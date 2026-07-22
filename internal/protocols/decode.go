@@ -1,0 +1,30 @@
+package protocols
+
+import "encoding/json"
+
+// ProtocolID identifies a wire protocol.
+type ProtocolID string
+
+const (
+	ProtocolOpenAI    ProtocolID = "openai"
+	ProtocolClaude    ProtocolID = "anthropic"
+	ProtocolGemini    ProtocolID = "gemini"
+	ProtocolResponses ProtocolID = "responses"
+)
+
+// RequestDecoder decodes a protocol-specific request JSON into IR.
+type RequestDecoder interface {
+	Protocol() ProtocolID
+	DecodeRequest(body json.RawMessage, model string, isStream bool) (*IRRequest, error)
+}
+
+// ResponseDecoder decodes an upstream response JSON into IR.
+type ResponseDecoder interface {
+	DecodeResponse(body json.RawMessage) (*IRResponse, error)
+}
+
+// StreamDecoder decodes upstream SSE/JSON Lines into IR deltas.
+type StreamDecoder interface {
+	DecodeChunk(raw string) ([]IRStreamDelta, error)
+	Finish() ([]IRStreamDelta, error)
+}
