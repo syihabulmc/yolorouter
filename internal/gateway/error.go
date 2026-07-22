@@ -41,18 +41,29 @@ func LocalErrorBody(errType, message string) []byte {
 	return b
 }
 
+// relayContextFrom retrieves the in-flight RelayContext Handle stashed on c
+// (see relayContextKey), or nil when none is present — e.g. a path that
+// never called Handle (unit tests, or an early 401 in middleware.APIKeyAuth
+// before Handle ever runs). The single lookup + two-step type assertion both
+// stashLocalErrorBody (here) and stashLocalClaudeErrorBody (ingress_error.go)
+// need.
+func relayContextFrom(c *gin.Context) *RelayContext {
+	v, ok := c.Get(relayContextKey)
+	if !ok {
+		return nil
+	}
+	rc, _ := v.(*RelayContext)
+	return rc
+}
+
 // stashLocalErrorBody records the local error JSON WriteOpenAIError is about
 // to return, as response_body for this request's request_log_bodies row
 // No-op when no RelayContext is on the context. The
 // body is a gateway-generated error envelope (no caller/upstream content), so
 // it is stored verbatim — v0.1 does not scrub body content.
 func stashLocalErrorBody(c *gin.Context, errType, message string) {
-	v, ok := c.Get(relayContextKey)
-	if !ok {
-		return
-	}
-	rc, ok := v.(*RelayContext)
-	if !ok || rc == nil {
+	rc := relayContextFrom(c)
+	if rc == nil {
 		return
 	}
 	rc.ResponseBody = LocalErrorBody(errType, message)
@@ -83,13 +94,22 @@ func WriteOpenAIError(c *gin.Context, status int, errType, message string) {
 	})
 }
 
+// AppendRequestID appends " (request: <id>)" to message so a caller
+// reporting an error can quote the id and the admin can find the row. A no-op
+// (returns message unchanged) when requestID is empty. Shared by every call
+// site that builds this exact suffix, so they can't drift out of sync.
+func AppendRequestID(message, requestID string) string {
+	if requestID == "" {
+		return message
+	}
+	return message + " (request: " + requestID + ")"
+}
+
 // WriteOpenAIErrorWithRequestID is WriteOpenAIError with the request id
 // appended to the message, so a caller reporting an error can quote the id
 // and the admin can find the row.
 func WriteOpenAIErrorWithRequestID(c *gin.Context, status int, errType, message, requestID string) {
-	if requestID != "" {
-		message = message + " (request: " + requestID + ")"
-	}
+	message = AppendRequestID(message, requestID)
 	WriteOpenAIError(c, status, errType, message)
 }
 

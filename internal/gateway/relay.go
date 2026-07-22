@@ -143,6 +143,12 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 		RequestID: requestIDFor(c),
 		APIKeyID:  apiKey.ID,
 	}
+	// The ingress protocol is a property of the request path, computed once
+	// up front so every error write in this function (and the pre-candidate
+	// validation below) uses the wire envelope the caller actually expects
+	// instead of always assuming OpenAI.
+	ingress := IngressProtocol(c.Request.URL.Path)
+	rc.Ingress = ingress
 	// Put rc on the gin context so WriteOpenAIError*
 	// (called from many exit paths below, and potentially from further down
 	// the chain) can stash the local error JSON into rc.ResponseBody without
@@ -183,7 +189,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if apiKey.ConcurrencyLimit != nil && *apiKey.ConcurrencyLimit > 0 {
 		if !s.limiter.AcquireConcurrency(apiKey.ID, *apiKey.ConcurrencyLimit) {
 			captureRejectedBody(c, rc)
-			WriteOpenAIErrorWithRequestID(c, http.StatusTooManyRequests, errTypeRateLimit, "concurrency limit exceeded", rc.RequestID)
+			WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeRateLimit, "concurrency limit exceeded", rc.RequestID)
 			s.finalize(rc, http.StatusTooManyRequests, "concurrency_limit", start)
 			return
 		}
@@ -196,7 +202,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if apiKey.RPMLimit != nil && *apiKey.RPMLimit > 0 {
 		if !s.limiter.CheckRPM(apiKey.ID, *apiKey.RPMLimit, time.Now()) {
 			captureRejectedBody(c, rc)
-			WriteOpenAIErrorWithRequestID(c, http.StatusTooManyRequests, errTypeRateLimit, "rate limit exceeded (requests per minute)", rc.RequestID)
+			WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeRateLimit, "rate limit exceeded (requests per minute)", rc.RequestID)
 			s.finalize(rc, http.StatusTooManyRequests, "rpm_exceeded", start)
 			return
 		}
@@ -222,7 +228,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 			message = "request body exceeds the size limit"
 			reason = "body_too_large"
 		}
-		WriteOpenAIErrorWithRequestID(c, status, errTypeInvalidRequest, message, rc.RequestID)
+		WriteIngressError(c, ingress, status, errTypeInvalidRequest, message, rc.RequestID)
 		s.finalize(rc, status, reason, start)
 		return
 	}
@@ -230,42 +236,44 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// request_log_bodies row, verbatim (v0.1 does not scrub body content).
 	rc.RequestBody = body
 
-	// One JSON decode of the caller body — parsed.Model/Stream for routing,
-	// parsed.validate() for structural checks, parsed.hasTools() for the
-	// capability filter. The body itself (in `body`) is forwarded to
-	// buildDispatchRequest untouched, which rewrites the model field
-	// (passthrough) or does the full IR decode/encode (cross-protocol).
-	parsed, err := parseRequest(body)
+	// One lightweight per-ingress peek of the caller body — meta.Model/Stream
+	// for routing, meta.validate() for the top-level structural checks each
+	// protocol's decoder is lenient about, meta.HasTools for the capability
+	// filter. The body itself (in `body`) is forwarded to buildUpstreamBody
+	// untouched, which rewrites the model field (passthrough) or does the
+	// full IR decode/encode (cross-protocol). The full protocol-specific
+	// structural decode runs later, once, via validateIngressBody below.
+	meta, err := peekIngress(ingress, body)
 	if err != nil {
-		WriteOpenAIErrorWithRequestID(c, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body", rc.RequestID)
 		s.finalize(rc, http.StatusBadRequest, "parse: "+err.Error(), start)
 		return
 	}
-	if parsed.Model == "" {
-		WriteOpenAIErrorWithRequestID(c, http.StatusBadRequest, errTypeInvalidRequest, "model is required", rc.RequestID)
+	if meta.Model == "" {
+		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "model is required", rc.RequestID)
 		s.finalize(rc, http.StatusBadRequest, "empty_model", start)
 		return
 	}
-	rc.OriginalModel = parsed.Model
-	rc.IsStream = parsed.Stream
-	rc.WantsStreamUsage = parsed.WantsStreamUsage
+	rc.OriginalModel = meta.Model
+	rc.IsStream = meta.Stream
+	rc.WantsStreamUsage = meta.WantsStreamUsage
 
 	// Step 4: model exists and is enabled. A model disabled by an admin
 	// must not route even if its candidates are still enabled.
-	m, err := repository.FindModelByName(s.db, parsed.Model)
+	m, err := repository.FindModelByName(s.db, meta.Model)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			WriteOpenAIErrorWithRequestID(c, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.RequestID)
+			WriteIngressError(c, ingress, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.RequestID)
 			s.finalize(rc, http.StatusNotFound, "model_not_found", start)
 			return
 		}
 		logger.Error("gateway: find model", zap.String("request_id", rc.RequestID), zap.Error(err))
-		WriteOpenAIErrorWithRequestID(c, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
 		s.finalize(rc, http.StatusInternalServerError, "db_model: "+err.Error(), start)
 		return
 	}
 	if m.ManagementStatus != model.ModelStatusEnabled {
-		WriteOpenAIErrorWithRequestID(c, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.RequestID)
 		s.finalize(rc, http.StatusNotFound, "model_disabled", start)
 		return
 	}
@@ -274,20 +282,33 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	allowed, err := repository.HasAPIKeyModelAccess(s.db, apiKey.ID, m.ID)
 	if err != nil {
 		logger.Error("gateway: allowlist", zap.String("request_id", rc.RequestID), zap.Error(err))
-		WriteOpenAIErrorWithRequestID(c, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
 		s.finalize(rc, http.StatusInternalServerError, "db_allowlist: "+err.Error(), start)
 		return
 	}
 	if !allowed {
-		WriteOpenAIErrorWithRequestID(c, http.StatusForbidden, errTypePermission, "model is not in this API key's allowlist", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusForbidden, errTypePermission, "model is not in this API key's allowlist", rc.RequestID)
 		s.finalize(rc, http.StatusForbidden, "model_not_allowed", start)
 		return
 	}
 
-	// Step 6: request structure validation.
-	if err := parsed.validate(); err != nil {
-		WriteOpenAIErrorWithRequestID(c, http.StatusBadRequest, errTypeInvalidRequest, err.Error(), rc.RequestID)
+	// Step 6: top-level structural validation (messages non-empty, Claude's
+	// max_tokens invariant, OpenAI's parsedRequest.validate() rules).
+	if err := meta.validate(); err != nil {
+		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, err.Error(), rc.RequestID)
 		s.finalize(rc, http.StatusBadRequest, "validate: "+err.Error(), start)
+		return
+	}
+
+	// Step 6.5: full protocol-specific structural decode (message content
+	// shapes, tool schemas, ...) — the same decode the request will
+	// eventually go through on the hot path. Run once here, BEFORE any
+	// candidate is picked, so a malformed body is rejected as a 400 client
+	// error instead of surfacing later as a misleading "all upstream
+	// candidates failed" 502 once relayCandidates has already started.
+	if err := validateIngressBody(ingress, body, rc.OriginalModel, rc.IsStream); err != nil {
+		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body: "+err.Error(), rc.RequestID)
+		s.finalize(rc, http.StatusBadRequest, "invalid_request: "+err.Error(), start)
 		return
 	}
 
@@ -295,11 +316,11 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	allCandidates, err := repository.ListModelCandidatesByModelID(s.db, m.ID)
 	if err != nil {
 		logger.Error("gateway: list candidates", zap.String("request_id", rc.RequestID), zap.Error(err))
-		WriteOpenAIErrorWithRequestID(c, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
 		s.finalize(rc, http.StatusInternalServerError, "db_candidates: "+err.Error(), start)
 		return
 	}
-	routable, anyEnabled, anyVerified := filterCandidates(allCandidates, parsed.Stream, parsed.hasTools())
+	routable, anyEnabled, anyVerified := filterCandidates(allCandidates, meta.Stream, meta.HasTools)
 	if len(routable) == 0 {
 		reason := "no_enabled_candidate"
 		if anyVerified {
@@ -307,7 +328,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 		} else if anyEnabled {
 			reason = "no_verified_candidate"
 		}
-		WriteOpenAIErrorWithRequestID(c, http.StatusServiceUnavailable, errTypeUnavailable, "model is not available", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusServiceUnavailable, errTypeUnavailable, "model is not available", rc.RequestID)
 		s.finalize(rc, http.StatusServiceUnavailable, reason, start)
 		return
 	}
@@ -324,21 +345,22 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 // before Handle's normal body read, so the audit row would otherwise have an
 // empty request_body).
 func (s *RelayService) checkKeyStateAndLimits(c *gin.Context, rc *RelayContext, apiKey *model.APIKey, start time.Time) bool {
+	ingress := rc.Ingress
 	if apiKey.Status == model.APIKeyStatusRevoked {
 		captureRejectedBody(c, rc)
-		WriteOpenAIErrorWithRequestID(c, http.StatusUnauthorized, errTypeAuthentication, "API key revoked", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusUnauthorized, errTypeAuthentication, "API key revoked", rc.RequestID)
 		s.finalize(rc, http.StatusUnauthorized, "revoked", start)
 		return false
 	}
 	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(time.Now().UTC()) {
 		captureRejectedBody(c, rc)
-		WriteOpenAIErrorWithRequestID(c, http.StatusUnauthorized, errTypeAuthentication, "API key expired", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusUnauthorized, errTypeAuthentication, "API key expired", rc.RequestID)
 		s.finalize(rc, http.StatusUnauthorized, "expired", start)
 		return false
 	}
 	if apiKey.BudgetLimitMicros != nil && apiKey.BudgetSpentMicros >= *apiKey.BudgetLimitMicros {
 		captureRejectedBody(c, rc)
-		WriteOpenAIErrorWithRequestID(c, http.StatusTooManyRequests, errTypeInsufficientQuota, "budget limit exceeded", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeInsufficientQuota, "budget limit exceeded", rc.RequestID)
 		s.finalize(rc, http.StatusTooManyRequests, "budget_exceeded", start)
 		return false
 	}
@@ -351,9 +373,9 @@ func (s *RelayService) checkKeyStateAndLimits(c *gin.Context, rc *RelayContext, 
 // decisions come back from tryKeys.
 func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candidates []model.ModelCandidate, start time.Time) {
 	// The ingress protocol is a property of the request path, not of any
-	// individual candidate — computed once and threaded through every
-	// candidate/key attempt below.
-	ingress := IngressProtocol(c.Request.URL.Path)
+	// individual candidate — threaded through every candidate/key attempt
+	// below.
+	ingress := rc.Ingress
 	for i := range candidates {
 		cand := candidates[i]
 		rc.Candidate = &cand
@@ -528,10 +550,7 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		// 2xx — dispatch directly instead of through a one-line trampoline.
-		// ingress is a pure function of the request path (IngressProtocol),
-		// so recomputing it here is cheap and avoids threading it through
-		// tryKeys just for this one downstream use.
-		ingress := IngressProtocol(c.Request.URL.Path)
+		ingress := rc.Ingress
 		if rc.IsStream {
 			return s.processDispatchResponseStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
 		}
@@ -578,7 +597,7 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 		return attemptNextCandidate
 	default: // statusTerminalClient — caller's request is the problem, no switch.
 		if !c.Writer.Written() {
-			WriteOpenAIErrorWithRequestID(c, statusCode, class.ErrorType, safeUpstreamMessage(statusCode), rc.RequestID)
+			WriteIngressError(c, rc.Ingress, statusCode, class.ErrorType, safeUpstreamMessage(statusCode), rc.RequestID)
 		}
 		s.finalize(rc, statusCode, fmt.Sprintf("upstream_client_error_%d", statusCode), start)
 		return attemptTerminal
@@ -598,7 +617,7 @@ func (s *RelayService) allCandidatesFailed(c *gin.Context, rc *RelayContext, sta
 		return
 	}
 	status := http.StatusBadGateway
-	WriteOpenAIErrorWithRequestID(c, status, errTypeUpstream, "all upstream candidates failed", rc.RequestID)
+	WriteIngressError(c, rc.Ingress, status, errTypeUpstream, "all upstream candidates failed", rc.RequestID)
 	s.finalize(rc, status, "all_candidates_failed", start)
 }
 

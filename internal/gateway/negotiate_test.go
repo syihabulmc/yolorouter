@@ -72,3 +72,137 @@ func TestNegotiate_NilProviderReturnsError(t *testing.T) {
 		t.Fatal("Negotiate(nil provider) expected error, got nil")
 	}
 }
+
+func TestNegotiate_MultiProtocolProvider_BothIngressesPassthroughWithProviderBaseURL(t *testing.T) {
+	p := &model.Provider{
+		ProviderType:      "openai",
+		BaseURL:           "https://api.openai.com",
+		ProtocolEndpoints: `{"anthropic":""}`,
+	}
+
+	openaiDecision, err := Negotiate(protocols.ProtocolOpenAI, p)
+	if err != nil {
+		t.Fatalf("Negotiate(openai) returned error: %v", err)
+	}
+	if !openaiDecision.Passthrough || openaiDecision.Protocol != protocols.ProtocolOpenAI {
+		t.Errorf("openai ingress: got %+v, want passthrough openai", openaiDecision)
+	}
+	if openaiDecision.BaseURL != p.BaseURL {
+		t.Errorf("openai ingress BaseURL = %q, want %q", openaiDecision.BaseURL, p.BaseURL)
+	}
+
+	claudeDecision, err := Negotiate(protocols.ProtocolClaude, p)
+	if err != nil {
+		t.Fatalf("Negotiate(claude) returned error: %v", err)
+	}
+	if !claudeDecision.Passthrough || claudeDecision.Protocol != protocols.ProtocolClaude {
+		t.Errorf("claude ingress: got %+v, want passthrough claude", claudeDecision)
+	}
+	// Empty per-protocol value in protocol_endpoints falls back to base_url.
+	if claudeDecision.BaseURL != p.BaseURL {
+		t.Errorf("claude ingress BaseURL = %q, want %q", claudeDecision.BaseURL, p.BaseURL)
+	}
+}
+
+func TestNegotiate_PerProtocolBaseURL_UsedWhenNonEmpty(t *testing.T) {
+	p := &model.Provider{
+		ProviderType:      "openai",
+		BaseURL:           "https://api.openai.com",
+		ProtocolEndpoints: `{"anthropic":"https://claude.gw/v1"}`,
+	}
+
+	claudeDecision, err := Negotiate(protocols.ProtocolClaude, p)
+	if err != nil {
+		t.Fatalf("Negotiate(claude) returned error: %v", err)
+	}
+	if !claudeDecision.Passthrough || claudeDecision.Protocol != protocols.ProtocolClaude {
+		t.Errorf("claude ingress: got %+v, want passthrough claude", claudeDecision)
+	}
+	if claudeDecision.BaseURL != "https://claude.gw/v1" {
+		t.Errorf("claude ingress BaseURL = %q, want %q", claudeDecision.BaseURL, "https://claude.gw/v1")
+	}
+
+	openaiDecision, err := Negotiate(protocols.ProtocolOpenAI, p)
+	if err != nil {
+		t.Fatalf("Negotiate(openai) returned error: %v", err)
+	}
+	if !openaiDecision.Passthrough || openaiDecision.Protocol != protocols.ProtocolOpenAI {
+		t.Errorf("openai ingress: got %+v, want passthrough openai", openaiDecision)
+	}
+	if openaiDecision.BaseURL != p.BaseURL {
+		t.Errorf("openai ingress BaseURL = %q, want %q", openaiDecision.BaseURL, p.BaseURL)
+	}
+}
+
+func TestNegotiate_MalformedProtocolEndpoints_DegradesToPrimaryOnly(t *testing.T) {
+	p := &model.Provider{
+		ProviderType:      "openai",
+		BaseURL:           "https://api.openai.com",
+		ProtocolEndpoints: "{bad json",
+	}
+
+	// Malformed protocol_endpoints means only the primary (openai) protocol
+	// is supported, so a claude ingress must fall back to the primary
+	// protocol rather than passing through.
+	decision, err := Negotiate(protocols.ProtocolClaude, p)
+	if err != nil {
+		t.Fatalf("Negotiate(claude) returned error: %v", err)
+	}
+	if decision.Passthrough {
+		t.Errorf("expected fallback (no passthrough) for malformed protocol_endpoints, got %+v", decision)
+	}
+	if decision.Protocol != protocols.ProtocolOpenAI {
+		t.Errorf("Protocol = %v, want %v", decision.Protocol, protocols.ProtocolOpenAI)
+	}
+	if decision.BaseURL != p.BaseURL {
+		t.Errorf("BaseURL = %q, want %q", decision.BaseURL, p.BaseURL)
+	}
+}
+
+func TestNegotiate_AnthropicPrimaryProvider_OpenAIIngressFallsBackToClaude(t *testing.T) {
+	p := &model.Provider{ProviderType: "anthropic", BaseURL: "https://api.anthropic.com"}
+
+	decision, err := Negotiate(protocols.ProtocolOpenAI, p)
+	if err != nil {
+		t.Fatalf("Negotiate(openai) returned error: %v", err)
+	}
+	if decision.Passthrough {
+		t.Errorf("expected fallback (no passthrough), got %+v", decision)
+	}
+	if decision.Protocol != protocols.ProtocolClaude {
+		t.Errorf("Protocol = %v, want %v", decision.Protocol, protocols.ProtocolClaude)
+	}
+	if decision.BaseURL != p.BaseURL {
+		t.Errorf("BaseURL = %q, want %q", decision.BaseURL, p.BaseURL)
+	}
+}
+
+func TestNegotiate_AnthropicProviderWithOpenAIEndpoint_MixedBaseURLs(t *testing.T) {
+	p := &model.Provider{
+		ProviderType:      "anthropic",
+		BaseURL:           "https://api.anthropic.com",
+		ProtocolEndpoints: `{"openai":"https://oai.gw/v1"}`,
+	}
+
+	openaiDecision, err := Negotiate(protocols.ProtocolOpenAI, p)
+	if err != nil {
+		t.Fatalf("Negotiate(openai) returned error: %v", err)
+	}
+	if !openaiDecision.Passthrough || openaiDecision.Protocol != protocols.ProtocolOpenAI {
+		t.Errorf("openai ingress: got %+v, want passthrough openai", openaiDecision)
+	}
+	if openaiDecision.BaseURL != "https://oai.gw/v1" {
+		t.Errorf("openai ingress BaseURL = %q, want %q", openaiDecision.BaseURL, "https://oai.gw/v1")
+	}
+
+	claudeDecision, err := Negotiate(protocols.ProtocolClaude, p)
+	if err != nil {
+		t.Fatalf("Negotiate(claude) returned error: %v", err)
+	}
+	if !claudeDecision.Passthrough || claudeDecision.Protocol != protocols.ProtocolClaude {
+		t.Errorf("claude ingress: got %+v, want passthrough claude", claudeDecision)
+	}
+	if claudeDecision.BaseURL != p.BaseURL {
+		t.Errorf("claude ingress BaseURL = %q, want %q", claudeDecision.BaseURL, p.BaseURL)
+	}
+}

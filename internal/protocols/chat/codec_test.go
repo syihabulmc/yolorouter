@@ -594,6 +594,67 @@ func TestOpenAIDecodeRequest_ExtendedParams(t *testing.T) {
 	}
 }
 
+// TestOpenAIDecodeRequest_StopScalar is a regression test for the P1 fix
+// that made the decoder accept "stop" as a plain string, not just an array —
+// OpenAI's Chat Completions API documents "stop" as EITHER a string OR an
+// array of strings, and a scalar "stop" used to fail the top-level JSON
+// unmarshal, erroring the whole decode.
+func TestOpenAIDecodeRequest_StopScalar(t *testing.T) {
+	body := json.RawMessage(`{
+		"model": "gpt-4",
+		"messages": [{"role": "user", "content": "Hi"}],
+		"stop": "END"
+	}`)
+
+	dec := RequestDecoder{}
+	req, err := dec.DecodeRequest(body, "gpt-4", false)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	if got := req.Generation.StopSequences; len(got) != 1 || got[0] != "END" {
+		t.Errorf("StopSequences = %v, want [\"END\"]", got)
+	}
+}
+
+// TestOpenAIDecodeRequest_StopArray covers the array form of "stop", which
+// the decoder already supported before the scalar fix.
+func TestOpenAIDecodeRequest_StopArray(t *testing.T) {
+	body := json.RawMessage(`{
+		"model": "gpt-4",
+		"messages": [{"role": "user", "content": "Hi"}],
+		"stop": ["A", "B"]
+	}`)
+
+	dec := RequestDecoder{}
+	req, err := dec.DecodeRequest(body, "gpt-4", false)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	want := []string{"A", "B"}
+	got := req.Generation.StopSequences
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("StopSequences = %v, want %v", got, want)
+	}
+}
+
+// TestOpenAIDecodeRequest_StopAbsent covers the no-"stop" case, which must
+// decode successfully with an empty StopSequences slice.
+func TestOpenAIDecodeRequest_StopAbsent(t *testing.T) {
+	body := json.RawMessage(`{
+		"model": "gpt-4",
+		"messages": [{"role": "user", "content": "Hi"}]
+	}`)
+
+	dec := RequestDecoder{}
+	req, err := dec.DecodeRequest(body, "gpt-4", false)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	if got := req.Generation.StopSequences; len(got) != 0 {
+		t.Errorf("StopSequences = %v, want empty", got)
+	}
+}
+
 func TestOpenAIEncodeRequest_ExtendedParams(t *testing.T) {
 	seed := int64(42)
 	irReq := &protocols.IRRequest{

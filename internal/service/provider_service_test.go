@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -11,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
@@ -82,36 +86,60 @@ func TestComputeRunningStatusUnavailableWhenGoodKeyNeedsReentry(t *testing.T) {
 // call returns — used to simulate a concurrent DB write racing against an
 // in-flight test call (e.g. a plaintext swap bumping config_version while
 // TestAllProviderKeys is mid-test for that key), so the write-back CAS then
-// observes a stale snapshot and discards the result.
+// observes a stale snapshot and discards the result. perTarget, when set,
+// overrides result/err for a specific (proto, baseURL) pair — used by tests
+// exercising verifyKeyAllDestinations against more than one destination;
+// falls back to result/err for any (proto, baseURL) not present in the map.
 type fakeProviderClient struct {
 	result     TestResult
 	err        error
 	calls      int
 	lastModel  string
+	lastProto  protocols.ProtocolID
 	sideEffect func()
+	perTarget  map[string]fakeTargetResponse
 }
 
-func (f *fakeProviderClient) TestChatCompletion(ctx context.Context, baseURL, apiKey, model string) (TestResult, error) {
+// fakeTargetResponse is one canned (TestResult, error) pair keyed by
+// "<proto>|<baseURL>" in fakeProviderClient.perTarget.
+type fakeTargetResponse struct {
+	result TestResult
+	err    error
+}
+
+func (f *fakeProviderClient) responseFor(proto protocols.ProtocolID, baseURL string) (TestResult, error) {
+	if f.perTarget != nil {
+		if resp, ok := f.perTarget[string(proto)+"|"+baseURL]; ok {
+			return resp.result, resp.err
+		}
+	}
+	return f.result, f.err
+}
+
+func (f *fakeProviderClient) TestChatCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
 	f.calls++
 	f.lastModel = model
+	f.lastProto = proto
+	if f.sideEffect != nil {
+		f.sideEffect()
+	}
+	return f.responseFor(proto, baseURL)
+}
+
+func (f *fakeProviderClient) TestStreamingCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
+	f.calls++
+	f.lastModel = model
+	f.lastProto = proto
 	if f.sideEffect != nil {
 		f.sideEffect()
 	}
 	return f.result, f.err
 }
 
-func (f *fakeProviderClient) TestStreamingCompletion(ctx context.Context, baseURL, apiKey, model string) (TestResult, error) {
+func (f *fakeProviderClient) TestFunctionCalling(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
 	f.calls++
 	f.lastModel = model
-	if f.sideEffect != nil {
-		f.sideEffect()
-	}
-	return f.result, f.err
-}
-
-func (f *fakeProviderClient) TestFunctionCalling(ctx context.Context, baseURL, apiKey, model string) (TestResult, error) {
-	f.calls++
-	f.lastModel = model
+	f.lastProto = proto
 	if f.sideEffect != nil {
 		f.sideEffect()
 	}
@@ -287,6 +315,69 @@ func TestCreateProviderRejectsPlaintextShorterThan20Chars(t *testing.T) {
 	}
 }
 
+func TestCreateProviderDefaultsProviderTypeToOpenAIWhenOmitted(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	view, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "no-type", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if view.ProviderType != "openai" {
+		t.Fatalf("expected default provider_type openai for backward compatibility, got %q", view.ProviderType)
+	}
+}
+
+func TestCreateProviderAcceptsExplicitProviderTypeAndEchoesItInView(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	view, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "anthropic-main", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "claude-3",
+		ProviderType: "anthropic",
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if view.ProviderType != "anthropic" {
+		t.Fatalf("expected provider_type anthropic, got %q", view.ProviderType)
+	}
+}
+
+func TestCreateProviderEchoesProtocolEndpointsInView(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	view, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "with-endpoints", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ProtocolEndpoints: `{"responses":"https://gw.example.com/v1"}`,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if view.ProtocolEndpoints != `{"responses":"https://gw.example.com/v1"}` {
+		t.Fatalf("expected protocol_endpoints to round-trip, got %q", view.ProtocolEndpoints)
+	}
+}
+
+func TestCreateProviderRejectsInvalidProviderType(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	_, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "bad-type", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ProviderType: "claude",
+	}, time.Now().UTC())
+	if !errors.Is(err, errcode.ErrProviderProtocolInvalid) {
+		t.Fatalf("expected ErrProviderProtocolInvalid for an unsupported provider_type, got %v", err)
+	}
+}
+
+func TestCreateProviderRejectsMalformedProtocolEndpoints(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	_, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "bad-endpoints", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ProtocolEndpoints: `{not-json`,
+	}, time.Now().UTC())
+	if !errors.Is(err, errcode.ErrProviderProtocolInvalid) {
+		t.Fatalf("expected ErrProviderProtocolInvalid for malformed protocol_endpoints JSON, got %v", err)
+	}
+}
+
 func TestUpdateProviderNotFound(t *testing.T) {
 	svc, _, _ := newTestProviderService(t)
 	_, err := svc.UpdateProvider(9999, UpdateProviderInput{Name: "x", BaseURL: "https://a.example.com"}, time.Now().UTC())
@@ -400,6 +491,126 @@ func TestUpdateProviderErrorsWhenNameNoteUpdateFailsForNonUniqueReason(t *testin
 	_, err = svc.UpdateProvider(provider.ID, UpdateProviderInput{Name: "renamed", Note: "n", BaseURL: provider.BaseURL}, now)
 	if err == nil || errors.Is(err, errcode.ErrProviderNameTaken) {
 		t.Fatalf("expected a raw DB error (not ErrProviderNameTaken), got %v", err)
+	}
+}
+
+// TestUpdateProviderNameOnlyPatchDoesNotChangeProviderTypeOrBumpDestinationVersion
+// is the direct regression test for the PATCH-omitted-field edge case: an
+// empty ProviderType/ProtocolEndpoints in an UpdateProviderInput means "not
+// supplied in this request, leave unchanged" — NOT "reset to the create
+// path's empty-means-openai default". A name-only PATCH on an anthropic
+// provider must leave provider_type == "anthropic" and must not bump
+// destination_version (which would spuriously invalidate every existing
+// key's authorization for an edit that never touched the protocol/address).
+func TestUpdateProviderNameOnlyPatchDoesNotChangeProviderTypeOrBumpDestinationVersion(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	now := time.Now().UTC()
+	created, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234",
+		TestModel: "gpt-4o-mini", ProviderType: "anthropic",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if created.ProviderType != "anthropic" {
+		t.Fatalf("expected provider_type=anthropic after create, got %q", created.ProviderType)
+	}
+
+	// PATCH omits provider_type/protocol_endpoints entirely (name-only edit).
+	updated, err := svc.UpdateProvider(created.ID, UpdateProviderInput{Name: "renamed", BaseURL: created.BaseURL}, now)
+	if err != nil {
+		t.Fatalf("UpdateProvider failed: %v", err)
+	}
+	if updated.ProviderType != "anthropic" {
+		t.Fatalf("expected provider_type to remain anthropic after a name-only PATCH, got %q", updated.ProviderType)
+	}
+	if updated.Keys[0].NeedsReentry {
+		t.Fatalf("expected the existing key to NOT need re-entry after a name-only PATCH (destination_version must not bump), got needs_reentry=true")
+	}
+}
+
+// TestUpdateProviderProtocolChangeBumpsDestinationVersionAndPersists is the
+// direct test for this task's core requirement: a PATCH that actually
+// changes provider_type/protocol_endpoints must write both columns AND bump
+// destination_version in the same atomic UPDATE, so an existing key's
+// authorized_destination_version immediately mismatches (needs re-entry) —
+// the same invariant a base_url change already enforces.
+func TestUpdateProviderProtocolChangeBumpsDestinationVersionAndPersists(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	now := time.Now().UTC()
+	created, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234",
+		TestModel: "gpt-4o-mini", ManagementStatus: model.ProviderStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if created.ProviderType != "openai" {
+		t.Fatalf("expected default provider_type=openai, got %q", created.ProviderType)
+	}
+
+	updated, err := svc.UpdateProvider(created.ID, UpdateProviderInput{
+		Name: created.Name, BaseURL: created.BaseURL,
+		ProviderType: "anthropic", ProtocolEndpoints: `{"responses":"https://gw/v1"}`,
+	}, now)
+	if err != nil {
+		t.Fatalf("UpdateProvider failed: %v", err)
+	}
+	if updated.ProviderType != "anthropic" || updated.ProtocolEndpoints != `{"responses":"https://gw/v1"}` {
+		t.Fatalf("expected provider_type/protocol_endpoints updated, got provider_type=%q protocol_endpoints=%q",
+			updated.ProviderType, updated.ProtocolEndpoints)
+	}
+	if !updated.Keys[0].NeedsReentry {
+		t.Fatalf("expected the existing key to need re-entry after a protocol-changing PATCH, got needs_reentry=false")
+	}
+}
+
+// TestUpdateProviderProtocolEndpointsSemanticReSubmitDoesNotBumpVersion
+// proves the compare uses the NORMALIZED value: re-submitting a
+// semantically-identical protocol_endpoints JSON object (same keys/values,
+// different key order) must not count as a change, so it never bumps
+// destination_version.
+func TestUpdateProviderProtocolEndpointsSemanticReSubmitDoesNotBumpVersion(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	now := time.Now().UTC()
+	created, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234",
+		TestModel: "gpt-4o-mini", ProtocolEndpoints: `{"anthropic":"https://gw/a","responses":"https://gw/r"}`,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+
+	updated, err := svc.UpdateProvider(created.ID, UpdateProviderInput{
+		Name: created.Name, BaseURL: created.BaseURL,
+		ProtocolEndpoints: `{"responses":"https://gw/r","anthropic":"https://gw/a"}`,
+	}, now)
+	if err != nil {
+		t.Fatalf("UpdateProvider failed: %v", err)
+	}
+	if updated.Keys[0].NeedsReentry {
+		t.Fatalf("expected a semantically-identical protocol_endpoints re-submit to NOT bump destination_version, got needs_reentry=true")
+	}
+}
+
+// TestUpdateProviderRejectsInvalidProviderType proves PATCH validation
+// reuses the same error surface as CreateProvider (ErrProviderProtocolInvalid),
+// not a generic 500, for a bad provider_type value.
+func TestUpdateProviderRejectsInvalidProviderType(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	now := time.Now().UTC()
+	created, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+
+	_, err = svc.UpdateProvider(created.ID, UpdateProviderInput{
+		Name: created.Name, BaseURL: created.BaseURL, ProviderType: "not-a-real-protocol",
+	}, now)
+	if !errors.Is(err, errcode.ErrProviderProtocolInvalid) {
+		t.Fatalf("expected ErrProviderProtocolInvalid, got %v", err)
 	}
 }
 
@@ -1748,17 +1959,36 @@ func TestTestKeyPreviewNeverPersists(t *testing.T) {
 	svc, db, client := newTestProviderService(t)
 	client.result = TestResult{Outcome: TestSuccess}
 
-	result, err := svc.TestKeyPreview(context.Background(), "https://a.example.com", "sk-preview-only", "gpt-4o-mini")
+	result, err := svc.TestKeyPreview(context.Background(), "https://a.example.com", "sk-preview-only", "gpt-4o-mini", "")
 	if err != nil {
 		t.Fatalf("TestKeyPreview failed: %v", err)
 	}
 	if result.Outcome != TestSuccess {
 		t.Fatalf("expected TestSuccess, got %v", result.Outcome)
 	}
+	if client.lastProto != protocols.ProtocolOpenAI {
+		t.Fatalf("expected an empty provider_type to default to openai, got %q", client.lastProto)
+	}
 	var count int64
 	db.Model(&model.ProviderKey{}).Count(&count)
 	if count != 0 {
 		t.Fatalf("expected TestKeyPreview to write nothing to the database, found %d rows", count)
+	}
+}
+
+// TestTestKeyPreviewThreadsProviderTypeToProtocol proves an admin can
+// preview-test an anthropic key before the provider row even exists: the
+// provider_type on the request body must reach the client as the anthropic
+// protocol, not silently fall back to openai.
+func TestTestKeyPreviewThreadsProviderTypeToProtocol(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	client.result = TestResult{Outcome: TestSuccess}
+
+	if _, err := svc.TestKeyPreview(context.Background(), "https://api.anthropic.com", "sk-ant-preview", "claude-3-5-sonnet", "anthropic"); err != nil {
+		t.Fatalf("TestKeyPreview failed: %v", err)
+	}
+	if client.lastProto != protocols.ProtocolClaude {
+		t.Fatalf("expected provider_type=anthropic to thread through as ProtocolClaude, got %q", client.lastProto)
 	}
 }
 
@@ -1970,6 +2200,11 @@ func TestClassifyTestResultCoversEveryOutcome(t *testing.T) {
 		{"rate limited", TestResult{Outcome: TestRateLimited}, 0, false, outcomeInt(TestRateLimited)},
 		{"unreachable", TestResult{Outcome: TestUnreachable}, 0, false, outcomeInt(TestUnreachable)},
 		{"upstream error", TestResult{Outcome: TestUpstreamError}, 0, false, outcomeInt(TestUpstreamError)},
+		// TestVerificationUnsupported (Finding 2): a gemini/responses
+		// destination's 2xx cannot be certified as a genuine pass, so this
+		// must never overwrite verification_status — same "inconclusive"
+		// shape as TestModelNotFound/TestRateLimited, not TestSuccess's.
+		{"verification unsupported", TestResult{Outcome: TestVerificationUnsupported}, 0, false, outcomeInt(TestVerificationUnsupported)},
 		{"unknown outcome falls to default", TestResult{Outcome: TestOutcome(999)}, 0, false, outcomeInt(TestOutcome(999))},
 	}
 	for _, c := range cases {
@@ -2037,5 +2272,386 @@ func TestReorderProviderKeyReturnsNotFoundForUnknownKey(t *testing.T) {
 
 	if err := svc.ReorderProviderKey(provider.ID, 999999, "up", now); !errors.Is(err, errcode.ErrProviderKeyNotFound) {
 		t.Fatalf("expected ErrProviderKeyNotFound, got %v", err)
+	}
+}
+
+// --- Finding 1: verification must cover EVERY routable destination ---
+
+// TestCreateProviderKeyVerifiesEveryRoutableDestination is the direct
+// regression test for Finding 1: a provider whose primary protocol is
+// openai but which also declares an anthropic protocol_endpoints host must
+// have its brand-new key tested against BOTH hosts before it can be
+// authorized — not just the primary. When the second (anthropic) host
+// returns 401, the aggregate must be TestAuthFailed and the key must NOT
+// reach passed/enabled, even though the primary host alone would have
+// passed.
+func TestCreateProviderKeyVerifiesEveryRoutableDestination(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	const anthropicURL = "https://anthropic.example.com/v1"
+	client.result = TestResult{Outcome: TestSuccess, DurationMs: 5}
+	client.perTarget = map[string]fakeTargetResponse{
+		string(protocols.ProtocolClaude) + "|" + anthropicURL: {result: TestResult{Outcome: TestAuthFailed, DurationMs: 3}},
+	}
+
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "multi-endpoint", BaseURL: "https://openai.example.com/v1", KeyLabel: "k1",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ProtocolEndpoints: `{"anthropic":"` + anthropicURL + `"}`,
+		ManagementStatus:  model.ProviderStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("expected verification to test both routable destinations (openai + anthropic), got %d calls", client.calls)
+	}
+	if provider.Keys[0].VerificationStatus != model.VerificationStatusFailed {
+		t.Fatalf("expected verification_status=failed since the anthropic destination never passed, got %d", provider.Keys[0].VerificationStatus)
+	}
+	if provider.Keys[0].ManagementStatus != model.ProviderKeyStatusDisabled {
+		t.Fatalf("expected the key to stay disabled since not every destination passed, got %d", provider.Keys[0].ManagementStatus)
+	}
+}
+
+// TestCreateProviderKeyPassesOnlyWhenEveryRoutableDestinationSucceeds is the
+// positive counterpart: when BOTH the primary and the protocol_endpoints
+// destination succeed, the aggregate is TestSuccess and the key reaches
+// passed/enabled exactly like the single-destination case always has.
+func TestCreateProviderKeyPassesOnlyWhenEveryRoutableDestinationSucceeds(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	client.result = TestResult{Outcome: TestSuccess, DurationMs: 5}
+
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "multi-endpoint-ok", BaseURL: "https://openai.example.com/v1", KeyLabel: "k1",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ProtocolEndpoints: `{"anthropic":"https://anthropic.example.com/v1"}`,
+		ManagementStatus:  model.ProviderStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("expected 2 verification calls (openai + anthropic), got %d", client.calls)
+	}
+	if provider.Keys[0].VerificationStatus != model.VerificationStatusPassed {
+		t.Fatalf("expected verification_status=passed when every routable destination succeeds, got %d", provider.Keys[0].VerificationStatus)
+	}
+	if provider.Keys[0].ManagementStatus != model.ProviderKeyStatusEnabled {
+		t.Fatalf("expected management_status=enabled after a fully passing verification, got %d", provider.Keys[0].ManagementStatus)
+	}
+}
+
+// TestCreateProviderKeyHitsRealAnthropicProtocolEndpointHost proves the
+// credential-scope fix end-to-end through a real HTTPProviderClient (not
+// the fake): a provider primarily typed openai, with an anthropic
+// protocol_endpoints host pointed at a second real httptest server, must
+// actually send an HTTP request to that second host during verification —
+// not just resolve its URL on paper. The anthropic host 401s, so the key
+// must not reach passed even though the primary openai host alone succeeds.
+func TestCreateProviderKeyHitsRealAnthropicProtocolEndpointHost(t *testing.T) {
+	openaiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"pong"}}]}`))
+	}))
+	defer openaiSrv.Close()
+
+	var anthropicHits int32
+	anthropicSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&anthropicHits, 1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`))
+	}))
+	defer anthropicSrv.Close()
+
+	realClient := NewHTTPProviderClient(false)
+	// Same transport swap provider_client_test.go's newTestClient uses:
+	// safehttp's SSRF-safe transport denies loopback dials, which is exactly
+	// where httptest servers listen, so only these unit tests bypass it.
+	realClient.httpClient = &http.Client{Transport: http.DefaultTransport, CheckRedirect: realClient.httpClient.CheckRedirect}
+
+	db := testutil.NewSQLiteDB(t)
+	svc := NewProviderService(db, testMasterKey(), realClient)
+	now := time.Now().UTC()
+
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "real-multi-endpoint", BaseURL: openaiSrv.URL, KeyLabel: "k1",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ProtocolEndpoints: fmt.Sprintf(`{"anthropic":%q}`, anthropicSrv.URL),
+		ManagementStatus:  model.ProviderStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if atomic.LoadInt32(&anthropicHits) == 0 {
+		t.Fatalf("expected the anthropic protocol_endpoints host to receive a real credential-test request")
+	}
+	if provider.Keys[0].VerificationStatus != model.VerificationStatusFailed {
+		t.Fatalf("expected verification_status=failed since the anthropic destination 401s, got %d", provider.Keys[0].VerificationStatus)
+	}
+}
+
+// TestTestProviderKeyRetestCoversEveryRoutableDestination proves the retest
+// entry point (TestProviderKey), not just the brand-new-key create path,
+// also routes through verifyKeyAllDestinations.
+func TestTestProviderKeyRetestCoversEveryRoutableDestination(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	const anthropicURL = "https://anthropic.example.com/v1"
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ProtocolEndpoints: `{"anthropic":"` + anthropicURL + `"}`,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	callsAfterCreate := client.calls
+	client.perTarget = map[string]fakeTargetResponse{
+		string(protocols.ProtocolClaude) + "|" + anthropicURL: {result: TestResult{Outcome: TestAuthFailed}},
+	}
+	client.result = TestResult{Outcome: TestSuccess}
+
+	view, err := svc.TestProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, now)
+	if err != nil {
+		t.Fatalf("TestProviderKey failed: %v", err)
+	}
+	if client.calls != callsAfterCreate+2 {
+		t.Fatalf("expected the retest to hit both routable destinations, calls went from %d to %d", callsAfterCreate, client.calls)
+	}
+	if view.VerificationStatus != model.VerificationStatusFailed {
+		t.Fatalf("expected verification_status=failed since the anthropic destination fails on retest, got %d", view.VerificationStatus)
+	}
+}
+
+// TestTestAllProviderKeysBatchCoversEveryRoutableDestination is
+// TestTestProviderKeyRetestCoversEveryRoutableDestination's counterpart for
+// the batch retest path (TestAllProviderKeys).
+func TestTestAllProviderKeysBatchCoversEveryRoutableDestination(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	const anthropicURL = "https://anthropic.example.com/v1"
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ProtocolEndpoints: `{"anthropic":"` + anthropicURL + `"}`,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	callsAfterCreate := client.calls
+	client.perTarget = map[string]fakeTargetResponse{
+		string(protocols.ProtocolClaude) + "|" + anthropicURL: {result: TestResult{Outcome: TestAuthFailed}},
+	}
+	client.result = TestResult{Outcome: TestSuccess}
+
+	results, err := svc.TestAllProviderKeys(context.Background(), provider.ID, now)
+	if err != nil {
+		t.Fatalf("TestAllProviderKeys failed: %v", err)
+	}
+	if client.calls != callsAfterCreate+2 {
+		t.Fatalf("expected the batch retest to hit both routable destinations, calls went from %d to %d", callsAfterCreate, client.calls)
+	}
+	if len(results) != 1 || results[0].Outcome == nil || *results[0].Outcome != int(TestAuthFailed) {
+		t.Fatalf("expected the batch result to report the anthropic destination's failure, got %+v", results)
+	}
+}
+
+// TestTestProviderKeyRetestDemotesWhenSecondaryDecisiveFailureBeatsWeakPrimary
+// is the direct regression test for the severity-ranked aggregate: on a
+// retest of a currently-Passed key, a DECISIVE failure at a SECONDARY
+// destination (TestAuthFailed — the credential just got rejected there) must
+// win over a weaker, inconclusive failure at the PRIMARY (TestModelNotFound,
+// which classifyTestResult leaves non-overwriting). A first-encountered-wins
+// aggregate would return the primary's weak result and wrongly leave the key
+// Passed/routable to the rejected destination; the most-severe rule demotes
+// it to Failed.
+func TestTestProviderKeyRetestDemotesWhenSecondaryDecisiveFailureBeatsWeakPrimary(t *testing.T) {
+	svc, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	const anthropicURL = "https://anthropic.example.com/v1"
+	// Both destinations succeed at create time, so the key starts Passed.
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ProtocolEndpoints: `{"anthropic":"` + anthropicURL + `"}`,
+		ManagementStatus:  model.ProviderStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	var seeded model.ProviderKey
+	if err := db.Where("id = ?", provider.Keys[0].ID).First(&seeded).Error; err != nil {
+		t.Fatalf("reload key failed: %v", err)
+	}
+	if seeded.VerificationStatus != model.VerificationStatusPassed {
+		t.Fatalf("test setup: expected the key to start Passed, got %d", seeded.VerificationStatus)
+	}
+
+	// Retest: PRIMARY (openai@hostA) returns a weak, non-overwriting
+	// TestModelNotFound; SECONDARY (anthropic@hostB) returns a decisive
+	// TestAuthFailed.
+	client.result = TestResult{Outcome: TestModelNotFound}
+	client.perTarget = map[string]fakeTargetResponse{
+		string(protocols.ProtocolClaude) + "|" + anthropicURL: {result: TestResult{Outcome: TestAuthFailed}},
+	}
+
+	view, err := svc.TestProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, now)
+	if err != nil {
+		t.Fatalf("TestProviderKey failed: %v", err)
+	}
+	if view.LastTestResult == nil || *view.LastTestResult != int(TestAuthFailed) {
+		t.Fatalf("expected the aggregate to surface the secondary's decisive TestAuthFailed, got last_test_result=%v", view.LastTestResult)
+	}
+	if view.VerificationStatus != model.VerificationStatusFailed {
+		t.Fatalf("expected the key to be DEMOTED to Failed by the secondary's decisive failure, got %d", view.VerificationStatus)
+	}
+}
+
+func TestVerificationSeverityRanksDecisiveFailuresAboveInconclusive(t *testing.T) {
+	cases := []struct {
+		name   string
+		result TestResult
+		want   int
+	}{
+		{"success", TestResult{Outcome: TestSuccess}, 0},
+		{"auth failed is decisive", TestResult{Outcome: TestAuthFailed}, 2},
+		{"quota unavailable is decisive", TestResult{Outcome: TestQuotaUnavailable}, 2},
+		{"non-model-scoped permission denied is decisive", TestResult{Outcome: TestPermissionDenied, IsModelScoped: false}, 2},
+		{"model-scoped permission denied is inconclusive", TestResult{Outcome: TestPermissionDenied, IsModelScoped: true}, 1},
+		{"model not found is inconclusive", TestResult{Outcome: TestModelNotFound}, 1},
+		{"rate limited is inconclusive", TestResult{Outcome: TestRateLimited}, 1},
+		{"unreachable is inconclusive", TestResult{Outcome: TestUnreachable}, 1},
+		{"upstream error is inconclusive", TestResult{Outcome: TestUpstreamError}, 1},
+		{"verification unsupported is inconclusive", TestResult{Outcome: TestVerificationUnsupported}, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := verificationSeverity(c.result); got != c.want {
+				t.Fatalf("verificationSeverity(%+v) = %d, want %d", c.result, got, c.want)
+			}
+		})
+	}
+}
+
+// --- Finding 2: gemini/responses must not falsely certify a key ---
+
+// TestCreateProviderKeyGeminiDestinationNeverReachesPassed is the direct
+// regression test for Finding 2 at the service layer: a gemini-typed
+// provider's key, whose client-level test returns TestVerificationUnsupported
+// (a 200 that can't be certified — see provider_client_test.go for the HTTP
+// level of this), must never be classified as passed/enabled, but its
+// last_test_result must still be recorded for the UI.
+func TestCreateProviderKeyGeminiDestinationNeverReachesPassed(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	client.result = TestResult{Outcome: TestVerificationUnsupported, DurationMs: 5}
+	now := time.Now().UTC()
+
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "gemini-provider", BaseURL: "https://gemini.example.com", KeyLabel: "k1",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gemini-1.5-flash",
+		ProviderType: "gemini", ManagementStatus: model.ProviderStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if provider.Keys[0].VerificationStatus != model.VerificationStatusUntested {
+		t.Fatalf("expected verification_status to stay untested for a gemini destination that cannot be certified, got %d", provider.Keys[0].VerificationStatus)
+	}
+	if provider.Keys[0].ManagementStatus != model.ProviderKeyStatusDisabled {
+		t.Fatalf("expected management_status to stay disabled since the key never reached passed, got %d", provider.Keys[0].ManagementStatus)
+	}
+	if provider.Keys[0].LastTestResult == nil || *provider.Keys[0].LastTestResult != int(TestVerificationUnsupported) {
+		t.Fatalf("expected last_test_result=%d recorded for UI visibility, got %v", TestVerificationUnsupported, provider.Keys[0].LastTestResult)
+	}
+}
+
+// --- Non-regression: single-destination providers verify exactly as before ---
+
+// TestCreateProviderOpenAIOnlyStillVerifiesToPassedWithOneCall proves the
+// common case (no protocol_endpoints) is unaffected by the multi-destination
+// helper: exactly one verification call still runs, and a passing result
+// still reaches passed/enabled.
+func TestCreateProviderOpenAIOnlyStillVerifiesToPassedWithOneCall(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	client.result = TestResult{Outcome: TestSuccess, DurationMs: 5}
+	now := time.Now().UTC()
+
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "openai-only", BaseURL: "https://api.openai.com/v1", KeyLabel: "k1",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ManagementStatus: model.ProviderStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if client.calls != 1 {
+		t.Fatalf("expected exactly 1 verification call for a single-destination provider, got %d", client.calls)
+	}
+	if provider.Keys[0].VerificationStatus != model.VerificationStatusPassed {
+		t.Fatalf("expected verification_status=passed for an openai-only provider, got %d", provider.Keys[0].VerificationStatus)
+	}
+	if provider.Keys[0].ManagementStatus != model.ProviderKeyStatusEnabled {
+		t.Fatalf("expected management_status=enabled after a passing verification, got %d", provider.Keys[0].ManagementStatus)
+	}
+}
+
+// TestCreateProviderAnthropicOnlyStillVerifiesToPassedViaRealClassification
+// mirrors the openai-only non-regression check for an anthropic-only
+// provider, confirming the protocol still threads through correctly and
+// the single-target case makes exactly one call.
+func TestCreateProviderAnthropicOnlyStillVerifiesToPassedViaRealClassification(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	client.result = TestResult{Outcome: TestSuccess, DurationMs: 5}
+	now := time.Now().UTC()
+
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "anthropic-only", BaseURL: "https://api.anthropic.com", KeyLabel: "k1",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "claude-3-5-sonnet",
+		ProviderType: "anthropic", ManagementStatus: model.ProviderStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if client.calls != 1 {
+		t.Fatalf("expected exactly 1 verification call for a single-destination provider, got %d", client.calls)
+	}
+	if provider.Keys[0].VerificationStatus != model.VerificationStatusPassed {
+		t.Fatalf("expected verification_status=passed for an anthropic-only provider, got %d", provider.Keys[0].VerificationStatus)
+	}
+	if provider.Keys[0].ManagementStatus != model.ProviderKeyStatusEnabled {
+		t.Fatalf("expected management_status=enabled after a passing verification, got %d", provider.Keys[0].ManagementStatus)
+	}
+	if client.lastProto != protocols.ProtocolClaude {
+		t.Fatalf("expected the verification call to use the anthropic protocol, got %q", client.lastProto)
+	}
+}
+
+// TestVerifyKeyAllDestinationsPropagatesClientError proves a transport-level
+// error from ANY destination (not just the first) aborts the whole
+// verification with that error and returns a zero-value TestResult —
+// matching runNewPlaintextTestAndCommit's existing "never classify a
+// zero-value TestResult as success" rule.
+func TestVerifyKeyAllDestinationsPropagatesClientError(t *testing.T) {
+	svc, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	client.result = TestResult{Outcome: TestSuccess}
+
+	provider := &model.Provider{
+		Name: "p1", ProviderType: "openai", BaseURL: "https://a.example.com",
+		ProtocolEndpoints: `{"anthropic":"https://b.example.com"}`,
+		ManagementStatus:  model.ProviderStatusEnabled, DestinationVersion: 1,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(provider).Error; err != nil {
+		t.Fatalf("seed provider failed: %v", err)
+	}
+	client.err = fmt.Errorf("too many concurrent provider test calls in flight")
+
+	result, err := svc.verifyKeyAllDestinations(context.Background(), provider, "sk-abcdefghijklmnopqrstuvwxyz1234", "gpt-4o-mini")
+	if err == nil {
+		t.Fatalf("expected the client's error to propagate")
+	}
+	if result != (TestResult{}) {
+		t.Fatalf("expected a zero-value TestResult on error, got %+v", result)
 	}
 }

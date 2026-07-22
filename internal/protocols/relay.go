@@ -114,6 +114,11 @@ func IsBenignPostDoneReadErr(err error) bool {
 
 // UpstreamBuffer is a minimal interface for recording upstream response data.
 type UpstreamBuffer interface {
+	// AppendUpstream records one raw (pre-IR-decode) upstream SSE/JSON-lines
+	// line for a streaming request. NOT the caller-facing bytes — see
+	// AppendResponse for that. Implementations are free to make this a
+	// no-op; raw upstream lines are not part of the caller-facing audit
+	// contract in this version (see AppendResponse's doc comment).
 	AppendUpstream(data []byte)
 	SetBody(data []byte)
 	// SetResponseBody records the caller-facing (post-IR-encode) bytes
@@ -123,6 +128,17 @@ type UpstreamBuffer interface {
 	// response_body) stays empty for every cross-protocol non-stream
 	// success, unlike the same-protocol passthrough path.
 	SetResponseBody(data []byte)
+	// AppendResponse records one already-caller-facing (post-IR-encode) SSE
+	// fragment actually written to the client for a streaming request — the
+	// streaming counterpart of SetResponseBody. IRStreamRelay and
+	// IRStreamRelayJSONLines call this at every point an encoded event is
+	// written to c.Writer, so a per-request stream audit capture built from
+	// these calls ends up byte-for-byte identical to what the client
+	// received, matching the same-protocol passthrough path's capture
+	// contract. Must NOT be conflated with AppendUpstream's raw upstream
+	// lines — mixing the two into one capture would interleave pre-decode
+	// and post-encode bytes.
+	AppendResponse(data []byte)
 }
 
 // ClearWriteDeadline resets the current request's write deadline to zero
@@ -266,7 +282,15 @@ func IRStreamRelay(
 			}
 		}
 		for _, event := range events {
-			_, _ = fmt.Fprint(c.Writer, event.String())
+			s := event.String()
+			_, _ = fmt.Fprint(c.Writer, s)
+			if buf != nil {
+				// Caller-facing (post-IR-encode) bytes actually written to the
+				// client — the ONLY capture point that keeps the per-request
+				// stream audit file byte-for-byte identical to what the client
+				// received (see AppendResponse's doc comment).
+				buf.AppendResponse([]byte(s))
+			}
 		}
 		c.Writer.Flush()
 	}
@@ -517,7 +541,15 @@ func IRStreamRelayJSONLines(
 			}
 		}
 		for _, event := range events {
-			_, _ = c.Writer.Write([]byte(event.String()))
+			b := []byte(event.String())
+			_, _ = c.Writer.Write(b)
+			if buf != nil {
+				// See IRStreamRelay's emit() for the full rationale: this is
+				// the only capture point that keeps the per-request stream
+				// audit file byte-for-byte identical to what the client
+				// received.
+				buf.AppendResponse(b)
+			}
 		}
 		c.Writer.Flush()
 	}

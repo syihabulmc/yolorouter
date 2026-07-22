@@ -156,6 +156,29 @@ func TestUpdateProviderBaseURLAtomicallyBumpsDestinationVersion(t *testing.T) {
 	}
 }
 
+func TestUpdateProviderProtocolAtomicallyBumpsDestinationVersion(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	provider, _ := seedProviderWithKey(t, db, "openai-main") // provider_type="openai", destination_version=1
+	now := time.Now().UTC().Truncate(time.Second)
+
+	newVersion, err := UpdateProviderProtocol(db, provider.ID, "anthropic", `{"responses":"https://gw/v1"}`, now)
+	if err != nil {
+		t.Fatalf("UpdateProviderProtocol failed: %v", err)
+	}
+	if newVersion != 2 {
+		t.Fatalf("expected destination_version to become 2, got %d", newVersion)
+	}
+
+	reloaded, err := FindProviderByID(db, provider.ID)
+	if err != nil {
+		t.Fatalf("FindProviderByID failed: %v", err)
+	}
+	if reloaded.ProviderType != "anthropic" || reloaded.ProtocolEndpoints != `{"responses":"https://gw/v1"}` || reloaded.DestinationVersion != 2 {
+		t.Fatalf("expected provider_type/protocol_endpoints updated and destination_version=2, got provider_type=%q protocol_endpoints=%q version=%d",
+			reloaded.ProviderType, reloaded.ProtocolEndpoints, reloaded.DestinationVersion)
+	}
+}
+
 func TestUpdateProviderNameNoteDoesNotTouchDestinationVersion(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	provider, _ := seedProviderWithKey(t, db, "openai-main")

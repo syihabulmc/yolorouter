@@ -23,12 +23,27 @@ type createProviderRequest struct {
 	// admin supplies a temporary model name every test call uses.
 	TestModel        string `json:"test_model" binding:"required,max=100"`
 	ManagementStatus int    `json:"management_status" binding:"omitempty,oneof=1 2"`
+	// ProviderType and ProtocolEndpoints are deliberately unconstrained by
+	// gin binding tags: they are validated in the service layer via
+	// service.ValidateProviderType/ValidateProtocolEndpoints so a bad value
+	// surfaces as a clean 400 through writeProviderServiceError rather than
+	// a gin binding error. Both are optional — omitting ProviderType
+	// normalizes to "openai" for backward compatibility.
+	ProviderType      string `json:"provider_type"`
+	ProtocolEndpoints string `json:"protocol_endpoints"`
 }
 
 type updateProviderRequest struct {
 	Name    string `json:"name" binding:"required,min=2,max=50"`
 	BaseURL string `json:"base_url" binding:"required,url,max=255"`
 	Note    string `json:"note" binding:"max=200"`
+	// ProviderType and ProtocolEndpoints are deliberately unconstrained by
+	// gin binding tags, same reasoning as createProviderRequest's: validated
+	// in the service layer so a bad value surfaces as a clean 400. Both are
+	// optional and, unlike create, an omitted (empty) value here means
+	// "leave unchanged" — PATCH semantics — not "reset to default/empty".
+	ProviderType      string `json:"provider_type"`
+	ProtocolEndpoints string `json:"protocol_endpoints"`
 }
 
 type setStatusRequest struct {
@@ -39,6 +54,13 @@ type testKeyRequest struct {
 	BaseURL string `json:"base_url" binding:"required,url"`
 	APIKey  string `json:"api_key" binding:"required"`
 	Model   string `json:"model" binding:"required"`
+	// ProviderType is optional and, like createProviderRequest's own field,
+	// deliberately unconstrained by gin binding tags — an invalid value is
+	// simply treated as unset (defaults to openai) rather than surfaced as
+	// a binding error, since this is only a preview call before any
+	// provider row exists to validate against. It lets an admin test an
+	// anthropic (or other non-openai) key before creating the provider.
+	ProviderType string `json:"provider_type"`
 }
 
 type createKeyRequest struct {
@@ -114,6 +136,12 @@ func writeProviderServiceError(c *gin.Context, err error) {
 		response.Error(c, errcode.ProviderKeyNeedsReentry, errcode.GetMessage(errcode.ProviderKeyNeedsReentry))
 	case errors.Is(err, errcode.ErrProviderKeyTestNotSaved):
 		response.Error(c, errcode.ProviderKeyTestNotSaved, errcode.GetMessage(errcode.ProviderKeyTestNotSaved))
+	case errors.Is(err, errcode.ErrProviderProtocolInvalid):
+		// Unlike the default branch below, this message is safe to return
+		// verbatim: it names exactly which client-supplied provider_type/
+		// protocol_endpoints value failed validation (e.g. "invalid
+		// provider_type: claude"), not internal crypto/gorm error detail.
+		response.Error(c, errcode.ProviderProtocolInvalid, err.Error())
 	case errors.Is(err, errcode.ErrProviderKeyTooShort):
 		// validatePlaintextLength (provider_service.go) wraps this sentinel —
 		// Gin's own binding tags currently make that check unreachable via
@@ -165,7 +193,9 @@ func PostProvider(svc *service.ProviderService) gin.HandlerFunc {
 		view, err := svc.CreateProvider(c.Request.Context(), service.CreateProviderInput{
 			Name: req.Name, BaseURL: req.BaseURL, Note: req.Note,
 			KeyLabel: req.KeyLabel, KeyPlaintext: req.KeyPlaintext, TestModel: req.TestModel,
-			ManagementStatus: req.ManagementStatus,
+			ManagementStatus:  req.ManagementStatus,
+			ProviderType:      req.ProviderType,
+			ProtocolEndpoints: req.ProtocolEndpoints,
 		}, timeNow())
 		if err != nil {
 			writeProviderServiceError(c, err)
@@ -185,7 +215,11 @@ func PatchProvider(svc *service.ProviderService) gin.HandlerFunc {
 		if !bindJSON(c, &req) {
 			return
 		}
-		view, err := svc.UpdateProvider(id, service.UpdateProviderInput{Name: req.Name, BaseURL: req.BaseURL, Note: req.Note}, timeNow())
+		view, err := svc.UpdateProvider(id, service.UpdateProviderInput{
+			Name: req.Name, BaseURL: req.BaseURL, Note: req.Note,
+			ProviderType:      req.ProviderType,
+			ProtocolEndpoints: req.ProtocolEndpoints,
+		}, timeNow())
 		if err != nil {
 			writeProviderServiceError(c, err)
 			return
@@ -218,7 +252,7 @@ func PostProviderTestKey(svc *service.ProviderService) gin.HandlerFunc {
 		if !bindJSON(c, &req) {
 			return
 		}
-		result, err := svc.TestKeyPreview(c.Request.Context(), req.BaseURL, req.APIKey, req.Model)
+		result, err := svc.TestKeyPreview(c.Request.Context(), req.BaseURL, req.APIKey, req.Model, req.ProviderType)
 		if err != nil {
 			// Same fix as writeProviderServiceError's default branch:
 			// this call site was

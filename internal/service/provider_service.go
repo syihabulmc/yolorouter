@@ -138,12 +138,26 @@ type CreateProviderInput struct {
 	// admin-supplied since there is no real model mapping yet.
 	TestModel        string
 	ManagementStatus int // requested status; server independently re-verifies before honoring "enabled"
+	// ProviderType selects the wire protocol this provider primarily
+	// speaks (openai/anthropic/gemini/responses). Empty normalizes to
+	// "openai" via ValidateProviderType for backward compatibility.
+	ProviderType string
+	// ProtocolEndpoints is optional JSON text declaring extra protocols
+	// (beyond ProviderType) this provider also accepts, each with its own
+	// endpoint URL. Empty means no extra protocols. See ValidateProtocolEndpoints.
+	ProtocolEndpoints string
 }
 
 type UpdateProviderInput struct {
 	Name    string
 	BaseURL string
 	Note    string
+	// ProviderType and ProtocolEndpoints follow PATCH semantics: an empty
+	// value means "omitted from this request, leave unchanged" — NOT
+	// CreateProviderInput's "empty means default/clear" meaning. See
+	// UpdateProvider's doc comment for why.
+	ProviderType      string
+	ProtocolEndpoints string
 }
 
 type ProviderKeyView struct {
@@ -162,15 +176,16 @@ type ProviderKeyView struct {
 }
 
 type ProviderView struct {
-	ID               uint              `json:"id"`
-	Name             string            `json:"name"`
-	ProviderType     string            `json:"provider_type"`
-	BaseURL          string            `json:"base_url"`
-	Note             string            `json:"note"`
-	ManagementStatus int               `json:"management_status"`
-	RunningStatus    string            `json:"running_status"`
-	Keys             []ProviderKeyView `json:"keys"`
-	CreatedAt        time.Time         `json:"created_at"`
+	ID                uint              `json:"id"`
+	Name              string            `json:"name"`
+	ProviderType      string            `json:"provider_type"`
+	ProtocolEndpoints string            `json:"protocol_endpoints"`
+	BaseURL           string            `json:"base_url"`
+	Note              string            `json:"note"`
+	ManagementStatus  int               `json:"management_status"`
+	RunningStatus     string            `json:"running_status"`
+	Keys              []ProviderKeyView `json:"keys"`
+	CreatedAt         time.Time         `json:"created_at"`
 }
 
 func toKeyView(k model.ProviderKey, destinationVersion int) ProviderKeyView {
@@ -192,7 +207,8 @@ func (s *ProviderService) toProviderView(provider *model.Provider, keys []model.
 	}
 	return ProviderView{
 		ID: provider.ID, Name: provider.Name, ProviderType: provider.ProviderType,
-		BaseURL: provider.BaseURL, Note: provider.Note, ManagementStatus: provider.ManagementStatus,
+		ProtocolEndpoints: provider.ProtocolEndpoints,
+		BaseURL:           provider.BaseURL, Note: provider.Note, ManagementStatus: provider.ManagementStatus,
 		RunningStatus: computeRunningStatus(keys, provider.DestinationVersion),
 		Keys:          views, CreatedAt: provider.CreatedAt,
 	}
@@ -270,6 +286,17 @@ func (s *ProviderService) CreateProvider(ctx context.Context, input CreateProvid
 	if err := validatePlaintextLength(input.KeyPlaintext); err != nil {
 		return nil, err
 	}
+	// Validated up front, before any DB work: an empty ProviderType
+	// normalizes to "openai" for backward compatibility with callers that
+	// don't supply one yet.
+	providerType, err := ValidateProviderType(input.ProviderType)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errcode.ErrProviderProtocolInvalid, err)
+	}
+	protocolEndpoints, err := ValidateProtocolEndpoints(input.ProtocolEndpoints)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errcode.ErrProviderProtocolInvalid, err)
+	}
 	if _, err := repository.FindProviderByName(s.db, input.Name); err == nil {
 		return nil, errcode.ErrProviderNameTaken
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -282,7 +309,8 @@ func (s *ProviderService) CreateProvider(ctx context.Context, input CreateProvid
 	}
 
 	provider := &model.Provider{
-		Name: input.Name, ProviderType: "openai", BaseURL: input.BaseURL, Note: input.Note,
+		Name: input.Name, ProviderType: providerType, ProtocolEndpoints: protocolEndpoints,
+		BaseURL: input.BaseURL, Note: input.Note,
 		ManagementStatus: model.ProviderStatusEnabled, DestinationVersion: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -310,7 +338,7 @@ func (s *ProviderService) CreateProvider(ctx context.Context, input CreateProvid
 	// inserted this row with those exact defaults, so there is no prior
 	// row to race against yet (mirrors CreateProviderKeyPendingTest's
 	// contract for a subsequently-added key).
-	s.runNewPlaintextTestAndCommit(ctx, key.ID, 1, 1, 1, input.BaseURL, input.KeyPlaintext, input.TestModel,
+	s.runNewPlaintextTestAndCommit(ctx, provider, key.ID, 1, 1, 1, input.KeyPlaintext, input.TestModel,
 		input.ManagementStatus == model.ProviderStatusEnabled, now)
 
 	return s.GetProviderDetail(provider.ID)
@@ -350,9 +378,22 @@ func isSortOrderUniqueViolation(err error) bool {
 	return isUniqueViolation(err) && strings.Contains(err.Error(), "sort_order")
 }
 
-// UpdateProvider handles name/note (no version bump) and base_url (atomic
-// destination_version bump) separately, since only the
-// latter must invalidate every key's authorization.
+// UpdateProvider handles name/note (no version bump), base_url, and
+// provider_type/protocol_endpoints (both atomic destination_version bumps)
+// — changing the protocol or its endpoints changes the destination just as
+// much as changing base_url does, so both must invalidate every key's
+// authorization the same way.
+//
+// PATCH-omitted-field semantics: input.ProviderType/ProtocolEndpoints being
+// empty means "not supplied in this request, leave unchanged" — unlike
+// CreateProvider, where an empty ProviderType legitimately means "default to
+// openai". Treating an omitted field the same as CreateProvider's empty-
+// means-default rule would silently flip an existing anthropic provider
+// back to openai (and bump destination_version) on every unrelated
+// name/note-only edit. So only normalize+compare through the validators
+// when the caller actually supplied a non-empty value; otherwise the
+// provider's own current stored value is reused untouched for both the
+// compare and the write.
 func (s *ProviderService) UpdateProvider(id uint, input UpdateProviderInput, now time.Time) (*ProviderView, error) {
 	provider, err := repository.FindProviderByID(s.db, id)
 	if err != nil {
@@ -362,17 +403,43 @@ func (s *ProviderService) UpdateProvider(id uint, input UpdateProviderInput, now
 		return nil, err
 	}
 
-	// These two writes previously ran
+	providerType := provider.ProviderType
+	if input.ProviderType != "" {
+		normalized, err := ValidateProviderType(input.ProviderType)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errcode.ErrProviderProtocolInvalid, err)
+		}
+		providerType = normalized
+	}
+	protocolEndpoints := provider.ProtocolEndpoints
+	if input.ProtocolEndpoints != "" {
+		normalized, err := ValidateProtocolEndpoints(input.ProtocolEndpoints)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errcode.ErrProviderProtocolInvalid, err)
+		}
+		protocolEndpoints = normalized
+	}
+
+	// These writes previously ran
 	// as independent, non-transactional statements: if UpdateProviderBaseURL
 	// committed (bumping destination_version, which instantly invalidates
 	// every key's authorization) and UpdateProviderNameNote then failed on a
 	// duplicate name, the admin saw a failed request but the base_url change
 	// — and its destination_version bump — had already silently landed.
-	// Both writes now share one transaction so a name conflict rolls back
-	// the base_url change too.
+	// All writes now share one transaction so a name conflict rolls back
+	// the base_url/protocol change too.
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		if input.BaseURL != provider.BaseURL {
 			if _, err := repository.UpdateProviderBaseURL(tx, id, input.BaseURL, now); err != nil {
+				return err
+			}
+		}
+		// Compared against the NORMALIZED values, not the raw request
+		// strings — a semantically-identical re-submit (e.g. protocol_endpoints
+		// JSON with reordered keys) must not spuriously bump
+		// destination_version.
+		if providerType != provider.ProviderType || protocolEndpoints != provider.ProtocolEndpoints {
+			if _, err := repository.UpdateProviderProtocol(tx, id, providerType, protocolEndpoints, now); err != nil {
 				return err
 			}
 		}
@@ -498,8 +565,8 @@ func (s *ProviderService) CreateProviderKey(ctx context.Context, providerID uint
 		return nil, err
 	}
 
-	s.runNewPlaintextTestAndCommit(ctx, key.ID, key.ConfigVersion, key.TestGeneration, snapshotVersion,
-		provider.BaseURL, input.Plaintext, input.TestModel, input.ManagementStatus == model.ProviderKeyStatusEnabled, now)
+	s.runNewPlaintextTestAndCommit(ctx, provider, key.ID, key.ConfigVersion, key.TestGeneration, snapshotVersion,
+		input.Plaintext, input.TestModel, input.ManagementStatus == model.ProviderKeyStatusEnabled, now)
 
 	reloaded, err := repository.FindProviderKeyByID(s.db, key.ID)
 	if err != nil {
@@ -507,6 +574,68 @@ func (s *ProviderService) CreateProviderKey(ctx context.Context, providerID uint
 	}
 	view := toKeyView(*reloaded, provider.DestinationVersion)
 	return &view, nil
+}
+
+// verificationSeverity ranks a per-destination result by how strongly it
+// should drive the aggregate verification outcome, derived FROM
+// classifyTestResult so it stays in lockstep with the write rule:
+//   - 0: TestSuccess (this destination passed).
+//   - 2: a decisive failure — classifyTestResult overwrites verification_status
+//     to Failed (TestAuthFailed / TestQuotaUnavailable / non-model-scoped
+//     TestPermissionDenied). On a retest this must DEMOTE the key.
+//   - 1: an inconclusive result — classifyTestResult leaves verification_status
+//     untouched (TestModelNotFound / TestRateLimited / TestUnreachable /
+//     TestUpstreamError / model-scoped TestPermissionDenied /
+//     TestVerificationUnsupported).
+func verificationSeverity(r TestResult) int {
+	if r.Outcome == TestSuccess {
+		return 0
+	}
+	vs, overwrite, _ := classifyTestResult(r)
+	if overwrite && vs == model.VerificationStatusFailed {
+		return 2
+	}
+	return 1
+}
+
+// verifyKeyAllDestinations tests the plaintext credential against EVERY
+// routable destination (VerificationTargets) and returns an aggregate: the
+// MOST SEVERE per-destination result (ties broken by target order, primary
+// first). TestSuccess only if every destination passed. A transport-level
+// error from ANY destination (err != nil, e.g. the client's concurrency cap)
+// aborts with that error and commits nothing — matching the existing "never
+// classify a zero-value TestResult as success" rule. Upholds
+// credential-destination isolation: a key is authorized only after proving it
+// works everywhere negotiation can route it.
+//
+// Severity-ranked, NOT first-encountered-wins: on a RETEST of an
+// already-Passed key, a decisive failure at a SECONDARY destination (its
+// credential just got rejected) must not be masked by a weaker, inconclusive
+// failure at the primary — first-wins would return the primary's
+// non-overwriting result and leave the key wrongly Passed/Enabled/routable to
+// the rejected destination. Picking the most severe result guarantees any
+// decisive failure anywhere demotes the key to Failed.
+func (s *ProviderService) verifyKeyAllDestinations(ctx context.Context, provider *model.Provider, plaintext, testModel string) (TestResult, error) {
+	targets := VerificationTargets(provider.ProviderType, provider.ProtocolEndpoints, provider.BaseURL)
+
+	var chosen TestResult
+	chosenSeverity := -1
+	for _, tgt := range targets {
+		result, err := s.client.TestChatCompletion(ctx, tgt.Proto, tgt.URL, plaintext, testModel)
+		if err != nil {
+			return TestResult{}, err
+		}
+		// Strictly greater keeps the FIRST result at each severity level
+		// (target order, primary first) and preserves its
+		// DurationMs/IsModelScoped. The single-target success case therefore
+		// returns exactly that one target's own result, unchanged from before
+		// this helper existed.
+		if severity := verificationSeverity(result); severity > chosenSeverity {
+			chosenSeverity = severity
+			chosen = result
+		}
+	}
+	return chosen, nil
 }
 
 // runNewPlaintextTestAndCommit is the shared "test first, then open the transaction" flow for any
@@ -526,8 +655,8 @@ func (s *ProviderService) CreateProviderKey(ctx context.Context, providerID uint
 // entirely — the row keeps whatever pre-test state
 // CreateProviderKeyPendingTest/SwapProviderKeyPlaintext already forced
 // (untested, disabled) until a later attempt actually runs.
-func (s *ProviderService) runNewPlaintextTestAndCommit(ctx context.Context, keyID uint, configVersion, testGeneration, snapshotVersion int, baseURL, plaintext, testModel string, requestEnable bool, now time.Time) {
-	result, err := s.client.TestChatCompletion(ctx, baseURL, plaintext, testModel)
+func (s *ProviderService) runNewPlaintextTestAndCommit(ctx context.Context, provider *model.Provider, keyID uint, configVersion, testGeneration, snapshotVersion int, plaintext, testModel string, requestEnable bool, now time.Time) {
+	result, err := s.verifyKeyAllDestinations(ctx, provider, plaintext, testModel)
 	if err != nil {
 		return
 	}
@@ -575,6 +704,14 @@ func classifyTestResult(result TestResult) (verificationStatus int, overwrite bo
 	case TestModelNotFound, TestRateLimited:
 		return 0, false, &outcomeInt
 	case TestUnreachable, TestUpstreamError:
+		return 0, false, &outcomeInt
+	case TestVerificationUnsupported:
+		// The destination's protocol (gemini/responses) has no real
+		// success-body validator yet, so a 2xx from it never counts as
+		// proof the credential works — verification_status is left
+		// untouched (never overwritten to passed), same "inconclusive"
+		// shape as TestModelNotFound/TestRateLimited above. last_test_result
+		// is still recorded so the UI can surface "pending/unsupported".
 		return 0, false, &outcomeInt
 	default:
 		return 0, false, &outcomeInt
@@ -739,8 +876,8 @@ func (s *ProviderService) UpdateProviderKey(ctx context.Context, providerID, key
 	if input.ManagementStatus != nil {
 		wantsEnabled = *input.ManagementStatus == model.ProviderKeyStatusEnabled
 	}
-	s.runNewPlaintextTestAndCommit(ctx, keyID, configVersion, testGeneration, snapshotVersion,
-		provider.BaseURL, *input.Plaintext, input.TestModel, wantsEnabled, now)
+	s.runNewPlaintextTestAndCommit(ctx, provider, keyID, configVersion, testGeneration, snapshotVersion,
+		*input.Plaintext, input.TestModel, wantsEnabled, now)
 
 	reloaded, err := repository.FindProviderKeyByID(s.db, keyID)
 	if err != nil {
@@ -804,9 +941,12 @@ func (s *ProviderService) ReorderProviderKey(providerID, keyID uint, direction s
 
 // TestKeyPreview is the stateless, unpersisted preview
 // (POST .../providers/test-key) — never writes to the database, never
-// trusted by any later request.
-func (s *ProviderService) TestKeyPreview(ctx context.Context, baseURL, apiKey, model string) (TestResult, error) {
-	return s.client.TestChatCompletion(ctx, baseURL, apiKey, model)
+// trusted by any later request. providerType is the candidate provider's
+// intended provider_type (e.g. "anthropic"); an empty value defaults to
+// openai, letting existing callers that don't supply one yet keep working
+// unchanged.
+func (s *ProviderService) TestKeyPreview(ctx context.Context, baseURL, apiKey, model, providerType string) (TestResult, error) {
+	return s.client.TestChatCompletion(ctx, protocolForProviderType(providerType), baseURL, apiKey, model)
 }
 
 // TestProviderKey retests an existing key's stored plaintext
@@ -846,7 +986,7 @@ func (s *ProviderService) TestProviderKey(ctx context.Context, providerID, keyID
 		return nil, fmt.Errorf("decrypt key: %w", err)
 	}
 
-	result, testErr := s.client.TestChatCompletion(ctx, provider.BaseURL, plaintext, key.TestModel)
+	result, testErr := s.verifyKeyAllDestinations(ctx, provider, plaintext, key.TestModel)
 	if testErr != nil {
 		// The client itself refused this call (e.g. concurrency cap
 		// exceeded) — not a real test outcome. Since TestSuccess is
@@ -932,7 +1072,7 @@ func (s *ProviderService) TestAllProviderKeys(ctx context.Context, providerID ui
 			continue
 		}
 
-		result, testErr := s.client.TestChatCompletion(ctx, provider.BaseURL, plaintext, key.TestModel)
+		result, testErr := s.verifyKeyAllDestinations(ctx, provider, plaintext, key.TestModel)
 		if testErr != nil {
 			// The client itself refused this call (e.g. concurrency cap
 			// exceeded) — not a real outcome, nothing to commit

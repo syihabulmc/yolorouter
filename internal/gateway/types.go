@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
 // RelayContext is one gateway request's lifecycle state. Sharply trimmed vs
@@ -26,6 +27,10 @@ type RelayContext struct {
 	RequestID     string
 	OriginalModel string // external model name; every response model field is rewritten to this
 	IsStream      bool
+	// Ingress is the wire protocol of the caller's request path, computed
+	// once in Handle from c.Request.URL.Path. Every gateway call site that
+	// already has rc in scope reads this instead of recomputing it.
+	Ingress protocols.ProtocolID
 	// WantsStreamUsage is true when the caller set
 	// stream_options.include_usage=true. Controls whether usage frames
 	// collected upstream are forwarded to the caller (the gateway always

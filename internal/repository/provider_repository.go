@@ -86,6 +86,28 @@ func UpdateProviderBaseURL(db *gorm.DB, id uint, baseURL string, now time.Time) 
 	return result.DestinationVersion, nil
 }
 
+// UpdateProviderProtocol atomically writes the new provider_type and
+// protocol_endpoints and bumps destination_version in the SAME UPDATE
+// statement, mirroring UpdateProviderBaseURL: changing the protocol or its
+// endpoints changes the destination just as much as changing base_url does,
+// so the write and the version bump must never be two separable statements.
+// Returns the resulting destination_version.
+func UpdateProviderProtocol(db *gorm.DB, id uint, providerType, protocolEndpoints string, now time.Time) (int, error) {
+	var result struct {
+		DestinationVersion int `gorm:"column:destination_version"`
+	}
+	err := db.Raw(`
+		UPDATE providers
+		SET provider_type = ?, protocol_endpoints = ?, destination_version = destination_version + 1, updated_at = ?
+		WHERE id = ?
+		RETURNING destination_version
+	`, providerType, protocolEndpoints, now, id).Scan(&result).Error
+	if err != nil {
+		return 0, err
+	}
+	return result.DestinationVersion, nil
+}
+
 // UpdateProviderManagementStatus enables/disables a provider.
 // UpdateProviderManagementStatus returns applied=false (no error) if id
 // doesn't exist: the service layer

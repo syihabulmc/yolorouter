@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
 func TestIsDataLine(t *testing.T) {
@@ -404,5 +406,101 @@ func TestStreamCaptureVerbatim(t *testing.T) {
 	}
 	if !rc.streamBodyCaptured {
 		t.Error("expected streamBodyCaptured to be true")
+	}
+}
+
+// TestWriteStreamErrorEventOpenAIIngress: a mid-stream failure on the
+// OpenAI ingress (/v1/chat/completions) must keep producing the original
+// OpenAI wire shape — an inline `data: {"error":...}` frame followed by
+// `data: [DONE]` so OpenAI SDKs blocked on [DONE] unblock promptly.
+func TestWriteStreamErrorEventOpenAIIngress(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rc := &RelayContext{RequestID: "req-openai-mid", Ingress: protocols.ProtocolOpenAI}
+
+	writeStreamErrorEvent(c, rc)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"type":"upstream_error"`) {
+		t.Errorf("expected OpenAI upstream_error frame, got %q", body)
+	}
+	if !strings.Contains(body, "req-openai-mid") {
+		t.Errorf("expected the request id quoted in the message, got %q", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Errorf("OpenAI ingress must still get the [DONE] terminator, got %q", body)
+	}
+	if strings.Contains(body, "event: error") {
+		t.Errorf("OpenAI ingress must not get the Claude event: error framing, got %q", body)
+	}
+}
+
+// TestWriteStreamErrorEventClaudeIngress: a mid-stream failure on the Claude
+// ingress (/v1/messages) must emit the Anthropic streaming error shape
+// (event: error + a top-level "type":"error" envelope) and must NOT emit the
+// OpenAI [DONE] terminator — Claude has no such convention, and sending it
+// would be a protocol violation the Anthropic SDK does not expect mid-stream.
+func TestWriteStreamErrorEventClaudeIngress(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rc := &RelayContext{RequestID: "req-claude-mid", Ingress: protocols.ProtocolClaude}
+
+	writeStreamErrorEvent(c, rc)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: error") {
+		t.Errorf("expected a Claude event: error frame, got %q", body)
+	}
+	if !strings.Contains(body, `"type":"error"`) {
+		t.Errorf("expected the top-level Anthropic \"type\":\"error\" discriminator, got %q", body)
+	}
+	if !strings.Contains(body, `"type":"api_error"`) {
+		t.Errorf("expected the nested error.type=api_error, got %q", body)
+	}
+	if !strings.Contains(body, "req-claude-mid") {
+		t.Errorf("expected the request id quoted in the message, got %q", body)
+	}
+	if strings.Contains(body, "[DONE]") {
+		t.Errorf("Claude ingress must NOT emit the OpenAI [DONE] terminator, got %q", body)
+	}
+	if !strings.HasSuffix(body, "\n\n") {
+		t.Errorf("expected the SSE event to end with the blank-line terminator, got %q", body)
+	}
+}
+
+// TestWriteStreamErrorEventCapturesToStreamFile: whatever bytes
+// writeStreamErrorEvent sends to the client must also land in the
+// per-request stream capture file, for both ingress protocols — the capture
+// file's contract is "exactly what the client received".
+func TestWriteStreamErrorEventCapturesToStreamFile(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{"openai", "/v1/chat/completions"},
+		{"claude", "/v1/messages"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, tt.path, nil)
+			c.Set(BodiesDirContextKey, dir)
+			rc := &RelayContext{RequestID: "req-" + tt.name + "-capture", Ingress: IngressProtocol(tt.path)}
+			openStreamBodyFile(c, rc)
+			defer closeStreamBodyFile(rc)
+
+			writeStreamErrorEvent(c, rc)
+
+			captured, err := os.ReadFile(filepath.Join(dir, rc.RequestID+".stream"))
+			if err != nil {
+				t.Fatalf("read captured stream file: %v", err)
+			}
+			if !bytes.Equal(captured, rec.Body.Bytes()) {
+				t.Errorf("captured stream file = %q, want it byte-for-byte equal to the client bytes %q", captured, rec.Body.Bytes())
+			}
+		})
 	}
 }

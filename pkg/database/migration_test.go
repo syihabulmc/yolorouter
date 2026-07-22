@@ -76,9 +76,10 @@ func TestGetCurrentVersionOnFreshSQLiteDB(t *testing.T) {
 	// 00004_create_providers.sql + 00005_create_models.sql +
 	// 00006_create_api_keys.sql + 00007_create_request_logs.sql +
 	// 00008_request_logs_status_index.sql + 00009_request_logs_request_id_index.sql +
-	// 00010_request_logs_cache_tokens.sql + 00011_create_request_log_bodies.sql).
-	if version != 11 {
-		t.Fatalf("expected version 11 after all migrations, got %d", version)
+	// 00010_request_logs_cache_tokens.sql + 00011_create_request_log_bodies.sql +
+	// 00012_provider_protocol_endpoints.sql).
+	if version != 12 {
+		t.Fatalf("expected version 12 after all migrations, got %d", version)
 	}
 }
 
@@ -103,6 +104,72 @@ func TestRunMigrationsAppliesAdminAuthTablesOnSQLite(t *testing.T) {
 		if err := row.Scan(&name); err != nil {
 			t.Fatalf("table %q not found after migration: %v", table, err)
 		}
+	}
+}
+
+func TestRunMigrationsAddsProviderProtocolEndpointsColumn(t *testing.T) {
+	db := newMemoryDB(t)
+
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	var found bool
+	rows, err := db.Query("PRAGMA table_info(providers)")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(providers): %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			colType    string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultVal, &pk); err != nil {
+			t.Fatalf("scan table_info row: %v", err)
+		}
+		if name == "protocol_endpoints" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate table_info rows: %v", err)
+	}
+	if !found {
+		t.Fatal("expected providers.protocol_endpoints column after migration, not found")
+	}
+
+	// Rolling back the 00012 migration must drop the column again.
+	if err := RollbackTo(db, "sqlite", migrations.SQLiteFS, "sqlite", 11); err != nil {
+		t.Fatalf("RollbackTo(11) failed: %v", err)
+	}
+	rows2, err := db.Query("PRAGMA table_info(providers)")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(providers) after rollback: %v", err)
+	}
+	defer func() { _ = rows2.Close() }()
+	for rows2.Next() {
+		var (
+			cid        int
+			name       string
+			colType    string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows2.Scan(&cid, &name, &colType, &notNull, &defaultVal, &pk); err != nil {
+			t.Fatalf("scan table_info row after rollback: %v", err)
+		}
+		if name == "protocol_endpoints" {
+			t.Fatal("expected providers.protocol_endpoints column to be dropped after rollback to version 11")
+		}
+	}
+	if err := rows2.Err(); err != nil {
+		t.Fatalf("iterate table_info rows after rollback: %v", err)
 	}
 }
 

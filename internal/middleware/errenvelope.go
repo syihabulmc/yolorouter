@@ -7,6 +7,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yolorouter/yolorouter/internal/gateway"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 	"github.com/yolorouter/yolorouter/pkg/response"
 )
@@ -81,22 +83,39 @@ func IsGatewayNamespace(path string) bool {
 
 // WriteNamespacedError dispatches a route-level error (404/405/500) to the
 // error shape its namespace owns: /api* gets pkg/response's admin envelope,
-// /v1* gets the OpenAI-compatible shape — the two must never be mixed, since
-// gateway clients expect the OpenAI shape specifically. This is the single
-// place NoRoute, NoMethod, and Recovery all dispatch through, so a future
-// panic under /v1/* doesn't leak the
-// admin envelope the way a per-caller ad-hoc check would risk.
+// /v1* gets the wire envelope its ingress protocol expects — the
+// OpenAI-compatible shape for every /v1/* path except /v1/messages, which
+// gets the Anthropic-native envelope instead (gateway.WriteIngressError). The
+// OpenAI branch is untouched by that split — same shape, same content, byte
+// for byte — since every existing /v1/* caller besides /v1/messages still
+// expects it. This is the single place NoRoute, NoMethod, and Recovery all
+// dispatch through, so a future panic under /v1/* doesn't leak an envelope
+// the caller's SDK can't parse.
 func WriteNamespacedError(c *gin.Context, path string, httpStatus int, adminCode int) {
 	if !IsGatewayNamespace(path) {
 		WriteAdminError(c, httpStatus, adminCode)
 		return
 	}
+	status, errType, message, openAICode := gatewayErrorFor(adminCode, httpStatus)
+	if gateway.IngressProtocol(path) == protocols.ProtocolClaude {
+		requestID := c.GetString(RequestIDKey)
+		gateway.WriteIngressError(c, protocols.ProtocolClaude, status, errType, message, requestID)
+		return
+	}
+	WriteGatewayError(c, status, errType, openAICode, message)
+}
+
+// gatewayErrorFor maps a route-level admin error code (404/405/500) to the
+// (status, error type, message, OpenAI-style code) tuple both /v1/* ingress
+// branches of WriteNamespacedError need — computed once so the OpenAI and
+// Claude wire shapes can't drift apart on which case maps to which text.
+func gatewayErrorFor(adminCode int, httpStatus int) (status int, errType, message, openAICode string) {
 	switch adminCode {
 	case errcode.MethodNotAllowed:
-		WriteGatewayError(c, httpStatus, "invalid_request_error", "method_not_allowed", "method not allowed")
+		return httpStatus, "invalid_request_error", "method not allowed", "method_not_allowed"
 	case errcode.RouteNotFound:
-		WriteGatewayError(c, httpStatus, "invalid_request_error", "route_not_found", "route not found")
+		return httpStatus, "invalid_request_error", "route not found", "route_not_found"
 	default:
-		WriteGatewayError(c, http.StatusInternalServerError, "server_error", "internal_error", "internal server error")
+		return http.StatusInternalServerError, "server_error", "internal server error", "internal_error"
 	}
 }

@@ -10,11 +10,34 @@ import "github.com/yolorouter/yolorouter/internal/protocols"
 var _ protocols.UpstreamBuffer = (*RelayContext)(nil)
 
 // AppendUpstream implements protocols.UpstreamBuffer for the streaming IR
-// relay path: it appends one raw upstream line to the per-request stream
-// capture file. Delegates to the existing appendStreamBodyLine helper (the
-// same one passthroughStreamToClient uses) rather than reimplementing the
-// capture-file bookkeeping (nil-file no-op, 1GiB anti-OOM backstop) here.
+// relay path. Intentionally a NO-OP in this version: data here is the raw
+// (pre-IR-decode) upstream line, not what the client actually received —
+// persisting it into the per-request <request_id>.stream capture file would
+// interleave un-rewritten upstream content with the real caller-facing bytes
+// (which land in that same file via AppendResponse below), corrupting the
+// "exactly what the client received" contract the capture file is supposed
+// to guarantee. Kept as a method (rather than removed) purely so
+// RelayContext still satisfies protocols.UpstreamBuffer; a future version
+// could route this into a separate <request_id>.upstream debug file instead
+// of discarding it, but that is a deliberate scope cut for now, not an
+// oversight.
 func (rc *RelayContext) AppendUpstream(data []byte) {
+	_ = data
+}
+
+// AppendResponse implements protocols.UpstreamBuffer for the streaming IR
+// relay path: it appends one already-caller-facing (post-IR-encode) SSE
+// fragment to the per-request stream capture file — the cross-protocol
+// counterpart of SetResponseBody, and the streaming counterpart of
+// AppendUpstream's raw-upstream no-op above. protocols.IRStreamRelay /
+// IRStreamRelayJSONLines call this at every point an encoded event is
+// actually written to the client, so the capture file ends up byte-for-byte
+// identical to what the client received — mirroring the same-protocol
+// passthrough path's appendStreamBodyLine(rc, sent) calls in
+// passthroughStreamToClient. Delegates to the existing appendStreamBodyLine
+// helper rather than reimplementing the capture-file bookkeeping (nil-file
+// no-op, 1GiB anti-OOM backstop) here.
+func (rc *RelayContext) AppendResponse(data []byte) {
 	appendStreamBodyLine(rc, data)
 }
 

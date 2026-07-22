@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
@@ -306,7 +307,7 @@ func (s *ModelService) TestCandidateMappingPreview(ctx context.Context, modelID,
 	if err != nil {
 		return TestResult{}, err
 	}
-	return s.runCapabilityTest(ctx, testType, provider.BaseURL, plaintext, providerModelName)
+	return s.runCapabilityTest(ctx, protocolForProviderType(provider.ProviderType), testType, provider.BaseURL, plaintext, providerModelName)
 }
 
 // decryptHighestPriorityAvailableKey picks the sort_order-first available
@@ -325,14 +326,14 @@ func (s *ModelService) decryptHighestPriorityAvailableKey(keys []model.ProviderK
 	return "", errcode.ErrProviderNoTestableModel
 }
 
-func (s *ModelService) runCapabilityTest(ctx context.Context, testType, baseURL, apiKey, providerModelName string) (TestResult, error) {
+func (s *ModelService) runCapabilityTest(ctx context.Context, proto protocols.ProtocolID, testType, baseURL, apiKey, providerModelName string) (TestResult, error) {
 	switch testType {
 	case "basic":
-		return s.client.TestChatCompletion(ctx, baseURL, apiKey, providerModelName)
+		return s.client.TestChatCompletion(ctx, proto, baseURL, apiKey, providerModelName)
 	case "streaming":
-		return s.client.TestStreamingCompletion(ctx, baseURL, apiKey, providerModelName)
+		return s.client.TestStreamingCompletion(ctx, proto, baseURL, apiKey, providerModelName)
 	case "function_calling":
-		return s.client.TestFunctionCalling(ctx, baseURL, apiKey, providerModelName)
+		return s.client.TestFunctionCalling(ctx, proto, baseURL, apiKey, providerModelName)
 	default:
 		return TestResult{}, fmt.Errorf("unknown test_type %q", testType)
 	}
@@ -405,7 +406,7 @@ func (s *ModelService) reverifyAndCommitNewCandidate(ctx context.Context, candid
 	if err != nil {
 		return
 	}
-	result, err := s.client.TestChatCompletion(ctx, provider.BaseURL, plaintext, providerModelName)
+	result, err := s.client.TestChatCompletion(ctx, protocolForProviderType(provider.ProviderType), provider.BaseURL, plaintext, providerModelName)
 	if err != nil {
 		return
 	}
@@ -534,7 +535,7 @@ func (s *ModelService) TestModelCandidate(ctx context.Context, id uint, testType
 	if err != nil {
 		return nil, err
 	}
-	result, err := s.runCapabilityTest(ctx, testType, provider.BaseURL, plaintext, candidate.ProviderModelName)
+	result, err := s.runCapabilityTest(ctx, protocolForProviderType(provider.ProviderType), testType, provider.BaseURL, plaintext, candidate.ProviderModelName)
 	if err != nil {
 		return nil, err
 	}

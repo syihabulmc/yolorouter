@@ -23,21 +23,34 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/gateway"
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
-// APIKeyAuth resolves an Authorization: Bearer <key> credential to its
+// APIKeyAuth resolves a caller's Yolorouter API key — presented either as
+// Authorization: Bearer <key> (OpenAI-compatible clients) or X-Api-Key: <key>
+// (the Anthropic SDK / Claude Code, which never sends Authorization) — to its
 // APIKey row and stores it on the context via gateway.SetGatewayAuth. A
-// missing, malformed, or unknown key returns an OpenAI-compatible 401 — the
-// gateway namespace uses upstream's native error shape, NOT pkg/response.
+// missing, conflicting, malformed, or unknown key returns a 401 in the
+// envelope the request's ingress protocol expects (gateway.WriteIngressError)
+// — the gateway namespace uses upstream's native error shape, NOT
+// pkg/response.
 func APIKeyAuth(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		raw := extractBearerKey(c)
+		ingress := gateway.IngressProtocol(c.Request.URL.Path)
+		requestID := c.GetString(RequestIDKey)
+
+		raw, conflict := resolveAPIKey(c)
+		if conflict {
+			logAuthRejection(c, db, ingress, http.StatusUnauthorized, "conflicting API key headers", "authentication_error", "conflicting API key headers")
+			gateway.WriteIngressError(c, ingress, http.StatusUnauthorized, "authentication_error", "conflicting API key headers", requestID)
+			return
+		}
 		if raw == "" {
-			logAuthRejection(c, db, http.StatusUnauthorized, "missing API key", "authentication_error", "missing API key")
-			gateway.WriteOpenAIError(c, http.StatusUnauthorized, "authentication_error", "missing API key")
+			logAuthRejection(c, db, ingress, http.StatusUnauthorized, "missing API key", "authentication_error", "missing API key")
+			gateway.WriteIngressError(c, ingress, http.StatusUnauthorized, "authentication_error", "missing API key", requestID)
 			return
 		}
 		key, err := repository.FindAPIKeyByHash(db, crypto.HashToken(raw))
@@ -45,17 +58,42 @@ func APIKeyAuth(db *gorm.DB) gin.HandlerFunc {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				// "invalid" rather than "not found" — never confirm whether
 				// a key exists, to avoid an enumeration oracle.
-				logAuthRejection(c, db, http.StatusUnauthorized, "invalid API key", "authentication_error", "invalid API key")
-				gateway.WriteOpenAIError(c, http.StatusUnauthorized, "authentication_error", "invalid API key")
+				logAuthRejection(c, db, ingress, http.StatusUnauthorized, "invalid API key", "authentication_error", "invalid API key")
+				gateway.WriteIngressError(c, ingress, http.StatusUnauthorized, "authentication_error", "invalid API key", requestID)
 				return
 			}
-			logAuthRejection(c, db, http.StatusInternalServerError, "auth db lookup failed", "server_error", "internal error")
-			gateway.WriteOpenAIError(c, http.StatusInternalServerError, "server_error", "internal error")
+			logAuthRejection(c, db, ingress, http.StatusInternalServerError, "auth db lookup failed", "server_error", "internal error")
+			gateway.WriteIngressError(c, ingress, http.StatusInternalServerError, "server_error", "internal error", requestID)
 			return
 		}
 		gateway.SetGatewayAuth(c, key)
 		c.Next()
 	}
+}
+
+// resolveAPIKey extracts the caller's API key from either the OpenAI-style
+// Authorization: Bearer header or the Anthropic SDK's X-Api-Key header
+// (c.GetHeader is case-insensitive), so the same key material authenticates
+// both wire protocols without any client-side change. When both headers
+// carry a value, they must agree — a mismatch almost certainly means the
+// caller sent a stale credential in one of the two, and silently preferring
+// one would mask that and mint a request whose actually-attributed key is
+// invisible to the caller. Returns ("", true) on a header mismatch
+// (conflict); returns ("", false) when neither header carries a value (the
+// ordinary missing-key case, handled by the caller).
+func resolveAPIKey(c *gin.Context) (raw string, conflict bool) {
+	bearer := extractBearerKey(c)
+	xAPIKey := c.GetHeader("X-Api-Key")
+	if bearer != "" && xAPIKey != "" {
+		if bearer != xAPIKey {
+			return "", true
+		}
+		return bearer, false
+	}
+	if bearer != "" {
+		return bearer, false
+	}
+	return xAPIKey, false
 }
 
 // authRejectionBodyCap bounds how much of an UNauthenticated request body the
@@ -72,17 +110,17 @@ const authRejectionBodyCap = 16 << 10 // 16 KiB
 // api_key_id, the rejection status, and a generic fail_reason are stored —
 // never the credential or header content.
 //
-// errType/message are the exact error.type/message gateway.WriteOpenAIError
+// errType/message are the exact error.type/message gateway.WriteIngressError
 // is about to return to the caller (the call site right after this one) —
 // passed through rather than re-derived so the persisted response_body
 // matches what the caller actually received.
-func logAuthRejection(c *gin.Context, db *gorm.DB, status int, reason, errType, message string) {
+func logAuthRejection(c *gin.Context, db *gorm.DB, ingress protocols.ProtocolID, status int, reason, errType, message string) {
 	// RequestID middleware is always registered ahead of APIKeyAuth (router.go
 	// mounts it first on the root engine), so request_id is always set here.
 	// If a future route mounts APIKeyAuth without RequestID, the empty id
 	// surfaces loudly in the audit row rather than silently synthesizing a
 	// fake id that can't be correlated with the access log.
-	requestID := c.GetString("request_id")
+	requestID := c.GetString(RequestIDKey)
 	row := &model.RequestLog{
 		RequestID:  requestID,
 		APIKeyID:   nil,
@@ -109,11 +147,20 @@ func logAuthRejection(c *gin.Context, db *gorm.DB, status int, reason, errType, 
 		// auth-rejected request, mirroring gateway.Handle's own capture.
 		reqHeaders = gateway.SanitizeHeaders(c.Request.Header)
 	}
+	// gateway.WriteIngressError appends " (request: <id>)" into message for
+	// the OpenAI ingress but leaves it untouched for the Claude ingress (the
+	// id travels in its own top-level request_id field there) — mirror that
+	// exact transform here so the stored response_body matches what the
+	// caller actually received byte for byte, on both ingresses.
+	auditMessage := message
+	if ingress != protocols.ProtocolClaude {
+		auditMessage = gateway.AppendRequestID(message, requestID)
+	}
 	bodyRow := &model.RequestLogBody{
 		RequestID:      requestID,
 		RequestHeaders: string(reqHeaders),
 		RequestBody:    string(reqBody),
-		ResponseBody:   string(gateway.LocalErrorBody(errType, message)),
+		ResponseBody:   string(gateway.LocalIngressErrorBody(ingress, errType, auditMessage, requestID)),
 	}
 	if err := repository.UpsertRequestLogBody(db, bodyRow); err != nil {
 		logger.Warn("middleware: write auth-rejection body row failed",

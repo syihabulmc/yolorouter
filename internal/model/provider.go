@@ -28,7 +28,7 @@ const (
 // Kept in this package (not internal/service) so the model layer doesn't
 // import service; internal/service/provider_client.go's TestOutcome
 // constants are numerically identical by construction (both start at 0 and
-// list the same 8 outcomes in the same order).
+// list the same 9 outcomes in the same order).
 const (
 	LastTestResultSuccess          = 0
 	LastTestResultAuthFailed       = 1
@@ -38,6 +38,11 @@ const (
 	LastTestResultRateLimited      = 5
 	LastTestResultUnreachable      = 6
 	LastTestResultUpstreamError    = 7
+	// LastTestResultVerificationUnsupported mirrors
+	// service.TestVerificationUnsupported: the destination's protocol
+	// (gemini/responses) has no real success-body validator yet, so a 2xx
+	// response from it cannot be certified as a genuine pass.
+	LastTestResultVerificationUnsupported = 8
 )
 
 // Provider is one upstream connection target. Deleting a
@@ -49,10 +54,14 @@ type Provider struct {
 	// ProviderType is fixed to "openai" in v0.1 — kept as a
 	// column (not a hardcoded constant) so a later version can add more
 	// provider types without a schema migration.
-	ProviderType     string `gorm:"column:provider_type" json:"provider_type"`
-	BaseURL          string `gorm:"column:base_url" json:"base_url"`
-	Note             string `gorm:"column:note" json:"note"`
-	ManagementStatus int    `gorm:"column:management_status" json:"management_status"`
+	ProviderType string `gorm:"column:provider_type" json:"provider_type"`
+	BaseURL      string `gorm:"column:base_url" json:"base_url"`
+	// ProtocolEndpoints is a JSON object mapping extra supported protocols
+	// (beyond ProviderType) to an optional per-protocol base URL; empty
+	// string means no extra protocols.
+	ProtocolEndpoints string `gorm:"column:protocol_endpoints" json:"protocol_endpoints"`
+	Note              string `gorm:"column:note" json:"note"`
+	ManagementStatus  int    `gorm:"column:management_status" json:"management_status"`
 	// DestinationVersion is json:"-": it's an internal CAS/versioning
 	// primitive, never something the frontend reads or
 	// writes directly.

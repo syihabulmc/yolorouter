@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -145,11 +146,14 @@ func (e modelOverrideStreamEncoder) Usage() protocols.IRUsage {
 // provider_type is openai today, so Negotiate (negotiate.go) always echoes
 // the ingress protocol.
 //
-// Known gap (tracked separately, deliberately not addressed here): unlike
-// the passthrough branch, this path does not populate the caller-facing
-// stream capture file (streamBodyFile) — protocols.IRStreamRelay records the
-// raw upstream lines via rc.AppendUpstream, not the caller-facing
-// (post-re-encode) bytes actually written to the client.
+// Like the passthrough branch, the caller-facing stream capture file
+// (streamBodyFile) is opened before the relay call and closed on every exit
+// path below: protocols.IRStreamRelay/IRStreamRelayJSONLines append the
+// caller-facing (post-re-encode) bytes actually written to the client via
+// rc.AppendResponse (protocols.UpstreamBuffer) at the same point they write
+// to c.Writer, so the capture file ends up byte-for-byte identical to what
+// the client received — never the raw upstream lines (rc.AppendUpstream is a
+// deliberate no-op for this reason, see ir_bridge.go).
 func (s *RelayService) processDispatchResponseStream(
 	c *gin.Context,
 	rc *RelayContext,
@@ -162,7 +166,7 @@ func (s *RelayService) processDispatchResponseStream(
 	start time.Time,
 ) attemptResult {
 	if egress.Passthrough {
-		return s.dispatchPassthroughStream(c, rc, cand, provider, pk, resp, start)
+		return s.dispatchPassthroughStream(c, rc, egress.Protocol, cand, provider, pk, resp, start)
 	}
 
 	// Now committed to this 2xx candidate — a stream request never
@@ -170,6 +174,14 @@ func (s *RelayService) processDispatchResponseStream(
 	// capture file instead), but a prior failed candidate may have stashed
 	// a stale error body in them.
 	rc.clearResponseBodies()
+
+	// Mirrors dispatchPassthroughStream's openStreamBodyFile/closeStreamBodyFile
+	// pairing: the file must stay open past the relay call so
+	// writeStreamErrorEvent's mid-stream error frame (below) can still be
+	// appended to it, so the close is deferred to the end of this function
+	// rather than happening right after the relay call returns.
+	openStreamBodyFile(c, rc)
+	defer closeStreamBodyFile(rc)
 
 	egressDecoder := codecsFor(egress.Protocol).NewStreamDecoder()
 	innerStreamEncoder := codecsFor(ingress).NewStreamEncoder()
@@ -213,6 +225,11 @@ func (s *RelayService) processDispatchResponseStream(
 	// (unknown, not zero) even though usage itself is never a nil pointer
 	// here.
 	rc.Usage = irUsageToUsage(usage)
+	// If the relay never emitted a single encoded event (a pre-first-event
+	// failure below), the capture file (if any) is empty — remove it so the
+	// detail page never shows an empty "stream body" link, mirroring
+	// dispatchPassthroughStream's identical call.
+	removeEmptyStreamBodyFile(c, rc)
 
 	if err == nil {
 		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
@@ -267,7 +284,7 @@ func (s *RelayService) processDispatchResponseNonStream(
 	start time.Time,
 ) attemptResult {
 	if egress.Passthrough {
-		return s.dispatchPassthroughNonStream(c, rc, cand, provider, pk, resp, start)
+		return s.dispatchPassthroughNonStream(c, rc, egress.Protocol, cand, provider, pk, resp, start)
 	}
 
 	decoder := codecsFor(egress.Protocol).ResponseDecoder
@@ -320,11 +337,59 @@ func (s *RelayService) processDispatchResponseNonStream(
 // not the raw upstream bytes, are what land in the request/stream body
 // capture used for audit and debugging.
 
+// passthroughRewriteNonStreamResponse rewrites a non-stream same-protocol
+// upstream response's model field back to the external name and extracts
+// usage, branching by egress protocol so the live OpenAI path is untouched.
+//
+// For an OpenAI egress this is exactly RewriteNonStreamResponse (unchanged
+// production behavior). For any other egress protocol, the model-field
+// rewrite is identical (rewriteModelField operates on any JSON body with a
+// top-level "model" field, which the Claude/Responses non-stream response
+// shapes all have), but usage is extracted via that protocol's own
+// ResponseDecoder instead of the OpenAI-shaped extractUsage -- Claude reports
+// input_tokens/output_tokens under a "usage" object, which extractUsage's
+// prompt_tokens/completion_tokens field names never match, so without this
+// branch a non-OpenAI passthrough response was byte-forwarded correctly but
+// silently left rc.Usage nil (no billing).
+//
+// A decode error here does NOT fail the request: the caller-facing bytes are
+// already correctly rewritten and about to be written to the client
+// regardless, so usage is simply left nil (unknown, not zero) rather than
+// failing this candidate over -- the response itself is not malformed, only
+// unparseable for the gateway's own cost accounting.
+func passthroughRewriteNonStreamResponse(egressProtocol protocols.ProtocolID, body []byte, externalModel string) ([]byte, *Usage, error) {
+	if egressProtocol == protocols.ProtocolOpenAI {
+		return RewriteNonStreamResponse(body, externalModel)
+	}
+	rewritten, err := rewriteModelField(body, externalModel)
+	if err != nil {
+		return nil, nil, err
+	}
+	var usage *Usage
+	if irResp, decErr := codecsFor(egressProtocol).ResponseDecoder.DecodeResponse(json.RawMessage(body)); decErr == nil && irResp != nil {
+		usage = irUsageToUsage(&irResp.Usage)
+	}
+	return rewritten, usage, nil
+}
+
 // dispatchPassthroughNonStream writes a 2xx non-stream same-protocol upstream
 // response to the client: bounded read, model-field rewrite + usage
-// extraction via RewriteNonStreamResponse, write. Called only from
-// processDispatchResponseNonStream's passthrough branch.
-func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayContext, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+// extraction, write. Called only from processDispatchResponseNonStream's
+// passthrough branch.
+//
+// egressProtocol is always equal to the ingress protocol here (that is what
+// Passthrough means, see EgressDecision), and selects how the response is
+// rewritten: an OpenAI egress keeps the original RewriteNonStreamResponse
+// codepath verbatim (the only production-live passthrough path, see
+// processDispatchResponseNonStream's doc comment); any other egress protocol
+// (e.g. an Anthropic ingress passed through to an Anthropic provider) goes
+// through passthroughRewriteNonStreamResponse instead, which reuses the same
+// model-field rewrite but extracts usage via that protocol's own
+// ResponseDecoder rather than assuming OpenAI's prompt_tokens/
+// completion_tokens shape -- without this, a non-OpenAI passthrough response
+// was byte-forwarded correctly but silently never billed (extractUsage always
+// returned nil against a Claude usage object).
+func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayContext, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
 	defer func() { _ = resp.Body.Close() }()
 	// Now committed to this 2xx candidate: drop any error body a prior failed
 	// candidate stashed in these fields. The three failover returns below
@@ -356,7 +421,7 @@ func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayCon
 		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "response too large"))
 		return attemptNextCandidate
 	}
-	rewritten, usage, err := RewriteNonStreamResponse(body, rc.OriginalModel)
+	rewritten, usage, err := passthroughRewriteNonStreamResponse(egressProtocol, body, rc.OriginalModel)
 	if err != nil {
 		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "rewrite: "+err.Error()))
 		return attemptNextCandidate
@@ -376,11 +441,25 @@ func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayCon
 	return attemptSuccess
 }
 
-// dispatchPassthroughStream drives the stream pump (passthroughStreamToClient)
-// and maps its outcome to an attemptResult, mirroring
+// dispatchPassthroughStream drives the stream pump (passthroughStreamToClient
+// for an OpenAI egress, passthroughStreamToClientDecoded for any other) and
+// maps its outcome to an attemptResult, mirroring
 // dispatchPassthroughNonStream's role for the stream case. Called only from
 // processDispatchResponseStream's passthrough branch.
-func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContext, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+//
+// egressProtocol is always equal to the ingress protocol here (Passthrough's
+// definition, see EgressDecision). The OpenAI branch is byte-for-byte the
+// original pump, unmodified (the only production-live passthrough path). Any
+// other egress protocol (e.g. an Anthropic ingress passed through to an
+// Anthropic provider) goes through passthroughStreamToClientDecoded instead:
+// same byte-forwarding, but usage/completion detection go through that
+// protocol's own StreamDecoder rather than the OpenAI-specific
+// prompt_tokens/completion_tokens usage shape and `data: [DONE]` terminator
+// — without this, a non-OpenAI passthrough stream was byte-forwarded
+// correctly but never billed (rc.Usage stayed nil) and always finalized as
+// "stream_no_done" (the [DONE] literal never appears on a Claude stream)
+// even when the upstream completed cleanly with message_stop.
+func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContext, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
 	// A prior failed candidate may have stashed its non-2xx error body in
 	// these fields. A stream request persists its response through the SSE
 	// capture file, not these fields — the types.go contract is that both
@@ -389,11 +468,17 @@ func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContex
 	// show a previous candidate's error as this (successful) request's
 	// "upstream response".
 	rc.clearResponseBodies()
-	usage, err := passthroughStreamToClient(c, resp, rc)
-	// passthroughStreamToClient deliberately leaves the capture file open past
-	// its own return, so the writeStreamErrorEvent call below can still
-	// append to it; this function is the single place responsible for
-	// closing it, on every exit path.
+	var usage *Usage
+	var err error
+	if egressProtocol == protocols.ProtocolOpenAI {
+		usage, err = passthroughStreamToClient(c, resp, rc)
+	} else {
+		usage, err = passthroughStreamToClientDecoded(c, resp, rc, egressProtocol)
+	}
+	// Both pumps deliberately leave the capture file open past their own
+	// return, so the writeStreamErrorEvent call below can still append to
+	// it; this function is the single place responsible for closing it, on
+	// every exit path.
 	defer closeStreamBodyFile(rc)
 	if usage != nil {
 		rc.Usage = usage // preserve partial usage even on error paths
@@ -595,4 +680,224 @@ func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *RelayCon
 		return usage, errStreamNoDoneTerminator
 	}
 	return usage, nil
+}
+
+// passthroughStreamToClientDecoded is passthroughStreamToClient's non-OpenAI
+// counterpart: it forwards every upstream SSE line to the client
+// byte-for-byte, exactly like passthroughStreamToClient, but deliberately
+// does NOT attempt the OpenAI-specific per-chunk model-field rewrite
+// (rewriteStreamChunk assumes an OpenAI chat.completion.chunk JSON shape,
+// which a Claude/Responses/Gemini SSE event does not have — a Claude
+// message_start event, for instance, nests "model" under "message", not at
+// the top level).
+//
+// For a Claude egress specifically, the one frame that does carry the model
+// name — message_start — IS rewritten in place via
+// rewriteClaudeMessageStartModel, so a Claude passthrough stream never leaks
+// the provider's internal model name to the client; see the call site below.
+// Gemini and Responses stream model rewrite remains deferred: their SSE
+// event shapes differ from Claude's and are not handled here.
+//
+// Every forwarded line is also fed into egressProtocol's own StreamDecoder
+// purely to accumulate usage (DeltaUsage) and detect a clean completion
+// (FinishSignals.SawDone — Claude: message_stop / a message_delta carrying
+// stop_reason) — the same technique protocols.IRStreamRelay uses for the
+// cross-protocol path. The decoded deltas themselves are discarded after
+// accumulation (never re-encoded): the bytes already on the wire, forwarded
+// verbatim above, are the caller-facing response.
+//
+// Returns the accumulated usage and an error only for transport-level
+// failures; reuses errClientDisconnected / errStreamNoDoneTerminator (the
+// SAME sentinel values passthroughStreamToClient returns) so
+// dispatchPassthroughStream's existing error-branch handling (mid-stream vs.
+// pre-first-byte failover, 499 vs. stream_no_done, ...) applies unchanged to
+// both pumps without any caller-side branching beyond picking which pump to
+// run.
+// rewriteClaudeMessageStartModel rewrites the model field nested in a Claude
+// message_start SSE data line to the external model name, so a passthrough
+// Claude stream never leaks the provider's internal model name. Any line that
+// is not a "data: " line, not a message_start frame, or not parseable is
+// returned unchanged (ok=false) so the rest of the stream is still forwarded
+// byte-for-byte. Preserves the trailing newline(s).
+func rewriteClaudeMessageStartModel(line []byte, externalModel string) ([]byte, bool) {
+	// Fast pre-check to skip the JSON parse on every other frame — a Claude
+	// stream sends exactly one message_start per response, so this substring
+	// check is false for the (many) content_block_delta/message_delta lines.
+	if !bytes.Contains(line, []byte("message_start")) {
+		return line, false
+	}
+	const prefix = "data: "
+	if !bytes.HasPrefix(line, []byte(prefix)) {
+		return line, false
+	}
+	payload := line[len(prefix):]
+	trimmed := bytes.TrimRight(payload, "\r\n")
+	trailing := payload[len(trimmed):]
+
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return line, false
+	}
+	var typ string
+	if err := json.Unmarshal(envelope["type"], &typ); err != nil || typ != "message_start" {
+		return line, false
+	}
+	msgRaw, ok := envelope["message"]
+	if !ok {
+		return line, false
+	}
+	var message map[string]json.RawMessage
+	if err := json.Unmarshal(msgRaw, &message); err != nil {
+		return line, false
+	}
+	modelJSON, err := json.Marshal(externalModel)
+	if err != nil {
+		return line, false
+	}
+	message["model"] = modelJSON
+	newMsgJSON, err := json.Marshal(message)
+	if err != nil {
+		return line, false
+	}
+	envelope["message"] = newMsgJSON
+	newEnvelopeJSON, err := json.Marshal(envelope)
+	if err != nil {
+		return line, false
+	}
+	newLine := make([]byte, 0, len(prefix)+len(newEnvelopeJSON)+len(trailing))
+	newLine = append(newLine, prefix...)
+	newLine = append(newLine, newEnvelopeJSON...)
+	newLine = append(newLine, trailing...)
+	return newLine, true
+}
+
+func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *RelayContext, egressProtocol protocols.ProtocolID) (*Usage, error) {
+	defer func() { _ = resp.Body.Close() }()
+
+	// Same capture-file lifecycle as passthroughStreamToClient: opened here,
+	// deliberately left open past this function's return so
+	// dispatchPassthroughStream's writeStreamErrorEvent can still append a
+	// mid-stream error frame to it; closed by dispatchPassthroughStream's
+	// defer once every write for this attempt is done.
+	openStreamBodyFile(c, rc)
+
+	decoder := codecsFor(egressProtocol).NewStreamDecoder()
+	var sig protocols.FinishSignals
+	var accUsage protocols.IRUsage
+	accumulate := func(deltas []protocols.IRStreamDelta) {
+		sig.Accumulate(deltas)
+		for _, d := range deltas {
+			if du, ok := d.(protocols.DeltaUsage); ok {
+				accUsage.Merge(du.Usage)
+			}
+		}
+	}
+	// irUsageToUsage nils out an all-zero usage (unknown, not zero) —
+	// evaluated fresh on every return path so a mid-stream failure still
+	// preserves whatever usage was collected before the failure, mirroring
+	// passthroughStreamToClient's *usage return.
+	currentUsage := func() *Usage { return irUsageToUsage(&accUsage) }
+
+	flusher, _ := c.Writer.(http.Flusher)
+	headerWritten := false
+	var preamble []byte
+	// modelRewritten latches true once the (single, per-stream) message_start
+	// frame has been rewritten, so later lines that also happen to contain
+	// the substring "message_start" (there aren't any in practice, but the
+	// pre-check is substring-based) skip the parse attempt too.
+	modelRewritten := false
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamLineBytes)
+	for scanner.Scan() {
+		select {
+		case <-c.Request.Context().Done():
+			return clientDisconnectOutcome(currentUsage(), sig.SawDone)
+		default:
+		}
+		line := append(scanner.Bytes(), '\n')
+		// Claude message_start carries the model name nested under
+		// "message.model" — rewrite it to the external name here, before the
+		// decoder feed and the writes below, so the client, the usage
+		// decoder, and the stream capture file all see the rewritten bytes.
+		// Gemini/Responses stream model rewrite is not handled (see the
+		// function doc comment above).
+		if egressProtocol == protocols.ProtocolClaude && !modelRewritten {
+			if newLine, ok := rewriteClaudeMessageStartModel(line, rc.OriginalModel); ok {
+				line = newLine
+				modelRewritten = true
+			}
+		}
+		deltas, _ := decoder.DecodeChunk(string(line))
+		accumulate(deltas)
+
+		switch {
+		case headerWritten:
+			_, _ = c.Writer.Write(line)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			appendStreamBodyLine(rc, line)
+		case isDataLine(line):
+			// First data frame — commit the SSE headers, flush any buffered
+			// preamble in order, then forward the data line. Mirrors
+			// passthroughStreamToClient's identical first-data-frame handling.
+			writeSSEHeader(c)
+			hadPreamble := len(preamble) > 0
+			if hadPreamble {
+				_, _ = c.Writer.Write(preamble)
+			}
+			headerWritten = true
+			rc.MarkFirstByteSent()
+			_, _ = c.Writer.Write(line)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			if hadPreamble {
+				appendStreamBodyLine(rc, preamble)
+				preamble = nil
+			}
+			appendStreamBodyLine(rc, line)
+		default:
+			// Preamble line before the first data frame — buffer it, capped
+			// exactly like passthroughStreamToClient's preamble handling.
+			if len(preamble)+len(line) <= maxPreambleBytes {
+				preamble = append(preamble, line...)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if errors.Is(c.Request.Context().Err(), context.Canceled) {
+			return clientDisconnectOutcome(currentUsage(), sig.SawDone)
+		}
+		if errors.Is(err, bufio.ErrTooLong) {
+			return currentUsage(), fmt.Errorf("upstream stream line too long (max %d bytes)", maxStreamLineBytes)
+		}
+		if sig.SawDone && protocols.IsBenignPostDoneReadErr(err) {
+			return currentUsage(), nil
+		}
+		return currentUsage(), fmt.Errorf("read upstream stream: %w", err)
+	}
+	// Clean EOF: flush the decoder's own internal buffer before judging
+	// sig.SawDone, mirroring protocols.IRStreamRelay's identical use of
+	// decoder.Finish() — some decoders only emit their terminal delta once a
+	// trailing boundary confirms the buffered event is complete, which a
+	// clean EOF right after the last forwarded byte would otherwise miss.
+	if deltas, _ := decoder.Finish(); len(deltas) > 0 {
+		accumulate(deltas)
+	}
+	if !headerWritten {
+		return currentUsage(), errors.New("upstream stream ended before any data chunk")
+	}
+	if !sig.SawDone {
+		// Upstream emitted at least one data frame but the decoder never saw
+		// a completion signal (Claude: no message_stop / no message_delta
+		// stop_reason) — the completion is silently truncated. Report it, so
+		// dispatchPassthroughStream logs a partial row instead of clean
+		// success, exactly like passthroughStreamToClient's [DONE] check —
+		// but keyed on the protocol's own completion signal instead of the
+		// OpenAI-only [DONE] literal.
+		return currentUsage(), errStreamNoDoneTerminator
+	}
+	return currentUsage(), nil
 }

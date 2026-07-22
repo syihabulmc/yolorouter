@@ -42,6 +42,7 @@ const (
 	ProviderKeyNeedsReentry  = 12012 // authorized_destination_version differs from the current destination_version, plaintext must be resubmitted
 	ProviderKeyTooShort      = 12013 // Key plaintext is shorter than minKeyPlaintextLength (normally already blocked by Gin binding; this is a defensive fallback)
 	ProviderKeyTestNotSaved  = 12014 // the test network call finished but the Key was modified concurrently while writing back the result (config_version changed), so the CAS missed and the result was not persisted; retry needed
+	ProviderProtocolInvalid  = 12015 // provider_type or protocol_endpoints failed validation (unsupported protocol name, malformed JSON, or a non-absolute-http(s) endpoint URL)
 
 	ModelNotFound               = 12101 // the public model name does not exist
 	ModelNameTaken              = 12102 // the public model name is already taken (globally unique)
@@ -129,6 +130,7 @@ var ErrorMessages = map[int]string{
 	ProviderKeyNeedsReentry:  "provider address changed, please resubmit the key plaintext",
 	ProviderKeyTooShort:      "key plaintext is too short",
 	ProviderKeyTestNotSaved:  "test result not saved because the key was modified concurrently, please retry",
+	ProviderProtocolInvalid:  "invalid provider_type or protocol_endpoints",
 
 	ModelNotFound:               "model not found",
 	ModelNameTaken:              "model name already taken",
@@ -191,6 +193,7 @@ var (
 	ErrProviderKeyNeedsReentry  = errors.New(ErrorMessages[ProviderKeyNeedsReentry])
 	ErrProviderKeyTooShort      = errors.New(ErrorMessages[ProviderKeyTooShort])
 	ErrProviderKeyTestNotSaved  = errors.New(ErrorMessages[ProviderKeyTestNotSaved])
+	ErrProviderProtocolInvalid  = errors.New(ErrorMessages[ProviderProtocolInvalid])
 
 	ErrModelNotFound               = errors.New(ErrorMessages[ModelNotFound])
 	ErrModelNameTaken              = errors.New(ErrorMessages[ModelNameTaken])

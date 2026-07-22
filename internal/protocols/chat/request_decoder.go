@@ -14,25 +14,29 @@ func (RequestDecoder) Protocol() protocols.ProtocolID { return protocols.Protoco
 
 func (d RequestDecoder) DecodeRequest(body json.RawMessage, model string, isStream bool) (*protocols.IRRequest, error) {
 	var req struct {
-		Model             string            `json:"model"`
-		Messages          json.RawMessage   `json:"messages"`
-		Stream            bool              `json:"stream"`
-		Temperature       *float64          `json:"temperature,omitempty"`
-		MaxTokens         *int              `json:"max_tokens,omitempty"`
-		TopP              *float64          `json:"top_p,omitempty"`
-		TopK              *int              `json:"top_k,omitempty"`
-		TopA              *float64          `json:"top_a,omitempty"`
-		MinP              *float64          `json:"min_p,omitempty"`
-		Seed              *int64            `json:"seed,omitempty"`
-		StopSequences     []json.RawMessage `json:"stop,omitempty"`
-		PresencePenalty   *float64          `json:"presence_penalty,omitempty"`
-		FrequencyPenalty  *float64          `json:"frequency_penalty,omitempty"`
-		RepetitionPenalty *float64          `json:"repetition_penalty,omitempty"`
-		LogProbs          *bool             `json:"logprobs,omitempty"`
-		TopLogProbs       *int              `json:"top_logprobs,omitempty"`
-		Tools             json.RawMessage   `json:"tools,omitempty"`
-		ToolChoice        json.RawMessage   `json:"tool_choice,omitempty"`
-		ResponseFormat    json.RawMessage   `json:"response_format,omitempty"`
+		Model       string          `json:"model"`
+		Messages    json.RawMessage `json:"messages"`
+		Stream      bool            `json:"stream"`
+		Temperature *float64        `json:"temperature,omitempty"`
+		MaxTokens   *int            `json:"max_tokens,omitempty"`
+		TopP        *float64        `json:"top_p,omitempty"`
+		TopK        *int            `json:"top_k,omitempty"`
+		TopA        *float64        `json:"top_a,omitempty"`
+		MinP        *float64        `json:"min_p,omitempty"`
+		Seed        *int64          `json:"seed,omitempty"`
+		// Stop is OpenAI's "stop" field, which the API accepts as EITHER a
+		// single string OR an array of strings — decoded via decodeStopSequences
+		// below rather than a fixed shape, since a plain json.RawMessage array
+		// element type would reject the scalar form outright.
+		Stop              json.RawMessage `json:"stop,omitempty"`
+		PresencePenalty   *float64        `json:"presence_penalty,omitempty"`
+		FrequencyPenalty  *float64        `json:"frequency_penalty,omitempty"`
+		RepetitionPenalty *float64        `json:"repetition_penalty,omitempty"`
+		LogProbs          *bool           `json:"logprobs,omitempty"`
+		TopLogProbs       *int            `json:"top_logprobs,omitempty"`
+		Tools             json.RawMessage `json:"tools,omitempty"`
+		ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
+		ResponseFormat    json.RawMessage `json:"response_format,omitempty"`
 		StreamOptions     *struct {
 			IncludeUsage bool `json:"include_usage"`
 		} `json:"stream_options,omitempty"`
@@ -81,12 +85,7 @@ func (d RequestDecoder) DecodeRequest(body json.RawMessage, model string, isStre
 		TopLogProbs:         req.TopLogProbs,
 		AllowExtendedParams: true,
 	}
-	for _, s := range req.StopSequences {
-		var str string
-		if json.Unmarshal(s, &str) == nil {
-			irReq.Generation.StopSequences = append(irReq.Generation.StopSequences, str)
-		}
-	}
+	irReq.Generation.StopSequences = decodeStopSequences(req.Stop)
 
 	// Tools
 	irReq.Tools = decodeOpenAITools(req.Tools)
@@ -133,6 +132,33 @@ func (d RequestDecoder) DecodeRequest(body json.RawMessage, model string, isStre
 	}
 
 	return irReq, nil
+}
+
+// decodeStopSequences decodes OpenAI's "stop" field, which the API accepts as
+// EITHER a single string OR an array of strings. A single string yields one
+// stop sequence; an array yields one entry per string element (non-string
+// elements are ignored, matching the previous array-only decoder's leniency);
+// an absent or null field yields no stop sequences.
+func decodeStopSequences(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var single string
+	if json.Unmarshal(raw, &single) == nil {
+		return []string{single}
+	}
+	var arr []json.RawMessage
+	if json.Unmarshal(raw, &arr) != nil {
+		return nil
+	}
+	var out []string
+	for _, s := range arr {
+		var str string
+		if json.Unmarshal(s, &str) == nil {
+			out = append(out, str)
+		}
+	}
+	return out
 }
 
 // decodeOpenAIMessages decodes the OpenAI Chat "messages" array into IR messages.

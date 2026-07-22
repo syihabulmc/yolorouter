@@ -307,11 +307,16 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 		DBDriver:  db.Dialector.Name(), //nolint:staticcheck // QF1008 false-positive — gorm.DB exposes the driver name only via Dialector.Name(); there is no db.Name()
 	}, versionSvc))
 
-	// Gateway: POST /v1/chat/completions — the second auth path.
-	// The caller presents an API key in Authorization: Bearer, not a session
-	// cookie. The 20MiB body cap is the gateway limit,
-	// larger than the admin JSON API's 1MiB to leave room for long histories
-	// and tool definitions.
+	// Gateway: POST /v1/chat/completions (OpenAI-compatible) and
+	// POST /v1/messages (Anthropic-compatible) — the second auth path.
+	// The caller presents an API key in Authorization: Bearer or
+	// X-Api-Key, not a session cookie. The 20MiB body cap is the gateway
+	// limit, larger than the admin JSON API's 1MiB to leave room for long
+	// histories and tool definitions. Both routes share this same group, so
+	// they inherit the same body-size limit, auth, and bodies-dir stash;
+	// gateway.PostChatCompletions/RelayService.Handle dispatch by request
+	// path (gateway.IngressProtocol) to pick the caller's actual wire
+	// protocol.
 	relaySvc := gateway.NewRelayService(db, providerMasterKey, allowPrivateUpstreams)
 	v1 := r.Group("/v1", middleware.BodySizeLimit(20<<20), middleware.APIKeyAuth(db))
 	// Stash the absolute bodies dir on the request context so the
@@ -324,6 +329,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 		c.Next()
 	})
 	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))
+	v1.POST("/messages", gateway.PostChatCompletions(relaySvc))
 
 	return r, nil
 }

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -484,5 +486,77 @@ func TestCrossProtocolStreamPreFirstEventFailover(t *testing.T) {
 	}
 	if text.String() != "ok" {
 		t.Errorf("concatenated client stream text = %q, want %q (from the second, healthy candidate)", text.String(), "ok")
+	}
+}
+
+// TestCrossProtocolStreamCaptureMatchesClientBytes is the streaming
+// counterpart to TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody:
+// after a successful cross-protocol IR stream (OpenAI ingress, Claude
+// upstream — same fixture as TestCrossProtocolOpenAIToAnthropicStream), the
+// per-request <request_id>.stream capture file must be byte-for-byte equal
+// to what the client actually received, not merely "contain" the expected
+// content. Before the AppendResponse fix, IRStreamRelay recorded the RAW
+// upstream lines (Claude SSE: message_start/content_block_delta/... shaped)
+// via rc.AppendUpstream instead of the caller-facing (post-re-encode) OpenAI
+// chat.completion.chunk bytes actually written to c.Writer — the two shapes
+// differ completely, so this regression test fails without the fix.
+func TestCrossProtocolStreamCaptureMatchesClientBytes(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		write := func(s string) {
+			_, _ = w.Write([]byte(s))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		write("event: message_start\n")
+		write(`data: {"type":"message_start","message":{"id":"msg_01xyz","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}` + "\n\n")
+		write("event: content_block_delta\n")
+		write(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}` + "\n\n")
+		write("event: content_block_delta\n")
+		write(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}` + "\n\n")
+		write("event: message_delta\n")
+		write(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}` + "\n\n")
+		write("event: message_stop\n")
+		write(`data: {"type":"message_stop"}` + "\n\n")
+	}))
+	defer upstream.Close()
+
+	svc := newRelaySvc(t, db)
+	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "claude-3-5-sonnet-20241022", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	dir := t.TempDir()
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	reqBody := []byte(`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	c, w := newCtx(reqBody)
+	c.Set(BodiesDirContextKey, dir)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	if captured.RequestID == "" {
+		t.Fatal("expected a non-empty request id")
+	}
+
+	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.RequestID+".stream"))
+	if err != nil {
+		t.Fatalf("read captured stream file: %v", err)
+	}
+	if !bytes.Equal(capturedBytes, w.Body.Bytes()) {
+		t.Errorf("captured stream file is not byte-for-byte equal to the client bytes.\ncaptured=%q\nclient=  %q", capturedBytes, w.Body.Bytes())
 	}
 }

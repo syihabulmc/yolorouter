@@ -7,11 +7,15 @@ import (
 	"net/http/httptest"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/config"
+	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/testutil"
+	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 	"github.com/yolorouter/yolorouter/pkg/response"
 )
@@ -311,6 +315,109 @@ func TestV1WrongMethodReturnsOpenAICompatibleEnvelope(t *testing.T) {
 	assertGatewayEnvelope(t, w.Body.Bytes(), "method_not_allowed")
 }
 
+// seedAPIKey inserts one active APIKey row keyed to rawKey and returns it,
+// mirroring the pattern internal/middleware/api_key_auth_test.go and
+// internal/gateway/relay_test.go both already use for their own fixtures.
+func seedAPIKey(t *testing.T, db *gorm.DB, rawKey string) *model.APIKey {
+	t.Helper()
+	now := time.Now().UTC()
+	prefixLen := len(rawKey)
+	if prefixLen > 12 {
+		prefixLen = 12
+	}
+	k := &model.APIKey{
+		KeyHash: crypto.HashToken(rawKey), KeyPrefix: rawKey[:prefixLen],
+		OwnerLabel: "tester", Status: model.APIKeyStatusActive, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(k).Error; err != nil {
+		t.Fatalf("seed api key: %v", err)
+	}
+	return k
+}
+
+// TestMessagesRouteReachesGatewayWithValidKey proves POST /v1/messages is
+// registered on the same protected /v1 group as /v1/chat/completions
+// (inherits BodySizeLimit + APIKeyAuth + the bodies-dir stash) and actually
+// dispatches into the gateway handler for a caller with a valid key — no
+// provider/model is configured in this test, so the request won't succeed
+// end to end (RelayService.Handle itself replies 404 "model does not exist",
+// a legitimate gateway-generated response, not a routing failure). What this
+// asserts is that the response is the Claude envelope Handle produces for
+// that rejection — proving both that the route dispatched into the gateway
+// handler (not 401 auth-rejected, not a route/method 404/405) and that it
+// resolved /v1/messages to the Claude ingress while doing so.
+func TestMessagesRouteReachesGatewayWithValidKey(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedAPIKey(t, db, "sk-yr-messages-route")
+	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	body := []byte(`{"model":"claude-3-opus","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	req.Header.Set("X-Api-Key", "sk-yr-messages-route")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusMethodNotAllowed {
+		t.Fatalf("expected the request to reach the gateway handler (not rejected at auth/routing), got %d, body: %s", w.Code, w.Body.String())
+	}
+	assertClaudeEnvelope(t, w.Body.Bytes())
+}
+
+// TestMessagesWrongMethodReturnsClaudeEnvelope drives the NoMethod path for
+// /v1/messages specifically: since /v1/messages is only registered for POST,
+// a GET must 405 with the Anthropic-native envelope, not the OpenAI shape
+// every other /v1/* path uses.
+func TestMessagesWrongMethodReturnsClaudeEnvelope(t *testing.T) {
+	r := newTestRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+	assertClaudeEnvelope(t, w.Body.Bytes())
+}
+
+// TestChatCompletionsWrongMethodReturnsOpenAIEnvelope is
+// TestMessagesWrongMethodReturnsClaudeEnvelope's OpenAI-ingress counterpart,
+// now driven against the real registered route (not the synthetic
+// "/v1/test-only-route" TestV1WrongMethodReturnsOpenAICompatibleEnvelope
+// uses) — locks in that adding the Claude branch did not flip
+// /v1/chat/completions's own wrong-method shape.
+func TestChatCompletionsWrongMethodReturnsOpenAIEnvelope(t *testing.T) {
+	r := newTestRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+	assertGatewayEnvelope(t, w.Body.Bytes(), "method_not_allowed")
+}
+
+// TestMessagesSubPathReturns404OpenAIEnvelope guards the exact-path-match
+// semantics of gateway.IngressProtocol: only the literal "/v1/messages"
+// path maps to the Claude ingress, so a 404 for anything under it (a
+// messages-like /v1/... shape that never matched a route) must still fall
+// back to the OpenAI envelope shape, not silently switch protocols.
+func TestMessagesSubPathReturns404OpenAIEnvelope(t *testing.T) {
+	r := newTestRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/messages/nonexistent", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	assertGatewayEnvelope(t, w.Body.Bytes(), "route_not_found")
+}
+
 // TestOversizedAdminRequestReturns413Envelope is the integration path
 // TestBodySizeLimitReturns413Envelope (internal/middleware/middleware_test.go)
 // can't cover: that test hand-writes the 413 response itself against a
@@ -379,5 +486,33 @@ func assertGatewayEnvelope(t *testing.T, body []byte, wantCode string) {
 	}
 	if _, ok := raw["code"]; ok {
 		t.Fatalf("must not leak the admin envelope's top-level code field, got: %s", body)
+	}
+}
+
+// assertClaudeEnvelope checks the Anthropic-native error shape: a top-level
+// "type":"error" discriminator plus "request_id", and a nested
+// error.type/error.message — the shape /v1/messages callers expect,
+// distinct from assertGatewayEnvelope's OpenAI shape above.
+func assertClaudeEnvelope(t *testing.T, body []byte) {
+	t.Helper()
+	var env struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+		Error     struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("expected Claude-style error envelope JSON, got unparseable body %s: %v", body, err)
+	}
+	if env.Type != "error" {
+		t.Fatalf(`expected top-level "type":"error", got %q (body: %s)`, env.Type, body)
+	}
+	if env.RequestID == "" {
+		t.Fatalf("expected non-empty top-level request_id, body: %s", body)
+	}
+	if env.Error.Type == "" || env.Error.Message == "" {
+		t.Fatalf("expected non-empty error.type and error.message, body: %s", body)
 	}
 }

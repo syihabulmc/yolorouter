@@ -43,11 +43,12 @@ func (p *parsedRequest) validate() error {
 	return nil
 }
 
-// parseRequest is the single JSON-decode pass the gateway does on a caller
-// body (one unmarshal into the raw shape, then one each for the messages and
-// tools sub-arrays). Handle keeps the returned *parsedRequest and threads it
-// through validate + the capability filter, instead of re-parsing the body
-// at each step.
+// parseRequest is the single JSON-decode pass the gateway does on an OpenAI
+// ingress caller body (one unmarshal into the raw shape, then one each for
+// the messages and tools sub-arrays). peekIngress wraps this for the OpenAI
+// ingress and threads the resulting *parsedRequest through ingressMeta so
+// Handle validates + filters candidates without re-parsing the body at each
+// step.
 func parseRequest(body []byte) (*parsedRequest, error) {
 	var raw struct {
 		Model         string          `json:"model"`
@@ -91,8 +92,9 @@ func parseRequest(body []byte) (*parsedRequest, error) {
 
 // PeekRequest extracts model + stream from a caller body. Kept as a public
 // convenience for callers that only need those two fields (and for tests);
-// the production hot path (Handle) calls parseRequest once and reads the
-// fields directly off the parsed struct.
+// the production hot path (Handle) calls peekIngress (which wraps
+// parseRequest for the OpenAI ingress) once and reads the fields directly
+// off the returned ingressMeta.
 func PeekRequest(body []byte) (model string, isStream bool, err error) {
 	p, err := parseRequest(body)
 	if err != nil {

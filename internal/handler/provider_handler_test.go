@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
@@ -63,15 +64,15 @@ func newProviderTestRouterWithClient(t *testing.T, client service.ProviderClient
 // on service package test-only symbols).
 type alwaysSuccessClient struct{}
 
-func (alwaysSuccessClient) TestChatCompletion(ctx context.Context, baseURL, apiKey, model string) (service.TestResult, error) {
+func (alwaysSuccessClient) TestChatCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (service.TestResult, error) {
 	return service.TestResult{Outcome: service.TestSuccess, DurationMs: 5}, nil
 }
 
-func (alwaysSuccessClient) TestStreamingCompletion(ctx context.Context, baseURL, apiKey, model string) (service.TestResult, error) {
+func (alwaysSuccessClient) TestStreamingCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (service.TestResult, error) {
 	return service.TestResult{Outcome: service.TestSuccess, DurationMs: 5}, nil
 }
 
-func (alwaysSuccessClient) TestFunctionCalling(ctx context.Context, baseURL, apiKey, model string) (service.TestResult, error) {
+func (alwaysSuccessClient) TestFunctionCalling(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (service.TestResult, error) {
 	return service.TestResult{Outcome: service.TestSuccess, DurationMs: 5}, nil
 }
 
@@ -83,15 +84,15 @@ func (alwaysSuccessClient) TestFunctionCalling(ctx context.Context, baseURL, api
 // alwaysSuccessClient can never reach.
 type modelNotFoundClient struct{}
 
-func (modelNotFoundClient) TestChatCompletion(ctx context.Context, baseURL, apiKey, model string) (service.TestResult, error) {
+func (modelNotFoundClient) TestChatCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (service.TestResult, error) {
 	return service.TestResult{Outcome: service.TestModelNotFound, DurationMs: 3}, nil
 }
 
-func (modelNotFoundClient) TestStreamingCompletion(ctx context.Context, baseURL, apiKey, model string) (service.TestResult, error) {
+func (modelNotFoundClient) TestStreamingCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (service.TestResult, error) {
 	return service.TestResult{Outcome: service.TestModelNotFound, DurationMs: 3}, nil
 }
 
-func (modelNotFoundClient) TestFunctionCalling(ctx context.Context, baseURL, apiKey, model string) (service.TestResult, error) {
+func (modelNotFoundClient) TestFunctionCalling(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (service.TestResult, error) {
 	return service.TestResult{Outcome: service.TestModelNotFound, DurationMs: 3}, nil
 }
 
@@ -100,15 +101,15 @@ func (modelNotFoundClient) TestFunctionCalling(ctx context.Context, baseURL, api
 // PostProviderTestKey's ProviderTestFailed mapping.
 type erroringClient struct{}
 
-func (erroringClient) TestChatCompletion(ctx context.Context, baseURL, apiKey, model string) (service.TestResult, error) {
+func (erroringClient) TestChatCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (service.TestResult, error) {
 	return service.TestResult{}, errors.New("client refused the call")
 }
 
-func (erroringClient) TestStreamingCompletion(ctx context.Context, baseURL, apiKey, model string) (service.TestResult, error) {
+func (erroringClient) TestStreamingCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (service.TestResult, error) {
 	return service.TestResult{}, errors.New("client refused the call")
 }
 
-func (erroringClient) TestFunctionCalling(ctx context.Context, baseURL, apiKey, model string) (service.TestResult, error) {
+func (erroringClient) TestFunctionCalling(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (service.TestResult, error) {
 	return service.TestResult{}, errors.New("client refused the call")
 }
 
@@ -204,6 +205,86 @@ func TestPostProviderRejectsDuplicateNameWith400(t *testing.T) {
 	r.ServeHTTP(w, req2)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPostProviderAcceptsExplicitProviderTypeAndEchoesInView(t *testing.T) {
+	r, _ := newProviderTestRouter(t)
+	body := map[string]interface{}{
+		"name": "anthropic-main", "base_url": "https://a.example.com", "key_label": "k1",
+		"key_plaintext": "sk-abcdefghijklmnopqrstuvwxyz1234", "test_model": "claude-3",
+		"provider_type":      "anthropic",
+		"protocol_endpoints": `{"responses":"https://gw.example.com/v1"}`,
+	}
+	w, env := doJSON(t, r, http.MethodPost, "/api/admin/providers", body, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var view struct {
+		ProviderType      string `json:"provider_type"`
+		ProtocolEndpoints string `json:"protocol_endpoints"`
+	}
+	if err := json.Unmarshal(env.Data, &view); err != nil {
+		t.Fatalf("unmarshal provider view: %v", err)
+	}
+	if view.ProviderType != "anthropic" {
+		t.Fatalf("expected provider_type=anthropic, got %q", view.ProviderType)
+	}
+	if view.ProtocolEndpoints != `{"responses":"https://gw.example.com/v1"}` {
+		t.Fatalf("expected protocol_endpoints to round-trip, got %q", view.ProtocolEndpoints)
+	}
+}
+
+func TestPostProviderDefaultsProviderTypeToOpenAIWhenOmitted(t *testing.T) {
+	r, _ := newProviderTestRouter(t)
+	body := map[string]interface{}{
+		"name": "no-type-main", "base_url": "https://a.example.com", "key_label": "k1",
+		"key_plaintext": "sk-abcdefghijklmnopqrstuvwxyz1234", "test_model": "gpt-4o-mini",
+	}
+	w, env := doJSON(t, r, http.MethodPost, "/api/admin/providers", body, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var view struct {
+		ProviderType string `json:"provider_type"`
+	}
+	if err := json.Unmarshal(env.Data, &view); err != nil {
+		t.Fatalf("unmarshal provider view: %v", err)
+	}
+	if view.ProviderType != "openai" {
+		t.Fatalf("expected default provider_type=openai for backward compatibility, got %q", view.ProviderType)
+	}
+}
+
+func TestPostProviderRejectsInvalidProviderTypeWith400(t *testing.T) {
+	r, _ := newProviderTestRouter(t)
+	body := map[string]interface{}{
+		"name": "bad-type-main", "base_url": "https://a.example.com", "key_label": "k1",
+		"key_plaintext": "sk-abcdefghijklmnopqrstuvwxyz1234", "test_model": "gpt-4o-mini",
+		"provider_type": "claude",
+	}
+	w, env := doJSON(t, r, http.MethodPost, "/api/admin/providers", body, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+	if env.Code != errcode.ProviderProtocolInvalid {
+		t.Fatalf("expected code %d, got %d", errcode.ProviderProtocolInvalid, env.Code)
+	}
+}
+
+func TestPostProviderRejectsMalformedProtocolEndpointsWith400(t *testing.T) {
+	r, _ := newProviderTestRouter(t)
+	body := map[string]interface{}{
+		"name": "bad-endpoints-main", "base_url": "https://a.example.com", "key_label": "k1",
+		"key_plaintext": "sk-abcdefghijklmnopqrstuvwxyz1234", "test_model": "gpt-4o-mini",
+		"protocol_endpoints": "{not-json",
+	}
+	w, env := doJSON(t, r, http.MethodPost, "/api/admin/providers", body, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+	if env.Code != errcode.ProviderProtocolInvalid {
+		t.Fatalf("expected code %d, got %d", errcode.ProviderProtocolInvalid, env.Code)
 	}
 }
 

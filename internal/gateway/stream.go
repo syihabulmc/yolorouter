@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
@@ -207,34 +208,78 @@ func usageFromRawMap(m map[string]json.RawMessage) *Usage {
 	return w.toUsage()
 }
 
-// writeStreamErrorEvent writes one SSE data frame carrying an error, used
-// when the upstream stream breaks AFTER the first byte has already gone to
-// the client (can't switch, can't change status — only emit an
-// inline error event and close). The caller has already verified the
-// response is mid-stream.
+// writeStreamErrorEvent writes one inline SSE error frame carrying an error,
+// used when the upstream stream breaks AFTER the first byte has already gone
+// to the client (can't switch, can't change status — only emit an inline
+// error event and close). The caller has already verified the response is
+// mid-stream.
+//
+// The wire shape is protocol-aware: a Claude ingress caller (/v1/messages)
+// expects the Anthropic streaming error shape (event: error + a
+// {"type":"error",...} envelope) and has no [DONE] terminator convention at
+// all, while every other ingress keeps the OpenAI shape this function has
+// always produced (a bare `data: {"error":...}` frame followed by
+// `data: [DONE]` so OpenAI SDKs blocked on [DONE] to finalize their
+// completion unblock promptly instead of hanging until their own read
+// timeout). Sending the OpenAI [DONE] convention to a Claude client would be
+// a protocol violation the Anthropic SDK does not expect mid-stream.
 //
 // rc's stream capture file is still open at this point (the passthrough
 // stream pump deliberately leaves it open past its own return, see
-// openStreamBodyFile's call site) — both frames written here are also
+// openStreamBodyFile's call site) — every frame written here is also
 // appended to it, or the persisted "sent stream chunks" capture would end
 // one frame short of what the real client actually received. The caller
 // closes the file once this function returns.
 func writeStreamErrorEvent(c *gin.Context, rc *RelayContext) {
-	requestID := rc.RequestID
-	msg := "upstream stream interrupted"
-	if requestID != "" {
-		msg = msg + " (request: " + requestID + ")" // caller can quote the id
+	msg := streamErrorMessage(rc.RequestID)
+	if rc.Ingress == protocols.ProtocolClaude {
+		writeClaudeStreamErrorEvent(c, rc, msg)
+		return
 	}
+	writeOpenAIStreamErrorEvent(c, rc, msg)
+}
+
+// streamErrorMessage builds the generic mid-stream failure message shared by
+// every ingress protocol — no upstream detail is leaked, only the request id
+// so the caller can quote it to support.
+func streamErrorMessage(requestID string) string {
+	return AppendRequestID("upstream stream interrupted", requestID)
+}
+
+// writeAndCaptureSSE writes one SSE frame to the client and appends the same
+// caller-facing bytes to rc's stream capture file, keeping the two writes
+// (live response, audit capture) from drifting apart at any call site that
+// needs both.
+func writeAndCaptureSSE(c *gin.Context, rc *RelayContext, b []byte) {
+	_, _ = c.Writer.Write(b)
+	appendStreamBodyLine(rc, b)
+}
+
+// writeOpenAIStreamErrorEvent writes the OpenAI-shaped mid-stream error: an
+// inline `data: {"error":...}` frame followed by `data: [DONE]`.
+func writeOpenAIStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
 	evt := fmt.Sprintf(`data: {"error":{"message":%q,"type":"upstream_error"}}`+"\n\n", msg)
-	evtBytes := []byte(evt)
-	_, _ = c.Writer.Write(evtBytes)
-	appendStreamBodyLine(rc, evtBytes)
+	writeAndCaptureSSE(c, rc, []byte(evt))
 	// Terminate the stream so OpenAI SDK clients that block on [DONE] to
 	// finalize their completion unblock promptly instead of hanging until
 	// their own read timeout.
-	doneBytes := []byte("data: [DONE]\n\n")
-	_, _ = c.Writer.Write(doneBytes)
-	appendStreamBodyLine(rc, doneBytes)
+	writeAndCaptureSSE(c, rc, []byte("data: [DONE]\n\n"))
+	if flusher, ok := c.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// writeClaudeStreamErrorEvent writes the Anthropic-shaped mid-stream error:
+// a single `event: error` SSE event carrying the Messages API error
+// envelope. Claude has no [DONE] terminator convention — the Anthropic SDK
+// treats the connection close right after this event as the end of the
+// stream, so nothing further is written.
+func writeClaudeStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
+	evt := protocols.SSEEvent{
+		Event: "error",
+		Data:  fmt.Sprintf(`{"type":"error","error":{"type":"api_error","message":%q}}`, msg),
+	}
+	writeAndCaptureSSE(c, rc, []byte(evt.String()))
 	if flusher, ok := c.Writer.(http.Flusher); ok {
 		flusher.Flush()
 	}

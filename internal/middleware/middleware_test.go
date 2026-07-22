@@ -170,6 +170,61 @@ func TestRecoveryMiddlewareDispatchesV1PanicToGatewayEnvelope(t *testing.T) {
 	}
 }
 
+// TestRecoveryMiddlewareDispatchesMessagesPanicToClaudeEnvelope is
+// TestRecoveryMiddlewareDispatchesV1PanicToGatewayEnvelope's Claude-ingress
+// counterpart: a panic under /v1/messages must recover into the
+// Anthropic-native envelope, not the OpenAI shape every other /v1/* path
+// gets — both routes go through the exact same Recovery() ->
+// WriteNamespacedError call, so this locks in that the ingress split
+// actually reaches the panic path too, not just NoRoute/NoMethod.
+func TestRecoveryMiddlewareDispatchesMessagesPanicToClaudeEnvelope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(RequestID())
+	r.Use(Recovery())
+	r.GET("/v1/messages", func(c *gin.Context) {
+		panic("boom")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+
+	var env struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+		Error     struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("expected Claude-style error envelope JSON, got unparseable body %s: %v", w.Body.Bytes(), err)
+	}
+	if env.Type != "error" {
+		t.Fatalf(`expected top-level "type":"error", got %q, body: %s`, env.Type, w.Body.String())
+	}
+	if env.RequestID == "" {
+		t.Fatalf("expected non-empty top-level request_id, body: %s", w.Body.String())
+	}
+	if env.Error.Type == "" || env.Error.Message == "" {
+		t.Fatalf("expected non-empty error.type and error.message, body: %s", w.Body.String())
+	}
+
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(w.Body.Bytes(), &raw)
+	if _, ok := raw["code"]; ok {
+		t.Fatalf("must not leak the admin envelope's top-level code field, got: %s", w.Body.String())
+	}
+	if _, ok := raw["timestamp"]; ok {
+		t.Fatalf("must not leak the admin envelope's timestamp field, got: %s", w.Body.String())
+	}
+}
+
 // TestRecoveryReRaisesAbortHandlerAfterPartialWrite guards the post-write
 // panic path: once a handler has already written bytes (e.g. a future
 // SSE/streaming handler mid-flush), Recovery must not try to write a JSON

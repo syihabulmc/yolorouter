@@ -33,10 +33,17 @@ func newRelaySvc(t *testing.T, db *gorm.DB) *RelayService {
 }
 
 func newCtx(body []byte) (*gin.Context, *httptest.ResponseRecorder) {
+	return newCtxPath("/v1/chat/completions", body)
+}
+
+// newCtxPath is newCtx with a caller-chosen request path, so a test can
+// exercise a non-OpenAI ingress (e.g. /v1/messages for Claude) through the
+// same Handle entry point.
+func newCtxPath(path string, body []byte) (*gin.Context, *httptest.ResponseRecorder) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 	return c, w
 }
@@ -157,6 +164,36 @@ func TestRelayNonStreamSuccess(t *testing.T) {
 	db.Model(&model.RequestLog{}).Count(&logCount)
 	if logCount != 1 {
 		t.Fatalf("expected 1 request_log row, got %d", logCount)
+	}
+}
+
+// TestRelayNonStreamScalarStopNotRejected is a regression test for the P1 fix
+// to the OpenAI chat decoder's "stop" field: OpenAI documents "stop" as
+// EITHER a single string OR an array of strings, but the decoder previously
+// only accepted the array form, so a scalar "stop" failed the top-level JSON
+// unmarshal inside validateIngressBody (relay.go) and the gateway rejected an
+// otherwise-valid request with 400 before ever trying a candidate. This test
+// pins that a scalar "stop" reaches the upstream successfully.
+func TestRelayNonStreamScalarStopNotRejected(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	svc := newRelaySvc(t, db)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-upstream-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	reqBody := []byte(`{"model":"gpt-4o","stop":"END","messages":[{"role":"user","content":"hello"}]}`)
+	c, w := newCtx(reqBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a scalar \"stop\" must not be rejected by validateIngressBody); body = %s", w.Code, w.Body.String())
 	}
 }
 
@@ -681,6 +718,82 @@ func TestRelayStreamSuccess(t *testing.T) {
 	}
 	if !log.CostKnown {
 		t.Error("expected cost_known=true (usage was received from the final chunk)")
+	}
+}
+
+// TestRelayClaudeMalformedBodyRejectedBeforeCandidateLoop: a /v1/messages
+// request whose top-level shape passes ingressMeta.validate() (non-empty
+// messages, positive max_tokens) but whose message content is structurally
+// invalid (an object, not a string or content-block array) must be rejected
+// by validateIngressBody as a 400 Claude error envelope BEFORE any candidate
+// is ever tried — proving the pre-loop full-body validation (added in this
+// task) actually gates the candidate loop, not just ingressMeta.validate().
+// Without it, this malformed body would instead reach buildUpstreamBody
+// (relay.go's decode step) once inside relayCandidates, fail there per
+// candidate, and get misreported as a 502 "all upstream candidates failed"
+// instead of the correct 400 client error.
+func TestRelayClaudeMalformedBodyRejectedBeforeCandidateLoop(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstreamHit := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+	}))
+	defer upstream.Close()
+
+	svc := newRelaySvc(t, db)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "claude-3-5-sonnet-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	// messages is non-empty and max_tokens is positive (passes
+	// ingressMeta.validate()), but content is an object -- neither a string
+	// nor a content-block array -- which only the full claude.RequestDecoder
+	// (validateIngressBody) rejects.
+	body := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"messages":[{"role":"user","content":{"foo":"bar"}}]}`)
+	c, w := newCtxPath("/v1/messages", body)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+	if upstreamHit {
+		t.Error("upstream must not be called for a body that fails the pre-loop structural validation")
+	}
+
+	var respBody map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &respBody); err != nil {
+		t.Fatalf("response body did not unmarshal: %v (body=%s)", err, w.Body.String())
+	}
+	if respBody["type"] != "error" {
+		t.Errorf(`top-level "type" = %v, want "error" (Anthropic-native envelope)`, respBody["type"])
+	}
+	if _, hasRequestID := respBody["request_id"]; !hasRequestID {
+		t.Errorf("response body missing top-level request_id: %v", respBody)
+	}
+	errObj, ok := respBody["error"].(map[string]any)
+	if !ok {
+		t.Fatalf(`"error" field is not an object: %v`, respBody["error"])
+	}
+	if errObj["type"] != "invalid_request_error" {
+		t.Errorf("error.type = %v, want invalid_request_error", errObj["type"])
+	}
+
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	// The audit trail must record the Claude envelope actually sent, not the
+	// OpenAI-shaped one.
+	if !bytes.Contains(captured.ResponseBody, []byte(`"type":"error"`)) {
+		t.Errorf("rc.ResponseBody = %s, want the Claude error envelope stashed for audit", captured.ResponseBody)
+	}
+	if len(captured.UpstreamRequestBody) != 0 || len(captured.UpstreamResponseBody) != 0 {
+		t.Errorf("expected empty upstream_* (candidate loop never entered), got request=%q response=%q",
+			captured.UpstreamRequestBody, captured.UpstreamResponseBody)
 	}
 }
 
