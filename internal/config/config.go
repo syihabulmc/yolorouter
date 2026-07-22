@@ -68,9 +68,16 @@ type SecurityConfig struct {
 // `enabled: false` does. GitHubRepo overrides the binary's compiled-in
 // version.DefaultGitHubRepo; empty falls back to it, and both empty (or
 // Enabled=false) disable the feature entirely.
+//
+// GitHubProxy, when non-empty, is a prefix through which every update-related
+// GitHub request (release lookup + asset download) is routed, for deployments
+// where GitHub is slow or blocked. Empty means direct GitHub. On a mirror
+// install it is seeded automatically from the YOLO_UPDATE_GITHUB_PROXY
+// environment variable when the config is first generated.
 type UpdateConfig struct {
-	Enabled    bool   `yaml:"enabled"`
-	GitHubRepo string `yaml:"github_repo"`
+	Enabled     bool   `yaml:"enabled"`
+	GitHubRepo  string `yaml:"github_repo"`
+	GitHubProxy string `yaml:"github_proxy"`
 }
 
 func defaults() *Config {
@@ -112,7 +119,27 @@ func Load(explicitPath string) (*Config, error) {
 		return generateDefaultConfig(path)
 	}
 
-	return loadStrict(path)
+	cfg, err := loadStrict(path)
+	if err != nil {
+		return nil, err
+	}
+	// An existing config is never regenerated, so a mirror installer upgrading a
+	// prior direct install can't seed the proxy at generation time. Fill it from
+	// the env the installer injects into the service unit — only when the file
+	// leaves it empty, so an explicit value in the config still wins.
+	applyUpdateProxyEnv(cfg)
+	return cfg, nil
+}
+
+// applyUpdateProxyEnv fills update.github_proxy from YOLO_UPDATE_GITHUB_PROXY
+// when the config leaves it empty, so the env var the mirror installer injects
+// into the service unit takes effect without overriding an explicit config value.
+func applyUpdateProxyEnv(cfg *Config) {
+	if cfg.Update.GitHubProxy == "" {
+		if proxy := os.Getenv("YOLO_UPDATE_GITHUB_PROXY"); proxy != "" {
+			cfg.Update.GitHubProxy = proxy
+		}
+	}
 }
 
 func generateDefaultConfig(path string) (*Config, error) {
@@ -122,6 +149,12 @@ func generateDefaultConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("generate provider_master_key: %w", err)
 	}
 	cfg.Security.ProviderMasterKey = key
+
+	// A mirror install (install.sh with YOLO_MIRROR) exports this, so record the
+	// proxy in the generated file — self-update then routes through the same
+	// mirror with no manual edit. Persisted here (before the write) so the CLI
+	// `update`, run from a shell without the env, also reads it from config.
+	applyUpdateProxyEnv(cfg)
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create config directory: %w", err)

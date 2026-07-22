@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -28,7 +29,7 @@ func newTestService(t *testing.T, status int, body any) (*VersionService, *atomi
 			_ = json.NewEncoder(w).Encode(body)
 		}
 	}))
-	svc := NewVersionService("owner/repo")
+	svc := NewVersionService("owner/repo", "")
 	svc.baseURL = srv.URL
 	svc.posTTL = 80 * time.Millisecond
 	svc.negTTL = 40 * time.Millisecond
@@ -42,8 +43,37 @@ func withVersion(t *testing.T, v string) {
 	version.Version = v
 }
 
+// TestCheckRoutesThroughProxy verifies the release lookup is prefixed with the
+// configured proxy: the request lands on the proxy host with the real GitHub
+// API URL embedded in the path (the prefix shape the mirror worker expects).
+func TestCheckRoutesThroughProxy(t *testing.T) {
+	withVersion(t, "v0.1.0")
+	var gotURI atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI.Store(r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(githubRelease{TagName: "v0.2.0"})
+	}))
+	defer srv.Close()
+
+	// baseURL stays the real GitHub host; proxy points at the test server, so
+	// ProxyURL yields "<test-server>/https://api.github.com/repos/...".
+	svc := NewVersionService("owner/repo", srv.URL)
+	svc.posTTL = 80 * time.Millisecond
+	svc.negTTL = 40 * time.Millisecond
+
+	st := svc.Check(context.Background())
+	if st.CheckFailed {
+		t.Fatalf("expected success through proxy, got CheckFailed")
+	}
+	uri, _ := gotURI.Load().(string)
+	if !strings.Contains(uri, "https://api.github.com/repos/owner/repo/releases/latest") {
+		t.Fatalf("proxied request URI = %q, want it to embed the GitHub API URL", uri)
+	}
+}
+
 func TestCheckRepoEmptyShortCircuitsWithoutNetwork(t *testing.T) {
-	svc := NewVersionService("")
+	svc := NewVersionService("", "")
 	st := svc.Check(context.Background())
 	if !st.CheckFailed {
 		t.Fatalf("empty repo must report CheckFailed=true, got %+v", st)
@@ -238,7 +268,7 @@ func TestCheckDegradesOnBadJSON(t *testing.T) {
 		_, _ = w.Write([]byte("{not valid json"))
 	}))
 	defer srv.Close()
-	svc := NewVersionService("owner/repo")
+	svc := NewVersionService("owner/repo", "")
 	svc.baseURL = srv.URL
 
 	if st := svc.Check(context.Background()); !st.CheckFailed {

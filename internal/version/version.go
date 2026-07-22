@@ -7,7 +7,10 @@
 // via `make build-release` (Makefile) or goreleaser (.goreleaser.yaml).
 package version
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 var (
 	// Version is the semver tag of this build ("v0.1.0"), or "dev" for a
@@ -52,4 +55,17 @@ func ResolveRepo(enabled bool, githubRepo string) string {
 		return githubRepo
 	}
 	return DefaultGitHubRepo
+}
+
+// ProxyURL prefixes rawURL with a mirror when proxy is non-empty, so a
+// deployment behind a slow or blocked GitHub can route release lookups and
+// asset downloads through a proxy. Trailing slashes on the proxy are trimmed
+// and exactly one separator is inserted, so both "https://host/" and
+// "https://host" produce a well-formed "https://host/https://github.com/...".
+// An empty proxy returns rawURL unchanged.
+func ProxyURL(proxy, rawURL string) string {
+	if proxy == "" {
+		return rawURL
+	}
+	return strings.TrimRight(proxy, "/") + "/" + rawURL
 }

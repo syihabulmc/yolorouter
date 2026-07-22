@@ -55,6 +55,9 @@ func runUpdate(ctx context.Context, args []string) error {
 	if repo == "" {
 		return fmt.Errorf("update is disabled: set update.enabled=true and/or update.github_repo, or rebuild with DEFAULT_GITHUB_REPO")
 	}
+	// When set, route the release lookup and both asset downloads through the
+	// configured mirror (deployments where GitHub is slow or blocked).
+	proxy := cfg.Update.GitHubProxy
 
 	client := &http.Client{Timeout: githubAPITimeout}
 	// Asset downloads (binary archive + checksums.txt) can be tens of MB; the
@@ -67,7 +70,7 @@ func runUpdate(ctx context.Context, args []string) error {
 	// release page instead of attempting a replacement that would fail
 	// mid-way and leave no binary behind.
 	if runtime.GOOS == "windows" {
-		rel, err := fetchLatestReleaseWith(ctx, client, repo)
+		rel, err := fetchLatestReleaseWith(ctx, client, repo, proxy)
 		if err != nil {
 			return fmt.Errorf("automatic update is unsupported on windows, and the latest-release lookup also failed: %w", err)
 		}
@@ -103,7 +106,7 @@ func runUpdate(ctx context.Context, args []string) error {
 		return fmt.Errorf("stat current executable: %w", err)
 	}
 
-	rel, err := fetchLatestReleaseWith(ctx, client, repo)
+	rel, err := fetchLatestReleaseWith(ctx, client, repo, proxy)
 	if err != nil {
 		return fmt.Errorf("look up latest release: %w", err)
 	}
@@ -141,11 +144,13 @@ func runUpdate(ctx context.Context, args []string) error {
 	// updater does not need a writable temp directory — allocating one would
 	// make updates fail on systems where TMPDIR is read-only or absent even
 	// though the actual writes never touch it.
-	assetBytes, err := downloadWith(ctx, downloadClient, asset.BrowserDownloadURL)
+	// GitHub returns absolute github.com asset URLs; route them through the
+	// mirror too so a blocked-GitHub deployment can actually fetch the bytes.
+	assetBytes, err := downloadWith(ctx, downloadClient, version.ProxyURL(proxy, asset.BrowserDownloadURL))
 	if err != nil {
 		return fmt.Errorf("download %s: %w", asset.Name, err)
 	}
-	checksumsBytes, err := downloadWith(ctx, downloadClient, checksumsAsset.BrowserDownloadURL)
+	checksumsBytes, err := downloadWith(ctx, downloadClient, version.ProxyURL(proxy, checksumsAsset.BrowserDownloadURL))
 	if err != nil {
 		return fmt.Errorf("download checksums.txt: %w", err)
 	}
@@ -279,8 +284,8 @@ type githubRelease struct {
 	Assets  []githubAsset `json:"assets"`
 }
 
-func fetchLatestReleaseWith(ctx context.Context, client *http.Client, repo string) (*githubRelease, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
+func fetchLatestReleaseWith(ctx context.Context, client *http.Client, repo, proxy string) (*githubRelease, error) {
+	url := version.ProxyURL(proxy, fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
