@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/yolorouter/yolorouter/internal/middleware"
+	"github.com/yolorouter/yolorouter/internal/protocols"
+	"github.com/yolorouter/yolorouter/internal/protocols/chat"
 	"github.com/yolorouter/yolorouter/internal/service/safehttp"
 )
 
@@ -121,6 +123,16 @@ type chatCompletionSuccessBody struct {
 	} `json:"choices"`
 }
 
+// providerTestURL builds the connection-test endpoint URL using the exact
+// same builder runtime dispatch uses (protocols.JoinUpstreamURL with the
+// chat egress path) — otherwise a bare-host or path-prefixed baseURL could
+// pass verification against one endpoint while production traffic actually
+// dispatches to another (e.g. a bare host getting /v1 inserted only at
+// runtime, never at verification time).
+func providerTestURL(baseURL string) string {
+	return protocols.JoinUpstreamURL(baseURL, chat.RequestEncoder{}.EgressPath("", false), protocols.ProtocolOpenAI)
+}
+
 // runTestRequest builds and sends a POST /chat/completions request, holding
 // the shared concurrency slot and per-call timeout for the request's ENTIRE
 // duration — including whatever handle does with the response body — not
@@ -150,7 +162,7 @@ func (c *HTTPProviderClient) runTestRequest(
 		return TestResult{}, fmt.Errorf("marshal request body: %w", err)
 	}
 
-	url := strings.TrimRight(baseURL, "/") + "/chat/completions"
+	url := providerTestURL(baseURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {
 		return TestResult{}, fmt.Errorf("build request: %w", err)

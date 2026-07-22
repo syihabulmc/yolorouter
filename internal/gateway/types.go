@@ -67,7 +67,7 @@ type RelayContext struct {
 	// post-usage-strip, including local error JSON); UpstreamResponseBody is
 	// the raw upstream response (non-stream full / non-2xx error body
 	// bounded-read). For stream, the sent SSE is appended to streamBodyFile
-	// instead and handleStream clears these two so they stay empty.
+	// instead and dispatchPassthroughStream clears these two so they stay empty.
 	// Nil/empty on early failure or body-read failure.
 	RequestBody          []byte
 	UpstreamRequestBody  []byte

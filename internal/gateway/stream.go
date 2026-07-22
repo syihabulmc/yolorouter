@@ -1,9 +1,7 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,12 +44,12 @@ func clientDisconnectOutcome(usage *Usage, doneSeen bool) (*Usage, error) {
 // errStreamNoDoneTerminator is returned when the upstream sent at least one
 // data frame but closed the stream without the `data: [DONE]` terminator.
 // The completion is silently truncated — the caller already received bytes
-// (so the HTTP status stays 200), but handleStream logs a partial row,
-// not clean success (stream-integrity fix).
+// (so the HTTP status stays 200), but the passthrough dispatch path logs a
+// partial row, not clean success (stream-integrity fix).
 var errStreamNoDoneTerminator = errors.New("upstream stream ended without [DONE] terminator")
 
-// maxPreambleBytes caps the pre-first-data-frame preamble buffer in
-// StreamUpstreamToClient — a malicious/buggy upstream could otherwise grow
+// maxPreambleBytes caps the pre-first-data-frame preamble buffer in the
+// passthrough stream pump — a malicious/buggy upstream could otherwise grow
 // it without bound (the response body has no bodylimit guard the way the
 // request body does).
 const maxPreambleBytes = 64 * 1024
@@ -71,157 +69,6 @@ const maxStreamLineBytes = 1 * 1024 * 1024 // 1 MiB
 // unaffected either way. A package var (not const) so tests can inject a
 // small value instead of actually writing 1GiB.
 var maxStreamBodyFileBytes int64 = 1 << 30 // 1 GiB
-
-// StreamUpstreamToClient pipes an SSE stream from upstream to the client,
-// rewriting the model field in every `data: {json}` chunk back to the
-// external name. Returns the usage from the final usage chunk
-// if the upstream sent one, and an error only for transport-level failures.
-//
-// Header is deferred until the first data frame: if the upstream returns 2xx
-// but EOFs (or errors) before emitting any data, nothing has been written to
-// the client yet and the relay loop can still failover to the next candidate
-// (lifecycle table — "received upstream response, first chunk not
-// yet sent to caller → failover allowed"). Once a data frame is forwarded,
-// rc.FirstByteSent flips true and no more switching is allowed.
-//
-// Leading non-data lines before the first data frame (commentary / SSE
-// preamble) are skipped — OpenAI chat streams open with `data:` directly, so
-// this only matters for unusual upstreams, and skipping keeps the failover
-// window intact.
-//
-// The [DONE] terminator is tracked: an upstream that sends data frames and
-// then closes cleanly WITHOUT `data: [DONE]` has truncated the completion —
-// the pump returns errStreamNoDoneTerminator so handleStream records a
-// partial row instead of clean success.
-//
-// When the caller did NOT request stream_options.include_usage but the
-// gateway injected it upstream (EnsureStreamUsageInjection), the usage field
-// is stripped from forwarded frames (injected usage is for the
-// gateway's internal cost accounting only).
-func StreamUpstreamToClient(c *gin.Context, resp *http.Response, rc *RelayContext) (*Usage, error) {
-	defer func() { _ = resp.Body.Close() }()
-
-	// Append every SENT SSE line (post-rewrite, post-usage-
-	// strip = caller-facing) to a
-	// per-request file under data/bodies/. Memory stays bounded (one line at
-	// a time); the full stream is persisted without truncation. The 1GiB
-	// backstop only sets a truncation flag (never silent) for a hostile
-	// upstream.
-	//
-	// The file is opened here but deliberately NOT closed before this
-	// function returns: a mid-stream failure after the
-	// first byte causes handleStream to call writeStreamErrorEvent, which
-	// writes one more inline SSE error frame + a synthetic [DONE] straight to
-	// the client — those bytes must also land in the capture file, so the
-	// file has to stay open across that call. handleStream closes it via
-	// closeStreamBodyFile once it has finished writing everything it's going
-	// to write for this attempt.
-	openStreamBodyFile(c, rc)
-
-	flusher, _ := c.Writer.(http.Flusher)
-	headerWritten := false
-	doneSeen := false // tracks whether upstream emitted the `data: [DONE]` terminator
-	var usage *Usage
-	// preamble buffers any SSE lines that arrive before the first data
-	// frame (commentary heartbeats, event:/id:/retry: directives, blank
-	// separators). They're flushed in order once the first data frame
-	// commits the headers — kept intact rather than dropped, so an upstream
-	// that opens with a preamble doesn't lose framing, while the failover
-	// window still only closes once actual data has reached the client.
-	var preamble []byte
-	// bufio.Scanner (not Reader.ReadBytes) bounds a single line's memory at
-	// maxStreamLineBytes — ReadBytes allocates the whole line before any
-	// length check could fire, so the cap was decorative. Scanner.Buffer's
-	// second arg is the max token size; exceeding it surfaces as
-	// bufio.ErrTooLong from Err().
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamLineBytes)
-	for scanner.Scan() {
-		// Caller disconnect -> stop reading upstream and release
-		// the concurrency slot. Checked before each forwarded line so a
-		// disconnect between chunks is caught promptly.
-		select {
-		case <-c.Request.Context().Done():
-			// Post-[DONE] disconnect -> success; pre-[DONE] -> 499. See
-			// clientDisconnectOutcome for the full rationale.
-			return clientDisconnectOutcome(usage, doneSeen)
-		default:
-		}
-		// ScanLines strips the trailing newline; re-add it so writeStreamLine
-		// sees the same shape ReadBytes would have produced.
-		line := append(scanner.Bytes(), '\n')
-		switch {
-		case headerWritten:
-			// Flush to the client BEFORE the capture-file append for
-			// efficiency: the append does a redact pass (regexes +
-			// a conditional JSON decode/marshal) plus a disk write, neither
-			// of which the caller should wait on before seeing bytes it
-			// already received — capture is best-effort persistence, not
-			// part of the client-visible streaming path.
-			sent := forwardStreamLine(c, rc, line, &usage, &doneSeen)
-			if flusher != nil {
-				flusher.Flush()
-			}
-			appendStreamBodyLine(rc, sent)
-		case isDataLine(line):
-			// First data frame — commit the SSE headers, flush any buffered
-			// preamble in order, then forward the data line.
-			writeSSEHeader(c)
-			hadPreamble := len(preamble) > 0
-			if hadPreamble {
-				_, _ = c.Writer.Write(preamble)
-			}
-			headerWritten = true
-			sent := forwardStreamLine(c, rc, line, &usage, &doneSeen)
-			if flusher != nil {
-				flusher.Flush()
-			}
-			if hadPreamble {
-				// The preamble bytes were just sent to the caller — capture
-				// them too, or the persisted stream body silently starts
-				// after whatever heartbeat/event:/id:/retry: lines the
-				// upstream opened with.
-				appendStreamBodyLine(rc, preamble)
-				preamble = nil
-			}
-			appendStreamBodyLine(rc, sent)
-		default:
-			// Preamble line before the first data frame — buffer it, but
-			// cap the buffer so a malicious/buggy upstream can't grow it
-			// without bound (the response body has no bodylimit guard the
-			// way the request body does).
-			if len(preamble)+len(line) <= maxPreambleBytes {
-				preamble = append(preamble, line...)
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		// A caller disconnect surfaces as a body-read error (the transport
-		// cancels on ctx.Done); recognize it so handleStream logs 499
-		// instead of an upstream stream fault.
-		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			// Same post-[DONE] disconnect as the in-loop select guard, but
-			// surfaced here as a ctx-canceled body-read error instead.
-			return clientDisconnectOutcome(usage, doneSeen)
-		}
-		if errors.Is(err, bufio.ErrTooLong) {
-			return usage, fmt.Errorf("upstream stream line too long (max %d bytes)", maxStreamLineBytes)
-		}
-		return usage, fmt.Errorf("read upstream stream: %w", err)
-	}
-	// scanner.Scan() returned false with nil err = clean EOF.
-	if !headerWritten {
-		return usage, errors.New("upstream stream ended before any data chunk")
-	}
-	if !doneSeen {
-		// Upstream emitted at least one data frame but closed without the
-		// [DONE] terminator — the completion is silently truncated. Report
-		// it so handleStream logs a partial row instead of clean success.
-		// Bytes already went to the client, so the HTTP status stays 200.
-		return usage, errStreamNoDoneTerminator
-	}
-	return usage, nil
-}
 
 // forwardStreamLine writes one SSE line and folds its outcome back onto rc
 // (first-byte marker), the running usage pointer (final-frame tokens), and
@@ -366,12 +213,12 @@ func usageFromRawMap(m map[string]json.RawMessage) *Usage {
 // inline error event and close). The caller has already verified the
 // response is mid-stream.
 //
-// rc's stream capture file is still open at this point (StreamUpstreamToClient
-// deliberately leaves it open past its own return, see openStreamBodyFile's
-// call site) — both frames written here are also appended to it, or the
-// persisted "sent stream chunks" capture would end one frame short of what
-// the real client actually received. The caller
-// (handleStream) closes the file once this function returns.
+// rc's stream capture file is still open at this point (the passthrough
+// stream pump deliberately leaves it open past its own return, see
+// openStreamBodyFile's call site) — both frames written here are also
+// appended to it, or the persisted "sent stream chunks" capture would end
+// one frame short of what the real client actually received. The caller
+// closes the file once this function returns.
 func writeStreamErrorEvent(c *gin.Context, rc *RelayContext) {
 	requestID := rc.RequestID
 	msg := "upstream stream interrupted"
@@ -496,8 +343,8 @@ func removeEmptyStreamBodyFile(c *gin.Context, rc *RelayContext) {
 	// past os.Remove would let any later appendStreamBodyLine write to an
 	// unlinked inode (bytes silently lost), and on Windows os.Remove of an
 	// open file fails outright, leaving a stale empty stream_body_path. This
-	// also nils rc.streamBodyFile so the deferred closeStreamBodyFile in
-	// handleStream is a no-op.
+	// also nils rc.streamBodyFile so the caller's deferred closeStreamBodyFile
+	// is a no-op.
 	closeStreamBodyFile(rc)
 	_ = os.Remove(path)
 	rc.streamBodyCaptured = false

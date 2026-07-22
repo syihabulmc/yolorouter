@@ -74,7 +74,7 @@ func parseRequest(body []byte) (*parsedRequest, error) {
 	// cost accounting) even when the caller didn't — but only FORWARDS that
 	// usage when the caller set stream_options.include_usage=true. Capture
 	// the caller's intent here so EnsureStreamUsageInjection knows whether
-	// to inject and StreamUpstreamToClient knows whether to strip.
+	// to inject and passthroughStreamToClient knows whether to strip.
 	if len(raw.StreamOptions) > 0 && string(raw.StreamOptions) != "null" {
 		var so struct {
 			IncludeUsage *bool `json:"include_usage"`
@@ -156,7 +156,7 @@ func RewriteRequestModel(body []byte, providerModelName string) ([]byte, error) 
 // stream request bound for the upstream when the caller did NOT already
 // request usage (the system always requests final usage from the upstream for
 // its own cost accounting; the injected usage is stripped from
-// forwarded frames in StreamUpstreamToClient when the caller didn't ask).
+// forwarded frames in passthroughStreamToClient when the caller didn't ask).
 // Returns body unchanged for non-stream requests or when the caller already
 // requested usage.
 func EnsureStreamUsageInjection(body []byte, isStream, callerWantsUsage bool) ([]byte, error) {

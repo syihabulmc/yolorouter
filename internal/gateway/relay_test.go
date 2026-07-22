@@ -630,8 +630,8 @@ func TestRelayBudgetExceededReturnsInsufficientQuota(t *testing.T) {
 // TestRelayStreamSuccess: a healthy streaming upstream forwards SSE chunks
 // with the model field rewritten to the external name in EVERY chunk
 // (provider name never leaks), terminates with [DONE], and records the
-// final-usage tokens for cost (cost_known=true). Covers handleStream +
-// StreamUpstreamToClient end-to-end.
+// final-usage tokens for cost (cost_known=true). Covers
+// dispatchPassthroughStream + passthroughStreamToClient end-to-end.
 func TestRelayStreamSuccess(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

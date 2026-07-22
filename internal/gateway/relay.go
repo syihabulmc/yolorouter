@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -231,8 +232,9 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 
 	// One JSON decode of the caller body — parsed.Model/Stream for routing,
 	// parsed.validate() for structural checks, parsed.hasTools() for the
-	// capability filter. The body itself (in `body`) is forwarded untouched
-	// by RewriteRequestModel.
+	// capability filter. The body itself (in `body`) is forwarded to
+	// buildDispatchRequest untouched, which rewrites the model field
+	// (passthrough) or does the full IR decode/encode (cross-protocol).
 	parsed, err := parseRequest(body)
 	if err != nil {
 		WriteOpenAIErrorWithRequestID(c, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body", rc.RequestID)
@@ -311,7 +313,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	}
 
 	// Steps 8–12.
-	s.relayCandidates(c, rc, routable, body, start)
+	s.relayCandidates(c, rc, routable, start)
 }
 
 // checkKeyStateAndLimits runs the pre-call checks that don't need a paired
@@ -347,7 +349,11 @@ func (s *RelayService) checkKeyStateAndLimits(c *gin.Context, rc *RelayContext, 
 // candidate it loads the provider's enabled keys, decrypts them one at a
 // time, and sends the upstream request; Key rotation and candidate failover
 // decisions come back from tryKeys.
-func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candidates []model.ModelCandidate, body []byte, start time.Time) {
+func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candidates []model.ModelCandidate, start time.Time) {
+	// The ingress protocol is a property of the request path, not of any
+	// individual candidate — computed once and threaded through every
+	// candidate/key attempt below.
+	ingress := IngressProtocol(c.Request.URL.Path)
 	for i := range candidates {
 		cand := candidates[i]
 		rc.Candidate = &cand
@@ -386,23 +392,29 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 			continue
 		}
 
-		// Step 9: rewrite the model field to this candidate's provider name.
-		upstreamBody, err := RewriteRequestModel(body, cand.ProviderModelName)
+		// Step 9: negotiate the wire protocol to speak to this candidate's
+		// provider — the ingress protocol when the provider accepts it
+		// directly (passthrough, no IR round trip), otherwise the
+		// provider's own primary protocol (buildDispatchRequest/
+		// processDispatchResponseNonStream do the IR decode/encode).
+		egress, err := Negotiate(ingress, provider)
 		if err != nil {
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "rewrite model: "+err.Error()))
+			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "negotiate egress: "+err.Error()))
 			continue // mapping failure -> skip candidate
 		}
-		// For a stream request where the caller didn't ask for
-		// usage, force stream_options.include_usage=true upstream so the
-		// final usage frame arrives and budget/cost accounting works — the
-		// injected usage is stripped before forwarding (StreamUpstreamToClient).
-		upstreamBody, err = EnsureStreamUsageInjection(upstreamBody, rc.IsStream, rc.WantsStreamUsage)
+
+		// Build the upstream body/URL once per candidate — it only depends
+		// on the candidate/egress choice (model rewrite OR IR decode/encode
+		// + stream-usage injection + URL), not on which key ends up sending
+		// it, so every key attempt below reuses the same bytes instead of
+		// rebuilding them.
+		outBody, url, err := s.buildUpstreamBody(rc, ingress, egress)
 		if err != nil {
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "inject stream usage: "+err.Error()))
-			continue
+			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "build request: "+err.Error()))
+			continue // build failure -> skip candidate, nothing sent yet
 		}
 
-		if s.tryKeys(c, rc, &cand, provider, enabled, upstreamBody, start) == outcomeDone {
+		if s.tryKeys(c, rc, &cand, provider, enabled, egress, outBody, url, start) == outcomeDone {
 			return
 		}
 		// outcomeNextCandidate: fall through to the next candidate.
@@ -418,12 +430,14 @@ const (
 	outcomeNextCandidate                     // this candidate's keys are exhausted, try next
 )
 
-// tryKeys walks one provider's enabled keys. Returns outcomeDone once a
-// response (success OR a non-switchable failure) has been written to the
-// client, or outcomeNextCandidate when every key on this provider failed
-// with a key-rotation error and the chain should move to the next candidate
-// (same-provider no usable key, THEN failover).
-func (s *RelayService) tryKeys(c *gin.Context, rc *RelayContext, cand *model.ModelCandidate, provider *model.Provider, keys []model.ProviderKey, upstreamBody []byte, start time.Time) relayOutcome {
+// tryKeys walks one provider's enabled keys, sending the same pre-built
+// upstream body/URL (outBody/url — built once per candidate by
+// relayCandidates via buildUpstreamBody) with each key's own auth header.
+// Returns outcomeDone once a response (success OR a non-switchable failure)
+// has been written to the client, or outcomeNextCandidate when every key on
+// this provider failed with a key-rotation error and the chain should move
+// to the next candidate (same-provider no usable key, THEN failover).
+func (s *RelayService) tryKeys(c *gin.Context, rc *RelayContext, cand *model.ModelCandidate, provider *model.Provider, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
 	for i := range keys {
 		pk := keys[i]
 		// Destination-version guard (credential-scope mechanism): a key
@@ -444,7 +458,7 @@ func (s *RelayService) tryKeys(c *gin.Context, rc *RelayContext, cand *model.Mod
 			rc.Attempts = append(rc.Attempts, makeAttempt(*cand, provider, &pk, 0, AttemptBadStatus, "decrypt failed"))
 			continue
 		}
-		switch s.attemptOne(c, rc, *cand, provider, pk, plaintext, upstreamBody, start) {
+		switch s.attemptOne(c, rc, *cand, provider, pk, plaintext, egress, outBody, url, start) {
 		case attemptSuccess, attemptTerminal:
 			return outcomeDone
 		case attemptRotateKey:
@@ -468,20 +482,35 @@ const (
 )
 
 // attemptOne sends one upstream request with one decrypted key and routes
-// the response. Transport failures, 5xx, and pre-first-byte stream failures
-// are candidate-level (failover); 401/429 are key-level (rotate); 2xx is
-// success; other 4xx is terminal (caller's problem).
-func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, plaintext string, upstreamBody []byte, start time.Time) attemptResult {
+// the response. outBody/url are the pre-built upstream body/URL for this
+// candidate (relayCandidates' buildUpstreamBody call) — this key's only
+// contribution is the auth header (SetupRequest). Transport failures, 5xx,
+// and pre-first-byte stream failures are candidate-level (failover); 401/429
+// are key-level (rotate); 2xx is success; other 4xx is terminal (caller's
+// problem).
+func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time) attemptResult {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), upstreamRequestTimeout)
+	defer cancel()
+
 	// Record the rewritten (provider_model_name) request
 	// actually sent upstream, verbatim. Overwritten on every attempt — the
 	// last write wins, matching the "successful attempt, else the last
 	// attempt" rule.
-	rc.UpstreamRequestBody = upstreamBody
+	rc.UpstreamRequestBody = outBody
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), upstreamRequestTimeout)
-	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(outBody))
+	if err != nil {
+		// A build failure here is a candidate-level problem, mirroring the
+		// old rewrite-model-failed skip: nothing has been sent, so fail
+		// over. Every key on this candidate would fail identically (url is
+		// candidate-invariant), so the first key attempt already exhausts
+		// this candidate via tryKeys' immediate return on attemptNextCandidate.
+		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, 0, AttemptBadStatus, "build request: "+err.Error()))
+		return attemptNextCandidate
+	}
+	codecsFor(egress.Protocol).RequestEncoder.SetupRequest(req, plaintext)
 
-	resp, err := s.client.SendUpstream(ctx, provider.BaseURL, plaintext, upstreamBody)
+	resp, err := s.client.SendUpstreamRequest(req)
 	if err != nil {
 		// Caller disconnected mid-request is terminal (can't switch — the
 		// caller is gone). Distinguish context.Canceled (client gone) from
@@ -499,10 +528,14 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		// 2xx — dispatch directly instead of through a one-line trampoline.
+		// ingress is a pure function of the request path (IngressProtocol),
+		// so recomputing it here is cheap and avoids threading it through
+		// tryKeys just for this one downstream use.
+		ingress := IngressProtocol(c.Request.URL.Path)
 		if rc.IsStream {
-			return s.handleStream(c, rc, cand, provider, pk, resp, start)
+			return s.processDispatchResponseStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
 		}
-		return s.handleNonStream(c, rc, cand, provider, pk, resp, start)
+		return s.processDispatchResponseNonStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
 	}
 
 	statusCode := resp.StatusCode
@@ -514,7 +547,7 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 	// an empty errBody from THIS attempt must clear out a stale non-empty body
 	// left by an earlier failed candidate, not leave it looking current.
 	// A subsequent SUCCESSFUL stream candidate clears
-	// it entirely — see handleStream.
+	// it entirely — see dispatchPassthroughStream (dispatch.go).
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	rc.UpstreamResponseBody = errBody
 	_ = resp.Body.Close()
@@ -550,118 +583,6 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 		s.finalize(rc, statusCode, fmt.Sprintf("upstream_client_error_%d", statusCode), start)
 		return attemptTerminal
 	}
-}
-
-func (s *RelayService) handleNonStream(c *gin.Context, rc *RelayContext, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
-	defer func() { _ = resp.Body.Close() }()
-	// Now committed to this 2xx candidate: drop any error body a prior failed
-	// candidate stashed in rc.UpstreamResponseBody (attemptOne's non-2xx path,
-	// "last attempt wins"). The three failover returns below (read error /
-	// oversize / rewrite error) don't refresh it, so without this clear a
-	// stale earlier-candidate error body would be persisted as THIS request's
-	// upstream response. Only the success path re-sets
-	// both fields.
-	rc.UpstreamResponseBody = nil
-	rc.ResponseBody = nil
-	// Bound the response read: a buggy or hostile upstream can otherwise
-	// return an unbounded body and exhaust gateway memory before the
-	// request timeout fires (the response body has no bodylimit guard the
-	// way the request body does). Mirrors provider_client.go: read up to
-	// N+1 bytes so an overflow is detectable, then failover.
-	limited := io.LimitReader(resp.Body, maxNonStreamResponseBytes+1)
-	body, err := io.ReadAll(limited)
-	if err != nil {
-		// A caller disconnect during the body read is terminal (the caller
-		// is gone), not a candidate failure — recognize it to avoid a
-		// wasted failover attempt and to log 499, not bad_status.
-		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
-			s.finalize(rc, 499, "client_disconnected", start)
-			return attemptTerminal
-		}
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "read body: "+err.Error()))
-		return attemptNextCandidate
-	}
-	if int64(len(body)) > maxNonStreamResponseBytes {
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "response too large"))
-		return attemptNextCandidate
-	}
-	rewritten, usage, err := RewriteNonStreamResponse(body, rc.OriginalModel)
-	if err != nil {
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "rewrite: "+err.Error()))
-		return attemptNextCandidate
-	}
-	// Raw upstream (pre-rewrite, provider model name) vs.
-	// caller-facing (post-rewrite, external model name) — these two differ
-	// only in the model field, but both must be recorded. Stored
-	// verbatim (v0.1 does not scrub body content).
-	rc.UpstreamResponseBody = body
-	rc.ResponseBody = rewritten
-	rc.Usage = usage
-	rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
-	c.Header("Content-Type", "application/json")
-	c.Writer.WriteHeader(resp.StatusCode)
-	_, _ = c.Writer.Write(rewritten)
-	s.finalize(rc, resp.StatusCode, "", start)
-	return attemptSuccess
-}
-
-func (s *RelayService) handleStream(c *gin.Context, rc *RelayContext, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
-	// A prior failed candidate may have stashed its non-2xx error body in
-	// rc.UpstreamResponseBody (attemptOne above). A stream request persists its
-	// response through the SSE capture file, not these fields — the types.go
-	// contract is that both stay empty for stream requests. Now that we've
-	// committed to streaming a 2xx candidate, drop any stale error body so the
-	// detail page doesn't show a previous candidate's error as this (successful)
-	// request's "upstream response".
-	rc.UpstreamResponseBody = nil
-	rc.ResponseBody = nil
-	usage, err := StreamUpstreamToClient(c, resp, rc)
-	// StreamUpstreamToClient deliberately leaves the capture file open past
-	// its own return, so the writeStreamErrorEvent call
-	// below can still append to it; this handleStream call is the single
-	// place responsible for closing it, on every exit path.
-	defer closeStreamBodyFile(rc)
-	if usage != nil {
-		rc.Usage = usage // preserve partial usage even on error paths
-	}
-	// If the stream never produced a sent byte, the capture file (if any)
-	// is empty — remove it so the detail page never shows an empty "stream
-	// body" link (covers both the pre-first-byte failover path below and an
-	// early client-disconnect).
-	removeEmptyStreamBodyFile(c, rc)
-	if err == nil {
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
-		s.finalize(rc, http.StatusOK, "", start)
-		return attemptSuccess
-	}
-	if errors.Is(err, errClientDisconnected) {
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
-		s.finalize(rc, 499, "client_disconnected", start)
-		return attemptSuccess // already streamed partial content, terminal
-	}
-	if errors.Is(err, errStreamNoDoneTerminator) {
-		// Upstream sent content but closed without the [DONE] terminator.
-		// Do NOT inject a synthetic error event — the caller already
-		// received the content bytes, and most OpenAI SDKs handle a plain
-		// EOF gracefully. Injecting an error event would break a possibly-
-		// complete completion (some upstreams stably omit [DONE]). Only
-		// mark the log row partial so the missing terminator is traceable.
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream ended without [DONE]"))
-		s.finalize(rc, http.StatusOK, "stream_no_done", start)
-		return attemptSuccess
-	}
-	if rc.FirstByteSent {
-		// Mid-stream failure after the first byte — can't switch,
-		// can't change HTTP status; emit one inline SSE error event + close.
-		writeStreamErrorEvent(c, rc)
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
-		s.finalize(rc, http.StatusOK, "stream_partial: "+err.Error(), start)
-		return attemptSuccess
-	}
-	// Pre-first-byte failure: nothing written yet, can still failover.
-	rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
-	return attemptNextCandidate
 }
 
 // allCandidatesFailed is reached only when every candidate was tried without

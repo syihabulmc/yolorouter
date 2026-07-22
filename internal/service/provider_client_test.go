@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yolorouter/yolorouter/internal/protocols"
+	"github.com/yolorouter/yolorouter/internal/protocols/chat"
 )
 
 func newTestClient(handler http.HandlerFunc) (*HTTPProviderClient, *httptest.Server) {
@@ -23,6 +26,46 @@ func newTestClient(handler http.HandlerFunc) (*HTTPProviderClient, *httptest.Ser
 	// exercises the same non-following behavior production code has.
 	c.httpClient = &http.Client{Transport: http.DefaultTransport, CheckRedirect: c.httpClient.CheckRedirect}
 	return c, srv
+}
+
+// TestProviderTestURLMatchesRuntimeDispatchBuilder is a regression test: the
+// verification/key-test URL must be built with the exact same
+// protocols.JoinUpstreamURL call runtime dispatch uses
+// (buildUpstreamBody in internal/gateway/dispatch.go), otherwise a
+// bare-host or path-prefixed provider could pass verification against one
+// endpoint and receive production traffic at another (e.g. a bare host
+// silently NOT getting /v1 inserted at verification time while runtime
+// dispatch does insert it).
+func TestProviderTestURLMatchesRuntimeDispatchBuilder(t *testing.T) {
+	chatEgressPath := chat.RequestEncoder{}.EgressPath("", false)
+	cases := []struct {
+		name    string
+		baseURL string
+	}{
+		{"bare host", "https://h"},
+		{"v1-suffixed host", "https://h/v1"},
+		{"trailing slash", "https://h/"},
+		{"path-prefixed host", "https://h/openai"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerTestURL(tc.baseURL)
+			want := protocols.JoinUpstreamURL(tc.baseURL, chatEgressPath, protocols.ProtocolOpenAI)
+			if got != want {
+				t.Errorf("providerTestURL(%q) = %q, want %q (must match the runtime dispatch URL builder)", tc.baseURL, got, want)
+			}
+		})
+	}
+
+	// Concrete confirmation of the two shapes the fix specifically targets:
+	// a /v1-suffixed base must not get a doubled /v1, and a bare host must
+	// get /v1 inserted exactly like runtime dispatch does.
+	if got := providerTestURL("https://h/v1"); got != "https://h/v1/chat/completions" {
+		t.Errorf("providerTestURL(%q) = %q, want no doubled /v1", "https://h/v1", got)
+	}
+	if got := providerTestURL("https://h"); got != "https://h/v1/chat/completions" {
+		t.Errorf("providerTestURL(%q) = %q, want /v1 inserted to match runtime dispatch", "https://h", got)
+	}
 }
 
 func TestTestChatCompletionSuccess(t *testing.T) {

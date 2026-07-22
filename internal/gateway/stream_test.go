@@ -168,7 +168,7 @@ func TestWriteStreamLineNonDataPassthrough(t *testing.T) {
 }
 
 // runStreamPump wires a minimal gin context + http.Response around
-// StreamUpstreamToClient so the truncation/usage tests don't repeat the
+// passthroughStreamToClient so the truncation/usage tests don't repeat the
 // boilerplate.
 func runStreamPump(t *testing.T, upstreamBody string, wantsUsage bool) (*Usage, error) {
 	t.Helper()
@@ -180,7 +180,7 @@ func runStreamPump(t *testing.T, upstreamBody string, wantsUsage bool) (*Usage, 
 		Header:     make(http.Header),
 	}
 	rc := &RelayContext{OriginalModel: "ext", IsStream: true, WantsStreamUsage: wantsUsage}
-	return StreamUpstreamToClient(c, resp, rc)
+	return passthroughStreamToClient(c, resp, rc)
 }
 
 // TestStreamUpstreamWithDoneSucceeds: a stream that emits a data frame and
@@ -194,9 +194,9 @@ func TestStreamUpstreamWithDoneSucceeds(t *testing.T) {
 
 // TestStreamUpstreamNoDoneReturnsTruncationError: a stream that emits at
 // least one data frame but closes WITHOUT `data: [DONE]` must report
-// errStreamNoDoneTerminator so handleStream logs a partial row instead of
-// clean success (the client already received bytes, so it's a silent
-// truncation, not a clean completion).
+// errStreamNoDoneTerminator so dispatchPassthroughStream logs a partial row
+// instead of clean success (the client already received bytes, so it's a
+// silent truncation, not a clean completion).
 func TestStreamUpstreamNoDoneReturnsTruncationError(t *testing.T) {
 	body := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
 	_, err := runStreamPump(t, body, true)
@@ -245,7 +245,7 @@ func TestStreamUpstreamPostDoneDisconnectSucceeds(t *testing.T) {
 		Header:     make(http.Header),
 	}
 	rc := &RelayContext{OriginalModel: "ext", IsStream: true, WantsStreamUsage: true}
-	_, err := StreamUpstreamToClient(c, resp, rc)
+	_, err := passthroughStreamToClient(c, resp, rc)
 	if err != nil {
 		t.Fatalf("post-[DONE] disconnect must succeed, got %v", err)
 	}
@@ -266,7 +266,7 @@ func TestStreamUpstreamStripsInjectedUsage(t *testing.T) {
 		Header:     make(http.Header),
 	}
 	rc := &RelayContext{OriginalModel: "ext", IsStream: true, WantsStreamUsage: false}
-	usage, err := StreamUpstreamToClient(c, resp, rc)
+	usage, err := passthroughStreamToClient(c, resp, rc)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -297,7 +297,7 @@ func runStreamPumpCapture(t *testing.T, upstreamBody, requestID, bodiesDir strin
 		Header:     make(http.Header),
 	}
 	rc := &RelayContext{RequestID: requestID, OriginalModel: "ext", IsStream: true, WantsStreamUsage: true}
-	usage, err := StreamUpstreamToClient(c, resp, rc)
+	usage, err := passthroughStreamToClient(c, resp, rc)
 	return rc, rec, usage, err
 }
 
