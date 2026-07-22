@@ -197,7 +197,9 @@ a {
 
 @media (max-width: 640px) {
   .layout-content {
-    padding: var(--space-5) var(--space-4) var(--space-8);
+    /* Top padding reserves room for the absolute locale switcher (top 20px,
+       34px tall) so page headers don't collide with it on narrow screens. */
+    padding: 4rem var(--space-4) var(--space-8);
   }
 
   .page-header {

@@ -29,9 +29,6 @@
         </div>
 
         <div class="sidebar-bottom">
-          <div v-if="!collapsed" class="sidebar-locale">
-            <LocaleSwitcher />
-          </div>
           <n-dropdown :options="userMenuOptions" placement="top-start" @select="onUserMenuSelect">
             <button class="sidebar-user" :class="{ 'sidebar-user--collapsed': collapsed }">
               <span class="sidebar-user__avatar">{{ userInitial }}</span>
@@ -45,6 +42,9 @@
     <n-layout class="layout-main">
       <n-layout-content>
         <div class="layout-content">
+          <div class="app-locale-corner">
+            <LocaleSwitcher />
+          </div>
           <router-view />
         </div>
       </n-layout-content>
@@ -289,10 +289,6 @@ async function onChangePasswordSubmit() {
   border-top: 1px solid var(--color-border);
 }
 
-.sidebar-locale {
-  display: flex;
-}
-
 .sidebar-user {
   display: flex;
   align-items: center;
@@ -344,8 +340,19 @@ async function onChangePasswordSubmit() {
 }
 
 .layout-content {
+  position: relative;
   height: 100dvh;
   overflow: auto;
+}
+
+/* Language switcher in the content's top-right corner — same positioning as
+   the login page (absolute inside the relative container that holds the
+   page). It sits top-right and scrolls with the content. */
+.app-locale-corner {
+  position: absolute;
+  top: var(--space-5);
+  right: var(--space-6);
+  z-index: 5;
 }
 
 @media (max-width: 640px) {
