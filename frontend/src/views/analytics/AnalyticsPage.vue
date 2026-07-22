@@ -92,7 +92,7 @@
             size="small"
           >
             <template #empty>
-              <EmptyState :title="t('analytics.noData')" />
+              <EmptyState :icon="BarChart3" :title="t('analytics.noData')" />
             </template>
           </NDataTable>
         </NTabPane>
@@ -107,7 +107,7 @@
             size="small"
           >
             <template #empty>
-              <EmptyState :title="t('analytics.noData')" />
+              <EmptyState :icon="BarChart3" :title="t('analytics.noData')" />
             </template>
           </NDataTable>
         </NTabPane>
@@ -122,7 +122,7 @@
             size="small"
           >
             <template #empty>
-              <EmptyState :title="t('analytics.noData')" />
+              <EmptyState :icon="BarChart3" :title="t('analytics.noData')" />
             </template>
           </NDataTable>
         </NTabPane>
@@ -137,7 +137,7 @@
             size="small"
           >
             <template #empty>
-              <EmptyState :title="t('analytics.noData')" />
+              <EmptyState :icon="BarChart3" :title="t('analytics.noData')" />
             </template>
           </NDataTable>
         </NTabPane>
@@ -150,7 +150,7 @@
 import { computed, h, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NButton, NDataTable, NTabPane, NTabs, useMessage, type DataTableColumns, type SelectOption } from 'naive-ui'
-import { Download } from '@lucide/vue'
+import { BarChart3, Download } from '@lucide/vue'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import HelpLabel from '../../components/HelpLabel.vue'

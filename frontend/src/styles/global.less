@@ -143,13 +143,22 @@ a {
   color: var(--color-text-secondary);
 }
 
-.empty-state__mark {
-  width: 42px;
-  height: 42px;
-  margin-bottom: var(--space-4);
+// Tinted square that centers an icon glyph. Shared by inline empty states and
+// the dashboard setup banner so the tile look has a single source of truth.
+.icon-tile {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
   border-radius: var(--radius-md);
-  background: linear-gradient(135deg, var(--color-accent-subtle), var(--color-purple-subtle));
-  box-shadow: var(--shadow-glow);
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+.empty-state__mark {
+  margin-bottom: var(--space-4);
 }
 
 .empty-state h3 {

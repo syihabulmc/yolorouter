@@ -108,7 +108,7 @@
       </div>
     </div>
 
-    <EmptyState v-if="!loading && rows.length === 0" :title="t('requestLogs.listEmpty')" />
+    <EmptyState v-if="!loading && rows.length === 0" :icon="FileSearch" :title="t('requestLogs.listEmpty')" />
     <div v-else class="data-table-wrapper">
       <NDataTable
         :columns="columns"
@@ -140,7 +140,7 @@ import {
   type PaginationProps,
   type SelectOption,
 } from 'naive-ui'
-import { Download, Search } from '@lucide/vue'
+import { Download, FileSearch, Search } from '@lucide/vue'
 import {
   listRequestLogs,
   exportRequestLogsCSV,

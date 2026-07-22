@@ -22,7 +22,7 @@
       </n-input>
     </div>
 
-    <EmptyState v-if="!store.loading && store.list.length === 0" :title="t('apiKeys.listEmpty')">
+    <EmptyState v-if="!store.loading && store.list.length === 0" :icon="KeyRound" :title="t('apiKeys.listEmpty')">
       <template #action>
         <n-button type="primary" @click="showCreate = true">{{ t('apiKeys.createButton') }}</n-button>
       </template>
@@ -50,7 +50,7 @@
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NButton, NSpace, NTag, useDialog, useMessage, type DataTableColumns, type PaginationProps } from 'naive-ui'
-import { Plus, Search } from '@lucide/vue'
+import { KeyRound, Plus, Search } from '@lucide/vue'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { displayMessage } from '../../api/client'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'

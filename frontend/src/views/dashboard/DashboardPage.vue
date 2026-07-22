@@ -14,7 +14,9 @@
          recorded, and adapts to the current setup step so a fresh deployment
          always has a clear next action instead of a blank overview. -->
     <div v-if="!loading && setupStep" class="setup-banner">
-      <div class="setup-banner__mark" />
+      <div class="icon-tile">
+        <component :is="setupStep.icon" :size="22" :stroke-width="1.75" />
+      </div>
       <div class="setup-banner__body">
         <h3 class="setup-banner__title">{{ t(setupStep.titleKey) }}</h3>
         <p class="setup-banner__desc">{{ t(setupStep.descKey) }}</p>
@@ -170,7 +172,8 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NButton, useMessage } from 'naive-ui'
-import { Activity, AlertTriangle, DollarSign, TrendingUp } from '@lucide/vue'
+import type { Component } from 'vue'
+import { Activity, AlertTriangle, Boxes, DollarSign, Hourglass, KeyRound, Server, TrendingUp } from '@lucide/vue'
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import TrendChart from '../../components/dashboard/TrendChart.vue'
@@ -196,6 +199,7 @@ const loading = ref(true)
 interface SetupStep {
   titleKey: string
   descKey: string
+  icon: Component
   ctaKey?: string
   to?: string
 }
@@ -211,15 +215,15 @@ const setupStep = computed<SetupStep | null>(() => {
   if (hasTraffic) return null
   const s = d.setup
   if (s.providers === 0) {
-    return { titleKey: 'dashboard.setupProviderTitle', descKey: 'dashboard.setupProviderDesc', ctaKey: 'dashboard.setupProviderCta', to: '/providers' }
+    return { titleKey: 'dashboard.setupProviderTitle', descKey: 'dashboard.setupProviderDesc', icon: Server, ctaKey: 'dashboard.setupProviderCta', to: '/providers' }
   }
   if (s.enabled_models === 0) {
-    return { titleKey: 'dashboard.setupModelTitle', descKey: 'dashboard.setupModelDesc', ctaKey: 'dashboard.setupModelCta', to: '/models' }
+    return { titleKey: 'dashboard.setupModelTitle', descKey: 'dashboard.setupModelDesc', icon: Boxes, ctaKey: 'dashboard.setupModelCta', to: '/models' }
   }
   if (s.api_keys === 0) {
-    return { titleKey: 'dashboard.setupKeyTitle', descKey: 'dashboard.setupKeyDesc', ctaKey: 'dashboard.setupKeyCta', to: '/api-keys' }
+    return { titleKey: 'dashboard.setupKeyTitle', descKey: 'dashboard.setupKeyDesc', icon: KeyRound, ctaKey: 'dashboard.setupKeyCta', to: '/api-keys' }
   }
-  return { titleKey: 'dashboard.setupWaitingTitle', descKey: 'dashboard.setupWaitingDesc' }
+  return { titleKey: 'dashboard.setupWaitingTitle', descKey: 'dashboard.setupWaitingDesc', icon: Hourglass }
 })
 
 async function reload() {
@@ -296,15 +300,6 @@ function goToRequestLog(requestId: string) {
   background: var(--color-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-lg);
-}
-
-.setup-banner__mark {
-  flex-shrink: 0;
-  width: 42px;
-  height: 42px;
-  border-radius: var(--radius-md);
-  background: linear-gradient(135deg, var(--color-accent-subtle), var(--color-purple-subtle));
-  box-shadow: var(--shadow-glow);
 }
 
 .setup-banner__body {

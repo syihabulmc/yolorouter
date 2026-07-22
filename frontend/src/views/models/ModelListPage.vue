@@ -10,7 +10,7 @@
       </template>
     </PageHeader>
 
-    <EmptyState v-if="!store.loading && store.list.length === 0" :title="t('models.listEmpty')">
+    <EmptyState v-if="!store.loading && store.list.length === 0" :icon="Boxes" :title="t('models.listEmpty')">
       <template #action>
         <n-button type="primary" @click="showCreate = true">{{ t('models.createButton') }}</n-button>
       </template>
@@ -40,7 +40,7 @@ import { computed, h, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
-import { Plus } from '@lucide/vue'
+import { Boxes, Plus } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import { toggleStatusWithConfirm } from '../../composables/useConfirmedStatusToggle'
