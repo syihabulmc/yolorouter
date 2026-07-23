@@ -81,6 +81,11 @@ type OverviewRow struct {
 	InputTokens      int64   `json:"input_tokens"`
 	OutputTokens     int64   `json:"output_tokens"`
 	CostMicros       int64   `json:"cost_micros"`
+	// Cache economics for the filtered window. Net saving is
+	// CacheReadSavedMicros − CacheWriteExtraMicros; both are sent so the client
+	// can show the read saving and the write premium as separate line items.
+	CacheReadSavedMicros  int64 `json:"cache_read_saved_micros"`
+	CacheWriteExtraMicros int64 `json:"cache_write_extra_micros"`
 }
 
 // ReportResult is the GET /analytics/report body. Dimension echoes the
@@ -123,14 +128,16 @@ func (s *AnalyticsService) GetOverview(filter AnalyticsFilter, bucket string) (*
 		return nil, err
 	}
 	return &OverviewRow{
-		TotalCalls:       m.TotalCalls,
-		SuccessCalls:     m.SuccessCalls,
-		EndedCalls:       m.EndedCalls,
-		SuccessRate:      m.SuccessRate(),
-		UnknownCostCalls: m.UnknownCostCalls,
-		InputTokens:      m.InputTokens,
-		OutputTokens:     m.OutputTokens,
-		CostMicros:       m.KnownCostMicros,
+		TotalCalls:            m.TotalCalls,
+		SuccessCalls:          m.SuccessCalls,
+		EndedCalls:            m.EndedCalls,
+		SuccessRate:           m.SuccessRate(),
+		UnknownCostCalls:      m.UnknownCostCalls,
+		InputTokens:           m.InputTokens,
+		OutputTokens:          m.OutputTokens,
+		CostMicros:            m.KnownCostMicros,
+		CacheReadSavedMicros:  m.CacheReadSavedMicros,
+		CacheWriteExtraMicros: m.CacheWriteExtraMicros,
 	}, nil
 }
 

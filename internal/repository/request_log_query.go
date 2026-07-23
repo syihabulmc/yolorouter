@@ -261,6 +261,10 @@ type MetricTotals struct {
 	CacheWriteTokens int64
 	CacheReadTokens  int64
 	KnownCostMicros  int64
+	// Cache economics, both non-negative. Net cache saving is
+	// CacheReadSavedMicros − CacheWriteExtraMicros, left for the reader.
+	CacheReadSavedMicros  int64
+	CacheWriteExtraMicros int64
 }
 
 // successRateOf returns success/ended, or 0 when no request has ended. It is
@@ -287,15 +291,17 @@ func (m *MetricTotals) SuccessRate() float64 {
 // second a separate COUNT for unknown-cost rows).
 func AggregateRequestLogMetrics(db *gorm.DB, f *RequestLogFilter) (*MetricTotals, error) {
 	var r struct {
-		TotalCalls       int64
-		SuccessCalls     int64
-		EndedCalls       int64
-		UnknownCostCalls int64
-		InputTokens      int64
-		OutputTokens     int64
-		CacheWriteTokens int64
-		CacheReadTokens  int64
-		KnownCostMicros  int64
+		TotalCalls            int64
+		SuccessCalls          int64
+		EndedCalls            int64
+		UnknownCostCalls      int64
+		InputTokens           int64
+		OutputTokens          int64
+		CacheWriteTokens      int64
+		CacheReadTokens       int64
+		KnownCostMicros       int64
+		CacheReadSavedMicros  int64
+		CacheWriteExtraMicros int64
 	}
 	err := f.applyFilter(db).Select(`
 		COUNT(*) AS total_calls,
@@ -306,20 +312,24 @@ func AggregateRequestLogMetrics(db *gorm.DB, f *RequestLogFilter) (*MetricTotals
 		COALESCE(SUM(output_tokens), 0) AS output_tokens,
 		COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
 		COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-		COALESCE(SUM(cost_micros), 0) AS known_cost_micros
+		COALESCE(SUM(cost_micros), 0) AS known_cost_micros,
+		COALESCE(SUM(cache_read_saved_micros), 0) AS cache_read_saved_micros,
+		COALESCE(SUM(cache_write_extra_micros), 0) AS cache_write_extra_micros
 	`, false).Scan(&r).Error
 	if err != nil {
 		return nil, err
 	}
 	return &MetricTotals{
-		TotalCalls:       r.TotalCalls,
-		SuccessCalls:     r.SuccessCalls,
-		EndedCalls:       r.EndedCalls,
-		UnknownCostCalls: r.UnknownCostCalls,
-		InputTokens:      r.InputTokens,
-		OutputTokens:     r.OutputTokens,
-		CacheWriteTokens: r.CacheWriteTokens,
-		CacheReadTokens:  r.CacheReadTokens,
-		KnownCostMicros:  r.KnownCostMicros,
+		TotalCalls:            r.TotalCalls,
+		SuccessCalls:          r.SuccessCalls,
+		EndedCalls:            r.EndedCalls,
+		UnknownCostCalls:      r.UnknownCostCalls,
+		InputTokens:           r.InputTokens,
+		OutputTokens:          r.OutputTokens,
+		CacheWriteTokens:      r.CacheWriteTokens,
+		CacheReadTokens:       r.CacheReadTokens,
+		KnownCostMicros:       r.KnownCostMicros,
+		CacheReadSavedMicros:  r.CacheReadSavedMicros,
+		CacheWriteExtraMicros: r.CacheWriteExtraMicros,
 	}, nil
 }

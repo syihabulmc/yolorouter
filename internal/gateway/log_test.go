@@ -15,12 +15,45 @@ func TestComputeCost(t *testing.T) {
 	// 1M input @ 1.0 + 0.5M output @ 2.0 = 1.0 + 1.0 = 2.0 CNY = 2_000_000 micros.
 	cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0}
 	usage := &Usage{PromptTokens: 1_000_000, CompletionTokens: 500_000}
-	micros, known := computeCost(cand, usage)
-	if !known {
+	cost := computeCost(cand, usage)
+	if !cost.Known {
 		t.Fatal("expected cost to be known when usage + candidate present")
 	}
-	if micros != 2_000_000 {
-		t.Fatalf("cost = %d micros, want 2_000_000", micros)
+	if cost.CostMicros != 2_000_000 {
+		t.Fatalf("cost = %d micros, want 2_000_000", cost.CostMicros)
+	}
+}
+
+func TestComputeCostCacheEconomics(t *testing.T) {
+	// input @ 3.0/M, cache read @ 0.3/M (cheaper), cache write @ 3.75/M (a
+	// premium over input). 1M cache-read tokens save (3.0−0.3)=2.7 CNY;
+	// 1M cache-write tokens cost an extra (3.75−3.0)=0.75 CNY.
+	readPrice, writePrice := 0.3, 3.75
+	cand := &model.ModelCandidate{
+		InputPrice:      3.0,
+		OutputPrice:     6.0,
+		CacheReadPrice:  &readPrice,
+		CacheWritePrice: &writePrice,
+	}
+	usage := &Usage{PromptTokens: 1_000_000, CacheReadTokens: 1_000_000, CacheWriteTokens: 1_000_000}
+	cost := computeCost(cand, usage)
+	if cost.CacheReadSavedMicros != 2_700_000 {
+		t.Errorf("cache read saved = %d, want 2_700_000", cost.CacheReadSavedMicros)
+	}
+	if cost.CacheWriteExtraMicros != 750_000 {
+		t.Errorf("cache write extra = %d, want 750_000", cost.CacheWriteExtraMicros)
+	}
+}
+
+func TestComputeCostNoCachePriceHasNoSavings(t *testing.T) {
+	// Without configured cache prices, cache tokens bill at the input price, so
+	// there is neither a read saving nor a write premium.
+	cand := &model.ModelCandidate{InputPrice: 2.0, OutputPrice: 4.0}
+	usage := &Usage{PromptTokens: 1_000_000, CacheReadTokens: 500_000, CacheWriteTokens: 500_000}
+	cost := computeCost(cand, usage)
+	if cost.CacheReadSavedMicros != 0 || cost.CacheWriteExtraMicros != 0 {
+		t.Errorf("expected 0/0 savings without cache prices, got read=%d write=%d",
+			cost.CacheReadSavedMicros, cost.CacheWriteExtraMicros)
 	}
 }
 
@@ -29,24 +62,24 @@ func TestComputeCostRoundsToMicro(t *testing.T) {
 	// 0.0000015 CNY = 1.5 micros -> rounds to 2 micros.
 	cand := &model.ModelCandidate{InputPrice: 1.5, OutputPrice: 0}
 	usage := &Usage{PromptTokens: 1, CompletionTokens: 0}
-	micros, known := computeCost(cand, usage)
-	if !known || micros != 2 {
-		t.Fatalf("expected known 2 micros, got %d (known=%v)", micros, known)
+	cost := computeCost(cand, usage)
+	if !cost.Known || cost.CostMicros != 2 {
+		t.Fatalf("expected known 2 micros, got %d (known=%v)", cost.CostMicros, cost.Known)
 	}
 }
 
 func TestComputeCostMissingUsageIsUnknown(t *testing.T) {
 	// Missing usage must be "unknown", never 0 cost.
 	cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 1.0}
-	if micros, known := computeCost(cand, nil); known || micros != 0 {
-		t.Fatalf("expected unknown/0 for nil usage, got %d (known=%v)", micros, known)
+	if cost := computeCost(cand, nil); cost.Known || cost.CostMicros != 0 {
+		t.Fatalf("expected unknown/0 for nil usage, got %d (known=%v)", cost.CostMicros, cost.Known)
 	}
 }
 
 func TestComputeCostMissingCandidateIsUnknown(t *testing.T) {
 	usage := &Usage{PromptTokens: 100, CompletionTokens: 100}
-	if micros, known := computeCost(nil, usage); known || micros != 0 {
-		t.Fatalf("expected unknown/0 for nil candidate, got %d (known=%v)", micros, known)
+	if cost := computeCost(nil, usage); cost.Known || cost.CostMicros != 0 {
+		t.Fatalf("expected unknown/0 for nil candidate, got %d (known=%v)", cost.CostMicros, cost.Known)
 	}
 }
 

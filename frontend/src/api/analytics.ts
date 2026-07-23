@@ -107,6 +107,10 @@ export interface OverviewRow {
   input_tokens: number
   output_tokens: number
   cost_micros: number
+  // Cache economics for the window. Net cache saving is
+  // cache_read_saved_micros − cache_write_extra_micros; both non-negative.
+  cache_read_saved_micros: number
+  cache_write_extra_micros: number
 }
 
 // Dimension-specific row types. Each is the per-bucket aggregate the

@@ -167,7 +167,7 @@ const navItems = computed<NavItem[]>(() => [
   { key: 'group-analytics', label: t('nav.groupAnalytics'), group: true },
   { key: 'usage', label: t('nav.usage'), icon: BarChart3, to: '/analytics' },
   { key: 'log-audit', label: t('nav.logAudit'), icon: ScrollText, to: '/request-logs' },
-  { key: 'cost-stats', label: t('nav.costStats'), icon: Receipt, disabled: true },
+  { key: 'cost-stats', label: t('nav.costStats'), icon: Receipt, to: '/costs' },
 
   { key: 'group-models', label: t('nav.groupModels'), group: true },
   { key: 'providers', label: t('nav.providers'), icon: Server, to: '/providers' },
