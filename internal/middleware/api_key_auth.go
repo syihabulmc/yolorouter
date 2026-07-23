@@ -29,20 +29,21 @@ import (
 	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
-// APIKeyAuth resolves a caller's Yolorouter API key — presented either as
-// Authorization: Bearer <key> (OpenAI-compatible clients) or X-Api-Key: <key>
-// (the Anthropic SDK / Claude Code, which never sends Authorization) — to its
-// APIKey row and stores it on the context via gateway.SetGatewayAuth. A
-// missing, conflicting, malformed, or unknown key returns a 401 in the
-// envelope the request's ingress protocol expects (gateway.WriteIngressError)
-// — the gateway namespace uses upstream's native error shape, NOT
-// pkg/response.
+// APIKeyAuth resolves a caller's Yolorouter API key — presented as
+// Authorization: Bearer <key> (OpenAI-compatible clients), X-Api-Key: <key>
+// (the Anthropic SDK / Claude Code, which never sends Authorization), or,
+// on the Gemini ingress only, x-goog-api-key: <key> / ?key=<key> (the
+// Google GenAI SDK) — to its APIKey row and stores it on the context via
+// gateway.SetGatewayAuth. A missing, conflicting, malformed, or unknown key
+// returns a 401 in the envelope the request's ingress protocol expects
+// (gateway.WriteIngressError) — the gateway namespace uses upstream's
+// native error shape, NOT pkg/response.
 func APIKeyAuth(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ingress := gateway.IngressProtocol(c.Request.URL.Path)
 		requestID := c.GetString(RequestIDKey)
 
-		raw, conflict := resolveAPIKey(c)
+		raw, conflict := resolveAPIKey(c, ingress)
 		if conflict {
 			logAuthRejection(c, db, ingress, http.StatusUnauthorized, "conflicting API key headers", "authentication_error", "conflicting API key headers")
 			gateway.WriteIngressError(c, ingress, http.StatusUnauthorized, "authentication_error", "conflicting API key headers", requestID)
@@ -71,29 +72,47 @@ func APIKeyAuth(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-// resolveAPIKey extracts the caller's API key from either the OpenAI-style
-// Authorization: Bearer header or the Anthropic SDK's X-Api-Key header
-// (c.GetHeader is case-insensitive), so the same key material authenticates
-// both wire protocols without any client-side change. When both headers
-// carry a value, they must agree — a mismatch almost certainly means the
-// caller sent a stale credential in one of the two, and silently preferring
-// one would mask that and mint a request whose actually-attributed key is
-// invisible to the caller. Returns ("", true) on a header mismatch
-// (conflict); returns ("", false) when neither header carries a value (the
-// ordinary missing-key case, handled by the caller).
-func resolveAPIKey(c *gin.Context) (raw string, conflict bool) {
-	bearer := extractBearerKey(c)
-	xAPIKey := c.GetHeader("X-Api-Key")
-	if bearer != "" && xAPIKey != "" {
-		if bearer != xAPIKey {
-			return "", true
+// resolveAPIKey extracts the caller's API key from whichever source(s) the
+// request's ingress protocol allows. Two sources are always checked: the
+// OpenAI-style Authorization: Bearer header and the Anthropic SDK's
+// X-Api-Key header (c.GetHeader is case-insensitive), so the same key
+// material authenticates both wire protocols without any client-side
+// change. On the Gemini ingress two more sources are checked: the Google
+// GenAI SDK, when pointed at Yolorouter, sends Yolorouter's own API key as
+// x-goog-api-key or as the ?key= query parameter — never as Authorization
+// or X-Api-Key — so those two must be accepted there and ONLY there (an
+// OpenAI/Claude/Responses caller must not be able to authenticate via a
+// query parameter).
+//
+// All applicable sources are collected and reduced to their distinct
+// non-empty values. More than one distinct value is a conflict — a
+// mismatch almost certainly means the caller sent a stale credential in
+// one of the sources, and silently preferring one would mask that and mint
+// a request whose actually-attributed key is invisible to the caller.
+// Returns ("", true) on a mismatch (conflict); returns ("", false) when no
+// source carries a value (the ordinary missing-key case, handled by the
+// caller).
+func resolveAPIKey(c *gin.Context, ingress protocols.ProtocolID) (raw string, conflict bool) {
+	candidates := []string{extractBearerKey(c), c.GetHeader("X-Api-Key")}
+	if ingress == protocols.ProtocolGemini {
+		candidates = append(candidates, c.GetHeader("x-goog-api-key"), c.Query("key"))
+	}
+
+	distinct := make(map[string]struct{}, len(candidates))
+	for _, v := range candidates {
+		if v != "" {
+			distinct[v] = struct{}{}
 		}
-		return bearer, false
 	}
-	if bearer != "" {
-		return bearer, false
+	switch len(distinct) {
+	case 0:
+		return "", false
+	case 1:
+		for v := range distinct {
+			return v, false
+		}
 	}
-	return xAPIKey, false
+	return "", true
 }
 
 // authRejectionBodyCap bounds how much of an UNauthenticated request body the
@@ -148,19 +167,21 @@ func logAuthRejection(c *gin.Context, db *gorm.DB, ingress protocols.ProtocolID,
 		reqHeaders = gateway.SanitizeHeaders(c.Request.Header)
 	}
 	// gateway.WriteIngressError appends " (request: <id>)" into message for
-	// the OpenAI ingress but leaves it untouched for the Claude ingress (the
-	// id travels in its own top-level request_id field there) — mirror that
-	// exact transform here so the stored response_body matches what the
-	// caller actually received byte for byte, on both ingresses.
+	// the OpenAI ingress but leaves it untouched for the Claude and Gemini
+	// ingresses (the id travels in Claude's top-level request_id field, and
+	// in Gemini's case only ever reaches the caller via the X-Request-Id
+	// header — see WriteGeminiError) — mirror that exact transform here so
+	// the stored response_body matches what the caller actually received
+	// byte for byte, on every ingress.
 	auditMessage := message
-	if ingress != protocols.ProtocolClaude {
+	if ingress != protocols.ProtocolClaude && ingress != protocols.ProtocolGemini {
 		auditMessage = gateway.AppendRequestID(message, requestID)
 	}
 	bodyRow := &model.RequestLogBody{
 		RequestID:      requestID,
 		RequestHeaders: string(reqHeaders),
 		RequestBody:    string(reqBody),
-		ResponseBody:   string(gateway.LocalIngressErrorBody(ingress, errType, auditMessage, requestID)),
+		ResponseBody:   string(gateway.LocalIngressErrorBody(ingress, status, errType, auditMessage, requestID)),
 	}
 	if err := repository.UpsertRequestLogBody(db, bodyRow); err != nil {
 		logger.Warn("middleware: write auth-rejection body row failed",

@@ -225,6 +225,87 @@ func TestRecoveryMiddlewareDispatchesMessagesPanicToClaudeEnvelope(t *testing.T)
 	}
 }
 
+// TestIsGatewayNamespaceAdmitsV1Beta confirms IsGatewayNamespace was widened
+// to recognize the native Gemini surface (/v1beta/...), which lives outside
+// /v1 (see router.go's sibling /v1beta route group) — without this, NoRoute/
+// NoMethod/Recovery for a /v1beta path would fall through to the admin
+// pkg/response envelope instead of a gateway (ingress-native) one.
+func TestIsGatewayNamespaceAdmitsV1Beta(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/v1beta/models/gemini-2.0-flash:generateContent", true},
+		{"/v1beta/models/x:streamGenerateContent", true},
+		{"/v1beta/", true},
+		{"/v1beta", false}, // no trailing slash: not admitted, mirrors "/v1" (bare) being the one exact-match exception
+		{"/v1/chat/completions", true},
+		{"/api/admin/auth/state", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := IsGatewayNamespace(tt.path); got != tt.want {
+				t.Errorf("IsGatewayNamespace(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRecoveryMiddlewareDispatchesGeminiPanicToGeminiEnvelope is the Gemini
+// counterpart of TestRecoveryMiddlewareDispatchesMessagesPanicToClaudeEnvelope:
+// a panic under a native /v1beta Gemini path must recover into the
+// Gemini-native envelope (nested code/message/status, no top-level
+// request_id) rather than the OpenAI shape every other /v1/* path gets —
+// proving WriteNamespacedError's namespace dispatch reaches the Gemini
+// branch through the exact same Recovery() -> WriteNamespacedError call as
+// every other ingress.
+func TestRecoveryMiddlewareDispatchesGeminiPanicToGeminiEnvelope(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(RequestID())
+	r.Use(Recovery())
+	r.GET("/v1beta/models/gemini-2.0-flash:generateContent", func(c *gin.Context) {
+		panic("boom")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1beta/models/gemini-2.0-flash:generateContent", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+
+	var env struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Status  string `json:"status"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("expected Gemini-style error envelope JSON, got unparseable body %s: %v", w.Body.Bytes(), err)
+	}
+	if env.Error.Code != http.StatusInternalServerError {
+		t.Fatalf("expected error.code=500, got %d, body: %s", env.Error.Code, w.Body.String())
+	}
+	if env.Error.Status != "INTERNAL" {
+		t.Fatalf("expected error.status=INTERNAL, got %q, body: %s", env.Error.Status, w.Body.String())
+	}
+	if env.Error.Message == "" {
+		t.Fatalf("expected non-empty error.message, body: %s", w.Body.String())
+	}
+
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(w.Body.Bytes(), &raw)
+	if _, ok := raw["request_id"]; ok {
+		t.Fatalf("Gemini envelope must not carry a top-level request_id field, got: %s", w.Body.String())
+	}
+	if got := w.Header().Get("X-Request-Id"); got == "" {
+		t.Fatalf("expected the request id on the X-Request-Id header, got empty")
+	}
+}
+
 // TestRecoveryReRaisesAbortHandlerAfterPartialWrite guards the post-write
 // panic path: once a handler has already written bytes (e.g. a future
 // SSE/streaming handler mid-flush), Recovery must not try to write a JSON

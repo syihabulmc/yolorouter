@@ -23,7 +23,7 @@ func TestPeekIngressOpenAI(t *testing.T) {
 		"messages":[{"role":"user","content":"hi"}],
 		"tools":[{"type":"function"}]
 	}`)
-	meta, err := peekIngress(protocols.ProtocolOpenAI, body)
+	meta, err := peekIngress(protocols.ProtocolOpenAI, body, "", false)
 	if err != nil {
 		t.Fatalf("peekIngress: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestPeekIngressOpenAI(t *testing.T) {
 
 func TestPeekIngressOpenAINoStreamUsageOptIn(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
-	meta, err := peekIngress(protocols.ProtocolOpenAI, body)
+	meta, err := peekIngress(protocols.ProtocolOpenAI, body, "", false)
 	if err != nil {
 		t.Fatalf("peekIngress: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestPeekIngressOpenAINoStreamUsageOptIn(t *testing.T) {
 
 func TestPeekIngressOpenAIValidateEmptyMessages(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","messages":[]}`)
-	meta, err := peekIngress(protocols.ProtocolOpenAI, body)
+	meta, err := peekIngress(protocols.ProtocolOpenAI, body, "", false)
 	if err != nil {
 		t.Fatalf("peekIngress: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestPeekIngressOpenAIValidateEmptyMessages(t *testing.T) {
 
 func TestPeekIngressOpenAIValidateNonFunctionTool(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"retrieval"}]}`)
-	meta, err := peekIngress(protocols.ProtocolOpenAI, body)
+	meta, err := peekIngress(protocols.ProtocolOpenAI, body, "", false)
 	if err != nil {
 		t.Fatalf("peekIngress: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestPeekIngressClaude(t *testing.T) {
 		"messages":[{"role":"user","content":"hi"}],
 		"tools":[{"name":"get_weather"}]
 	}`)
-	meta, err := peekIngress(protocols.ProtocolClaude, body)
+	meta, err := peekIngress(protocols.ProtocolClaude, body, "", false)
 	if err != nil {
 		t.Fatalf("peekIngress: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestPeekIngressClaude(t *testing.T) {
 
 func TestPeekIngressClaudeStreamAlwaysWantsUsage(t *testing.T) {
 	body := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	meta, err := peekIngress(protocols.ProtocolClaude, body)
+	meta, err := peekIngress(protocols.ProtocolClaude, body, "", false)
 	if err != nil {
 		t.Fatalf("peekIngress: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestPeekIngressClaudeStreamAlwaysWantsUsage(t *testing.T) {
 
 func TestPeekIngressClaudeValidateMissingMessages(t *testing.T) {
 	body := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024}`)
-	meta, err := peekIngress(protocols.ProtocolClaude, body)
+	meta, err := peekIngress(protocols.ProtocolClaude, body, "", false)
 	if err != nil {
 		t.Fatalf("peekIngress: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestPeekIngressClaudeValidateMissingMessages(t *testing.T) {
 
 func TestPeekIngressClaudeValidateEmptyMessages(t *testing.T) {
 	body := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"messages":[]}`)
-	meta, err := peekIngress(protocols.ProtocolClaude, body)
+	meta, err := peekIngress(protocols.ProtocolClaude, body, "", false)
 	if err != nil {
 		t.Fatalf("peekIngress: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestPeekIngressClaudeValidateEmptyMessages(t *testing.T) {
 
 func TestPeekIngressClaudeValidateMissingMaxTokens(t *testing.T) {
 	body := []byte(`{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`)
-	meta, err := peekIngress(protocols.ProtocolClaude, body)
+	meta, err := peekIngress(protocols.ProtocolClaude, body, "", false)
 	if err != nil {
 		t.Fatalf("peekIngress: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestPeekIngressClaudeValidateNonPositiveMaxTokens(t *testing.T) {
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
-			meta, err := peekIngress(protocols.ProtocolClaude, []byte(body))
+			meta, err := peekIngress(protocols.ProtocolClaude, []byte(body), "", false)
 			if err != nil {
 				t.Fatalf("peekIngress: %v", err)
 			}
@@ -239,5 +239,230 @@ func TestValidateIngressBodyOpenAIValid(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
 	if err := validateIngressBody(protocols.ProtocolOpenAI, body, "placeholder", false); err != nil {
 		t.Errorf("validateIngressBody() = %v, want nil", err)
+	}
+}
+
+func TestParseGeminiPathGenerateContent(t *testing.T) {
+	model, stream, ok := parseGeminiPath("/v1beta/models/gemini-2.0-flash:generateContent")
+	if !ok {
+		t.Fatalf("parseGeminiPath() ok = false, want true")
+	}
+	if model != "gemini-2.0-flash" {
+		t.Errorf("model = %q, want %q", model, "gemini-2.0-flash")
+	}
+	if stream {
+		t.Errorf("stream = true, want false")
+	}
+}
+
+func TestParseGeminiPathStreamGenerateContent(t *testing.T) {
+	model, stream, ok := parseGeminiPath("/v1beta/models/gemini-1.5-pro:streamGenerateContent")
+	if !ok {
+		t.Fatalf("parseGeminiPath() ok = false, want true")
+	}
+	if model != "gemini-1.5-pro" {
+		t.Errorf("model = %q, want %q", model, "gemini-1.5-pro")
+	}
+	if !stream {
+		t.Errorf("stream = false, want true")
+	}
+}
+
+// Note: there used to be a TestParseGeminiPathPercentEncodedModel here that
+// fed parseGeminiPath a "%2F"-encoded string directly and asserted it
+// URL-decoded to "/". That was misleading as coverage: parseGeminiPath is
+// only ever called with c.Request.URL.Path (relay.go), and net/http already
+// percent-decodes "%2F" into a literal "/" before gin ever routes the
+// request -- so a real caller sending that path never reaches
+// parseGeminiPath with an encoded model at all; see
+// TestGeminiRouteWithSlashInModelSegmentDoesNotRoute
+// (internal/router/router_test.go) for what real HTTP routing actually does
+// with a slash-containing model segment, and parseGeminiPath's doc comment
+// above for the routing-layer explanation.
+
+func TestParseGeminiPathNoColonIsInvalid(t *testing.T) {
+	if _, _, ok := parseGeminiPath("/v1beta/models/gemini-2.0-flash"); ok {
+		t.Errorf("parseGeminiPath() ok = true, want false for a path with no action")
+	}
+}
+
+func TestParseGeminiPathUnknownActionIsInvalid(t *testing.T) {
+	if _, _, ok := parseGeminiPath("/v1beta/models/gemini-2.0-flash:countTokens"); ok {
+		t.Errorf("parseGeminiPath() ok = true, want false for an unrecognized action")
+	}
+}
+
+func TestParseGeminiPathEmptyModelIsInvalid(t *testing.T) {
+	if _, _, ok := parseGeminiPath("/v1beta/models/:generateContent"); ok {
+		t.Errorf("parseGeminiPath() ok = true, want false for an empty model")
+	}
+}
+
+func TestParseGeminiPathWrongPrefixIsInvalid(t *testing.T) {
+	if _, _, ok := parseGeminiPath("/v1/models/gemini-2.0-flash:generateContent"); ok {
+		t.Errorf("parseGeminiPath() ok = true, want false for a path missing the /v1beta/models/ prefix")
+	}
+}
+
+// --- peekGeminiIngress ---
+
+func TestPeekIngressGemini(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+		"tools":[{"functionDeclarations":[{"name":"get_weather"}]}]
+	}`)
+	meta, err := peekIngress(protocols.ProtocolGemini, body, "gemini-2.0-flash", true)
+	if err != nil {
+		t.Fatalf("peekIngress: %v", err)
+	}
+	if meta.Model != "gemini-2.0-flash" {
+		t.Errorf("Model = %q, want %q (from pathModel, not the body)", meta.Model, "gemini-2.0-flash")
+	}
+	if !meta.Stream {
+		t.Errorf("Stream = false, want true (from pathStream, not the body)")
+	}
+	if !meta.WantsStreamUsage {
+		t.Errorf("WantsStreamUsage = false, want true (Gemini usageMetadata is unconditional)")
+	}
+	if !meta.HasTools {
+		t.Errorf("HasTools = false, want true")
+	}
+	if err := meta.validate(); err != nil {
+		t.Errorf("validate() = %v, want nil", err)
+	}
+}
+
+func TestPeekIngressGeminiNoTools(t *testing.T) {
+	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	meta, err := peekIngress(protocols.ProtocolGemini, body, "gemini-2.0-flash", false)
+	if err != nil {
+		t.Fatalf("peekIngress: %v", err)
+	}
+	if meta.Stream {
+		t.Errorf("Stream = true, want false (from pathStream)")
+	}
+	if meta.HasTools {
+		t.Errorf("HasTools = true, want false (no tools in body)")
+	}
+}
+
+func TestPeekIngressGeminiValidateEmptyContents(t *testing.T) {
+	body := []byte(`{"contents":[]}`)
+	meta, err := peekIngress(protocols.ProtocolGemini, body, "gemini-2.0-flash", false)
+	if err != nil {
+		t.Fatalf("peekIngress: %v", err)
+	}
+	if err := meta.validate(); err == nil {
+		t.Errorf("validate() = nil, want error for an empty contents array")
+	}
+}
+
+func TestPeekIngressGeminiValidateMissingContents(t *testing.T) {
+	body := []byte(`{}`)
+	meta, err := peekIngress(protocols.ProtocolGemini, body, "gemini-2.0-flash", false)
+	if err != nil {
+		t.Fatalf("peekIngress: %v", err)
+	}
+	if err := meta.validate(); err == nil {
+		t.Errorf("validate() = nil, want error for a missing contents field")
+	}
+}
+
+func TestPeekIngressGeminiContentsNotArray(t *testing.T) {
+	body := []byte(`{"contents":"nope"}`)
+	if _, err := peekIngress(protocols.ProtocolGemini, body, "gemini-2.0-flash", false); err == nil {
+		t.Errorf("peekIngress() = nil error, want error for contents not being an array")
+	}
+}
+
+func TestPeekIngressGeminiMalformedJSON(t *testing.T) {
+	if _, err := peekIngress(protocols.ProtocolGemini, []byte(`{`), "gemini-2.0-flash", false); err == nil {
+		t.Errorf("peekIngress() = nil error, want error for malformed JSON")
+	}
+}
+
+func TestPeekIngressGeminiToolsNotArray(t *testing.T) {
+	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tools":"nope"}`)
+	if _, err := peekIngress(protocols.ProtocolGemini, body, "gemini-2.0-flash", false); err == nil {
+		t.Errorf("peekIngress() = nil error, want error for tools not being an array")
+	}
+}
+
+// --- peekResponsesIngress ---
+
+func TestPeekIngressResponses(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-4o",
+		"stream":true,
+		"input":"hello",
+		"tools":[{"type":"function","name":"get_weather"}]
+	}`)
+	meta, err := peekIngress(protocols.ProtocolResponses, body, "", false)
+	if err != nil {
+		t.Fatalf("peekIngress: %v", err)
+	}
+	if meta.Model != "gpt-4o" {
+		t.Errorf("Model = %q, want %q (from the body, not pathModel)", meta.Model, "gpt-4o")
+	}
+	if !meta.Stream {
+		t.Errorf("Stream = false, want true (from the body, not pathStream)")
+	}
+	if !meta.WantsStreamUsage {
+		t.Errorf("WantsStreamUsage = false, want true (Responses response.completed usage is unconditional)")
+	}
+	if !meta.HasTools {
+		t.Errorf("HasTools = false, want true")
+	}
+	if err := meta.validate(); err != nil {
+		t.Errorf("validate() = %v, want nil", err)
+	}
+}
+
+func TestPeekIngressResponsesNoTools(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","input":"hello"}`)
+	meta, err := peekIngress(protocols.ProtocolResponses, body, "", false)
+	if err != nil {
+		t.Fatalf("peekIngress: %v", err)
+	}
+	if meta.Stream {
+		t.Errorf("Stream = true, want false (absent from body defaults to false)")
+	}
+	if meta.HasTools {
+		t.Errorf("HasTools = true, want false (no tools in body)")
+	}
+}
+
+func TestPeekIngressResponsesValidateMissingInput(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o"}`)
+	meta, err := peekIngress(protocols.ProtocolResponses, body, "", false)
+	if err != nil {
+		t.Fatalf("peekIngress: %v", err)
+	}
+	if err := meta.validate(); err == nil {
+		t.Errorf("validate() = nil, want error for a missing input field")
+	}
+}
+
+func TestPeekIngressResponsesValidateNullInput(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","input":null}`)
+	meta, err := peekIngress(protocols.ProtocolResponses, body, "", false)
+	if err != nil {
+		t.Fatalf("peekIngress: %v", err)
+	}
+	if err := meta.validate(); err == nil {
+		t.Errorf("validate() = nil, want error for a null input field")
+	}
+}
+
+func TestPeekIngressResponsesMalformedJSON(t *testing.T) {
+	if _, err := peekIngress(protocols.ProtocolResponses, []byte(`{`), "", false); err == nil {
+		t.Errorf("peekIngress() = nil error, want error for malformed JSON")
+	}
+}
+
+func TestPeekIngressResponsesToolsNotArray(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","input":"hi","tools":"nope"}`)
+	if _, err := peekIngress(protocols.ProtocolResponses, body, "", false); err == nil {
+		t.Errorf("peekIngress() = nil error, want error for tools not being an array")
 	}
 }

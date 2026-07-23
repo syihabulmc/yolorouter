@@ -218,7 +218,7 @@ func TestLocalIngressErrorBody_MatchesSentBody(t *testing.T) {
 		c, w := newIngressTestContext(t, "/v1/messages")
 		WriteIngressError(c, protocols.ProtocolClaude, http.StatusBadRequest, errTypeInvalidRequest, "bad body", "req_1")
 
-		got := LocalIngressErrorBody(protocols.ProtocolClaude, errTypeInvalidRequest, "bad body", "req_1")
+		got := LocalIngressErrorBody(protocols.ProtocolClaude, http.StatusBadRequest, errTypeInvalidRequest, "bad body", "req_1")
 		if string(got) != w.Body.String() {
 			t.Errorf("LocalIngressErrorBody = %s, want it to equal sent body %s", got, w.Body.String())
 		}
@@ -231,7 +231,7 @@ func TestLocalIngressErrorBody_MatchesSentBody(t *testing.T) {
 		// WriteIngressError appends the request id into the message for the
 		// OpenAI ingress, so the audit body must be built with that same
 		// message to match — LocalErrorBody does not append it itself.
-		got := LocalIngressErrorBody(protocols.ProtocolOpenAI, errTypeInvalidRequest, "bad body (request: req_2)", "req_2")
+		got := LocalIngressErrorBody(protocols.ProtocolOpenAI, http.StatusBadRequest, errTypeInvalidRequest, "bad body (request: req_2)", "req_2")
 		if string(got) != w.Body.String() {
 			t.Errorf("LocalIngressErrorBody = %s, want it to equal sent body %s", got, w.Body.String())
 		}
@@ -247,5 +247,174 @@ func TestLocalClaudeErrorBody_Shape(t *testing.T) {
 	got := LocalClaudeErrorBody("overloaded_error", "overloaded", "req_3")
 	if string(got) != w.Body.String() {
 		t.Errorf("LocalClaudeErrorBody = %s, want it to equal sent body %s", got, w.Body.String())
+	}
+}
+
+// TestGeminiErrorStatus covers every HTTP status geminiErrorStatus has an
+// explicit mapping for, plus the generic 4xx/5xx fallbacks, per the Google
+// canonical-status table (see the function's own doc comment).
+func TestGeminiErrorStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"bad_request", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"unauthorized", http.StatusUnauthorized, "UNAUTHENTICATED"},
+		{"forbidden", http.StatusForbidden, "PERMISSION_DENIED"},
+		{"not_found", http.StatusNotFound, "NOT_FOUND"},
+		{"too_many_requests", http.StatusTooManyRequests, "RESOURCE_EXHAUSTED"},
+		{"internal_server_error", http.StatusInternalServerError, "INTERNAL"},
+		{"service_unavailable", http.StatusServiceUnavailable, "UNAVAILABLE"},
+		{"gateway_timeout", http.StatusGatewayTimeout, "DEADLINE_EXCEEDED"},
+		{"other_4xx", http.StatusConflict, "INVALID_ARGUMENT"},
+		{"other_5xx", http.StatusBadGateway, "INTERNAL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := geminiErrorStatus(tt.status); got != tt.want {
+				t.Errorf("geminiErrorStatus(%d) = %q, want %q", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWriteGeminiError_Envelope confirms WriteGeminiError writes the Google
+// API error shape: a single nested "error" object carrying code/message/
+// status, with no top-level request_id field (unlike Anthropic's envelope)
+// and the request id only on the X-Request-Id header.
+func TestWriteGeminiError_Envelope(t *testing.T) {
+	c, w := newIngressTestContext(t, "/v1beta/models/gemini-2.0-flash:generateContent")
+
+	WriteGeminiError(c, http.StatusTooManyRequests, "too many requests", "req_gemini")
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusTooManyRequests)
+	}
+	if got := w.Header().Get("X-Request-Id"); got != "req_gemini" {
+		t.Errorf("X-Request-Id header = %q, want %q", got, "req_gemini")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body did not unmarshal: %v (body=%s)", err, w.Body.String())
+	}
+	if _, hasTopLevelRequestID := body["request_id"]; hasTopLevelRequestID {
+		t.Errorf("body has a top-level request_id field, want none: %v", body)
+	}
+	errObj, ok := body["error"].(map[string]any)
+	if !ok {
+		t.Fatalf(`"error" field is not an object: %v`, body["error"])
+	}
+	if code, _ := errObj["code"].(float64); int(code) != http.StatusTooManyRequests {
+		t.Errorf("error.code = %v, want %d", errObj["code"], http.StatusTooManyRequests)
+	}
+	if errObj["message"] != "too many requests" {
+		t.Errorf("error.message = %v, want %q", errObj["message"], "too many requests")
+	}
+	if errObj["status"] != "RESOURCE_EXHAUSTED" {
+		t.Errorf("error.status = %v, want RESOURCE_EXHAUSTED", errObj["status"])
+	}
+	// The request id must NOT leak into the message (it only ever travels on
+	// the header for Gemini).
+	if strings.Contains(errObj["message"].(string), "req_gemini") {
+		t.Errorf("error.message = %v, must not contain the request id", errObj["message"])
+	}
+}
+
+// TestWriteIngressError_Gemini is the Gemini counterpart of
+// TestWriteIngressError_Claude/_OpenAI: confirms WriteIngressError routes a
+// /v1beta native Gemini path to the Gemini envelope across the status codes
+// the task calls out (401/400/404/429/502), with the right canonical status
+// string and the code field mirroring the HTTP status.
+func TestWriteIngressError_Gemini(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		wantStatus string
+	}{
+		{"unauthorized", http.StatusUnauthorized, "UNAUTHENTICATED"},
+		{"bad_request", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"not_found", http.StatusNotFound, "NOT_FOUND"},
+		{"too_many_requests", http.StatusTooManyRequests, "RESOURCE_EXHAUSTED"},
+		{"bad_gateway", http.StatusBadGateway, "INTERNAL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, w := newIngressTestContext(t, "/v1beta/models/gemini-2.0-flash:generateContent")
+			WriteIngressError(c, protocols.ProtocolGemini, tt.status, errTypeInvalidRequest, "upstream failed", "req_"+tt.name)
+
+			if w.Code != tt.status {
+				t.Fatalf("status = %d, want %d", w.Code, tt.status)
+			}
+			if got := w.Header().Get("X-Request-Id"); got != "req_"+tt.name {
+				t.Errorf("X-Request-Id header = %q, want %q", got, "req_"+tt.name)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("body did not unmarshal: %v (body=%s)", err, w.Body.String())
+			}
+			errObj, ok := body["error"].(map[string]any)
+			if !ok {
+				t.Fatalf(`"error" field is not an object: %v`, body["error"])
+			}
+			if code, _ := errObj["code"].(float64); int(code) != tt.status {
+				t.Errorf("error.code = %v, want %d", errObj["code"], tt.status)
+			}
+			if errObj["status"] != tt.wantStatus {
+				t.Errorf("error.status = %v, want %q", errObj["status"], tt.wantStatus)
+			}
+			if errObj["message"] != "upstream failed" {
+				t.Errorf("error.message = %v, want unchanged message %q", errObj["message"], "upstream failed")
+			}
+		})
+	}
+}
+
+// TestLocalIngressErrorBody_GeminiMatchesSentBody is the Gemini counterpart
+// of TestLocalIngressErrorBody_MatchesSentBody: LocalIngressErrorBody must
+// byte-for-byte equal what WriteIngressError actually put on the wire for the
+// Gemini ingress.
+func TestLocalIngressErrorBody_GeminiMatchesSentBody(t *testing.T) {
+	c, w := newIngressTestContext(t, "/v1beta/models/gemini-2.0-flash:generateContent")
+	WriteIngressError(c, protocols.ProtocolGemini, http.StatusNotFound, errTypeNotFound, "model does not exist", "req_gemini_4")
+
+	got := LocalIngressErrorBody(protocols.ProtocolGemini, http.StatusNotFound, errTypeNotFound, "model does not exist", "req_gemini_4")
+	if string(got) != w.Body.String() {
+		t.Errorf("LocalIngressErrorBody = %s, want it to equal sent body %s", got, w.Body.String())
+	}
+}
+
+// TestWriteIngressError_Responses confirms the Responses ingress reuses the
+// OpenAI-compatible error envelope verbatim (no Responses-specific writer):
+// the Responses API's non-stream error shape is the same
+// {"error":{message,type}} nested object OpenAI Chat uses, so
+// WriteIngressError's default branch already produces the correct wire body
+// — this test pins that reuse as intentional, not an oversight.
+func TestWriteIngressError_Responses(t *testing.T) {
+	c, w := newIngressTestContext(t, "/v1/responses")
+
+	WriteIngressError(c, protocols.ProtocolResponses, http.StatusBadRequest, errTypeInvalidRequest, "invalid input", "req_responses")
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body did not unmarshal: %v", err)
+	}
+	if _, hasTopLevelType := body["type"]; hasTopLevelType {
+		t.Errorf("body has an OpenAI-illegal top-level %q field: %v", "type", body)
+	}
+	errObj, ok := body["error"].(map[string]any)
+	if !ok {
+		t.Fatalf(`"error" field is not an object: %v`, body["error"])
+	}
+	if errObj["type"] != errTypeInvalidRequest {
+		t.Errorf("error.type = %v, want %q", errObj["type"], errTypeInvalidRequest)
+	}
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "invalid input") || !strings.Contains(msg, "req_responses") {
+		t.Errorf("error.message = %q, want it to contain both the message and the request id", msg)
 	}
 }

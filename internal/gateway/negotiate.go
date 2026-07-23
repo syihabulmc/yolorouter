@@ -3,21 +3,40 @@ package gateway
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
+// geminiIngressPathPrefix is the fixed prefix of a native Gemini ingress
+// path; the remainder is the {model}:{action} segment parseGeminiPath
+// splits apart. Shared with ingress.go's parseGeminiPath so the prefix the
+// two functions match against can't drift apart.
+const geminiIngressPathPrefix = "/v1beta/models/"
+
 // IngressProtocol maps the client-facing request path to the wire protocol
 // the caller is speaking. Structured as a switch so later versions can add
 // more ingress routes without reshaping the call sites; everything unmapped
 // falls back to ProtocolOpenAI.
+//
+// Gemini's native path is parameterized by model
+// (/v1beta/models/{model}:generateContent or :streamGenerateContent), so it
+// can't be matched by an exact-string switch case like the other ingress
+// routes -- it's checked separately, before the switch, by prefix + one of
+// the two recognized action suffixes.
 func IngressProtocol(requestPath string) protocols.ProtocolID {
+	if strings.HasPrefix(requestPath, geminiIngressPathPrefix) &&
+		(strings.HasSuffix(requestPath, ":generateContent") || strings.HasSuffix(requestPath, ":streamGenerateContent")) {
+		return protocols.ProtocolGemini
+	}
 	switch requestPath {
 	case "/v1/messages":
 		return protocols.ProtocolClaude
 	case "/v1/chat/completions":
 		return protocols.ProtocolOpenAI
+	case "/v1/responses":
+		return protocols.ProtocolResponses
 	default:
 		return protocols.ProtocolOpenAI
 	}

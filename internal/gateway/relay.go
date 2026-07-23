@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/logger"
@@ -236,6 +237,27 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// request_log_bodies row, verbatim (v0.1 does not scrub body content).
 	rc.RequestBody = body
 
+	// Gemini carries neither model nor stream in the body -- both are
+	// encoded in the URL path
+	// (/v1beta/models/{model}:generateContent|:streamGenerateContent) -- so
+	// they must be pulled out here and threaded into peekIngress instead of
+	// being read off the body like every other ingress protocol. A path
+	// parseGeminiPath rejects (missing prefix, no recognized action, empty
+	// model) is a structurally invalid request; reject it as a 400 the same
+	// way an unparseable body is rejected just below, before the body is
+	// even peeked.
+	var pathModel string
+	var pathStream bool
+	if ingress == protocols.ProtocolGemini {
+		gm, gs, ok := parseGeminiPath(c.Request.URL.Path)
+		if !ok {
+			WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request path", rc.RequestID)
+			s.finalize(rc, http.StatusBadRequest, "invalid_gemini_path", start)
+			return
+		}
+		pathModel, pathStream = gm, gs
+	}
+
 	// One lightweight per-ingress peek of the caller body — meta.Model/Stream
 	// for routing, meta.validate() for the top-level structural checks each
 	// protocol's decoder is lenient about, meta.HasTools for the capability
@@ -243,7 +265,10 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// untouched, which rewrites the model field (passthrough) or does the
 	// full IR decode/encode (cross-protocol). The full protocol-specific
 	// structural decode runs later, once, via validateIngressBody below.
-	meta, err := peekIngress(ingress, body)
+	// pathModel/pathStream are only consumed by the Gemini branch (see
+	// peekIngress); every other ingress protocol reads model/stream from the
+	// body itself and ignores these two parameters.
+	meta, err := peekIngress(ingress, body, pathModel, pathStream)
 	if err != nil {
 		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body", rc.RequestID)
 		s.finalize(rc, http.StatusBadRequest, "parse: "+err.Error(), start)

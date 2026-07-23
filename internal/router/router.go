@@ -307,31 +307,68 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 		DBDriver:  db.Dialector.Name(), //nolint:staticcheck // QF1008 false-positive — gorm.DB exposes the driver name only via Dialector.Name(); there is no db.Name()
 	}, versionSvc))
 
-	// Gateway: POST /v1/chat/completions (OpenAI-compatible) and
-	// POST /v1/messages (Anthropic-compatible) — the second auth path.
-	// The caller presents an API key in Authorization: Bearer or
+	// Gateway: POST /v1/chat/completions (OpenAI-compatible),
+	// POST /v1/messages (Anthropic-compatible), POST /v1/responses
+	// (OpenAI Responses-compatible), and POST /v1beta/models/{model}:{action}
+	// (native Gemini generateContent/streamGenerateContent) — the second
+	// auth path. The caller presents an API key in Authorization: Bearer or
 	// X-Api-Key, not a session cookie. The 20MiB body cap is the gateway
 	// limit, larger than the admin JSON API's 1MiB to leave room for long
-	// histories and tool definitions. Both routes share this same group, so
-	// they inherit the same body-size limit, auth, and bodies-dir stash;
+	// histories and tool definitions. Gemini's native path lives outside
+	// /v1, so it's mounted on a sibling /v1beta group via gatewayGroup below
+	// rather than bare on r, which would otherwise skip auth, the body-size
+	// cap, and the bodies-dir stash. All four routes share the same
+	// middleware chain (body-size limit, auth, bodies-dir stash);
 	// gateway.PostChatCompletions/RelayService.Handle dispatch by request
 	// path (gateway.IngressProtocol) to pick the caller's actual wire
 	// protocol.
 	relaySvc := gateway.NewRelayService(db, providerMasterKey, allowPrivateUpstreams)
-	v1 := r.Group("/v1", middleware.BodySizeLimit(20<<20), middleware.APIKeyAuth(db))
+
+	v1 := gatewayGroup(r, "/v1", bodiesDir, db)
+	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))
+	v1.POST("/messages", gateway.PostChatCompletions(relaySvc))
+	v1.POST("/responses", gateway.PostChatCompletions(relaySvc))
+
+	v1beta := gatewayGroup(r, "/v1beta", bodiesDir, db)
+	// :modelaction captures the whole "{model}:{action}" path segment (a
+	// gin path parameter matches everything up to the next "/", colon
+	// included); gateway.parseGeminiPath does the actual model/action split
+	// once a request reaches the handler.
+	//
+	// This single-segment param means a model name containing a "/" (a
+	// tuned model's "tunedModels/xyz" resource name, percent-encoded as
+	// "tunedModels%2Fxyz" in the URL) is unsupported: net/http decodes
+	// "%2F" to a literal "/" in URL.Path before gin ever sees it, at which
+	// point :modelaction no longer matches the (now two-segment) path at
+	// all -- the request 404s here, never reaching parseGeminiPath.
+	// Standard (non-tuned) Gemini model names never contain a slash, so
+	// this is not a practical gap for this version; see
+	// gateway.parseGeminiPath's doc comment and
+	// TestGeminiRouteWithSlashInModelSegmentDoesNotRoute (router_test.go)
+	// for the full explanation and a routing-layer regression test.
+	v1beta.POST("/models/:modelaction", gateway.PostChatCompletions(relaySvc))
+
+	return r, nil
+}
+
+// gatewayGroup mounts a caller-facing gateway ingress group at relativePath
+// with the middleware chain every gateway route needs: the 20MiB body cap
+// (see the comment above this function's call sites), API-key auth (not the
+// admin session cookie), and the bodies-dir stash. Factored out so the two
+// gateway namespaces (/v1 and /v1beta) can't drift onto different
+// middleware chains as more ingress routes are added.
+func gatewayGroup(r *gin.Engine, relativePath, bodiesDir string, db *gorm.DB) *gin.RouterGroup {
+	g := r.Group(relativePath, middleware.BodySizeLimit(20<<20), middleware.APIKeyAuth(db))
 	// Stash the absolute bodies dir on the request context so the
 	// gateway package (which cannot import app config without a cycle) can
 	// resolve where to append its stream capture file via
 	// gateway.BodiesDirContextKey — see internal/gateway/stream.go's
 	// streamBodiesDir.
-	v1.Use(func(c *gin.Context) {
+	g.Use(func(c *gin.Context) {
 		c.Set(gateway.BodiesDirContextKey, bodiesDir)
 		c.Next()
 	})
-	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))
-	v1.POST("/messages", gateway.PostChatCompletions(relaySvc))
-
-	return r, nil
+	return g
 }
 
 // isStaticAssetNamespace reports whether path falls under the embedded

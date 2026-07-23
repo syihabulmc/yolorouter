@@ -810,3 +810,185 @@ func extractModelFromJSON(t *testing.T, body []byte) string {
 	}
 	return p.Model
 }
+
+// TestGeminiIngressResolvesModelFromPath drives Handle with a native Gemini
+// generateContent request against an openai-type provider (forcing the
+// cross-protocol IR round trip: gemini.RequestDecoder -> IR ->
+// chat.RequestEncoder, since the provider only supports openai on the
+// wire). It pins the structural change this task adds: the external model
+// name and the stream flag come from the URL path
+// (/v1beta/models/{model}:generateContent), NOT the request body -- the
+// gemini body here carries neither field.
+func TestGeminiIngressResolvesModelFromPath(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+
+	var sawUpstreamModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sawUpstreamModel = extractModelFromJSON(t, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"hi there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	svc := newRelaySvc(t, db)
+	p := createProvider(t, db, "openai-provider", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	// The body deliberately carries neither "model" nor "stream" -- Gemini's
+	// wire format has no such top-level fields; both must come from the URL.
+	reqBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	c, w := newCtxPath("/v1beta/models/gemini-2.0-flash:generateContent", reqBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if sawUpstreamModel != "gpt-4o-real" {
+		t.Errorf("upstream body model = %q, want the provider model name %q (external model %q resolved via the URL path)", sawUpstreamModel, "gpt-4o-real", "gemini-2.0-flash")
+	}
+}
+
+// TestGeminiIngressStreamActionSetsStreamFromPath covers the
+// :streamGenerateContent action -- the stream flag, like the model name,
+// must come from the URL suffix, not from any body field.
+func TestGeminiIngressStreamActionSetsStreamFromPath(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		write := func(s string) {
+			_, _ = w.Write([]byte(s))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		write(`data: {"id":"chatcmpl-2","model":"gpt-4o-real","choices":[{"delta":{"role":"assistant","content":"hi"}}]}` + "\n\n")
+		write(`data: {"id":"chatcmpl-2","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n")
+		write("data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	svc := newRelaySvc(t, db)
+	p := createProvider(t, db, "openai-provider", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	reqBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	c, w := newCtxPath("/v1beta/models/gemini-2.0-flash:streamGenerateContent", reqBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	if !captured.IsStream {
+		t.Errorf("rc.IsStream = false, want true (from the :streamGenerateContent path suffix)")
+	}
+}
+
+// TestGeminiIngressMalformedPathRejected covers an ingress path that
+// IngressProtocol still routes to Gemini (the prefix + suffix match) but
+// parseGeminiPath rejects for a different reason -- an empty model segment.
+// Handle must return a 400 before ever peeking the body or touching a
+// candidate, mirroring how a malformed body is rejected.
+func TestGeminiIngressMalformedPathRejected(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstreamHit := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+	}))
+	defer upstream.Close()
+
+	svc := newRelaySvc(t, db)
+	p := createProvider(t, db, "openai-provider", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	reqBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	c, w := newCtxPath("/v1beta/models/:generateContent", reqBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+	if upstreamHit {
+		t.Error("upstream must not be called for a malformed Gemini ingress path")
+	}
+}
+
+// TestResponsesIngressResolvesModelAndStreamFromBody covers the Responses
+// ingress path against an openai-type provider (forcing the cross-protocol
+// IR round trip). Unlike Gemini, Responses carries model and stream in the
+// body itself, same as OpenAI Chat and Claude.
+func TestResponsesIngressResolvesModelAndStreamFromBody(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+
+	var sawUpstreamModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sawUpstreamModel = extractModelFromJSON(t, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-3","model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"hi there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	svc := newRelaySvc(t, db)
+	p := createProvider(t, db, "openai-provider", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "responses-model", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	reqBody := []byte(`{"model":"responses-model","input":"hi"}`)
+	c, w := newCtxPath("/v1/responses", reqBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if sawUpstreamModel != "gpt-4o-real" {
+		t.Errorf("upstream body model = %q, want the provider model name %q (external model %q resolved from the body)", sawUpstreamModel, "gpt-4o-real", "responses-model")
+	}
+}
+
+// TestResponsesIngressMissingInputRejected covers the responses-specific
+// top-level invariant peekResponsesIngress/validate() enforce that the
+// responses.RequestDecoder itself is lenient about: a missing "input" field
+// must be rejected as a 400 before any candidate is picked.
+func TestResponsesIngressMissingInputRejected(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstreamHit := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+	}))
+	defer upstream.Close()
+
+	svc := newRelaySvc(t, db)
+	p := createProvider(t, db, "openai-provider", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "responses-model", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	reqBody := []byte(`{"model":"responses-model"}`)
+	c, w := newCtxPath("/v1/responses", reqBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+	if upstreamHit {
+		t.Error("upstream must not be called for a responses request missing input")
+	}
+}

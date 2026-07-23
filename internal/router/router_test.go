@@ -367,6 +367,121 @@ func TestMessagesRouteReachesGatewayWithValidKey(t *testing.T) {
 	assertClaudeEnvelope(t, w.Body.Bytes())
 }
 
+// TestResponsesRouteReachesGatewayWithValidKey proves POST /v1/responses is
+// registered on the same protected /v1 group as /v1/chat/completions and
+// /v1/messages (inherits BodySizeLimit + APIKeyAuth + the bodies-dir
+// stash) and actually dispatches into the gateway handler for a caller with
+// a valid key. The Responses ingress body decode itself isn't wired up yet
+// (that's a later task) -- peekIngress falls back to the OpenAI parse for
+// any non-Claude ingress, so an empty JSON body fails its
+// non-empty-messages check -- but that failure is itself proof the request
+// reached RelayService.Handle rather than being rejected at auth or routing
+// (401/404/405).
+func TestResponsesRouteReachesGatewayWithValidKey(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedAPIKey(t, db, "sk-yr-responses-route")
+	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("X-Api-Key", "sk-yr-responses-route")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusNotFound || w.Code == http.StatusMethodNotAllowed {
+		t.Fatalf("expected the request to reach the gateway handler (not rejected at auth/routing), got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestGeminiGenerateContentRouteReachesGatewayWithValidKey is the Gemini
+// counterpart of TestMessagesRouteReachesGatewayWithValidKey: it proves
+// POST /v1beta/models/{model}:generateContent is registered on a sibling
+// group carrying the identical middleware chain as /v1 (not mounted bare on
+// the engine, which would skip auth/body-limit/bodies-dir), and that gin's
+// ":modelaction" parameter correctly matches a path segment containing a
+// colon. No provider/model is configured in this test, and the Gemini
+// ingress now resolves its external model name from the URL path itself
+// (not the body -- see parseGeminiPath/peekGeminiIngress), so the request
+// reaches RelayService.Handle, resolves the model name from the path, and
+// gets a legitimate gateway-generated 404 "model does not exist" for that
+// unconfigured model -- not a routing failure (401/405), which is what this
+// test asserts.
+func TestGeminiGenerateContentRouteReachesGatewayWithValidKey(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedAPIKey(t, db, "sk-yr-gemini-route")
+	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.0-flash:generateContent", bytes.NewReader([]byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)))
+	req.Header.Set("X-Api-Key", "sk-yr-gemini-route")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusMethodNotAllowed {
+		t.Fatalf("expected the request to reach the gateway handler (not rejected at auth/routing), got %d, body: %s", w.Code, w.Body.String())
+	}
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 model-not-found from the gateway (no model configured), got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestGeminiRouteWithoutAPIKeyIsUnauthorized guards the security property
+// the sibling /v1beta group exists for: /v1beta must carry the same
+// APIKeyAuth chain as /v1, not be mounted bare on the engine (which would
+// skip auth entirely).
+func TestGeminiRouteWithoutAPIKeyIsUnauthorized(t *testing.T) {
+	r := newTestRouter(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.0-flash:generateContent", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for an unauthenticated gemini request, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestGeminiRouteWithSlashInModelSegmentDoesNotRoute documents (and locks
+// in) an actual limitation of the /v1beta/models/:modelaction route: a model
+// segment containing a percent-encoded slash, like a tuned model's
+// "tunedModels/xyz" resource name, does NOT reach the gateway handler
+// through real HTTP routing, unlike gateway.parseGeminiPath's own unit tests
+// might suggest (parseGeminiPath happily URL-decodes a "%2F" it is handed
+// directly). The reason is upstream of parseGeminiPath entirely: net/http
+// decodes "%2F" into a literal "/" in req.URL.Path before gin ever sees the
+// request (verified directly against httptest.NewRequest — RawPath keeps the
+// original encoding, but gin's default router matches against the decoded
+// Path, not RawPath, since UseRawPath is never enabled here), so the
+// registered ":modelaction" param — which gin's tree matches against a
+// single "/"-delimited path segment — never matches the resulting two-segment
+// path at all. The request 404s at the routing layer, never reaching
+// parseGeminiPath. See parseGeminiPath's doc comment for the same note from
+// the decode side.
+func TestGeminiRouteWithSlashInModelSegmentDoesNotRoute(t *testing.T) {
+	r := newTestRouter(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/tunedModels%2Fmy-model:generateContent", bytes.NewReader([]byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// No API key is set on purpose: if this ever DID route through to the
+	// gateway handler, it would 401 (unauthenticated) rather than 404. What
+	// this test pins is the routing layer itself never matching the path at
+	// all -- both a plain SPA-fallback 404 and a 401 would be suspicious
+	// here, but a 401 in particular would mean the route silently started
+	// matching a slashed segment, which is the one thing this test exists to
+	// catch.
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 (route does not match a slash-containing model segment), got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
 // TestMessagesWrongMethodReturnsClaudeEnvelope drives the NoMethod path for
 // /v1/messages specifically: since /v1/messages is only registered for POST,
 // a GET must 405 with the Anthropic-native envelope, not the OpenAI shape
@@ -381,6 +496,40 @@ func TestMessagesWrongMethodReturnsClaudeEnvelope(t *testing.T) {
 		t.Fatalf("expected 405, got %d", w.Code)
 	}
 	assertClaudeEnvelope(t, w.Body.Bytes())
+}
+
+// TestGeminiWrongMethodReturnsGeminiEnvelope is
+// TestMessagesWrongMethodReturnsClaudeEnvelope's Gemini counterpart: since
+// /v1beta/models/:modelaction is only registered for POST, a GET must 405
+// with the Gemini-native envelope (nested code/message/status, no top-level
+// request_id) — proving IsGatewayNamespace's /v1beta admission plus
+// WriteNamespacedError's Gemini branch are wired all the way through the
+// real router, not just at the middleware-unit level.
+func TestGeminiWrongMethodReturnsGeminiEnvelope(t *testing.T) {
+	r := newTestRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1beta/models/gemini-2.0-flash:generateContent", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d, body: %s", w.Code, w.Body.String())
+	}
+	assertGeminiEnvelope(t, w.Body.Bytes())
+}
+
+// TestUnknownV1BetaPathReturns404 guards the NoRoute path specifically (not
+// NoMethod): an unmatched /v1beta/* path must still be dispatched through
+// the gateway namespace (not fall through to the SPA/admin 404), proving
+// IsGatewayNamespace's /v1beta admission covers NoRoute too.
+func TestUnknownV1BetaPathReturns404(t *testing.T) {
+	r := newTestRouter(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1beta/does-not-exist", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d, body: %s", w.Code, w.Body.String())
+	}
 }
 
 // TestChatCompletionsWrongMethodReturnsOpenAIEnvelope is
@@ -514,5 +663,33 @@ func assertClaudeEnvelope(t *testing.T, body []byte) {
 	}
 	if env.Error.Type == "" || env.Error.Message == "" {
 		t.Fatalf("expected non-empty error.type and error.message, body: %s", body)
+	}
+}
+
+// assertGeminiEnvelope checks the Gemini-native error shape: a single nested
+// "error" object carrying code/message/status, with no top-level request_id
+// field (unlike assertClaudeEnvelope) — the shape /v1beta callers expect.
+func assertGeminiEnvelope(t *testing.T, body []byte) {
+	t.Helper()
+	var env struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Status  string `json:"status"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("expected Gemini-style error envelope JSON, got unparseable body %s: %v", body, err)
+	}
+	if env.Error.Code == 0 {
+		t.Fatalf("expected non-zero error.code, body: %s", body)
+	}
+	if env.Error.Message == "" || env.Error.Status == "" {
+		t.Fatalf("expected non-empty error.message and error.status, body: %s", body)
+	}
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(body, &raw)
+	if _, ok := raw["request_id"]; ok {
+		t.Fatalf("must not leak a top-level request_id field, got: %s", body)
 	}
 }

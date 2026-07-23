@@ -75,31 +75,37 @@ func IsAdminNamespace(path string) bool {
 	return path == "/api" || strings.HasPrefix(path, "/api/")
 }
 
-// IsGatewayNamespace reports whether path falls under the /v1/* gateway
-// namespace (OpenAI-compatible surface).
+// IsGatewayNamespace reports whether path falls under a gateway ingress
+// namespace: /v1/* (OpenAI-compatible, Claude, and Responses surfaces) or
+// /v1beta/* (the native Gemini surface, which lives outside /v1 — see
+// gateway.geminiIngressPathPrefix/router.go's sibling /v1beta route group).
 func IsGatewayNamespace(path string) bool {
-	return path == "/v1" || strings.HasPrefix(path, "/v1/")
+	return path == "/v1" || strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/v1beta/")
 }
 
 // WriteNamespacedError dispatches a route-level error (404/405/500) to the
-// error shape its namespace owns: /api* gets pkg/response's admin envelope,
-// /v1* gets the wire envelope its ingress protocol expects — the
-// OpenAI-compatible shape for every /v1/* path except /v1/messages, which
-// gets the Anthropic-native envelope instead (gateway.WriteIngressError). The
-// OpenAI branch is untouched by that split — same shape, same content, byte
-// for byte — since every existing /v1/* caller besides /v1/messages still
-// expects it. This is the single place NoRoute, NoMethod, and Recovery all
-// dispatch through, so a future panic under /v1/* doesn't leak an envelope
-// the caller's SDK can't parse.
+// error shape its namespace owns: /api* gets pkg/response's admin envelope;
+// /v1*|/v1beta* gets the wire envelope its ingress protocol expects — the
+// Anthropic-native envelope for /v1/messages and the Gemini-native envelope
+// for /v1beta's native Gemini paths (both via gateway.WriteIngressError), and
+// the OpenAI-compatible shape for every other /v1/* path (including
+// /v1/responses, which reuses that same shape — see WriteIngressError's own
+// doc comment). The OpenAI branch is untouched by that split — same shape,
+// same content, byte for byte — since every existing /v1/* caller besides
+// /v1/messages and /v1beta's Gemini paths still expects it. This is the
+// single place NoRoute, NoMethod, and Recovery all dispatch through, so a
+// future panic under /v1*|/v1beta* doesn't leak an envelope the caller's SDK
+// can't parse.
 func WriteNamespacedError(c *gin.Context, path string, httpStatus int, adminCode int) {
 	if !IsGatewayNamespace(path) {
 		WriteAdminError(c, httpStatus, adminCode)
 		return
 	}
 	status, errType, message, openAICode := gatewayErrorFor(adminCode, httpStatus)
-	if gateway.IngressProtocol(path) == protocols.ProtocolClaude {
+	ingress := gateway.IngressProtocol(path)
+	if ingress == protocols.ProtocolClaude || ingress == protocols.ProtocolGemini {
 		requestID := c.GetString(RequestIDKey)
-		gateway.WriteIngressError(c, protocols.ProtocolClaude, status, errType, message, requestID)
+		gateway.WriteIngressError(c, ingress, status, errType, message, requestID)
 		return
 	}
 	WriteGatewayError(c, status, errType, openAICode, message)

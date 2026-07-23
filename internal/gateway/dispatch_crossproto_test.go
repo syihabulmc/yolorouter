@@ -39,6 +39,46 @@ func createAnthropicProvider(t *testing.T, db *gorm.DB, name, baseURL string) *m
 	return p
 }
 
+// createGeminiProvider is createAnthropicProvider's Gemini counterpart:
+// provider_type="gemini" maps (negotiate.go's primaryProtocol) to
+// protocols.ProtocolGemini, so a request against this provider from a native
+// Gemini ingress caller (/v1beta/...) is same-protocol passthrough — no IR
+// round trip — exercising passthroughStreamToClientDecoded's Gemini branch
+// and, on a mid-stream upstream failure, writeStreamErrorEvent's Gemini
+// branch.
+func createGeminiProvider(t *testing.T, db *gorm.DB, name, baseURL string) *model.Provider {
+	t.Helper()
+	now := time.Now().UTC()
+	p := &model.Provider{
+		Name: name, ProviderType: "gemini", BaseURL: baseURL,
+		ManagementStatus: model.ProviderStatusEnabled, DestinationVersion: 1,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(p).Error; err != nil {
+		t.Fatalf("seed gemini provider: %v", err)
+	}
+	return p
+}
+
+// createResponsesProvider is createGeminiProvider's Responses counterpart:
+// provider_type="responses" maps (negotiate.go's primaryProtocol) to
+// protocols.ProtocolResponses, so a request against this provider from a
+// native Responses ingress caller (/v1/responses) is same-protocol
+// passthrough — no IR round trip.
+func createResponsesProvider(t *testing.T, db *gorm.DB, name, baseURL string) *model.Provider {
+	t.Helper()
+	now := time.Now().UTC()
+	p := &model.Provider{
+		Name: name, ProviderType: "responses", BaseURL: baseURL,
+		ManagementStatus: model.ProviderStatusEnabled, DestinationVersion: 1,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(p).Error; err != nil {
+		t.Fatalf("seed responses provider: %v", err)
+	}
+	return p
+}
+
 // TestCrossProtocolOpenAIToAnthropicNonStream drives the first
 // production-shaped exercise of the cross-protocol IR path: an OpenAI Chat
 // Completions request against a provider_type="anthropic" provider. It

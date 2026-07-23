@@ -21,6 +21,45 @@ func TestIngressProtocol_UnknownPathFallsBackToOpenAI(t *testing.T) {
 	}
 }
 
+func TestIngressProtocol_Responses(t *testing.T) {
+	got := IngressProtocol("/v1/responses")
+	if got != protocols.ProtocolResponses {
+		t.Fatalf("IngressProtocol(/v1/responses) = %v, want %v", got, protocols.ProtocolResponses)
+	}
+}
+
+func TestIngressProtocol_Messages(t *testing.T) {
+	got := IngressProtocol("/v1/messages")
+	if got != protocols.ProtocolClaude {
+		t.Fatalf("IngressProtocol(/v1/messages) = %v, want %v", got, protocols.ProtocolClaude)
+	}
+}
+
+func TestIngressProtocol_GeminiGenerateContent(t *testing.T) {
+	got := IngressProtocol("/v1beta/models/gemini-2.0-flash:generateContent")
+	if got != protocols.ProtocolGemini {
+		t.Fatalf("IngressProtocol(gemini generateContent) = %v, want %v", got, protocols.ProtocolGemini)
+	}
+}
+
+func TestIngressProtocol_GeminiStreamGenerateContent(t *testing.T) {
+	got := IngressProtocol("/v1beta/models/gemini-1.5-pro:streamGenerateContent")
+	if got != protocols.ProtocolGemini {
+		t.Fatalf("IngressProtocol(gemini streamGenerateContent) = %v, want %v", got, protocols.ProtocolGemini)
+	}
+}
+
+// TestIngressProtocol_GeminiPrefixWithoutRecognizedActionFallsBackToOpenAI
+// guards that the Gemini match requires one of the two known action
+// suffixes -- an unrelated action under the same /v1beta/models/ prefix
+// must not be misclassified as Gemini.
+func TestIngressProtocol_GeminiPrefixWithoutRecognizedActionFallsBackToOpenAI(t *testing.T) {
+	got := IngressProtocol("/v1beta/models/gemini-2.0-flash:countTokens")
+	if got != protocols.ProtocolOpenAI {
+		t.Fatalf("IngressProtocol(gemini unrecognized action) = %v, want %v", got, protocols.ProtocolOpenAI)
+	}
+}
+
 func TestNegotiate_OpenAIIngressOnOpenAIProvider_Passthrough(t *testing.T) {
 	p := &model.Provider{ProviderType: "openai", BaseURL: "https://api.openai.com"}
 

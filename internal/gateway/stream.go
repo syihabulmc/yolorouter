@@ -214,15 +214,29 @@ func usageFromRawMap(m map[string]json.RawMessage) *Usage {
 // error event and close). The caller has already verified the response is
 // mid-stream.
 //
-// The wire shape is protocol-aware: a Claude ingress caller (/v1/messages)
-// expects the Anthropic streaming error shape (event: error + a
-// {"type":"error",...} envelope) and has no [DONE] terminator convention at
-// all, while every other ingress keeps the OpenAI shape this function has
-// always produced (a bare `data: {"error":...}` frame followed by
-// `data: [DONE]` so OpenAI SDKs blocked on [DONE] to finalize their
-// completion unblock promptly instead of hanging until their own read
-// timeout). Sending the OpenAI [DONE] convention to a Claude client would be
-// a protocol violation the Anthropic SDK does not expect mid-stream.
+// The wire shape is protocol-aware:
+//   - Claude (/v1/messages): the Anthropic streaming error shape (event:
+//     error + a {"type":"error",...} envelope), no [DONE] terminator
+//     convention at all.
+//   - Gemini (/v1beta/...): a bare `data: {"error":{code,message,status}}`
+//     frame — Gemini's streamGenerateContent SSE has no [DONE] terminator
+//     convention either (see gemini.StreamEncoder.EncodeDeltas/EncodeDone,
+//     which only ever emit plain data frames), so none is appended.
+//   - Responses (/v1/responses): a bare `data: {"type":"error",...}` frame —
+//     the Responses SSE stream is framed as typed response.* events
+//     (response.created/.../response.completed/response.failed), never
+//     OpenAI Chat's chat.completion.chunk + `data: [DONE]` (see
+//     responses.StreamDecoder, which recognizes "[DONE]" only as a tolerated
+//     no-op, not the completion signal), so no [DONE] is appended here
+//     either.
+//   - Every other ingress (OpenAI Chat) keeps the shape this function has
+//     always produced: a bare `data: {"error":...}` frame followed by
+//     `data: [DONE]` so OpenAI SDKs blocked on [DONE] to finalize their
+//     completion unblock promptly instead of hanging until their own read
+//     timeout.
+//
+// Sending the OpenAI [DONE] convention to a Claude, Gemini, or Responses
+// client would be a protocol violation none of those SDKs expect mid-stream.
 //
 // rc's stream capture file is still open at this point (the passthrough
 // stream pump deliberately leaves it open past its own return, see
@@ -232,11 +246,16 @@ func usageFromRawMap(m map[string]json.RawMessage) *Usage {
 // closes the file once this function returns.
 func writeStreamErrorEvent(c *gin.Context, rc *RelayContext) {
 	msg := streamErrorMessage(rc.RequestID)
-	if rc.Ingress == protocols.ProtocolClaude {
+	switch rc.Ingress {
+	case protocols.ProtocolClaude:
 		writeClaudeStreamErrorEvent(c, rc, msg)
-		return
+	case protocols.ProtocolGemini:
+		writeGeminiStreamErrorEvent(c, rc, msg)
+	case protocols.ProtocolResponses:
+		writeResponsesStreamErrorEvent(c, rc, msg)
+	default:
+		writeOpenAIStreamErrorEvent(c, rc, msg)
 	}
-	writeOpenAIStreamErrorEvent(c, rc, msg)
 }
 
 // streamErrorMessage builds the generic mid-stream failure message shared by
@@ -280,6 +299,40 @@ func writeClaudeStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
 		Data:  fmt.Sprintf(`{"type":"error","error":{"type":"api_error","message":%q}}`, msg),
 	}
 	writeAndCaptureSSE(c, rc, []byte(evt.String()))
+	if flusher, ok := c.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// writeGeminiStreamErrorEvent writes the Gemini-shaped mid-stream error: a
+// bare `data: {"error":{code,message,status}}` frame, with no [DONE]
+// terminator (Gemini's SSE framing has no such convention at all — see this
+// function's doc comment on writeStreamErrorEvent). The nested error uses
+// http.StatusInternalServerError as its representative status: by this point
+// the response's real HTTP status is already committed as 200 (headers went
+// out with the first upstream chunk), so there is no meaningful per-request
+// status left to report — 500/INTERNAL is the same "opaque upstream failure"
+// choice writeClaudeStreamErrorEvent makes with its fixed api_error type.
+func writeGeminiStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
+	const midStreamStatus = http.StatusInternalServerError
+	evt := fmt.Sprintf(`data: {"error":{"code":%d,"message":%q,"status":%q}}`+"\n\n",
+		midStreamStatus, msg, geminiErrorStatus(midStreamStatus))
+	writeAndCaptureSSE(c, rc, []byte(evt))
+	if flusher, ok := c.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// writeResponsesStreamErrorEvent writes the Responses-shaped mid-stream
+// error: a bare `data: {"type":"error",...}` frame matching the top-level
+// error event shape responses.StreamDecoder itself recognizes on the decode
+// side (see its "case \"error\":" branch), with no [DONE] terminator — the
+// Responses SSE stream is framed as typed response.* events, never OpenAI
+// Chat's [DONE] sentinel (see this function's doc comment on
+// writeStreamErrorEvent).
+func writeResponsesStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
+	evt := fmt.Sprintf(`data: {"type":"error","message":%q,"code":null,"param":null}`+"\n\n", msg)
+	writeAndCaptureSSE(c, rc, []byte(evt))
 	if flusher, ok := c.Writer.(http.Flusher); ok {
 		flusher.Flush()
 	}

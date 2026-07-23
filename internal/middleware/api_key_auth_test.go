@@ -3,8 +3,10 @@ package middleware
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -293,6 +295,182 @@ func TestAPIKeyAuth_MissingKey_IngressAwareEnvelope(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// geminiIngressPath is a native Gemini generateContent path, matching
+// gateway.IngressProtocol's prefix+suffix rule so these tests exercise the
+// Gemini ingress branch of resolveAPIKey.
+const geminiIngressPath = "/v1beta/models/gemini-1.5-pro:generateContent"
+
+// TestAPIKeyAuth_GeminiGoogHeader confirms the Google GenAI SDK's
+// x-goog-api-key header authenticates a caller on the Gemini ingress.
+func TestAPIKeyAuth_GeminiGoogHeader(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedAPIKey(t, db, "sk-yr-goog-header")
+	r := newAuthRouter(db, geminiIngressPath)
+
+	req := httptest.NewRequest(http.MethodPost, geminiIngressPath, nil)
+	req.Header.Set("x-goog-api-key", "sk-yr-goog-header")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (authenticated); body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAPIKeyAuth_GeminiQueryKey confirms the ?key= query parameter
+// authenticates a caller on the Gemini ingress.
+func TestAPIKeyAuth_GeminiQueryKey(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedAPIKey(t, db, "sk-yr-goog-query")
+	r := newAuthRouter(db, geminiIngressPath)
+
+	req := httptest.NewRequest(http.MethodPost, geminiIngressPath+"?key=sk-yr-goog-query", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (authenticated); body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAPIKeyAuth_GeminiGoogHeaderAndQuery_SameValue confirms both Gemini
+// sources present with the SAME value is accepted, not treated as a
+// conflict.
+func TestAPIKeyAuth_GeminiGoogHeaderAndQuery_SameValue(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedAPIKey(t, db, "sk-yr-goog-both-same")
+	r := newAuthRouter(db, geminiIngressPath)
+
+	req := httptest.NewRequest(http.MethodPost, geminiIngressPath+"?key=sk-yr-goog-both-same", nil)
+	req.Header.Set("x-goog-api-key", "sk-yr-goog-both-same")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for identical sources; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAPIKeyAuth_GeminiGoogHeaderAndQuery_Conflict confirms x-goog-api-key
+// and ?key= carrying DIFFERENT values is rejected as a conflict.
+func TestAPIKeyAuth_GeminiGoogHeaderAndQuery_Conflict(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedAPIKey(t, db, "sk-yr-goog-a")
+	seedAPIKey(t, db, "sk-yr-goog-b")
+	r := newAuthRouter(db, geminiIngressPath)
+
+	req := httptest.NewRequest(http.MethodPost, geminiIngressPath+"?key=sk-yr-goog-b", nil)
+	req.Header.Set("x-goog-api-key", "sk-yr-goog-a")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for conflicting Gemini sources; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAPIKeyAuth_GeminiGoogHeaderConflictsWithBearer confirms x-goog-api-key
+// disagreeing with Authorization: Bearer is rejected as a conflict too —
+// the conflict rule applies across all applicable sources, not just the
+// two Gemini-specific ones.
+func TestAPIKeyAuth_GeminiGoogHeaderConflictsWithBearer(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedAPIKey(t, db, "sk-yr-bearer-side")
+	seedAPIKey(t, db, "sk-yr-goog-side")
+	r := newAuthRouter(db, geminiIngressPath)
+
+	req := httptest.NewRequest(http.MethodPost, geminiIngressPath, nil)
+	req.Header.Set("Authorization", "Bearer sk-yr-bearer-side")
+	req.Header.Set("x-goog-api-key", "sk-yr-goog-side")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for x-goog-api-key vs Bearer conflict; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAPIKeyAuth_GeminiMissingAllSources confirms the Gemini ingress still
+// rejects a request that carries none of the four applicable sources.
+func TestAPIKeyAuth_GeminiMissingAllSources(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	r := newAuthRouter(db, geminiIngressPath)
+
+	req := httptest.NewRequest(http.MethodPost, geminiIngressPath, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for a keyless Gemini request; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAPIKeyAuth_QueryKeyRejectedOffGeminiIngress confirms the ?key= query
+// parameter is NOT accepted as a credential source on a non-Gemini
+// ingress — an OpenAI caller must not be able to authenticate via a query
+// parameter just because the Gemini ingress happens to allow one.
+func TestAPIKeyAuth_QueryKeyRejectedOffGeminiIngress(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedAPIKey(t, db, "sk-yr-openai-query-attempt")
+	r := newAuthRouter(db, "/v1/chat/completions")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?key=sk-yr-openai-query-attempt", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: ?key= must not authenticate the OpenAI ingress; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAPIKeyAuth_GeminiAuthRejection_QueryKeyNeverPersisted is the
+// audit-leak guard: a Gemini request carrying ?key=<secret> must never have
+// that secret land in the request_logs / request_log_bodies audit trail.
+// logAuthRejection is the middleware's own persistence path (it runs
+// whenever auth rejects, independent of gateway.Handle's finalize), and
+// gateway.IngressProtocol plus every persistence site here key off
+// c.Request.URL.Path only (never .RawQuery/.String()/.RequestURI) — so no
+// query string, and therefore no key value, is ever stored. This test locks
+// that in against regression.
+func TestAPIKeyAuth_GeminiAuthRejection_QueryKeyNeverPersisted(t *testing.T) {
+	const secret = "sk-yr-rejected-must-not-leak"
+	db := testutil.NewSQLiteDB(t)
+	r := newAuthRouter(db, geminiIngressPath)
+
+	// No matching APIKey row seeded, so this is rejected as "invalid API key"
+	// — the rejection path (logAuthRejection) still must not persist the
+	// query-string secret anywhere.
+	req := httptest.NewRequest(http.MethodPost, geminiIngressPath+"?key="+secret, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", w.Code, w.Body.String())
+	}
+	requestID := w.Header().Get("X-Request-Id")
+
+	var auditRow model.RequestLog
+	if err := db.Where("request_id = ?", requestID).First(&auditRow).Error; err != nil {
+		t.Fatalf("expected a request_logs audit row: %v", err)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", auditRow), secret) {
+		t.Errorf("request_logs row contains the query-string secret: %+v", auditRow)
+	}
+
+	bodyRow, err := repository.GetRequestLogBodyByRequestID(db, requestID)
+	if err != nil {
+		t.Fatalf("GetRequestLogBodyByRequestID: %v", err)
+	}
+	if bodyRow == nil {
+		t.Fatal("expected a request_log_bodies row for the auth rejection")
+	}
+	if strings.Contains(bodyRow.RequestHeaders, secret) ||
+		strings.Contains(bodyRow.RequestBody, secret) ||
+		strings.Contains(bodyRow.ResponseBody, secret) {
+		t.Errorf("request_log_bodies row contains the query-string secret: %+v", bodyRow)
 	}
 }
 
