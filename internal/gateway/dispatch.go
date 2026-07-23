@@ -418,24 +418,7 @@ func passthroughRewriteNonStreamResponse(egressProtocol protocols.ProtocolID, bo
 // is forwarded unchanged rather than gaining a field the wire shape never
 // has.
 func rewriteGeminiResponseModelVersion(body []byte, externalModel string) ([]byte, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, fmt.Errorf("parse gemini response object: %w", err)
-	}
-	if m == nil {
-		// body was literal "null" -- forward unchanged rather than crash the
-		// request, mirroring rewriteModelField's identical guard.
-		return body, nil
-	}
-	if _, present := m["modelVersion"]; !present {
-		return body, nil
-	}
-	modelJSON, err := json.Marshal(externalModel)
-	if err != nil {
-		return nil, err
-	}
-	m["modelVersion"] = modelJSON
-	return json.Marshal(m)
+	return rewriteJSONStringField(body, "modelVersion", externalModel, true)
 }
 
 // dispatchPassthroughNonStream writes a 2xx non-stream same-protocol upstream
@@ -784,6 +767,37 @@ func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *RelayCon
 // pre-first-byte failover, 499 vs. stream_no_done, ...) applies unchanged to
 // both pumps without any caller-side branching beyond picking which pump to
 // run.
+// rewriteSSEDataLineJSON applies mutate to the JSON object carried by a
+// "data: {...}" SSE line. Returns the rewritten line and true only if it was a
+// data line whose payload parsed and mutate reported a change; otherwise
+// returns the original line and false. Preserves the trailing newline bytes.
+func rewriteSSEDataLineJSON(line []byte, mutate func(obj map[string]json.RawMessage) bool) ([]byte, bool) {
+	const prefix = "data: "
+	if !bytes.HasPrefix(line, []byte(prefix)) {
+		return line, false
+	}
+	payload := line[len(prefix):]
+	trimmed := bytes.TrimRight(payload, "\r\n")
+	trailing := payload[len(trimmed):]
+
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return line, false
+	}
+	if !mutate(envelope) {
+		return line, false
+	}
+	newEnvelopeJSON, err := json.Marshal(envelope)
+	if err != nil {
+		return line, false
+	}
+	newLine := make([]byte, 0, len(prefix)+len(newEnvelopeJSON)+len(trailing))
+	newLine = append(newLine, prefix...)
+	newLine = append(newLine, newEnvelopeJSON...)
+	newLine = append(newLine, trailing...)
+	return newLine, true
+}
+
 // rewriteClaudeMessageStartModel rewrites the model field nested in a Claude
 // message_start SSE data line to the external model name, so a passthrough
 // Claude stream never leaks the provider's internal model name. Any line that
@@ -797,49 +811,31 @@ func rewriteClaudeMessageStartModel(line []byte, externalModel string) ([]byte, 
 	if !bytes.Contains(line, []byte("message_start")) {
 		return line, false
 	}
-	const prefix = "data: "
-	if !bytes.HasPrefix(line, []byte(prefix)) {
-		return line, false
-	}
-	payload := line[len(prefix):]
-	trimmed := bytes.TrimRight(payload, "\r\n")
-	trailing := payload[len(trimmed):]
-
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &envelope); err != nil {
-		return line, false
-	}
-	var typ string
-	if err := json.Unmarshal(envelope["type"], &typ); err != nil || typ != "message_start" {
-		return line, false
-	}
-	msgRaw, ok := envelope["message"]
-	if !ok {
-		return line, false
-	}
-	var message map[string]json.RawMessage
-	if err := json.Unmarshal(msgRaw, &message); err != nil {
-		return line, false
-	}
-	modelJSON, err := json.Marshal(externalModel)
-	if err != nil {
-		return line, false
-	}
-	message["model"] = modelJSON
-	newMsgJSON, err := json.Marshal(message)
-	if err != nil {
-		return line, false
-	}
-	envelope["message"] = newMsgJSON
-	newEnvelopeJSON, err := json.Marshal(envelope)
-	if err != nil {
-		return line, false
-	}
-	newLine := make([]byte, 0, len(prefix)+len(newEnvelopeJSON)+len(trailing))
-	newLine = append(newLine, prefix...)
-	newLine = append(newLine, newEnvelopeJSON...)
-	newLine = append(newLine, trailing...)
-	return newLine, true
+	return rewriteSSEDataLineJSON(line, func(envelope map[string]json.RawMessage) bool {
+		var typ string
+		if err := json.Unmarshal(envelope["type"], &typ); err != nil || typ != "message_start" {
+			return false
+		}
+		msgRaw, ok := envelope["message"]
+		if !ok {
+			return false
+		}
+		var message map[string]json.RawMessage
+		if err := json.Unmarshal(msgRaw, &message); err != nil {
+			return false
+		}
+		modelJSON, err := json.Marshal(externalModel)
+		if err != nil {
+			return false
+		}
+		message["model"] = modelJSON
+		newMsgJSON, err := json.Marshal(message)
+		if err != nil {
+			return false
+		}
+		envelope["message"] = newMsgJSON
+		return true
+	})
 }
 
 // rewriteGeminiStreamModelVersion rewrites a Gemini stream chunk's top-level
@@ -855,35 +851,17 @@ func rewriteGeminiStreamModelVersion(line []byte, externalModel string) ([]byte,
 	if !bytes.Contains(line, []byte("modelVersion")) {
 		return line, false
 	}
-	const prefix = "data: "
-	if !bytes.HasPrefix(line, []byte(prefix)) {
-		return line, false
-	}
-	payload := line[len(prefix):]
-	trimmed := bytes.TrimRight(payload, "\r\n")
-	trailing := payload[len(trimmed):]
-
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &envelope); err != nil {
-		return line, false
-	}
-	if _, present := envelope["modelVersion"]; !present {
-		return line, false
-	}
-	modelJSON, err := json.Marshal(externalModel)
-	if err != nil {
-		return line, false
-	}
-	envelope["modelVersion"] = modelJSON
-	newEnvelopeJSON, err := json.Marshal(envelope)
-	if err != nil {
-		return line, false
-	}
-	newLine := make([]byte, 0, len(prefix)+len(newEnvelopeJSON)+len(trailing))
-	newLine = append(newLine, prefix...)
-	newLine = append(newLine, newEnvelopeJSON...)
-	newLine = append(newLine, trailing...)
-	return newLine, true
+	return rewriteSSEDataLineJSON(line, func(envelope map[string]json.RawMessage) bool {
+		if _, present := envelope["modelVersion"]; !present {
+			return false
+		}
+		modelJSON, err := json.Marshal(externalModel)
+		if err != nil {
+			return false
+		}
+		envelope["modelVersion"] = modelJSON
+		return true
+	})
 }
 
 // rewriteResponsesStreamModel rewrites the nested "response.model" field
@@ -903,48 +881,30 @@ func rewriteResponsesStreamModel(line []byte, externalModel string) ([]byte, boo
 	if !bytes.Contains(line, []byte(`"response"`)) || !bytes.Contains(line, []byte(`"model"`)) {
 		return line, false
 	}
-	const prefix = "data: "
-	if !bytes.HasPrefix(line, []byte(prefix)) {
-		return line, false
-	}
-	payload := line[len(prefix):]
-	trimmed := bytes.TrimRight(payload, "\r\n")
-	trailing := payload[len(trimmed):]
-
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &envelope); err != nil {
-		return line, false
-	}
-	respRaw, ok := envelope["response"]
-	if !ok {
-		return line, false
-	}
-	var respObj map[string]json.RawMessage
-	if err := json.Unmarshal(respRaw, &respObj); err != nil {
-		return line, false
-	}
-	if _, present := respObj["model"]; !present {
-		return line, false
-	}
-	modelJSON, err := json.Marshal(externalModel)
-	if err != nil {
-		return line, false
-	}
-	respObj["model"] = modelJSON
-	newRespJSON, err := json.Marshal(respObj)
-	if err != nil {
-		return line, false
-	}
-	envelope["response"] = newRespJSON
-	newEnvelopeJSON, err := json.Marshal(envelope)
-	if err != nil {
-		return line, false
-	}
-	newLine := make([]byte, 0, len(prefix)+len(newEnvelopeJSON)+len(trailing))
-	newLine = append(newLine, prefix...)
-	newLine = append(newLine, newEnvelopeJSON...)
-	newLine = append(newLine, trailing...)
-	return newLine, true
+	return rewriteSSEDataLineJSON(line, func(envelope map[string]json.RawMessage) bool {
+		respRaw, ok := envelope["response"]
+		if !ok {
+			return false
+		}
+		var respObj map[string]json.RawMessage
+		if err := json.Unmarshal(respRaw, &respObj); err != nil {
+			return false
+		}
+		if _, present := respObj["model"]; !present {
+			return false
+		}
+		modelJSON, err := json.Marshal(externalModel)
+		if err != nil {
+			return false
+		}
+		respObj["model"] = modelJSON
+		newRespJSON, err := json.Marshal(respObj)
+		if err != nil {
+			return false
+		}
+		envelope["response"] = newRespJSON
+		return true
+	})
 }
 
 // rewritePassthroughStreamModel rewrites the model name embedded in one

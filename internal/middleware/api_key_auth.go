@@ -84,35 +84,41 @@ func APIKeyAuth(db *gorm.DB) gin.HandlerFunc {
 // OpenAI/Claude/Responses caller must not be able to authenticate via a
 // query parameter).
 //
-// All applicable sources are collected and reduced to their distinct
-// non-empty values. More than one distinct value is a conflict — a
-// mismatch almost certainly means the caller sent a stale credential in
-// one of the sources, and silently preferring one would mask that and mint
-// a request whose actually-attributed key is invisible to the caller.
-// Returns ("", true) on a mismatch (conflict); returns ("", false) when no
-// source carries a value (the ordinary missing-key case, handled by the
-// caller).
+// All applicable sources are checked in sequence and reduced to their
+// distinct non-empty values, without allocating a slice or a set. More than
+// one distinct value is a conflict — a mismatch almost certainly means the
+// caller sent a stale credential in one of the sources, and silently
+// preferring one would mask that and mint a request whose actually-attributed
+// key is invisible to the caller. Returns ("", true) on a mismatch
+// (conflict); returns ("", false) when no source carries a value (the
+// ordinary missing-key case, handled by the caller).
 func resolveAPIKey(c *gin.Context, ingress protocols.ProtocolID) (raw string, conflict bool) {
-	candidates := []string{extractBearerKey(c), c.GetHeader("X-Api-Key")}
+	var found string
+	add := func(v string) (isConflict bool) {
+		if v == "" {
+			return false
+		}
+		if found == "" {
+			found = v
+			return false
+		}
+		return v != found
+	}
+	if add(extractBearerKey(c)) {
+		return "", true
+	}
+	if add(c.GetHeader("X-Api-Key")) {
+		return "", true
+	}
 	if ingress == protocols.ProtocolGemini {
-		candidates = append(candidates, c.GetHeader("x-goog-api-key"), c.Query("key"))
-	}
-
-	distinct := make(map[string]struct{}, len(candidates))
-	for _, v := range candidates {
-		if v != "" {
-			distinct[v] = struct{}{}
+		if add(c.GetHeader("x-goog-api-key")) {
+			return "", true
+		}
+		if add(c.Query("key")) {
+			return "", true
 		}
 	}
-	switch len(distinct) {
-	case 0:
-		return "", false
-	case 1:
-		for v := range distinct {
-			return v, false
-		}
-	}
-	return "", true
+	return found, false
 }
 
 // authRejectionBodyCap bounds how much of an UNauthenticated request body the

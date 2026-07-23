@@ -124,28 +124,41 @@ func HasTools(body []byte) bool {
 	return p.hasTools()
 }
 
+// rewriteJSONStringField sets a top-level string field to newValue in a JSON
+// object body. When requirePresent is true, an absent field leaves the body
+// unchanged (never adds it); when false, the field is set even if absent. A
+// body that is literal "null" is returned unchanged.
+func rewriteJSONStringField(body []byte, field, newValue string, requirePresent bool) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, fmt.Errorf("parse json object: %w", err)
+	}
+	if m == nil {
+		// body was literal "null" — json.Unmarshal returns nil error but
+		// leaves m nil, and writing m[field] would panic on a nil map.
+		// Forward unchanged rather than crash the request.
+		return body, nil
+	}
+	if requirePresent {
+		if _, present := m[field]; !present {
+			return body, nil
+		}
+	}
+	valueJSON, err := json.Marshal(newValue)
+	if err != nil {
+		return nil, err
+	}
+	m[field] = valueJSON
+	return json.Marshal(m)
+}
+
 // rewriteModelField parses body as a JSON object, replaces just the "model"
 // field, and re-serializes — every other field is preserved verbatim via
 // json.RawMessage, so unknown/extended OpenAI params pass through untouched.
 // Used for the request (external name -> provider_model_name) and the
 // non-stream response (provider name -> external name).
 func rewriteModelField(body []byte, newModel string) ([]byte, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, fmt.Errorf("parse openai object: %w", err)
-	}
-	if m == nil {
-		// body was literal "null" — json.Unmarshal returns nil error but
-		// leaves m nil, and writing m["model"] would panic on a nil map.
-		// Forward unchanged rather than crash the request.
-		return body, nil
-	}
-	modelJSON, err := json.Marshal(newModel)
-	if err != nil {
-		return nil, err
-	}
-	m["model"] = modelJSON
-	return json.Marshal(m)
+	return rewriteJSONStringField(body, "model", newModel, false)
 }
 
 // RewriteRequestModel swaps the caller's external model name for the

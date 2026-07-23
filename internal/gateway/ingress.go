@@ -11,79 +11,39 @@ import (
 
 // ingressMeta is the gateway's one-pass view of a caller request, extracted
 // by peekIngress before any candidate is chosen: just enough to route
-// (Model, Stream) and to filter/validate (WantsStreamUsage, HasTools). It
-// carries a small amount of unexported per-protocol bookkeeping so validate()
-// can enforce protocol-specific invariants without a second body parse.
+// (Model, Stream) and to filter/validate (WantsStreamUsage, HasTools).
+// validate closes over whatever protocol-specific bookkeeping each peek*
+// function's local parse produced, so the structural invariant check below
+// runs without a second body parse and without a protocol switch here.
 type ingressMeta struct {
 	Model            string
 	Stream           bool
 	WantsStreamUsage bool
 	HasTools         bool
 
-	// protocol records which peek* function built this meta, so validate()
-	// knows which protocol-specific invariants to check without re-deriving
-	// it from which of the fields below happen to be non-zero (several of
-	// them, e.g. claudeMessageCount and geminiContentCount, are legitimately
-	// 0 for a protocol they don't apply to).
-	protocol protocols.ProtocolID
-
-	// openai retains the full parsed OpenAI request so validate() can reuse
+	// validate checks the structural invariants the gateway cares about
+	// before picking a candidate: messages must be non-empty for every
+	// protocol, plus whatever else that protocol's decoder is lenient about
+	// at the top level (for Claude, max_tokens must be present). This is a
+	// lightweight pre-check; the full body structure (message content shape,
+	// tool schema, ...) is checked once by validateIngressBody after a
+	// candidate model is resolved. Each peek* function assigns its own
+	// closure over its local parsed values; OpenAI reuses
 	// parsedRequest.validate() verbatim instead of duplicating its rules.
-	openai *parsedRequest
-
-	// Claude-only bookkeeping: the decoder itself (claude.RequestDecoder) does
-	// not reject an empty messages array, a missing max_tokens, or a
-	// present-but-non-positive max_tokens, so validate() checks these
-	// top-level invariants itself using the fields below. claudeMaxTokens is
-	// the parsed value (nil = the field was absent) so validate() can tell
-	// "absent" apart from "present but <= 0".
-	claudeMessageCount int
-	claudeMaxTokens    *int
-
-	// Gemini-only bookkeeping: gemini.RequestDecoder does not reject an
-	// empty/absent contents array, so validate() checks it itself using the
-	// count peekGeminiIngress recorded from the top-level parse.
-	geminiContentCount int
-
-	// Responses-only bookkeeping: responses.RequestDecoder treats an
-	// empty/absent input as "zero messages" rather than an error, so
-	// validate() checks presence itself using the flag peekResponsesIngress
-	// recorded from the top-level parse.
-	responsesHasInput bool
+	validate func() error
 }
 
-// validate checks the structural invariants the gateway cares about before
-// picking a candidate: messages must be non-empty for every protocol, plus
-// whatever else that protocol's decoder is lenient about at the top level
-// (for Claude, max_tokens must be present). This is a lightweight pre-check;
-// the full body structure (message content shape, tool schema, ...) is
-// checked once by validateIngressBody after a candidate model is resolved.
-func (m *ingressMeta) validate() error {
-	switch m.protocol {
-	case protocols.ProtocolClaude:
-		if m.claudeMessageCount == 0 {
-			return fmt.Errorf("messages must be a non-empty array")
-		}
-		if m.claudeMaxTokens == nil {
-			return fmt.Errorf("max_tokens is required")
-		}
-		if *m.claudeMaxTokens <= 0 {
-			return fmt.Errorf("max_tokens must be a positive integer")
-		}
-		return nil
-	case protocols.ProtocolGemini:
-		if m.geminiContentCount == 0 {
-			return fmt.Errorf("contents must be a non-empty array")
-		}
-		return nil
-	case protocols.ProtocolResponses:
-		if !m.responsesHasInput {
-			return fmt.Errorf("input is required")
-		}
-		return nil
-	default:
-		return m.openai.validate()
+// countJSONArray parses an optional JSON array field, returning its element
+// count (0 for absent or null) or an error if present but not an array.
+func countJSONArray(raw json.RawMessage, fieldName string) (int, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, nil
 	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return 0, fmt.Errorf("%s must be an array: %w", fieldName, err)
+	}
+	return len(arr), nil
 }
 
 // peekIngress extracts routing/filtering metadata from a caller body without
@@ -114,12 +74,11 @@ func peekOpenAIIngress(body []byte) (*ingressMeta, error) {
 		return nil, err
 	}
 	return &ingressMeta{
-		protocol:         protocols.ProtocolOpenAI,
 		Model:            p.Model,
 		Stream:           p.Stream,
 		WantsStreamUsage: p.WantsStreamUsage,
 		HasTools:         p.hasTools(),
-		openai:           p,
+		validate:         p.validate,
 	}, nil
 }
 
@@ -142,33 +101,38 @@ func peekClaudeIngress(body []byte) (*ingressMeta, error) {
 		return nil, fmt.Errorf("parse claude request: %w", err)
 	}
 
-	var messages []json.RawMessage
-	if len(raw.Messages) > 0 && string(raw.Messages) != "null" {
-		if err := json.Unmarshal(raw.Messages, &messages); err != nil {
-			return nil, fmt.Errorf("messages must be an array: %w", err)
-		}
+	msgCount, err := countJSONArray(raw.Messages, "messages")
+	if err != nil {
+		return nil, err
 	}
 
-	hasTools := false
-	if len(raw.Tools) > 0 && string(raw.Tools) != "null" {
-		var tools []json.RawMessage
-		if err := json.Unmarshal(raw.Tools, &tools); err != nil {
-			return nil, fmt.Errorf("tools must be an array: %w", err)
-		}
-		hasTools = len(tools) > 0
+	toolCount, err := countJSONArray(raw.Tools, "tools")
+	if err != nil {
+		return nil, err
 	}
+	hasTools := toolCount > 0
 
+	maxTokens := raw.MaxTokens
 	return &ingressMeta{
-		protocol: protocols.ProtocolClaude,
-		Model:    raw.Model,
-		Stream:   raw.Stream,
+		Model:  raw.Model,
+		Stream: raw.Stream,
 		// Claude streaming always carries usage in message_delta/message_stop;
 		// unlike OpenAI there is no caller opt-in equivalent to
 		// stream_options.include_usage, so this is unconditionally true.
-		WantsStreamUsage:   true,
-		HasTools:           hasTools,
-		claudeMessageCount: len(messages),
-		claudeMaxTokens:    raw.MaxTokens,
+		WantsStreamUsage: true,
+		HasTools:         hasTools,
+		validate: func() error {
+			if msgCount == 0 {
+				return fmt.Errorf("messages must be a non-empty array")
+			}
+			if maxTokens == nil {
+				return fmt.Errorf("max_tokens is required")
+			}
+			if *maxTokens <= 0 {
+				return fmt.Errorf("max_tokens must be a positive integer")
+			}
+			return nil
+		},
 	}, nil
 }
 
@@ -192,35 +156,34 @@ func peekGeminiIngress(body []byte, pathModel string, pathStream bool) (*ingress
 		return nil, fmt.Errorf("parse gemini request: %w", err)
 	}
 
-	var contents []json.RawMessage
-	if len(raw.Contents) > 0 && string(raw.Contents) != "null" {
-		if err := json.Unmarshal(raw.Contents, &contents); err != nil {
-			return nil, fmt.Errorf("contents must be an array: %w", err)
-		}
+	contentCount, err := countJSONArray(raw.Contents, "contents")
+	if err != nil {
+		return nil, err
 	}
 
-	hasTools := false
-	if len(raw.Tools) > 0 && string(raw.Tools) != "null" {
-		var tools []json.RawMessage
-		if err := json.Unmarshal(raw.Tools, &tools); err != nil {
-			return nil, fmt.Errorf("tools must be an array: %w", err)
-		}
-		hasTools = len(tools) > 0
+	toolCount, err := countJSONArray(raw.Tools, "tools")
+	if err != nil {
+		return nil, err
 	}
+	hasTools := toolCount > 0
 
 	return &ingressMeta{
-		protocol: protocols.ProtocolGemini,
-		Model:    pathModel,
-		Stream:   pathStream,
+		Model:  pathModel,
+		Stream: pathStream,
 		// Gemini's usageMetadata is unconditionally attached to the final SSE
 		// chunk of a streamGenerateContent response (and to every
 		// non-streaming response); there is no caller opt-in field on the
 		// wire (unlike OpenAI's stream_options.include_usage) that gates it,
 		// so this is unconditionally true, mirroring gemini.RequestDecoder's
 		// own IRStreamConfig.IncludeUsage:true.
-		WantsStreamUsage:   true,
-		HasTools:           hasTools,
-		geminiContentCount: len(contents),
+		WantsStreamUsage: true,
+		HasTools:         hasTools,
+		validate: func() error {
+			if contentCount == 0 {
+				return fmt.Errorf("contents must be a non-empty array")
+			}
+			return nil
+		},
 	}, nil
 }
 
@@ -243,28 +206,30 @@ func peekResponsesIngress(body []byte) (*ingressMeta, error) {
 		return nil, fmt.Errorf("parse responses request: %w", err)
 	}
 
-	hasTools := false
-	if len(raw.Tools) > 0 && string(raw.Tools) != "null" {
-		var tools []json.RawMessage
-		if err := json.Unmarshal(raw.Tools, &tools); err != nil {
-			return nil, fmt.Errorf("tools must be an array: %w", err)
-		}
-		hasTools = len(tools) > 0
+	toolCount, err := countJSONArray(raw.Tools, "tools")
+	if err != nil {
+		return nil, err
 	}
+	hasTools := toolCount > 0
 
+	hasInput := len(raw.Input) > 0 && string(raw.Input) != "null"
 	return &ingressMeta{
-		protocol: protocols.ProtocolResponses,
-		Model:    raw.Model,
-		Stream:   raw.Stream,
+		Model:  raw.Model,
+		Stream: raw.Stream,
 		// responses.StreamEncoder (internal/protocols/responses/encoder.go)
 		// unconditionally attaches usage to the response.completed event via
 		// its own accumulated e.usage -- there is no caller opt-in request
 		// field (no Responses equivalent of OpenAI Chat's
 		// stream_options.include_usage) gating it, so this is
 		// unconditionally true, same as Claude and Gemini.
-		WantsStreamUsage:  true,
-		HasTools:          hasTools,
-		responsesHasInput: len(raw.Input) > 0 && string(raw.Input) != "null",
+		WantsStreamUsage: true,
+		HasTools:         hasTools,
+		validate: func() error {
+			if !hasInput {
+				return fmt.Errorf("input is required")
+			}
+			return nil
+		},
 	}, nil
 }
 
