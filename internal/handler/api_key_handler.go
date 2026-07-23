@@ -84,10 +84,28 @@ func writeAPIKeyServiceError(c *gin.Context, err error) {
 	}
 }
 
+// validAPIKeyStatusFilters is the allowlist for the ?status= filter: empty
+// (no filter) plus the four display statuses computeAPIKeyDisplayStatus can
+// return. An unknown value is rejected with a 400 rather than silently
+// ignored (which would return the unfiltered list) — mirroring the request-log
+// handler's status-class allowlist.
+var validAPIKeyStatusFilters = map[string]struct{}{
+	"":                             {},
+	service.APIKeyDisplayActive:    {},
+	service.APIKeyDisplayExpired:   {},
+	service.APIKeyDisplayRevoked:   {},
+	service.APIKeyDisplayBudgetHit: {},
+}
+
 func GetAPIKeys(svc *service.APIKeyService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		page, pageSize := parseAPIKeyPagination(c)
-		list, total, err := svc.ListAPIKeys(c.Query("q"), page, pageSize)
+		status := c.Query("status")
+		if _, ok := validAPIKeyStatusFilters[status]; !ok {
+			response.ParamError(c, "status must be one of: active, expired, revoked, budget_exhausted")
+			return
+		}
+		list, total, err := svc.ListAPIKeys(c.Query("q"), c.Query("owner"), status, page, pageSize)
 		if err != nil {
 			writeAPIKeyServiceError(c, err)
 			return

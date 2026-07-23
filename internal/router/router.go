@@ -255,6 +255,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	modelSvc := service.NewModelService(db, providerMasterKey, service.NewHTTPProviderClient(allowPrivateUpstreams))
 	protected.GET("/models", handler.GetModels(modelSvc))
 	protected.POST("/models", handler.PostModel(modelSvc))
+	protected.POST("/models/batch", handler.PostModelsBatch(modelSvc))
 	protected.GET("/models/:id", handler.GetModel(modelSvc))
 	protected.PATCH("/models/:id", handler.PatchModel(modelSvc))
 	protected.PATCH("/models/:id/status", handler.PatchModelStatus(modelSvc))

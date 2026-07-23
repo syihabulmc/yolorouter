@@ -55,6 +55,86 @@ func TestCreateModelRejectsInvalidCharacters(t *testing.T) {
 	}
 }
 
+func TestCreateModelsBatchCreatesValidAndSkipsExistingAndInvalid(t *testing.T) {
+	svc, _, _ := newTestModelService(t)
+	now := time.Now().UTC()
+	if _, err := svc.CreateModel(CreateModelInput{Name: "gpt-5.6"}, now); err != nil {
+		t.Fatalf("seed CreateModel failed: %v", err)
+	}
+
+	// "gpt-5.6" already exists → skip(exists); "bad name!" is invalid →
+	// skip(invalid); the repeated "claude-sonnet-5" is created once, the
+	// second occurrence skips(exists).
+	result, err := svc.CreateModelsBatch(
+		[]string{"gpt-5.6", "claude-sonnet-5", "bad name!", "claude-sonnet-5", "deepseek-v4-flash"},
+		now,
+	)
+	if err != nil {
+		t.Fatalf("CreateModelsBatch failed: %v", err)
+	}
+
+	createdNames := make([]string, 0, len(result.Created))
+	for _, m := range result.Created {
+		createdNames = append(createdNames, m.Name)
+	}
+	wantCreated := []string{"claude-sonnet-5", "deepseek-v4-flash"}
+	if len(createdNames) != len(wantCreated) {
+		t.Fatalf("expected created %v, got %v", wantCreated, createdNames)
+	}
+	for i, name := range wantCreated {
+		if createdNames[i] != name {
+			t.Fatalf("expected created[%d]=%q, got %q", i, name, createdNames[i])
+		}
+	}
+
+	reasons := map[string]string{}
+	for _, s := range result.Skipped {
+		reasons[s.Name] = s.Reason
+	}
+	if reasons["gpt-5.6"] != BatchSkipReasonExists {
+		t.Fatalf("expected gpt-5.6 skipped as exists, got %q", reasons["gpt-5.6"])
+	}
+	if reasons["bad name!"] != BatchSkipReasonInvalid {
+		t.Fatalf("expected 'bad name!' skipped as invalid, got %q", reasons["bad name!"])
+	}
+	if got := len(result.Skipped); got != 3 {
+		t.Fatalf("expected 3 skipped (exists, invalid, in-batch dup), got %d: %+v", got, result.Skipped)
+	}
+}
+
+// A storage failure part-way through the batch must roll back every insert,
+// not leave the models created before the failure committed while the caller
+// sees a total failure.
+func TestCreateModelsBatchRollsBackOnMidBatchFailure(t *testing.T) {
+	svc, db, _ := newTestModelService(t)
+	now := time.Now().UTC()
+
+	// Inject a storage failure when the model named "boom" is inserted, so the
+	// batch fails only after "alpha" has already been inserted in the same
+	// transaction.
+	if err := db.Callback().Create().Before("gorm:create").Register("fail_on_boom", func(tx *gorm.DB) {
+		if m, ok := tx.Statement.Dest.(*model.Model); ok && m.Name == "boom" {
+			_ = tx.AddError(errors.New("injected storage failure"))
+		}
+	}); err != nil {
+		t.Fatalf("register callback: %v", err)
+	}
+
+	if _, err := svc.CreateModelsBatch([]string{"alpha", "boom", "gamma"}, now); err == nil {
+		t.Fatalf("expected an error from the injected mid-batch failure")
+	}
+
+	// The whole batch must have rolled back — "alpha" (inserted before "boom"
+	// failed) must not remain committed.
+	models, err := svc.ListModels()
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("expected no models after rollback, got %d: %+v", len(models), models)
+	}
+}
+
 func TestGetModelDetailReturnsNotFoundForUnknownID(t *testing.T) {
 	svc, _, _ := newTestModelService(t)
 	_, err := svc.GetModelDetail(999999)

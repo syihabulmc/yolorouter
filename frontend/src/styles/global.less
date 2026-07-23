@@ -132,6 +132,49 @@ a {
   padding: var(--space-3) var(--space-4);
 }
 
+// Canonical list-page filter bar, shared by every filterable list (request
+// logs, models, ...) so they read identically. A bordered panel above the
+// data table with a wrapping row of small controls and the search / reset
+// actions pushed to the right. Controls inside should use size="small".
+.filter-panel {
+  padding: var(--space-4);
+  background: var(--color-bg-elevated, var(--color-bg));
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg, 8px);
+}
+
+.filter-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.filter-item {
+  width: 180px;
+}
+
+.filter-item--grow {
+  flex: 1 1 200px;
+  min-width: 200px;
+}
+
+// A comfortable fixed width for a search field — wider than a plain select but
+// deliberately NOT stretching to fill the whole row.
+.filter-item--search {
+  width: 260px;
+}
+
+.filter-item--range {
+  width: 360px;
+}
+
+.filter-actions {
+  display: inline-flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
 .empty-state {
   display: flex;
   min-height: 220px;

@@ -264,6 +264,72 @@ func (s *ModelService) CreateModel(input CreateModelInput, now time.Time) (*Mode
 	return s.GetModelDetail(m.ID)
 }
 
+// Reasons a name is skipped by CreateModelsBatch, surfaced verbatim in the
+// per-item summary so the client can group them ("already exists" vs
+// "invalid name").
+const (
+	BatchSkipReasonExists  = "exists"
+	BatchSkipReasonInvalid = "invalid"
+)
+
+type BatchSkippedModel struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+type BatchCreateModelsResult struct {
+	Created []ModelView         `json:"created"`
+	Skipped []BatchSkippedModel `json:"skipped"`
+}
+
+// CreateModelsBatch creates each requested name best-effort: invalid names and
+// names that already exist are skipped and reported, the rest are created. A
+// name repeated within the batch is created once; later occurrences skip as
+// "exists" (the first insert is visible to the later lookup inside the same
+// transaction).
+//
+// All inserts run in ONE transaction: a genuine storage failure rolls the
+// whole batch back and returns an error, so the caller never ends up with some
+// models silently committed while it sees a total failure (which would make a
+// retry report those committed names as already-existing). Invalid/duplicate
+// names are skips, not errors, so they never abort the transaction.
+func (s *ModelService) CreateModelsBatch(names []string, now time.Time) (*BatchCreateModelsResult, error) {
+	result := &BatchCreateModelsResult{Created: []ModelView{}, Skipped: []BatchSkippedModel{}}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		for _, name := range names {
+			if !isValidModelName(name) {
+				result.Skipped = append(result.Skipped, BatchSkippedModel{Name: name, Reason: BatchSkipReasonInvalid})
+				continue
+			}
+			if _, err := repository.FindModelByName(tx, name); err == nil {
+				result.Skipped = append(result.Skipped, BatchSkippedModel{Name: name, Reason: BatchSkipReasonExists})
+				continue
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			m := &model.Model{Name: name, ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+			if err := repository.CreateModel(tx, m); err != nil {
+				// A unique violation here means a concurrent request claimed
+				// the name between the lookup above and this insert; roll the
+				// batch back and let the caller retry (which then skips it as
+				// existing) rather than poison the transaction with a caught
+				// constraint error.
+				return err
+			}
+			// A brand-new model has no candidates, so its view is built
+			// directly from the inserted row (running status not_configured)
+			// instead of re-reading it — the row isn't visible outside this
+			// still-open transaction anyway.
+			result.Created = append(result.Created, s.toModelView(*m, nil, nil))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 type CreateCandidateInput struct {
 	ProviderID        uint
 	ProviderModelName string

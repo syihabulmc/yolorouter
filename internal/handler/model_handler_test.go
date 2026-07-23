@@ -35,6 +35,7 @@ func newModelTestRouterWithClient(t *testing.T, client service.ProviderClient) (
 	admin := r.Group("/api/admin")
 	admin.GET("/models", GetModels(svc))
 	admin.POST("/models", PostModel(svc))
+	admin.POST("/models/batch", PostModelsBatch(svc))
 	admin.GET("/models/:id", GetModel(svc))
 	admin.PATCH("/models/:id", PatchModel(svc))
 	admin.PATCH("/models/:id/status", PatchModelStatus(svc))
@@ -101,6 +102,44 @@ func TestPostModelRejectsMissingName(t *testing.T) {
 	w, _ := doJSON(t, r, http.MethodPost, "/api/admin/models", map[string]interface{}{}, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPostModelsBatchCreatesAndSkips(t *testing.T) {
+	r, _ := newModelTestRouter(t)
+	createModelForTest(t, r, "gpt-5.6")
+
+	w, env := doJSON(t, r, http.MethodPost, "/api/admin/models/batch", map[string]interface{}{
+		"names": []string{"gpt-5.6", "claude-sonnet-5", "bad name!"},
+	}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Created []modelResponse `json:"created"`
+		Skipped []struct {
+			Name   string `json:"name"`
+			Reason string `json:"reason"`
+		} `json:"skipped"`
+	}
+	if err := json.Unmarshal(env.Data, &body); err != nil {
+		t.Fatalf("unmarshal batch response: %v", err)
+	}
+	if len(body.Created) != 1 || body.Created[0].Name != "claude-sonnet-5" {
+		t.Fatalf("expected 1 created 'claude-sonnet-5', got %+v", body.Created)
+	}
+	if len(body.Skipped) != 2 {
+		t.Fatalf("expected 2 skipped, got %+v", body.Skipped)
+	}
+}
+
+func TestPostModelsBatchRejectsEmptyNames(t *testing.T) {
+	r, _ := newModelTestRouter(t)
+	w, _ := doJSON(t, r, http.MethodPost, "/api/admin/models/batch", map[string]interface{}{
+		"names": []string{},
+	}, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty names, got %d", w.Code)
 	}
 }
 

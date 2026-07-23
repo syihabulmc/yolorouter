@@ -63,6 +63,20 @@ export function createModel(name: string): Promise<Model> {
   return apiFetch('/api/admin/models', { method: 'POST', body: JSON.stringify({ name }) })
 }
 
+export interface BatchSkippedModel {
+  name: string
+  reason: 'exists' | 'invalid'
+}
+
+export interface BatchCreateModelsResult {
+  created: Model[]
+  skipped: BatchSkippedModel[]
+}
+
+export function createModelsBatch(names: string[]): Promise<BatchCreateModelsResult> {
+  return apiFetch('/api/admin/models/batch', { method: 'POST', body: JSON.stringify({ names }) })
+}
+
 export function getModel(id: number): Promise<Model> {
   return apiFetch(`/api/admin/models/${id}`)
 }

@@ -220,7 +220,7 @@ func TestListAPIKeysSearchesByOwnerLabel(t *testing.T) {
 	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "bob", ModelIDs: []uint{mid}}, time.Now().UTC()); err != nil {
 		t.Fatalf("CreateAPIKey bob: %v", err)
 	}
-	list, total, err := svc.ListAPIKeys("alice", 1, 20)
+	list, total, err := svc.ListAPIKeys("", "alice", "", 1, 20)
 	if err != nil {
 		t.Fatalf("ListAPIKeys: %v", err)
 	}
@@ -251,5 +251,68 @@ func TestDisplayStatusExpiredForPastExpiry(t *testing.T) {
 	}
 	if view.DisplayStatus != APIKeyDisplayExpired {
 		t.Fatalf("expected expired display status, got %q", view.DisplayStatus)
+	}
+}
+
+// The status filter must match the runtime-computed display status, not the
+// stored active/revoked column. Seed one key per display status and assert
+// each status value returns exactly its partition — the SQL predicates in
+// applyAPIKeyFilters and computeAPIKeyDisplayStatus must agree on the whole
+// precedence (revoked > expired > budget-exhausted > active), not just the
+// two simplest cases.
+func TestListAPIKeysFiltersByDisplayStatus(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	now := time.Now().UTC()
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+	limit := int64(1000)
+
+	// Active (created via the service so it goes through the normal path).
+	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "live", ModelIDs: []uint{mid}}, now); err != nil {
+		t.Fatalf("CreateAPIKey live: %v", err)
+	}
+	// The other statuses seed rows directly (the service create path won't
+	// produce an expired/revoked/over-budget key). The last seed is BOTH
+	// expired and over-budget: precedence (expired > budget) means it must
+	// render — and filter — as expired, not budget-exhausted. That's the only
+	// case where the SQL guards and the Go if/else ordering could silently
+	// disagree, so it's what makes this an equivalence test rather than four
+	// isolated predicate checks.
+	seeds := []*model.APIKey{
+		{KeyHash: hashToken("sk-yr-expired"), KeyPrefix: "sk-yr-expired00", Status: model.APIKeyStatusActive, ExpiresAt: &past, CreatedAt: now, UpdatedAt: now},
+		{KeyHash: hashToken("sk-yr-revoked"), KeyPrefix: "sk-yr-revoked00", Status: model.APIKeyStatusRevoked, CreatedAt: now, UpdatedAt: now},
+		{KeyHash: hashToken("sk-yr-budget"), KeyPrefix: "sk-yr-budget000", Status: model.APIKeyStatusActive, ExpiresAt: &future, BudgetLimitMicros: &limit, BudgetSpentMicros: limit, CreatedAt: now, UpdatedAt: now},
+		{KeyHash: hashToken("sk-yr-exp-budget"), KeyPrefix: "sk-yr-expbudget", Status: model.APIKeyStatusActive, ExpiresAt: &past, BudgetLimitMicros: &limit, BudgetSpentMicros: limit, CreatedAt: now, UpdatedAt: now},
+	}
+	for _, k := range seeds {
+		if err := db.Create(k).Error; err != nil {
+			t.Fatalf("seed key %s: %v", k.KeyPrefix, err)
+		}
+	}
+
+	// Expected partition sizes: the expired+over-budget key lands in "expired"
+	// (precedence), so expired has 2 and budget-exhausted has 1.
+	wantCount := map[string]int{
+		APIKeyDisplayActive:    1,
+		APIKeyDisplayExpired:   2,
+		APIKeyDisplayRevoked:   1,
+		APIKeyDisplayBudgetHit: 1,
+	}
+	for status, want := range wantCount {
+		list, total, err := svc.ListAPIKeys("", "", status, 1, 20)
+		if err != nil {
+			t.Fatalf("ListAPIKeys %s: %v", status, err)
+		}
+		if int(total) != want || len(list) != want {
+			t.Fatalf("status=%s: expected %d keys, got total=%d list=%v", status, want, total, list)
+		}
+		// Every returned row's computed display status must equal the filter —
+		// the SQL partition and the Go computation must agree row-for-row.
+		for _, v := range list {
+			if v.DisplayStatus != status {
+				t.Fatalf("status=%s: returned key %s whose display status is %q", status, v.KeyPrefix, v.DisplayStatus)
+			}
+		}
 	}
 }

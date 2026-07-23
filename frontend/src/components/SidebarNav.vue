@@ -27,6 +27,10 @@ export interface NavItem {
   // badge lights a small indicator dot (e.g. "new version available") at the
   // item's top-right. Optional; absent means no badge.
   badge?: boolean
+  // When true the entry is kept in the source list (route and code intact) but
+  // never rendered in the sidebar — used to hide a menu item without deleting
+  // its wiring.
+  hidden?: boolean
 }
 
 const props = defineProps<{
@@ -47,10 +51,12 @@ function isActive(to: string): boolean {
 }
 
 const resolvedItems = computed(() =>
-  props.items.map((item) => ({
-    ...item,
-    active: item.to ? isActive(item.to) : false,
-  })),
+  props.items
+    .filter((item) => !item.hidden)
+    .map((item) => ({
+      ...item,
+      active: item.to ? isActive(item.to) : false,
+    })),
 )
 </script>
 

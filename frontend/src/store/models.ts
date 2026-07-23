@@ -52,6 +52,11 @@ export const useModelsStore = defineStore('models', {
       await this.fetchList()
       return created
     },
+    async createBatch(names: string[]): Promise<modelsApi.BatchCreateModelsResult> {
+      const result = await modelsApi.createModelsBatch(names)
+      await this.fetchList()
+      return result
+    },
     async update(id: number, name: string): Promise<Model> {
       return modelsApi.updateModel(id, name)
     },

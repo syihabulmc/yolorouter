@@ -14,6 +14,10 @@ type createModelRequest struct {
 	Name string `json:"name" binding:"required,max=100"`
 }
 
+type batchCreateModelsRequest struct {
+	Names []string `json:"names" binding:"required,min=1,max=200,dive,max=100"`
+}
+
 type updateModelRequest struct {
 	Name string `json:"name" binding:"required,max=100"`
 }
@@ -118,6 +122,24 @@ func PostModel(svc *service.ModelService) gin.HandlerFunc {
 			return
 		}
 		response.Success(c, view)
+	}
+}
+
+// PostModelsBatch creates several models at once from a list of names,
+// skipping (rather than failing on) names that are invalid or already exist —
+// the response carries the created models plus a per-name skip summary.
+func PostModelsBatch(svc *service.ModelService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req batchCreateModelsRequest
+		if !bindJSON(c, &req) {
+			return
+		}
+		result, err := svc.CreateModelsBatch(req.Names, timeNow())
+		if err != nil {
+			writeModelServiceError(c, err)
+			return
+		}
+		response.Success(c, result)
 	}
 }
 

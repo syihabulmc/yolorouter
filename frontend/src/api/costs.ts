@@ -83,11 +83,13 @@ const BURN_RATE_WINDOW_DAYS = 7
 // the summary complete matters more than the request count here — the overview
 // cards present these as authoritative totals.
 async function getAllAPIKeys(): Promise<APIKey[]> {
-  const first = await listAPIKeys('', 1, BUDGET_KEYS_PAGE_SIZE)
+  const first = await listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: BUDGET_KEYS_PAGE_SIZE })
   if (first.total <= first.list.length) return first.list
   const pageCount = Math.ceil(first.total / BUDGET_KEYS_PAGE_SIZE)
   const rest = await Promise.all(
-    Array.from({ length: pageCount - 1 }, (_, i) => listAPIKeys('', i + 2, BUDGET_KEYS_PAGE_SIZE)),
+    Array.from({ length: pageCount - 1 }, (_, i) =>
+      listAPIKeys({ q: '', owner: '', status: '', page: i + 2, pageSize: BUDGET_KEYS_PAGE_SIZE }),
+    ),
   )
   return rest.reduce((acc, page) => acc.concat(page.list), first.list)
 }

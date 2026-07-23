@@ -11,13 +11,22 @@
 
     <n-tabs v-model:value="activeTab" type="line" animated>
       <n-tab-pane name="overview" :tab="t('models.tabOverview')">
-        <div class="section-card">
-          <n-descriptions :column="1" label-placement="left">
-            <n-descriptions-item :label="t('models.name')">{{ modelData.name }}</n-descriptions-item>
-            <n-descriptions-item :label="t('models.managementStatusColumn')">
-              {{ modelData.management_status === 1 ? t('models.statusEnabled') : t('models.statusDisabled') }}
-            </n-descriptions-item>
-          </n-descriptions>
+        <div class="section-card overview-card">
+          <div class="overview-head">
+            <h3 class="overview-head__title">{{ t('models.basicInfo') }}</h3>
+            <n-button size="small" @click="showEditModel = true">{{ t('models.editModel') }}</n-button>
+          </div>
+          <dl class="info-grid">
+            <dt>{{ t('models.name') }}</dt>
+            <dd>{{ modelData.name }}</dd>
+
+            <dt>{{ t('models.managementStatusColumn') }}</dt>
+            <dd>
+              <n-tag size="small" :bordered="false" round :type="modelData.management_status === 1 ? 'success' : 'default'">
+                {{ modelData.management_status === 1 ? t('models.statusEnabled') : t('models.statusDisabled') }}
+              </n-tag>
+            </dd>
+          </dl>
         </div>
       </n-tab-pane>
 
@@ -54,6 +63,7 @@
 
     <CandidateEditModal v-model:show="showAddCandidate" :model-id="modelData.id" @saved="reload" />
     <CandidateEditModal v-model:show="showEditCandidate" :model-id="modelData.id" :editing-candidate="editingCandidate" @saved="reload" />
+    <ModelEditModal v-model:show="showEditModel" :model="modelData" @updated="reload" />
   </div>
 </template>
 
@@ -71,6 +81,7 @@ import type { Model, ModelCandidate } from '../../api/models'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import CandidateEditModal from '../../components/models/CandidateEditModal.vue'
+import ModelEditModal from '../../components/models/ModelEditModal.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { useSingleRowAction } from '../../composables/useSingleRowAction'
@@ -86,6 +97,7 @@ const modelData = ref<Model | null>(null)
 const activeTab = ref('overview')
 const showAddCandidate = ref(false)
 const showEditCandidate = ref(false)
+const showEditModel = ref(false)
 
 // Client-side pagination for the route-chain candidate table — a single
 // model's candidate list is short, so slice in-page rather than paging
@@ -295,5 +307,42 @@ const candidateColumns = computed<DataTableColumns<ModelCandidate>>(() => [
   display: flex;
   justify-content: flex-end;
   margin-bottom: var(--space-4);
+}
+
+.overview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: var(--space-3);
+  margin-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.overview-head__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: var(--space-8);
+  row-gap: var(--space-3);
+  margin: 0;
+}
+
+.info-grid dt {
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.info-grid dd {
+  margin: 0;
+  color: var(--color-text);
+  line-height: 1.6;
+  word-break: break-all;
 }
 </style>

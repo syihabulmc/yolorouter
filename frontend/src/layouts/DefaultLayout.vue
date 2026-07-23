@@ -178,7 +178,8 @@ const navItems = computed<NavItem[]>(() => [
   { key: 'cost-optimization', label: t('nav.costOptimization'), icon: TrendingDown, disabled: true },
 
   { key: 'group-system', label: t('nav.groupSystem'), group: true },
-  { key: 'system-info', label: t('nav.systemInfo'), icon: Info, to: '/system', badge: updateStore.hasUpdate },
+  // Hidden from the sidebar for now; the /system route and page code stay wired up.
+  { key: 'system-info', label: t('nav.systemInfo'), icon: Info, to: '/system', badge: updateStore.hasUpdate, hidden: true },
   { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
   { key: 'change-password', label: t('auth.changePasswordTitle'), icon: KeyRound, onClick: () => (showChangePassword.value = true) },
   { key: 'model-pricing', label: t('nav.modelPricing'), icon: Tags, disabled: true },

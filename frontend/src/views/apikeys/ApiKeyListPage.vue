@@ -10,16 +10,43 @@
       </template>
     </PageHeader>
 
-    <div class="apikeys-toolbar">
-      <n-input
-        :value="store.query"
-        :placeholder="t('apiKeys.searchPlaceholder')"
-        clearable
-        class="apikeys-search"
-        @update:value="onSearch"
-      >
-        <template #prefix><Search :size="14" /></template>
-      </n-input>
+    <div class="filter-panel">
+      <div class="filter-grid">
+        <div class="filter-item filter-item--search">
+          <n-input
+            v-model:value="draft.query"
+            :placeholder="t('apiKeys.searchPlaceholder')"
+            clearable
+            size="small"
+            @keyup.enter="onSearch"
+          >
+            <template #prefix><Search :size="14" /></template>
+          </n-input>
+        </div>
+        <div class="filter-item">
+          <n-input
+            v-model:value="draft.owner"
+            :placeholder="t('apiKeys.filterOwner')"
+            clearable
+            size="small"
+            @keyup.enter="onSearch"
+          />
+        </div>
+        <div class="filter-item">
+          <n-select
+            v-model:value="draft.status"
+            :options="statusOptions"
+            :placeholder="t('apiKeys.filterStatus')"
+            clearable
+            size="small"
+            @update:value="onSearch"
+          />
+        </div>
+        <div class="filter-actions">
+          <n-button size="small" type="primary" @click="onSearch">{{ t('apiKeys.search') }}</n-button>
+          <n-button size="small" quaternary @click="onReset">{{ t('apiKeys.reset') }}</n-button>
+        </div>
+      </div>
     </div>
 
     <EmptyState v-if="!store.loading && store.list.length === 0" :icon="KeyRound" :title="t('apiKeys.listEmpty')">
@@ -47,7 +74,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NButton, NSpace, NTag, useDialog, useMessage, type DataTableColumns, type PaginationProps } from 'naive-ui'
 import { KeyRound, Plus, Search } from '@lucide/vue'
@@ -68,20 +95,19 @@ const store = useApiKeysStore()
 const showCreate = ref(false)
 const showEdit = ref(false)
 const editingId = ref<number | null>(null)
-let searchTimer: ReturnType<typeof setTimeout> | null = null
+// Live draft of the filter controls; the server filters only update when the
+// user hits Enter or the Search button, matching the request-logs page.
+const draft = reactive({ query: store.query, owner: store.owner, status: store.status as string | null })
+
+const statusOptions = computed(() => [
+  { label: t('apiKeys.statusActive'), value: 'active' },
+  { label: t('apiKeys.statusExpired'), value: 'expired' },
+  { label: t('apiKeys.statusBudgetExhausted'), value: 'budget_exhausted' },
+  { label: t('apiKeys.statusRevoked'), value: 'revoked' },
+])
 
 onMounted(() => {
   void store.fetchList().catch((err) => message.error(displayMessage(err, t)))
-})
-
-// Clear a pending debounced search if the user leaves the page inside the
-// 300ms window — otherwise the timer fires after unmount, sending a request
-// nobody sees and touching store/message state on a gone view.
-onBeforeUnmount(() => {
-  if (searchTimer) {
-    clearTimeout(searchTimer)
-    searchTimer = null
-  }
 })
 
 async function reload() {
@@ -92,14 +118,18 @@ async function reload() {
   }
 }
 
-// Debounced search: a keystroke-level fetchList() would fire one request per
-// character and race the shared store's lastFetchId guard needlessly.
-function onSearch(v: string | null) {
-  if (searchTimer) clearTimeout(searchTimer)
-  searchTimer = setTimeout(() => {
-    store.setQuery(v ?? '')
-    void reload()
-  }, 300)
+// setFilters resets the store to page 1, so a search always lands on the
+// first page of results.
+function onSearch() {
+  store.setFilters({ query: draft.query.trim(), owner: draft.owner.trim(), status: draft.status ?? '' })
+  void reload()
+}
+function onReset() {
+  draft.query = ''
+  draft.owner = ''
+  draft.status = null
+  store.setFilters({ query: '', owner: '', status: '' })
+  void reload()
 }
 
 const pagination = computed<PaginationProps>(() => ({
@@ -255,14 +285,6 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
-}
-
-.apikeys-toolbar {
-  display: flex;
-}
-
-.apikeys-search {
-  max-width: 360px;
 }
 
 :deep(.mono-cell) {

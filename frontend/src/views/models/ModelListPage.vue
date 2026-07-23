@@ -16,35 +16,77 @@
       </template>
     </EmptyState>
 
-    <div v-else class="data-table-wrapper">
-      <n-data-table
-        :columns="columns"
-        :data="store.list"
-        :loading="store.loading"
-        :bordered="false"
-        :single-line="false"
-        :row-key="(row: Model) => row.id"
-        :row-props="rowProps"
-        :pagination="pagination"
-        @update:page="onPageChange"
-        @update:page-size="onPageSizeChange"
-      />
-    </div>
+    <template v-else>
+      <div class="filter-panel">
+        <div class="filter-grid">
+          <div class="filter-item filter-item--search">
+            <n-input
+              v-model:value="filter.name"
+              :placeholder="t('models.filterName')"
+              clearable
+              size="small"
+              @keyup.enter="onSearch"
+            >
+              <template #prefix><Search :size="14" /></template>
+            </n-input>
+          </div>
+          <div class="filter-item">
+            <n-select
+              v-model:value="filter.running"
+              :options="runningStatusOptions"
+              :placeholder="t('models.filterRunningStatus')"
+              clearable
+              size="small"
+              @update:value="onSearch"
+            />
+          </div>
+          <div class="filter-item">
+            <n-select
+              v-model:value="filter.management"
+              :options="managementStatusOptions"
+              :placeholder="t('models.filterManagementStatus')"
+              clearable
+              size="small"
+              @update:value="onSearch"
+            />
+          </div>
+          <div class="filter-actions">
+            <n-button size="small" type="primary" @click="onSearch">{{ t('models.search') }}</n-button>
+            <n-button size="small" quaternary @click="onReset">{{ t('models.reset') }}</n-button>
+          </div>
+        </div>
+      </div>
+
+      <div class="data-table-wrapper">
+        <n-data-table
+          :columns="columns"
+          :data="filteredModels"
+          :loading="store.loading"
+          :bordered="false"
+          :single-line="false"
+          :row-key="(row: Model) => row.id"
+          :row-props="rowProps"
+          :pagination="pagination"
+          @update:page="onPageChange"
+          @update:page-size="onPageSizeChange"
+        />
+      </div>
+    </template>
 
     <NewModelModal v-model:show="showCreate" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
-import { Boxes, Plus } from '@lucide/vue'
+import { Boxes, Plus, Search } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import { toggleStatusWithConfirm } from '../../composables/useConfirmedStatusToggle'
-import { modelRunningStatusDisplay } from '../../utils/modelStatusDisplay'
+import { modelRunningStatusDisplay, MODEL_RUNNING_STATUS_DISPLAY } from '../../utils/modelStatusDisplay'
 import { columnTitle } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 import type { Model } from '../../api/models'
@@ -59,10 +101,57 @@ const message = useMessage()
 const store = useModelsStore()
 const showCreate = ref(false)
 
+// In-page filters over the fully-fetched list (name substring + running /
+// management status). `filter` is the live draft the inputs edit; `applied`
+// is the snapshot the table actually filters by — mirroring the
+// search/reset flow on the request-logs page so the text field only takes
+// effect on Enter / the Search button, not on every keystroke.
+interface ModelFilter {
+  name: string
+  running: string | null
+  management: number | null
+}
+const emptyFilter = (): ModelFilter => ({ name: '', running: null, management: null })
+const filter = reactive<ModelFilter>(emptyFilter())
+const applied = reactive<ModelFilter>(emptyFilter())
+
+const runningStatusOptions = computed(() =>
+  Object.entries(MODEL_RUNNING_STATUS_DISPLAY).map(([value, { i18nKey }]) => ({
+    label: t(`models.running${i18nKey}`),
+    value,
+  })),
+)
+const managementStatusOptions = computed(() => [
+  { label: t('models.statusEnabled'), value: 1 },
+  { label: t('models.statusDisabled'), value: 2 },
+])
+
+const filteredModels = computed(() => {
+  const q = applied.name.trim().toLowerCase()
+  return store.list.filter((m) => {
+    if (q && !m.name.toLowerCase().includes(q)) return false
+    if (applied.running && m.running_status !== applied.running) return false
+    if (applied.management !== null && m.management_status !== applied.management) return false
+    return true
+  })
+})
+
 // Client-side pagination: models are few (admin-configured), so the full list
 // is fetched once and sliced in the table rather than adding a server-side
 // paged endpoint.
 const { pagination, onPageChange, onPageSizeChange } = useClientPagination()
+
+// A narrowed filter can leave the current page past the end of the results —
+// reset to the first page whenever a filter is applied.
+function onSearch() {
+  Object.assign(applied, filter)
+  pagination.page = 1
+}
+function onReset() {
+  Object.assign(filter, emptyFilter())
+  Object.assign(applied, emptyFilter())
+  pagination.page = 1
+}
 
 onMounted(() => {
   void store.fetchList().catch((err) => message.error(displayMessage(err, t)))

@@ -18,36 +18,73 @@ func FindAPIKeyByID(db *gorm.DB, id uint) (*model.APIKey, error) {
 	return &k, nil
 }
 
-// applyAPIKeySearch adds the free-text WHERE clause (matched against
-// key_prefix / owner_label / remark) when q is non-empty. LOWER() on both
-// sides keeps SQLite's case-sensitive LIKE and Postgres's case-sensitive LIKE
-// behaving identically — search must not depend on the driver.
-func applyAPIKeySearch(tx *gorm.DB, q string) *gorm.DB {
-	if q == "" {
-		return tx
-	}
-	// Escape LIKE metacharacters so a search for "100%" or "a_b" matches
-	// literally rather than as wildcards. Backslash is the escape
-	// char on both SQLite and Postgres.
-	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
-	like := "%" + escaped + "%"
-	const pattern = "LOWER(key_prefix) LIKE LOWER(?) ESCAPE '\\' OR LOWER(owner_label) LIKE LOWER(?) ESCAPE '\\' OR LOWER(remark) LIKE LOWER(?) ESCAPE '\\'"
-	return tx.Where(pattern, like, like, like)
+// APIKeyFilter is the set of list filters applied together (AND). All fields
+// are optional — an empty field is a no-op. Now anchors the status filter's
+// expiry comparison and must be supplied by the caller (same clock the display
+// status is computed against).
+type APIKeyFilter struct {
+	Query  string
+	Owner  string
+	Status string
+	Now    time.Time
 }
 
-// CountAPIKeys returns the total row count matching q (empty q = no filter).
-func CountAPIKeys(db *gorm.DB, q string) (int64, error) {
+// likeContainsPattern wraps q in a LIKE "contains" pattern, escaping the LIKE
+// metacharacters so a search for "100%" or "a_b" matches literally rather than
+// as wildcards. Backslash is the escape char on both SQLite and Postgres.
+func likeContainsPattern(q string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
+	return "%" + escaped + "%"
+}
+
+// applyAPIKeyFilters ANDs together the free-text search, the owner filter and
+// the display-status filter. LOWER() on both sides keeps SQLite's and
+// Postgres's case-sensitive LIKE behaving identically — search must not depend
+// on the driver.
+func applyAPIKeyFilters(tx *gorm.DB, f APIKeyFilter) *gorm.DB {
+	// Free-text search matches the key prefix or remark (owner has its own
+	// dedicated filter below).
+	if f.Query != "" {
+		like := likeContainsPattern(f.Query)
+		tx = tx.Where("LOWER(key_prefix) LIKE LOWER(?) ESCAPE '\\' OR LOWER(remark) LIKE LOWER(?) ESCAPE '\\'", like, like)
+	}
+	if f.Owner != "" {
+		tx = tx.Where("LOWER(owner_label) LIKE LOWER(?) ESCAPE '\\'", likeContainsPattern(f.Owner))
+	}
+	// Status filter mirrors computeAPIKeyDisplayStatus exactly, including its
+	// precedence: revoked > expired > budget-exhausted > active.
+	switch f.Status {
+	case "revoked":
+		tx = tx.Where("status = ?", model.APIKeyStatusRevoked)
+	case "expired":
+		tx = tx.Where("status = ? AND expires_at IS NOT NULL AND expires_at < ?", model.APIKeyStatusActive, f.Now)
+	case "budget_exhausted":
+		tx = tx.Where(
+			"status = ? AND (expires_at IS NULL OR expires_at >= ?) AND budget_limit_micros IS NOT NULL AND budget_spent_micros >= budget_limit_micros",
+			model.APIKeyStatusActive, f.Now,
+		)
+	case "active":
+		tx = tx.Where(
+			"status = ? AND (expires_at IS NULL OR expires_at >= ?) AND (budget_limit_micros IS NULL OR budget_spent_micros < budget_limit_micros)",
+			model.APIKeyStatusActive, f.Now,
+		)
+	}
+	return tx
+}
+
+// CountAPIKeys returns the total row count matching the filter.
+func CountAPIKeys(db *gorm.DB, f APIKeyFilter) (int64, error) {
 	var total int64
-	if err := applyAPIKeySearch(db.Model(&model.APIKey{}), q).Count(&total).Error; err != nil {
+	if err := applyAPIKeyFilters(db.Model(&model.APIKey{}), f).Count(&total).Error; err != nil {
 		return 0, err
 	}
 	return total, nil
 }
 
-// SearchAPIKeys returns one page (newest first) of API keys matching q.
-func SearchAPIKeys(db *gorm.DB, q string, offset, limit int) ([]model.APIKey, error) {
+// SearchAPIKeys returns one page (newest first) of API keys matching the filter.
+func SearchAPIKeys(db *gorm.DB, f APIKeyFilter, offset, limit int) ([]model.APIKey, error) {
 	var keys []model.APIKey
-	if err := applyAPIKeySearch(db.Order("id DESC"), q).Offset(offset).Limit(limit).Find(&keys).Error; err != nil {
+	if err := applyAPIKeyFilters(db.Order("id DESC"), f).Offset(offset).Limit(limit).Find(&keys).Error; err != nil {
 		return nil, err
 	}
 	return keys, nil

@@ -8,6 +8,8 @@ interface ApiKeysState {
   page: number
   pageSize: number
   query: string
+  owner: string
+  status: string
   loading: boolean
   error: unknown | null
   // Monotonic token so a stale list response can't clobber a newer one if a
@@ -23,6 +25,8 @@ export const useApiKeysStore = defineStore('apiKeys', {
     page: 1,
     pageSize: 20,
     query: '',
+    owner: '',
+    status: '',
     loading: false,
     error: null,
     lastFetchId: 0,
@@ -33,7 +37,13 @@ export const useApiKeysStore = defineStore('apiKeys', {
       this.loading = true
       this.error = null
       try {
-        const res: APIKeyPage = await apiKeysApi.listAPIKeys(this.query, this.page, this.pageSize)
+        const res: APIKeyPage = await apiKeysApi.listAPIKeys({
+          q: this.query,
+          owner: this.owner,
+          status: this.status,
+          page: this.page,
+          pageSize: this.pageSize,
+        })
         // A newer fetchList() started while this one was in flight — its
         // result is authoritative, so leave state untouched.
         if (fetchId !== this.lastFetchId) return
@@ -47,8 +57,12 @@ export const useApiKeysStore = defineStore('apiKeys', {
         if (fetchId === this.lastFetchId) this.loading = false
       }
     },
-    setQuery(q: string) {
-      this.query = q
+    // Applies all three list filters at once and resets to the first page —
+    // the search/reset buttons are the only thing that changes them.
+    setFilters(f: { query: string; owner: string; status: string }) {
+      this.query = f.query
+      this.owner = f.owner
+      this.status = f.status
       this.page = 1
     },
     setPage(page: number) {

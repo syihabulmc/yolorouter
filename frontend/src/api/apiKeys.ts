@@ -69,8 +69,22 @@ export interface UpdateAPIKeyInput {
   budget_limit_micros?: number
 }
 
-export function listAPIKeys(q: string, page: number, pageSize: number): Promise<APIKeyPage> {
-  const params = new URLSearchParams({ q, page: String(page), page_size: String(pageSize) })
+export interface APIKeyListParams {
+  q: string
+  owner: string
+  status: string
+  page: number
+  pageSize: number
+}
+
+export function listAPIKeys(p: APIKeyListParams): Promise<APIKeyPage> {
+  const params = new URLSearchParams({
+    q: p.q,
+    owner: p.owner,
+    status: p.status,
+    page: String(p.page),
+    page_size: String(p.pageSize),
+  })
   return apiFetch(`/api/admin/api-keys?${params.toString()}`)
 }
 

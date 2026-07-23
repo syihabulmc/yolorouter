@@ -16,20 +16,72 @@
       </template>
     </EmptyState>
 
-    <div v-else class="data-table-wrapper">
-      <n-data-table
-        :columns="columns"
-        :data="store.list"
-        :loading="store.loading"
-        :bordered="false"
-        :single-line="false"
-        :row-key="(row: Provider) => row.id"
-        :row-props="rowProps"
-        :pagination="pagination"
-        @update:page="onPageChange"
-        @update:page-size="onPageSizeChange"
-      />
-    </div>
+    <template v-else>
+      <div class="filter-panel">
+        <div class="filter-grid">
+          <div class="filter-item filter-item--search">
+            <n-input
+              v-model:value="filter.name"
+              :placeholder="t('providers.filterName')"
+              clearable
+              size="small"
+              @keyup.enter="onSearch"
+            >
+              <template #prefix><Search :size="14" /></template>
+            </n-input>
+          </div>
+          <div class="filter-item">
+            <n-select
+              v-model:value="filter.protocol"
+              :options="protocolOptions"
+              :placeholder="t('providers.filterProtocol')"
+              clearable
+              size="small"
+              @update:value="onSearch"
+            />
+          </div>
+          <div class="filter-item">
+            <n-select
+              v-model:value="filter.running"
+              :options="runningStatusOptions"
+              :placeholder="t('providers.filterRunningStatus')"
+              clearable
+              size="small"
+              @update:value="onSearch"
+            />
+          </div>
+          <div class="filter-item">
+            <n-select
+              v-model:value="filter.management"
+              :options="managementStatusOptions"
+              :placeholder="t('providers.filterManagementStatus')"
+              clearable
+              size="small"
+              @update:value="onSearch"
+            />
+          </div>
+          <div class="filter-actions">
+            <n-button size="small" type="primary" @click="onSearch">{{ t('providers.search') }}</n-button>
+            <n-button size="small" quaternary @click="onReset">{{ t('providers.reset') }}</n-button>
+          </div>
+        </div>
+      </div>
+
+      <div class="data-table-wrapper">
+        <n-data-table
+          :columns="columns"
+          :data="filteredProviders"
+          :loading="store.loading"
+          :bordered="false"
+          :single-line="false"
+          :row-key="(row: Provider) => row.id"
+          :row-props="rowProps"
+          :pagination="pagination"
+          @update:page="onPageChange"
+          @update:page-size="onPageSizeChange"
+        />
+      </div>
+    </template>
 
     <!-- No @created handler needed: store.create() (called inside the
          modal) already refetches the list itself. -->
@@ -38,11 +90,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
-import { Plus, Server } from '@lucide/vue'
+import { Plus, Search, Server } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
 import type { Provider } from '../../api/providers'
@@ -51,7 +103,7 @@ import EmptyState from '../../components/EmptyState.vue'
 import NewProviderModal from '../../components/providers/NewProviderModal.vue'
 import { columnTitle } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
-import { enabledProtocolEndpoints } from '../../utils/providerProtocol'
+import { ALL_PROTOCOLS, enabledProtocolEndpoints } from '../../utils/providerProtocol'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -60,10 +112,61 @@ const message = useMessage()
 const store = useProvidersStore()
 const showCreate = ref(false)
 
+// In-page filters over the fully-fetched list. `filter` is the live draft the
+// inputs edit; `applied` is the snapshot the table filters by — so the text
+// field only takes effect on Enter / the Search button, mirroring the
+// request-logs page.
+interface ProviderFilter {
+  name: string
+  protocol: string | null
+  running: string | null
+  management: number | null
+}
+const emptyFilter = (): ProviderFilter => ({ name: '', protocol: null, running: null, management: null })
+const filter = reactive<ProviderFilter>(emptyFilter())
+const applied = reactive<ProviderFilter>(emptyFilter())
+
+const protocolOptions = computed(() =>
+  ALL_PROTOCOLS.map((p) => ({ label: t(`providers.protocol_${p}`), value: p })),
+)
+const runningStatusOptions = computed(() =>
+  Object.entries(RUNNING_STATUS_DISPLAY).map(([value, { i18nKey }]) => ({
+    label: t(`providers.running${i18nKey}`),
+    value,
+  })),
+)
+const managementStatusOptions = computed(() => [
+  { label: t('providers.statusEnabled'), value: 1 },
+  { label: t('providers.statusDisabled'), value: 2 },
+])
+
+const filteredProviders = computed(() => {
+  const q = applied.name.trim().toLowerCase()
+  return store.list.filter((p) => {
+    if (q && !p.name.toLowerCase().includes(q)) return false
+    if (applied.protocol && p.provider_type !== applied.protocol) return false
+    if (applied.running && p.running_status !== applied.running) return false
+    if (applied.management !== null && p.management_status !== applied.management) return false
+    return true
+  })
+})
+
 // Client-side pagination: providers are few (admin-configured), so the full
 // list is fetched once and sliced in the table rather than adding a
 // server-side paged endpoint.
 const { pagination, onPageChange, onPageSizeChange } = useClientPagination()
+
+// Applying a narrowed filter can leave the current page past the end of the
+// results, so reset to the first page.
+function onSearch() {
+  Object.assign(applied, filter)
+  pagination.page = 1
+}
+function onReset() {
+  Object.assign(filter, emptyFilter())
+  Object.assign(applied, emptyFilter())
+  pagination.page = 1
+}
 
 onMounted(() => {
   void store.fetchList().catch((err) => message.error(displayMessage(err, t)))
@@ -151,6 +254,13 @@ const columns = computed<DataTableColumns<Provider>>(() => [
         { class: 'provider-url-cell' },
         serviceAddresses(row).map((url) => h('div', { key: url, class: 'provider-url-line' }, url)),
       ),
+  },
+  {
+    title: columnTitle(t('providers.protocolPrimary'), t('providers.protocolPrimary_tip')),
+    key: 'provider_type',
+    width: 150,
+    render: (row) =>
+      h(NTag, { size: 'small', bordered: false, round: true }, { default: () => t(`providers.protocol_${row.provider_type}`) }),
   },
   {
     title: columnTitle(t('providers.runningStatusColumn'), t('providers.runningStatusColumn_tip')),

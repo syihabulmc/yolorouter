@@ -272,7 +272,7 @@ async function loadProviders() {
 }
 
 async function loadCallers() {
-  const { list } = await listAPIKeys('', 1, 200)
+  const { list } = await listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: 200 })
   apiKeys.value = list
 }
 
@@ -581,38 +581,9 @@ const columns = computed<DataTableColumns<RequestLogRow>>(() => [
   gap: var(--space-6);
 }
 
-.filter-panel {
-  padding: var(--space-4);
-  background: var(--color-bg-elevated, var(--color-bg));
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg, 8px);
-}
-
-.filter-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  align-items: center;
-}
-
-.filter-item {
-  width: 180px;
-}
-
-.filter-item--grow {
-  flex: 1 1 200px;
-  min-width: 200px;
-}
-
-.filter-item--range {
-  width: 360px;
-}
-
-.filter-actions {
-  display: inline-flex;
-  gap: var(--space-2);
-  margin-left: auto;
-}
+/* Filter-bar styles (.filter-panel / .filter-grid / .filter-item /
+   .filter-actions) are the canonical shared classes in styles/global.less —
+   this page is the reference every other list page's filter bar matches. */
 
 :deep(.mono-cell) {
   font-family: var(--font-mono, monospace);

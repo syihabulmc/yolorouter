@@ -99,8 +99,13 @@ type UpdateAPIKeyInput struct {
 	BudgetLimitMicros *int64
 }
 
-func (s *APIKeyService) ListAPIKeys(q string, page, pageSize int) ([]APIKeyView, int64, error) {
-	total, err := repository.CountAPIKeys(s.db, q)
+func (s *APIKeyService) ListAPIKeys(q, owner, status string, page, pageSize int) ([]APIKeyView, int64, error) {
+	// Anchor the status filter's expiry check AND the rendered display status
+	// to one clock, so a key expiring mid-request can't be filtered as active
+	// while being rendered as expired.
+	now := time.Now().UTC()
+	filter := repository.APIKeyFilter{Query: q, Owner: owner, Status: status, Now: now}
+	total, err := repository.CountAPIKeys(s.db, filter)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -108,7 +113,7 @@ func (s *APIKeyService) ListAPIKeys(q string, page, pageSize int) ([]APIKeyView,
 		return []APIKeyView{}, 0, nil
 	}
 	offset := (page - 1) * pageSize
-	keys, err := repository.SearchAPIKeys(s.db, q, offset, pageSize)
+	keys, err := repository.SearchAPIKeys(s.db, filter, offset, pageSize)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -126,7 +131,7 @@ func (s *APIKeyService) ListAPIKeys(q string, page, pageSize int) ([]APIKeyView,
 	}
 	views := make([]APIKeyView, 0, len(keys))
 	for _, k := range keys {
-		views = append(views, toAPIKeyView(k, allowByKey[k.ID]))
+		views = append(views, toAPIKeyView(k, allowByKey[k.ID], now))
 	}
 	return views, total, nil
 }
@@ -155,7 +160,7 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 	if err := repository.CreateAPIKey(s.db, key, modelIDs, now); err != nil {
 		return nil, err
 	}
-	view := toAPIKeyView(*key, modelIDs)
+	view := toAPIKeyView(*key, modelIDs, now)
 	return &CreateAPIKeyResult{PlaintextKey: rawKey, APIKey: view}, nil
 }
 
@@ -171,7 +176,7 @@ func (s *APIKeyService) GetAPIKey(id uint) (*APIKeyView, error) {
 	if err != nil {
 		return nil, err
 	}
-	view := toAPIKeyView(*key, modelIDs)
+	view := toAPIKeyView(*key, modelIDs, time.Now().UTC())
 	return &view, nil
 }
 
@@ -254,13 +259,17 @@ func (s *APIKeyService) assertModelsExist(modelIDs []uint) error {
 	return nil
 }
 
-func toAPIKeyView(k model.APIKey, modelIDs []uint) APIKeyView {
+// toAPIKeyView takes `now` (rather than reading the clock itself) so a caller
+// that also filters by status can use one consistent timestamp for both — see
+// ListAPIKeys, where a key expiring between the SQL filter and this call would
+// otherwise be filtered as active but rendered as expired.
+func toAPIKeyView(k model.APIKey, modelIDs []uint, now time.Time) APIKeyView {
 	if modelIDs == nil {
 		modelIDs = []uint{}
 	}
 	return APIKeyView{
 		ID: k.ID, KeyPrefix: k.KeyPrefix, OwnerLabel: k.OwnerLabel, Remark: k.Remark,
-		Status: k.Status, DisplayStatus: computeAPIKeyDisplayStatus(k),
+		Status: k.Status, DisplayStatus: computeAPIKeyDisplayStatus(k, now),
 		ExpiresAt: k.ExpiresAt, RPMLimit: k.RPMLimit, TPMLimit: k.TPMLimit,
 		ConcurrencyLimit: k.ConcurrencyLimit, BudgetLimitMicros: k.BudgetLimitMicros,
 		BudgetSpentMicros: k.BudgetSpentMicros, ModelIDs: modelIDs,
@@ -268,14 +277,16 @@ func toAPIKeyView(k model.APIKey, modelIDs []uint) APIKeyView {
 	}
 }
 
-// computeAPIKeyDisplayStatus derives the UI status from stored fields. Order
-// matters: revoked wins over everything; then expiry; then budget. Active is
-// the fallback.
-func computeAPIKeyDisplayStatus(k model.APIKey) string {
+// computeAPIKeyDisplayStatus derives the UI status from stored fields, as of
+// `now`. Order matters: revoked wins over everything; then expiry; then
+// budget. Active is the fallback. The expiry boundary (expires_at < now)
+// mirrors the SQL in repository.applyAPIKeyFilters, so both must be given the
+// same `now` to agree.
+func computeAPIKeyDisplayStatus(k model.APIKey, now time.Time) string {
 	if k.Status == model.APIKeyStatusRevoked {
 		return APIKeyDisplayRevoked
 	}
-	if k.ExpiresAt != nil && k.ExpiresAt.Before(time.Now().UTC()) {
+	if k.ExpiresAt != nil && k.ExpiresAt.Before(now) {
 		return APIKeyDisplayExpired
 	}
 	if k.BudgetLimitMicros != nil && k.BudgetSpentMicros >= *k.BudgetLimitMicros {

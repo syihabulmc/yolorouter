@@ -126,7 +126,7 @@ onMounted(async () => {
     const [providerPage, modelPage, apiKeyPage] = await Promise.all([
       listProviders(),
       listModels(),
-      listAPIKeys('', 1, 200), // 200 is plenty for an admin's key catalog
+      listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: 200 }), // 200 is plenty for an admin's key catalog
     ])
     providerOptions.value = providerPage.list.map((p) => ({ label: p.name, value: p.id }))
     modelOptions.value = modelPage.list.map((m) => ({ label: m.name, value: m.name }))
