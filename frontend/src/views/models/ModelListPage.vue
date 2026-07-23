@@ -31,7 +31,7 @@
       />
     </div>
 
-    <NewModelDrawer v-model:show="showCreate" />
+    <NewModelModal v-model:show="showCreate" />
   </div>
 </template>
 
@@ -50,7 +50,7 @@ import { useClientPagination } from '../../composables/useClientPagination'
 import type { Model } from '../../api/models'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
-import NewModelDrawer from '../../components/models/NewModelDrawer.vue'
+import NewModelModal from '../../components/models/NewModelModal.vue'
 
 const { t } = useI18n()
 const router = useRouter()

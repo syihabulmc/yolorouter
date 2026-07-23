@@ -4,7 +4,7 @@ export type RunningStatusTagType = 'default' | 'success' | 'warning' | 'error'
 
 // Whether a candidate passed a given capability test — 'basic' reads its
 // verification_status, streaming/function_calling their capability flags.
-// Shared by ModelDetailPage.vue and CandidateEditDrawer.vue so the per-type
+// Shared by ModelDetailPage.vue and CandidateEditModal.vue so the per-type
 // pass rule lives in one place.
 export function candidateTestPassed(
   testType: 'basic' | 'streaming' | 'function_calling',
@@ -17,7 +17,7 @@ export function candidateTestPassed(
 
 // Localized result text for a candidate test: "passed", or "failed: <reason>"
 // when the outcome is known, else a plain "failed". Reused by the row-test
-// toast and the drawer's result alert so both name a failure identically.
+// toast and the modal's result alert so both name a failure identically.
 export function candidateTestResultText(
   t: (key: string) => string,
   passed: boolean,

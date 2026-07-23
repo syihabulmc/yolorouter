@@ -1,42 +1,48 @@
-<!-- frontend/src/components/providers/KeyEditDrawer.vue -->
+<!-- frontend/src/components/providers/KeyEditModal.vue -->
 <template>
-  <n-drawer :show="show" width="420" @update:show="onUpdateShow">
-    <n-drawer-content :title="editingKey ? t('providers.editKey') : t('providers.addKey')" closable>
-      <n-form require-mark-placement="left" ref="formRef" :model="form" :rules="rules">
-        <n-form-item path="label">
-          <template #label>
-            <HelpLabel :tip="t('providers.keyLabel_tip')">{{ t('providers.keyLabel') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="form.label" />
-        </n-form-item>
-        <n-form-item path="plaintext">
-          <template #label>
-            <HelpLabel :tip="t('providers.keyPlaintext_tip')">{{ t('providers.keyPlaintext') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="form.plaintext" type="password" show-password-on="click"
-            :placeholder="plaintextPlaceholder" />
-        </n-form-item>
-        <n-form-item path="testModel">
-          <template #label>
-            <HelpLabel :tip="t('providers.testModel_tip')">{{ t('providers.testModel') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="form.testModel" :placeholder="t('providers.testModelHint')" />
-        </n-form-item>
-        <n-form-item>
-          <template #label>
-            <HelpLabel :tip="t('providers.statusEnabled_tip')">{{ t('providers.statusEnabled') }}</HelpLabel>
-          </template>
-          <n-switch v-model:value="form.enabled" />
-        </n-form-item>
-      </n-form>
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="onUpdateShow(false)">{{ t('providers.cancel') }}</n-button>
-          <n-button type="primary" :loading="submitting" @click="onSubmit">{{ t('providers.save') }}</n-button>
-        </n-space>
-      </template>
-    </n-drawer-content>
-  </n-drawer>
+  <n-modal
+    :show="show"
+    preset="card"
+    :title="editingKey ? t('providers.editKey') : t('providers.addKey')"
+    style="max-width: 520px"
+    :mask-closable="false"
+    :close-on-esc="false"
+    @update:show="onUpdateShow"
+  >
+    <n-form require-mark-placement="left" ref="formRef" :model="form" :rules="rules">
+      <n-form-item path="label">
+        <template #label>
+          <HelpLabel :tip="t('providers.keyLabel_tip')">{{ t('providers.keyLabel') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="form.label" />
+      </n-form-item>
+      <n-form-item path="plaintext">
+        <template #label>
+          <HelpLabel :tip="t('providers.keyPlaintext_tip')">{{ t('providers.keyPlaintext') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="form.plaintext" type="password" show-password-on="click"
+          :placeholder="plaintextPlaceholder" />
+      </n-form-item>
+      <n-form-item path="testModel">
+        <template #label>
+          <HelpLabel :tip="t('providers.testModel_tip')">{{ t('providers.testModel') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="form.testModel" :placeholder="t('providers.testModelHint')" />
+      </n-form-item>
+      <n-form-item>
+        <template #label>
+          <HelpLabel :tip="t('providers.statusEnabled_tip')">{{ t('providers.statusEnabled') }}</HelpLabel>
+        </template>
+        <n-switch v-model:value="form.enabled" />
+      </n-form-item>
+    </n-form>
+    <template #footer>
+      <n-space justify="end">
+        <n-button @click="onUpdateShow(false)">{{ t('providers.cancel') }}</n-button>
+        <n-button type="primary" :loading="submitting" @click="onSubmit">{{ t('providers.save') }}</n-button>
+      </n-space>
+    </template>
+  </n-modal>
 </template>
 
 <script setup lang="ts">
@@ -64,7 +70,7 @@ const form = reactive({ label: '', plaintext: '', testModel: '', enabled: false 
 // (no prior ciphertext to fall back on) but optional when editing an
 // existing one (blank = "keep the current key unchanged").
 // Rule factories live in utils/providerValidators.ts (shared with
-// NewProviderDrawer.vue).
+// NewProviderModal.vue).
 const rules = computed<FormRules>(() => ({
   label: keyLabelRule(t),
   plaintext: keyPlaintextRule(t, !props.editingKey),

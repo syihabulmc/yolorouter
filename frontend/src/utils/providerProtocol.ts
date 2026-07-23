@@ -90,7 +90,7 @@ export function isValidEndpointUrl(value: string): boolean {
 // `path`, so they are NOT registered in the parent form's validation map and
 // formRef.validate() silently skips them. This re-checks the same rule
 // across all enabled additional-protocol endpoints so an invalid URL can
-// never reach the backend — used by both provider drawers before submit.
+// never reach the backend — used by both provider modals before submit.
 export function protocolEndpointsValid(model: ProtocolConfigModel): boolean {
   for (const protocol of ALL_PROTOCOLS) {
     const entry = model.endpoints[protocol]

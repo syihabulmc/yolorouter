@@ -4,7 +4,7 @@
 // integer micro-units (millionths, i.e. major_unit * 1e6), which is how
 // monetary cost/budget are stored to avoid float drift on a cumulative hard
 // cap while keeping 6-decimal precision. Centralizing the rounding and
-// formatting policy here keeps CreateKeyModal / EditKeyDrawer / ApiKeyListPage
+// formatting policy here keeps CreateKeyModal / EditKeyModal / ApiKeyListPage
 // and every cost display consistent, and gives one place to change if the
 // precision rule ever needs to. Naming is currency-agnostic on purpose: the
 // project hard-codes CNY today, but the conversion itself is just

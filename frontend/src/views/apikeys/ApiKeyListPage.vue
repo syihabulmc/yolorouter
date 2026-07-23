@@ -42,7 +42,7 @@
     </div>
 
     <CreateKeyModal v-model:show="showCreate" @created="onCreated" />
-    <EditKeyDrawer v-if="editingId" :key="editingId" :show="showEdit" :api-key-id="editingId" @update:show="onEditShow" @saved="onSaved" />
+    <EditKeyModal v-if="editingId" :key="editingId" :show="showEdit" :api-key-id="editingId" @update:show="onEditShow" @saved="onSaved" />
   </div>
 </template>
 
@@ -59,7 +59,7 @@ import type { APIKey } from '../../api/apiKeys'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import CreateKeyModal from '../../components/apikeys/CreateKeyModal.vue'
-import EditKeyDrawer from '../../components/apikeys/EditKeyDrawer.vue'
+import EditKeyModal from '../../components/apikeys/EditKeyModal.vue'
 
 const { t } = useI18n()
 const dialog = useDialog()
@@ -147,9 +147,9 @@ function openEdit(id: number) {
   showEdit.value = true
 }
 
-// Cancel/X close the drawer via update:show=false — clear editingId too so
+// Cancel/X close the modal via update:show=false — clear editingId too so
 // v-if="editingId" flips off and the next openEdit (same row or another)
-// remounts the drawer and re-runs onMounted/fill. Without this, reopening the
+// remounts the modal and re-runs onMounted/fill. Without this, reopening the
 // same row would reuse the stale form from the previous open.
 function onEditShow(v: boolean) {
   showEdit.value = v
@@ -181,7 +181,7 @@ function onCreated() {
 
 function onSaved() {
   showEdit.value = false
-  // Reset editingId so the drawer unmounts (v-if="editingId"); reopening it
+  // Reset editingId so the modal unmounts (v-if="editingId"); reopening it
   // remounts and re-runs onMounted/fill instead of showing stale form state.
   editingId.value = null
   message.success(t('apiKeys.saveSuccess'))

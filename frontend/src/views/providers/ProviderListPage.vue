@@ -32,8 +32,8 @@
     </div>
 
     <!-- No @created handler needed: store.create() (called inside the
-         drawer) already refetches the list itself. -->
-    <NewProviderDrawer v-model:show="showCreate" />
+         modal) already refetches the list itself. -->
+    <NewProviderModal v-model:show="showCreate" />
   </div>
 </template>
 
@@ -48,7 +48,7 @@ import { displayMessage } from '../../api/client'
 import type { Provider } from '../../api/providers'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
-import NewProviderDrawer from '../../components/providers/NewProviderDrawer.vue'
+import NewProviderModal from '../../components/providers/NewProviderModal.vue'
 import { columnTitle } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 

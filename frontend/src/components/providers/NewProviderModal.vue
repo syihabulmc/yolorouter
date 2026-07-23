@@ -1,68 +1,74 @@
-<!-- frontend/src/components/providers/NewProviderDrawer.vue -->
+<!-- frontend/src/components/providers/NewProviderModal.vue -->
 <template>
-  <n-drawer :show="show" width="480" @update:show="onUpdateShow">
-    <n-drawer-content :title="t('providers.createButton')" closable>
-      <n-steps :current="step" size="small" class="steps">
-        <n-step :title="t('providers.name')" />
-        <n-step :title="t('providers.keyLabel')" />
-      </n-steps>
+  <n-modal
+    :show="show"
+    preset="card"
+    :title="t('providers.createButton')"
+    style="max-width: 520px"
+    :mask-closable="false"
+    :close-on-esc="false"
+    @update:show="onUpdateShow"
+  >
+    <n-steps :current="step" size="small" class="steps">
+      <n-step :title="t('providers.name')" />
+      <n-step :title="t('providers.keyLabel')" />
+    </n-steps>
 
-      <n-form require-mark-placement="left" v-if="step === 1" ref="basicFormRef" :model="basicForm" :rules="basicRules" class="form">
-        <n-form-item path="name">
-          <template #label>
-            <HelpLabel :tip="t('providers.name_tip')">{{ t('providers.name') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="basicForm.name" />
-        </n-form-item>
-        <n-form-item path="baseUrl">
-          <template #label>
-            <HelpLabel :tip="t('providers.baseUrl_tip')">{{ t('providers.baseUrl') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="basicForm.baseUrl" placeholder="https://api.example.com/v1" />
-        </n-form-item>
-        <ProtocolConfigFields v-model="basicForm.protocol" />
-        <n-form-item path="note">
-          <template #label>
-            <HelpLabel :tip="t('providers.note_tip')">{{ t('providers.note') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="basicForm.note" type="textarea" />
-        </n-form-item>
-      </n-form>
+    <n-form require-mark-placement="left" v-if="step === 1" ref="basicFormRef" :model="basicForm" :rules="basicRules" class="form">
+      <n-form-item path="name">
+        <template #label>
+          <HelpLabel :tip="t('providers.name_tip')">{{ t('providers.name') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="basicForm.name" />
+      </n-form-item>
+      <n-form-item path="baseUrl">
+        <template #label>
+          <HelpLabel :tip="t('providers.baseUrl_tip')">{{ t('providers.baseUrl') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="basicForm.baseUrl" placeholder="https://api.example.com/v1" />
+      </n-form-item>
+      <ProtocolConfigFields v-model="basicForm.protocol" />
+      <n-form-item path="note">
+        <template #label>
+          <HelpLabel :tip="t('providers.note_tip')">{{ t('providers.note') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="basicForm.note" type="textarea" />
+      </n-form-item>
+    </n-form>
 
-      <n-form require-mark-placement="left" v-else ref="keyFormRef" :model="keyForm" :rules="keyRules" class="form">
-        <n-form-item path="label">
-          <template #label>
-            <HelpLabel :tip="t('providers.keyLabel_tip')">{{ t('providers.keyLabel') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="keyForm.label" />
-        </n-form-item>
-        <n-form-item path="plaintext">
-          <template #label>
-            <HelpLabel :tip="t('providers.keyPlaintext_tip')">{{ t('providers.keyPlaintext') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="keyForm.plaintext" type="password" show-password-on="click" />
-        </n-form-item>
-        <n-form-item path="testModel">
-          <template #label>
-            <HelpLabel :tip="t('providers.testModel_tip')">{{ t('providers.testModel') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="keyForm.testModel" :placeholder="t('providers.testModelHint')" />
-        </n-form-item>
-        <n-button :loading="testing" @click="onTestConnection">{{ t('providers.testConnection') }}</n-button>
-        <n-alert v-if="testOutcome !== null" :type="testResultOk ? 'success' : 'error'" class="test-result">
-          {{ testResultText }}
-        </n-alert>
-      </n-form>
+    <n-form require-mark-placement="left" v-else ref="keyFormRef" :model="keyForm" :rules="keyRules" class="form">
+      <n-form-item path="label">
+        <template #label>
+          <HelpLabel :tip="t('providers.keyLabel_tip')">{{ t('providers.keyLabel') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="keyForm.label" />
+      </n-form-item>
+      <n-form-item path="plaintext">
+        <template #label>
+          <HelpLabel :tip="t('providers.keyPlaintext_tip')">{{ t('providers.keyPlaintext') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="keyForm.plaintext" type="password" show-password-on="click" />
+      </n-form-item>
+      <n-form-item path="testModel">
+        <template #label>
+          <HelpLabel :tip="t('providers.testModel_tip')">{{ t('providers.testModel') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="keyForm.testModel" :placeholder="t('providers.testModelHint')" />
+      </n-form-item>
+      <n-button :loading="testing" @click="onTestConnection">{{ t('providers.testConnection') }}</n-button>
+      <n-alert v-if="testOutcome !== null" :type="testResultOk ? 'success' : 'error'" class="test-result">
+        {{ testResultText }}
+      </n-alert>
+    </n-form>
 
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="onUpdateShow(false)">{{ t('providers.cancel') }}</n-button>
-          <n-button v-if="step === 1" type="primary" @click="onNextStep">{{ t('common.save') }}</n-button>
-          <n-button v-else type="primary" :loading="submitting" @click="onSubmit">{{ t('providers.save') }}</n-button>
-        </n-space>
-      </template>
-    </n-drawer-content>
-  </n-drawer>
+    <template #footer>
+      <n-space justify="end">
+        <n-button @click="onUpdateShow(false)">{{ t('providers.cancel') }}</n-button>
+        <n-button v-if="step === 1" type="primary" @click="onNextStep">{{ t('common.save') }}</n-button>
+        <n-button v-else type="primary" :loading="submitting" @click="onSubmit">{{ t('providers.save') }}</n-button>
+      </n-space>
+    </template>
+  </n-modal>
 </template>
 
 <script setup lang="ts">
@@ -108,7 +114,7 @@ const testResultText = computed(() => {
 })
 
 // Rule factories live in utils/providerValidators.ts (shared with
-// KeyEditDrawer.vue) and mirror the backend's own binding tags
+// KeyEditModal.vue) and mirror the backend's own binding tags
 // (createProviderRequest/createKeyRequest in internal/handler/provider_handler.go).
 const basicRules: FormRules = {
   name: providerNameRule(t),
@@ -191,7 +197,7 @@ async function onSubmit() {
       key_label: keyForm.label,
       key_plaintext: keyForm.plaintext,
       test_model: keyForm.testModel,
-      management_status: 1, // this drawer's fixed behavior: the first key is always submitted requesting enabled (server independently re-verifies before honoring it)
+      management_status: 1, // this modal's fixed behavior: the first key is always submitted requesting enabled (server independently re-verifies before honoring it)
       ...serializeProtocolConfig(basicForm.protocol),
     })
     onUpdateShow(false)

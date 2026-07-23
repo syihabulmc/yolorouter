@@ -78,9 +78,9 @@
       </n-tab-pane>
     </n-tabs>
 
-    <KeyEditDrawer v-model:show="showAddKey" :provider-id="provider.id" @saved="reload" />
-    <KeyEditDrawer v-model:show="showEditKey" :provider-id="provider.id" :editing-key="editingKey" @saved="reload" />
-    <ProviderEditDrawer v-model:show="showEditProvider" :provider="provider" @updated="reload" />
+    <KeyEditModal v-model:show="showAddKey" :provider-id="provider.id" @saved="reload" />
+    <KeyEditModal v-model:show="showEditKey" :provider-id="provider.id" :editing-key="editingKey" @saved="reload" />
+    <ProviderEditModal v-model:show="showEditProvider" :provider="provider" @updated="reload" />
   </div>
 </template>
 
@@ -97,8 +97,8 @@ import { displayMessage } from '../../api/client'
 import type { BatchTestResult, Provider, ProviderKey } from '../../api/providers'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
-import KeyEditDrawer from '../../components/providers/KeyEditDrawer.vue'
-import ProviderEditDrawer from '../../components/providers/ProviderEditDrawer.vue'
+import KeyEditModal from '../../components/providers/KeyEditModal.vue'
+import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { testOutcomeI18nKey } from '../../utils/testOutcomeDisplay'
 import { ALL_PROTOCOLS, parseProtocolConfig } from '../../utils/providerProtocol'

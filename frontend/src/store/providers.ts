@@ -41,7 +41,7 @@ export const useProvidersStore = defineStore('providers', {
     async update(id: number, input: UpdateProviderInput): Promise<Provider> {
       const updated = await providersApi.updateProvider(id, input)
       // Best-effort refresh (see create): a failed list refresh must not mask a
-      // committed PATCH — the edit drawer would otherwise report failure and
+      // committed PATCH — the edit modal would otherwise report failure and
       // stay open even though the server persisted the change (and may have
       // invalidated keys).
       await this.refreshListBestEffort()

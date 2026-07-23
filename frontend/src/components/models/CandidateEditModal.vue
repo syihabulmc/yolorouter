@@ -1,75 +1,81 @@
-<!-- frontend/src/components/models/CandidateEditDrawer.vue -->
+<!-- frontend/src/components/models/CandidateEditModal.vue -->
 <template>
-  <n-drawer :show="show" width="480" @update:show="onUpdateShow">
-    <n-drawer-content :title="editingCandidate ? t('models.editCandidate') : t('models.addCandidate')" closable>
-      <n-form require-mark-placement="left" ref="formRef" :model="form" :rules="rules">
-        <n-form-item v-if="!editingCandidate" path="providerId">
-          <template #label>
-            <HelpLabel :tip="t('models.provider_tip')">{{ t('models.provider') }}</HelpLabel>
-          </template>
-          <n-select v-model:value="form.providerId" :options="providerOptions" :placeholder="t('models.provider')" />
-          <n-button text @click="openNewProviderDrawer">{{ t('providers.createButton') }}</n-button>
-        </n-form-item>
-        <n-form-item path="providerModelName">
-          <template #label>
-            <HelpLabel :tip="t('models.providerModelName_tip')">{{ t('models.providerModelName') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="form.providerModelName" :placeholder="t('models.providerModelNameHint')" />
-        </n-form-item>
-        <n-form-item path="inputPrice">
-          <template #label>
-            <HelpLabel :tip="t('models.inputPrice_tip')">{{ t('models.inputPrice') }}</HelpLabel>
-          </template>
-          <n-input-number v-model:value="form.inputPrice" :min="0" style="width: 100%" />
-        </n-form-item>
-        <n-form-item path="outputPrice">
-          <template #label>
-            <HelpLabel :tip="t('models.outputPrice_tip')">{{ t('models.outputPrice') }}</HelpLabel>
-          </template>
-          <n-input-number v-model:value="form.outputPrice" :min="0" style="width: 100%" />
-        </n-form-item>
-        <n-form-item>
-          <template #label>
-            <HelpLabel :tip="t('models.cacheWritePrice_tip')">{{ t('models.cacheWritePrice') }}</HelpLabel>
-          </template>
-          <n-input-number v-model:value="form.cacheWritePrice" :min="0" style="width: 100%" />
-        </n-form-item>
-        <n-form-item>
-          <template #label>
-            <HelpLabel :tip="t('models.cacheReadPrice_tip')">{{ t('models.cacheReadPrice') }}</HelpLabel>
-          </template>
-          <n-input-number v-model:value="form.cacheReadPrice" :min="0" style="width: 100%" />
-        </n-form-item>
-        <n-form-item>
-          <template #label>
-            <HelpLabel :tip="t('models.maxOutput_tip')">{{ t('models.maxOutput') }}</HelpLabel>
-          </template>
-          <n-input-number v-model:value="form.maxOutput" :min="0" style="width: 100%" />
-        </n-form-item>
-      </n-form>
+  <n-modal
+    :show="show"
+    preset="card"
+    :title="editingCandidate ? t('models.editCandidate') : t('models.addCandidate')"
+    style="max-width: 520px"
+    :mask-closable="false"
+    :close-on-esc="false"
+    @update:show="onUpdateShow"
+  >
+    <n-form require-mark-placement="left" ref="formRef" :model="form" :rules="rules">
+      <n-form-item v-if="!editingCandidate" path="providerId">
+        <template #label>
+          <HelpLabel :tip="t('models.provider_tip')">{{ t('models.provider') }}</HelpLabel>
+        </template>
+        <n-select v-model:value="form.providerId" :options="providerOptions" :placeholder="t('models.provider')" />
+        <n-button text @click="openNewProviderModal">{{ t('providers.createButton') }}</n-button>
+      </n-form-item>
+      <n-form-item path="providerModelName">
+        <template #label>
+          <HelpLabel :tip="t('models.providerModelName_tip')">{{ t('models.providerModelName') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="form.providerModelName" :placeholder="t('models.providerModelNameHint')" />
+      </n-form-item>
+      <n-form-item path="inputPrice">
+        <template #label>
+          <HelpLabel :tip="t('models.inputPrice_tip')">{{ t('models.inputPrice') }}</HelpLabel>
+        </template>
+        <n-input-number v-model:value="form.inputPrice" :min="0" style="width: 100%" />
+      </n-form-item>
+      <n-form-item path="outputPrice">
+        <template #label>
+          <HelpLabel :tip="t('models.outputPrice_tip')">{{ t('models.outputPrice') }}</HelpLabel>
+        </template>
+        <n-input-number v-model:value="form.outputPrice" :min="0" style="width: 100%" />
+      </n-form-item>
+      <n-form-item>
+        <template #label>
+          <HelpLabel :tip="t('models.cacheWritePrice_tip')">{{ t('models.cacheWritePrice') }}</HelpLabel>
+        </template>
+        <n-input-number v-model:value="form.cacheWritePrice" :min="0" style="width: 100%" />
+      </n-form-item>
+      <n-form-item>
+        <template #label>
+          <HelpLabel :tip="t('models.cacheReadPrice_tip')">{{ t('models.cacheReadPrice') }}</HelpLabel>
+        </template>
+        <n-input-number v-model:value="form.cacheReadPrice" :min="0" style="width: 100%" />
+      </n-form-item>
+      <n-form-item>
+        <template #label>
+          <HelpLabel :tip="t('models.maxOutput_tip')">{{ t('models.maxOutput') }}</HelpLabel>
+        </template>
+        <n-input-number v-model:value="form.maxOutput" :min="0" style="width: 100%" />
+      </n-form-item>
+    </n-form>
 
-      <n-space vertical>
-        <n-button :loading="testing === 'basic'" @click="onTest('basic')">{{ t('models.testBasic') }}</n-button>
-        <n-button :loading="testing === 'streaming'" @click="onTest('streaming')">{{ t('models.testStreaming') }}</n-button>
-        <n-button :loading="testing === 'function_calling'" @click="onTest('function_calling')">{{ t('models.testFunctionCalling') }}</n-button>
-        <n-alert v-if="testResult" :type="testResult.ok ? 'success' : 'error'">
-          {{ testResultLabel }}
-        </n-alert>
+    <n-space vertical>
+      <n-button :loading="testing === 'basic'" @click="onTest('basic')">{{ t('models.testBasic') }}</n-button>
+      <n-button :loading="testing === 'streaming'" @click="onTest('streaming')">{{ t('models.testStreaming') }}</n-button>
+      <n-button :loading="testing === 'function_calling'" @click="onTest('function_calling')">{{ t('models.testFunctionCalling') }}</n-button>
+      <n-alert v-if="testResult" :type="testResult.ok ? 'success' : 'error'">
+        {{ testResultLabel }}
+      </n-alert>
+    </n-space>
+
+    <template #footer>
+      <n-space justify="end">
+        <n-button @click="onUpdateShow(false)">{{ t('models.cancel') }}</n-button>
+        <n-button :loading="submitting" @click="onSave(false)">{{ t('models.saveDisabled') }}</n-button>
+        <n-button type="primary" :disabled="!basicTestPassed" :loading="submitting" @click="onSave(true)">
+          {{ t('models.saveEnabled') }}
+        </n-button>
       </n-space>
+    </template>
+  </n-modal>
 
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="onUpdateShow(false)">{{ t('models.cancel') }}</n-button>
-          <n-button :loading="submitting" @click="onSave(false)">{{ t('models.saveDisabled') }}</n-button>
-          <n-button type="primary" :disabled="!basicTestPassed" :loading="submitting" @click="onSave(true)">
-            {{ t('models.saveEnabled') }}
-          </n-button>
-        </n-space>
-      </template>
-    </n-drawer-content>
-  </n-drawer>
-
-  <NewProviderDrawer v-model:show="showNewProviderDrawer" />
+  <NewProviderModal v-model:show="showNewProviderModal" />
 </template>
 
 <script setup lang="ts">
@@ -82,7 +88,7 @@ import { displayMessage } from '../../api/client'
 import { providerModelNameRule, nonNegativePriceRule } from '../../utils/modelValidators'
 import { candidateTestPassed, candidateTestResultText } from '../../utils/modelStatusDisplay'
 import HelpLabel from '../HelpLabel.vue'
-import NewProviderDrawer from '../providers/NewProviderDrawer.vue'
+import NewProviderModal from '../providers/NewProviderModal.vue'
 import type { ModelCandidate } from '../../api/models'
 
 const props = defineProps<{ show: boolean; modelId: number; editingCandidate?: ModelCandidate | null }>()
@@ -102,7 +108,7 @@ const testing = ref<'basic' | 'streaming' | 'function_calling' | null>(null)
 // both the new-mapping and edit branches).
 const testResult = ref<{ ok: boolean; outcome?: number | null; testType: 'basic' | 'streaming' | 'function_calling' } | null>(null)
 // basicTestPassed gates the "save and enable" button. It is satisfied by the
-// candidate's stored basic verification, or by a fresh in-drawer BASIC test
+// candidate's stored basic verification, or by a fresh in-modal BASIC test
 // pass — NOT by a streaming/function_calling pass, which does not imply the
 // basic mapping works (the server refuses to enable an unverified candidate,
 // so counting those would enable the button then hit a rejection). UX gate
@@ -122,7 +128,7 @@ const testResultLabel = computed(() => {
   return candidateTestResultText(t, r.ok, r.outcome)
 })
 
-const showNewProviderDrawer = ref(false)
+const showNewProviderModal = ref(false)
 let providerIdBeforeCreate = 0
 
 const form = reactive({
@@ -176,16 +182,16 @@ function onUpdateShow(value: boolean) {
   emit('update:show', value)
 }
 
-function openNewProviderDrawer() {
-  // NewProviderDrawer.vue only emits 'update:show' (an unused 'created'
+function openNewProviderModal() {
+  // NewProviderModal.vue only emits 'update:show' (an unused 'created'
   // emit was removed) — so instead of listening for a
   // creation event, capture the highest existing provider id, then diff
-  // against the refetched list once the drawer closes.
+  // against the refetched list once the modal closes.
   providerIdBeforeCreate = providersStore.list.reduce((max, p) => Math.max(max, p.id), 0)
-  showNewProviderDrawer.value = true
+  showNewProviderModal.value = true
 }
 
-watch(showNewProviderDrawer, async (visible) => {
+watch(showNewProviderModal, async (visible) => {
   if (visible) return
   await providersStore.fetchList()
   const created = providersStore.list.find((p) => p.id > providerIdBeforeCreate)

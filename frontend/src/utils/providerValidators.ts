@@ -2,10 +2,10 @@ import type { FormItemRule } from 'naive-ui'
 import { isValidEndpointUrl } from './providerProtocol'
 
 // Mirrors the backend's own binding tags (createProviderRequest / createKeyRequest
-// / updateKeyRequest in internal/handler/provider_handler.go) so NewProviderDrawer.vue
-// and KeyEditDrawer.vue can't drift apart from each other or from the backend —
+// / updateKeyRequest in internal/handler/provider_handler.go) so NewProviderModal.vue
+// and KeyEditModal.vue can't drift apart from each other or from the backend —
 // the same reason authValidators.ts exists for the auth forms (these rules were
-// previously duplicated inline in both drawers).
+// previously duplicated inline in both forms).
 
 export function providerNameRule(t: (key: string) => string): FormItemRule[] {
   return [

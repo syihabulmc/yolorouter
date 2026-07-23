@@ -1,23 +1,29 @@
-<!-- frontend/src/components/models/NewModelDrawer.vue -->
+<!-- frontend/src/components/models/NewModelModal.vue -->
 <template>
-  <n-drawer :show="show" width="420" @update:show="onUpdateShow">
-    <n-drawer-content :title="t('models.createButton')" closable>
-      <n-form require-mark-placement="left" ref="formRef" :model="form" :rules="rules">
-        <n-form-item path="name">
-          <template #label>
-            <HelpLabel :tip="t('models.name_tip')">{{ t('models.name') }}</HelpLabel>
-          </template>
-          <n-input v-model:value="form.name" :placeholder="t('models.nameHint')" />
-        </n-form-item>
-      </n-form>
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="onUpdateShow(false)">{{ t('models.cancel') }}</n-button>
-          <n-button type="primary" :loading="submitting" @click="onSubmit">{{ t('models.save') }}</n-button>
-        </n-space>
-      </template>
-    </n-drawer-content>
-  </n-drawer>
+  <n-modal
+    :show="show"
+    preset="card"
+    :title="t('models.createButton')"
+    style="max-width: 520px"
+    :mask-closable="false"
+    :close-on-esc="false"
+    @update:show="onUpdateShow"
+  >
+    <n-form require-mark-placement="left" ref="formRef" :model="form" :rules="rules">
+      <n-form-item path="name">
+        <template #label>
+          <HelpLabel :tip="t('models.name_tip')">{{ t('models.name') }}</HelpLabel>
+        </template>
+        <n-input v-model:value="form.name" :placeholder="t('models.nameHint')" />
+      </n-form-item>
+    </n-form>
+    <template #footer>
+      <n-space justify="end">
+        <n-button @click="onUpdateShow(false)">{{ t('models.cancel') }}</n-button>
+        <n-button type="primary" :loading="submitting" @click="onSubmit">{{ t('models.save') }}</n-button>
+      </n-space>
+    </template>
+  </n-modal>
 </template>
 
 <script setup lang="ts">

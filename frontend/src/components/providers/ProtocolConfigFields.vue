@@ -1,6 +1,6 @@
 <!-- frontend/src/components/providers/ProtocolConfigFields.vue -->
 <!-- Reusable primary-protocol + additional-protocol-endpoints editor, shared
-     between NewProviderDrawer.vue and a future provider edit drawer. Purely a
+     between NewProviderModal.vue and ProviderEditModal.vue. Purely a
      form-model editor: it maintains ProtocolConfigModel (see
      utils/providerProtocol.ts) and never serializes to the wire format
      itself — the parent form does that via serializeProtocolConfig() at

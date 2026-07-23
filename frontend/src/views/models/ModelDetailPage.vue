@@ -52,8 +52,8 @@
       </n-tab-pane>
     </n-tabs>
 
-    <CandidateEditDrawer v-model:show="showAddCandidate" :model-id="modelData.id" @saved="reload" />
-    <CandidateEditDrawer v-model:show="showEditCandidate" :model-id="modelData.id" :editing-candidate="editingCandidate" @saved="reload" />
+    <CandidateEditModal v-model:show="showAddCandidate" :model-id="modelData.id" @saved="reload" />
+    <CandidateEditModal v-model:show="showEditCandidate" :model-id="modelData.id" :editing-candidate="editingCandidate" @saved="reload" />
   </div>
 </template>
 
@@ -70,7 +70,7 @@ import { candidateTestPassed, candidateTestResultText, modelRunningStatusDisplay
 import type { Model, ModelCandidate } from '../../api/models'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
-import CandidateEditDrawer from '../../components/models/CandidateEditDrawer.vue'
+import CandidateEditModal from '../../components/models/CandidateEditModal.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { useSingleRowAction } from '../../composables/useSingleRowAction'
