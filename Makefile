@@ -1,4 +1,4 @@
-.PHONY: build build-embed build-release frontend embed-frontend test test-release test-embed vet vet-embed dev migrate
+.PHONY: build build-embed build-release build-windows frontend embed-frontend test test-release test-embed vet vet-embed dev migrate
 
 # Release-build metadata injected via -ldflags into internal/version (the
 # package both the `--version` CLI flag and the system-info API read from).
@@ -19,6 +19,12 @@ VERSION_PKG := github.com/yolorouter/yolorouter/internal/version
 # tracked exceptions. Serves web/placeholder.html for every request.
 build:
 	go build -o ./bin/yolorouter ./cmd/yolorouter
+
+# Cross-compile check: the project must always build for windows so the
+# platform-split instance lock / stop paths never regress. No embed needed —
+# this only verifies compilation.
+build-windows:
+	GOOS=windows GOARCH=amd64 go build ./...
 
 # Removes frontend/dist first so a misconfigured build (e.g. an outDir
 # typo in vite.config that leaves npm run build writing somewhere else
