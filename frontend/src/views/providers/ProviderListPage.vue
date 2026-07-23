@@ -86,6 +86,7 @@
     <!-- No @created handler needed: store.create() (called inside the
          modal) already refetches the list itself. -->
     <NewProviderModal v-model:show="showCreate" />
+    <ProviderEditModal v-model:show="showEditProvider" :provider="editingProvider" @updated="onEdited" />
   </div>
 </template>
 
@@ -93,7 +94,7 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { Plus, Search, Server } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
@@ -101,6 +102,7 @@ import type { Provider } from '../../api/providers'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import NewProviderModal from '../../components/providers/NewProviderModal.vue'
+import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
 import { columnTitle } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { ALL_PROTOCOLS, enabledProtocolEndpoints } from '../../utils/providerProtocol'
@@ -111,6 +113,19 @@ const dialog = useDialog()
 const message = useMessage()
 const store = useProvidersStore()
 const showCreate = ref(false)
+// Inline row edit: open the provider edit modal straight from the list so a
+// quick change needs no navigation into the detail page.
+const showEditProvider = ref(false)
+const editingProvider = ref<Provider | null>(null)
+
+function openEditProvider(row: Provider) {
+  editingProvider.value = row
+  showEditProvider.value = true
+}
+
+function onEdited() {
+  void store.fetchList().catch((err) => message.error(displayMessage(err, t)))
+}
 
 // In-page filters over the fully-fetched list. `filter` is the live draft the
 // inputs edit; `applied` is the snapshot the table filters by — so the text
@@ -289,6 +304,23 @@ const columns = computed<DataTableColumns<Provider>>(() => [
             value: row.management_status === 1,
             'onUpdate:value': (v: boolean) => onToggleStatus(row, v),
           }),
+        ],
+      ),
+  },
+  {
+    title: t('common.actions'),
+    key: 'actions',
+    width: 90,
+    render: (row) =>
+      h(
+        'div',
+        { onClick: (e: MouseEvent) => e.stopPropagation() },
+        [
+          h(
+            NButton,
+            { size: 'small', quaternary: true, onClick: () => openEditProvider(row) },
+            { default: () => t('providers.editProvider') },
+          ),
         ],
       ),
   },

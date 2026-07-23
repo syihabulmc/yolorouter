@@ -3,6 +3,7 @@
   <div class="provider-detail-page" v-if="provider">
     <PageHeader :eyebrow="t('providers.eyebrow')" :title="provider.name" :description="provider.base_url">
       <template #actions>
+        <n-button size="small" @click="showEditProvider = true">{{ t('providers.editProvider') }}</n-button>
         <n-button quaternary @click="onToggleProviderStatus">
           {{ provider.management_status === 1 ? t('providers.statusDisabled') : t('providers.statusEnabled') }}
         </n-button>
@@ -10,38 +11,6 @@
     </PageHeader>
 
     <n-tabs v-model:value="activeTab" type="line" animated>
-      <n-tab-pane name="overview" :tab="t('providers.tabOverview')">
-        <div class="section-card overview-card">
-          <div class="overview-head">
-            <h3 class="overview-head__title">{{ t('providers.basicInfo') }}</h3>
-            <n-button size="small" @click="showEditProvider = true">{{ t('providers.editProvider') }}</n-button>
-          </div>
-          <dl class="info-grid">
-            <dt>{{ t('providers.name') }}</dt>
-            <dd>{{ provider.name }}</dd>
-
-            <dt>{{ t('providers.baseUrl') }}</dt>
-            <dd class="mono">{{ provider.base_url }}</dd>
-
-            <dt>{{ t('providers.protocolPrimary') }}</dt>
-            <dd>
-              <n-tag size="small" :bordered="false" round>{{ t('providers.protocol_' + provider.provider_type) }}</n-tag>
-            </dd>
-
-            <dt>{{ t('providers.protocolAdditional') }}</dt>
-            <dd>
-              <span v-if="additionalProtocolLines.length === 0" class="muted">{{ t('providers.protocolNone') }}</span>
-              <div v-else class="additional-protocols">
-                <div v-for="line in additionalProtocolLines" :key="line" class="mono">{{ line }}</div>
-              </div>
-            </dd>
-
-            <dt>{{ t('providers.note') }}</dt>
-            <dd :class="{ muted: !provider.note }">{{ provider.note || '-' }}</dd>
-          </dl>
-        </div>
-      </n-tab-pane>
-
       <n-tab-pane name="keys" :tab="t('providers.tabKeys')">
         <div class="keys-toolbar">
           <span v-if="pendingCount !== null" class="keys-toolbar__count">
@@ -130,7 +99,6 @@ import KeyEditModal from '../../components/providers/KeyEditModal.vue'
 import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { testOutcomeLabel } from '../../utils/testOutcomeDisplay'
-import { enabledProtocolEndpoints } from '../../utils/providerProtocol'
 import { useSingleRowAction } from '../../composables/useSingleRowAction'
 import { useClientPagination } from '../../composables/useClientPagination'
 
@@ -157,7 +125,7 @@ const {
 
 const providerId = Number(route.params.id)
 const provider = ref<Provider | null>(null)
-const activeTab = ref('overview')
+const activeTab = ref('keys')
 const showAddKey = ref(false)
 const showEditKey = ref(false)
 const editingKey = ref<ProviderKey | null>(null)
@@ -183,16 +151,6 @@ const batchResultByKeyId = ref<Record<number, BatchTestResult>>({})
 const pendingCount = computed(() => {
   if (!provider.value) return null
   return provider.value.keys.filter((k) => !k.needs_reentry).length
-})
-
-// Display lines for the Overview's "additional protocols" row: one line per
-// enabled non-primary protocol (parsed from protocol_endpoints), showing
-// its own URL or a "reuse main base URL" note when its URL is blank.
-const additionalProtocolLines = computed<string[]>(() => {
-  if (!provider.value) return []
-  return enabledProtocolEndpoints(provider.value.provider_type, provider.value.protocol_endpoints).map(
-    ({ protocol, url }) => `${t('providers.protocol_' + protocol)}: ${url || t('providers.reuseMainBaseUrl')}`,
-  )
 })
 
 function batchResultLabel(result: BatchTestResult): string {
@@ -540,58 +498,6 @@ async function onTestAll() {
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
-}
-
-.overview-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-bottom: var(--space-3);
-  margin-bottom: var(--space-4);
-  border-bottom: 1px solid var(--color-border-subtle);
-}
-
-.overview-head__title {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.info-grid {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  column-gap: var(--space-8);
-  row-gap: var(--space-3);
-  margin: 0;
-}
-
-.info-grid dt {
-  color: var(--color-text-muted);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.info-grid dd {
-  margin: 0;
-  color: var(--color-text);
-  line-height: 1.6;
-  word-break: break-all;
-}
-
-.info-grid .mono {
-  font-family: var(--font-mono);
-  font-size: 13px;
-}
-
-.info-grid .muted {
-  color: var(--color-text-muted);
-}
-
-.additional-protocols {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
 }
 
 .keys-toolbar {

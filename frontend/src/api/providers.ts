@@ -131,6 +131,15 @@ export function listModelsPreview(baseUrl: string, apiKey: string, providerType:
   })
 }
 
+// listModelsForProvider fetches the upstream model catalogue for an already-
+// stored provider, using one of its server-side keys — the by-id counterpart
+// to listModelsPreview (which needs a plaintext key the candidate UI doesn't
+// hold). A non-success outcome (including "no usable key") returns an empty
+// list; the caller falls back to manual model entry.
+export function listModelsForProvider(id: number): Promise<ListModelsResult> {
+  return apiFetch(`/api/admin/providers/${id}/models`)
+}
+
 export function createProviderKey(providerId: number, input: CreateKeyInput): Promise<ProviderKey> {
   return apiFetch(`/api/admin/providers/${providerId}/keys`, { method: 'POST', body: JSON.stringify(input) })
 }

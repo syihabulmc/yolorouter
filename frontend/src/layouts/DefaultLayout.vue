@@ -182,7 +182,8 @@ const navItems = computed<NavItem[]>(() => [
   { key: 'system-info', label: t('nav.systemInfo'), icon: Info, to: '/system', badge: updateStore.hasUpdate, hidden: true },
   { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
   { key: 'change-password', label: t('auth.changePasswordTitle'), icon: KeyRound, onClick: () => (showChangePassword.value = true) },
-  { key: 'model-pricing', label: t('nav.modelPricing'), icon: Tags, disabled: true },
+  // Hidden from the sidebar for now (feature not built yet).
+  { key: 'model-pricing', label: t('nav.modelPricing'), icon: Tags, disabled: true, hidden: true },
 ])
 
 // Just "logout" now — change password moved into the System Settings group in

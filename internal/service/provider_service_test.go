@@ -2855,3 +2855,118 @@ func TestVerifyKeyAllDestinationsPropagatesClientError(t *testing.T) {
 		t.Fatalf("expected a zero-value TestResult on error, got %+v", result)
 	}
 }
+
+func TestPickKeyForCatalogueFetch(t *testing.T) {
+	const dv = 3
+	enabledVerified := model.ProviderKey{Label: "verified", ManagementStatus: model.ProviderKeyStatusEnabled, VerificationStatus: model.VerificationStatusPassed, AuthorizedDestinationVersion: dv}
+	enabledUntested := model.ProviderKey{Label: "untested", ManagementStatus: model.ProviderKeyStatusEnabled, VerificationStatus: model.VerificationStatusUntested, AuthorizedDestinationVersion: dv}
+	disabled := model.ProviderKey{Label: "disabled", ManagementStatus: model.ProviderKeyStatusDisabled, VerificationStatus: model.VerificationStatusPassed, AuthorizedDestinationVersion: dv}
+	needsReentry := model.ProviderKey{Label: "reentry", ManagementStatus: model.ProviderKeyStatusEnabled, VerificationStatus: model.VerificationStatusPassed, AuthorizedDestinationVersion: dv - 1}
+
+	cases := []struct {
+		name string
+		keys []model.ProviderKey
+		want string // Label of the expected key; "" means nil is expected
+	}{
+		{"no keys", nil, ""},
+		{"only disabled", []model.ProviderKey{disabled}, ""},
+		{"only needs-reentry", []model.ProviderKey{needsReentry}, ""},
+		{"prefers verified even when an untested key comes first", []model.ProviderKey{enabledUntested, enabledVerified}, "verified"},
+		{"falls back to the first enabled current key when none verified", []model.ProviderKey{enabledUntested}, "untested"},
+		{"skips disabled and needs-reentry to reach a usable key", []model.ProviderKey{disabled, needsReentry, enabledUntested}, "untested"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pickKeyForCatalogueFetch(tc.keys, dv)
+			if tc.want == "" {
+				if got != nil {
+					t.Fatalf("expected nil, got %q", got.Label)
+				}
+				return
+			}
+			if got == nil || got.Label != tc.want {
+				t.Fatalf("expected key %q, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+// seedProviderWithUsableKey creates a provider and forces its first key into
+// an enabled, verified, current state so a catalogue fetch can authenticate.
+func seedProviderWithUsableKey(t *testing.T, svc *ProviderService, db *gorm.DB, name string) uint {
+	t.Helper()
+	view, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: name, BaseURL: "https://api.example.com/v1",
+		KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ManagementStatus: model.ProviderStatusEnabled,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	var prov model.Provider
+	if err := db.First(&prov, view.ID).Error; err != nil {
+		t.Fatalf("load provider failed: %v", err)
+	}
+	if err := db.Model(&model.ProviderKey{}).Where("id = ?", view.Keys[0].ID).Updates(map[string]any{
+		"management_status":              model.ProviderKeyStatusEnabled,
+		"verification_status":            model.VerificationStatusPassed,
+		"authorized_destination_version": prov.DestinationVersion,
+	}).Error; err != nil {
+		t.Fatalf("promote key failed: %v", err)
+	}
+	return view.ID
+}
+
+func TestListModelsForProviderReturnsCatalogueForUsableKey(t *testing.T) {
+	svc, db, client := newTestProviderService(t)
+	client.models = []string{"model-a", "model-b"}
+	client.result = TestResult{Outcome: TestSuccess}
+	id := seedProviderWithUsableKey(t, svc, db, "openai-main")
+
+	res, err := svc.ListModelsForProvider(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ListModelsForProvider failed: %v", err)
+	}
+	if res.Outcome != TestSuccess {
+		t.Fatalf("expected TestSuccess, got %v", res.Outcome)
+	}
+	if len(res.Models) != 2 {
+		t.Fatalf("expected 2 models, got %v", res.Models)
+	}
+}
+
+func TestListModelsForProviderFallsBackWhenNoUsableKey(t *testing.T) {
+	svc, db, client := newTestProviderService(t)
+	client.models = []string{"unused"}
+	view, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "no-usable-key", BaseURL: "https://api.example.com/v1",
+		KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ManagementStatus: model.ProviderStatusEnabled,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	// Force the only key disabled so no key qualifies for a catalogue fetch.
+	if err := db.Model(&model.ProviderKey{}).Where("id = ?", view.Keys[0].ID).
+		Update("management_status", model.ProviderKeyStatusDisabled).Error; err != nil {
+		t.Fatalf("disable key failed: %v", err)
+	}
+
+	res, err := svc.ListModelsForProvider(context.Background(), view.ID)
+	if err != nil {
+		t.Fatalf("ListModelsForProvider failed: %v", err)
+	}
+	if res.Outcome != TestAuthFailed {
+		t.Fatalf("expected TestAuthFailed, got %v", res.Outcome)
+	}
+	if len(res.Models) != 0 {
+		t.Fatalf("expected no models on fallback, got %v", res.Models)
+	}
+}
+
+func TestListModelsForProviderUnknownProviderReturnsNotFound(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	if _, err := svc.ListModelsForProvider(context.Background(), 999999); !errors.Is(err, errcode.ErrProviderNotFound) {
+		t.Fatalf("expected ErrProviderNotFound, got %v", err)
+	}
+}

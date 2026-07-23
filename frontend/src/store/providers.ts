@@ -89,5 +89,8 @@ export const useProvidersStore = defineStore('providers', {
     async listModelsPreview(baseUrl: string, apiKey: string, providerType: string): Promise<ListModelsResult> {
       return providersApi.listModelsPreview(baseUrl, apiKey, providerType)
     },
+    async listModelsForProvider(id: number): Promise<ListModelsResult> {
+      return providersApi.listModelsForProvider(id)
+    },
   },
 })

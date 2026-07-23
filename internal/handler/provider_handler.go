@@ -293,18 +293,47 @@ func PostProviderListModels(svc *service.ProviderService) gin.HandlerFunc {
 			response.Error(c, errcode.ProviderTestFailed, errcode.GetMessage(errcode.ProviderTestFailed))
 			return
 		}
-		// Normalize a nil slice to [] so the JSON body is always a list, never
-		// null — the frontend iterates it unconditionally. Only models +
-		// outcome are surfaced: the picker shows the categorized outcome, not a
-		// per-fetch detail/duration (unlike the credential test, which does).
-		models := result.Models
-		if models == nil {
-			models = []string{}
+		respondModelCatalogue(c, result)
+	}
+}
+
+// respondModelCatalogue writes the JSON body shared by both model-catalogue
+// endpoints: a nil slice is normalized to [] so the body is always a list
+// (the frontend iterates it unconditionally), and only models + outcome are
+// surfaced — the picker shows the categorized outcome, not the per-fetch
+// detail/duration a credential test carries.
+func respondModelCatalogue(c *gin.Context, result service.ListModelsResult) {
+	models := result.Models
+	if models == nil {
+		models = []string{}
+	}
+	response.Success(c, gin.H{
+		"models":  models,
+		"outcome": int(result.Outcome),
+	})
+}
+
+// GetProviderListModels fetches the model catalogue for an already-stored
+// provider (GET .../providers/:id/models) using one of its server-side keys —
+// the by-id counterpart to the stateless preview above. A non-success outcome
+// (including "no usable key") comes back as 200 with an empty list, letting
+// the picker fall back to manual entry.
+func GetProviderListModels(svc *service.ProviderService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		providerID, ok := parseUintParam(c, "id")
+		if !ok {
+			return
 		}
-		response.Success(c, gin.H{
-			"models":  models,
-			"outcome": int(result.Outcome),
-		})
+		result, err := svc.ListModelsForProvider(c.Request.Context(), providerID)
+		if err != nil {
+			if errors.Is(err, errcode.ErrProviderNotFound) {
+				response.Error(c, errcode.ProviderNotFound, errcode.GetMessage(errcode.ProviderNotFound))
+				return
+			}
+			response.Error(c, errcode.ProviderTestFailed, errcode.GetMessage(errcode.ProviderTestFailed))
+			return
+		}
+		respondModelCatalogue(c, result)
 	}
 }
 

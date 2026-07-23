@@ -996,6 +996,63 @@ func (s *ProviderService) ListModelsPreview(ctx context.Context, baseURL, apiKey
 	return s.client.ListModels(ctx, protocolForProviderType(providerType), baseURL, apiKey)
 }
 
+// ListModelsForProvider fetches the upstream model catalogue for an already-
+// stored provider (GET .../providers/:id/models) so the candidate-mapping UI
+// can offer a picker instead of a free-text model field. Unlike the stateless
+// preview, the plaintext lives only server-side: it decrypts one of the
+// provider's stored keys here and queries the provider's primary protocol.
+// When no usable key exists the result carries TestAuthFailed (not an error)
+// so the caller falls back to manual entry rather than showing a failure.
+func (s *ProviderService) ListModelsForProvider(ctx context.Context, providerID uint) (ListModelsResult, error) {
+	provider, err := repository.FindProviderByID(s.db, providerID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ListModelsResult{}, errcode.ErrProviderNotFound
+		}
+		return ListModelsResult{}, err
+	}
+	keys, err := repository.ListProviderKeysByProvider(s.db, providerID)
+	if err != nil {
+		return ListModelsResult{}, err
+	}
+	key := pickKeyForCatalogueFetch(keys, provider.DestinationVersion)
+	if key == nil {
+		return ListModelsResult{Outcome: TestAuthFailed}, nil
+	}
+	plaintext, err := crypto.Decrypt(s.masterKey, key.EncryptedKey)
+	if err != nil {
+		return ListModelsResult{}, fmt.Errorf("decrypt key: %w", err)
+	}
+	return s.client.ListModels(ctx, protocolForProviderType(provider.ProviderType), provider.BaseURL, plaintext)
+}
+
+// pickKeyForCatalogueFetch chooses the stored key most likely to authenticate
+// a model-catalogue request: an enabled, still-current (not needs-reentry)
+// key, preferring one already verified, else the first enabled current key.
+// Returns nil when none qualify — the catalogue can't be fetched and the
+// caller falls back to manual entry. Keys arrive ordered by sort_order.
+func pickKeyForCatalogueFetch(keys []model.ProviderKey, destinationVersion int) *model.ProviderKey {
+	var fallback *model.ProviderKey
+	for i := range keys {
+		k := &keys[i]
+		if k.ManagementStatus != model.ProviderKeyStatusEnabled {
+			continue
+		}
+		// A needs-reentry key's stored ciphertext predates the current
+		// destination version, so it may no longer authenticate — skip it.
+		if k.AuthorizedDestinationVersion != destinationVersion {
+			continue
+		}
+		if k.VerificationStatus == model.VerificationStatusPassed {
+			return k
+		}
+		if fallback == nil {
+			fallback = k
+		}
+	}
+	return fallback
+}
+
 // TestProviderKey retests an existing key's stored plaintext
 // (POST .../keys/:keyId/test). Rejects up front, without any network
 // call, if the key needs re-entry (its authorized_destination_version

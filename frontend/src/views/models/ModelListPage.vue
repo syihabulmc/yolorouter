@@ -74,6 +74,7 @@
     </template>
 
     <NewModelModal v-model:show="showCreate" />
+    <ModelEditModal v-model:show="showEditModel" :model="editingModel" @updated="onEdited" />
   </div>
 </template>
 
@@ -81,7 +82,7 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { Boxes, Plus, Search } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
@@ -93,6 +94,7 @@ import type { Model } from '../../api/models'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import NewModelModal from '../../components/models/NewModelModal.vue'
+import ModelEditModal from '../../components/models/ModelEditModal.vue'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -100,6 +102,19 @@ const dialog = useDialog()
 const message = useMessage()
 const store = useModelsStore()
 const showCreate = ref(false)
+// Inline row edit: reuse the same edit modal the detail page uses, opened
+// straight from the list so a name change needs no navigation.
+const showEditModel = ref(false)
+const editingModel = ref<Model | null>(null)
+
+function openEditModel(row: Model) {
+  editingModel.value = row
+  showEditModel.value = true
+}
+
+function onEdited() {
+  void store.fetchList().catch((err) => message.error(displayMessage(err, t)))
+}
 
 // In-page filters over the fully-fetched list (name substring + running /
 // management status). `filter` is the live draft the inputs edit; `applied`
@@ -231,6 +246,23 @@ const columns = computed<DataTableColumns<Model>>(() => [
             value: row.management_status === 1,
             'onUpdate:value': (v: boolean) => onToggleStatus(row, v),
           }),
+        ],
+      ),
+  },
+  {
+    title: t('common.actions'),
+    key: 'actions',
+    width: 90,
+    render: (row) =>
+      h(
+        'div',
+        { onClick: (e: MouseEvent) => e.stopPropagation() },
+        [
+          h(
+            NButton,
+            { size: 'small', quaternary: true, onClick: () => openEditModel(row) },
+            { default: () => t('models.editModel') },
+          ),
         ],
       ),
   },
