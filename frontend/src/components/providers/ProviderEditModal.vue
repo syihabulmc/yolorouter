@@ -17,7 +17,16 @@
     <n-alert type="warning" class="reverify-warning">
       {{ t('providers.editProtocolReverifyWarning') }}
     </n-alert>
-    <n-form require-mark-placement="left" ref="formRef" :model="form" :rules="rules" class="form">
+    <n-form
+      require-mark-placement="left"
+      ref="formRef"
+      :model="form"
+      :rules="rules"
+      class="form provider-form-dense"
+      label-placement="left"
+      label-align="right"
+      label-width="auto"
+    >
       <n-form-item path="name">
         <template #label>
           <HelpLabel :tip="t('providers.name_tip')">{{ t('providers.name') }}</HelpLabel>
@@ -134,6 +143,6 @@ async function onSubmit() {
   margin-bottom: 16px;
 }
 .form {
-  margin-top: 8px;
+  margin-top: 0;
 }
 </style>

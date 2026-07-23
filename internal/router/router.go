@@ -241,6 +241,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	protected.GET("/providers", handler.GetProviders(providerSvc))
 	protected.POST("/providers", handler.PostProvider(providerSvc))
 	protected.POST("/providers/test-key", handler.PostProviderTestKey(providerSvc))
+	protected.POST("/providers/list-models", handler.PostProviderListModels(providerSvc))
 	protected.GET("/providers/:id", handler.GetProvider(providerSvc))
 	protected.PATCH("/providers/:id", handler.PatchProvider(providerSvc))
 	protected.PATCH("/providers/:id/status", handler.PatchProviderStatus(providerSvc))

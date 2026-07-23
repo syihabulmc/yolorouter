@@ -18,7 +18,7 @@ type createProviderRequest struct {
 	BaseURL      string `json:"base_url" binding:"required,url,max=255"`
 	Note         string `json:"note" binding:"max=200"`
 	KeyLabel     string `json:"key_label" binding:"required,min=2,max=30"`
-	KeyPlaintext string `json:"key_plaintext" binding:"required,min=20"`
+	KeyPlaintext string `json:"key_plaintext" binding:"required,min=8"`
 	// TestModel is required: there is no real model mapping yet, so the
 	// admin supplies a temporary model name every test call uses.
 	TestModel        string `json:"test_model" binding:"required,max=100"`
@@ -67,16 +67,26 @@ type testKeyRequest struct {
 	ProviderType string `json:"provider_type"`
 }
 
+// listModelsRequest mirrors testKeyRequest minus the model: a catalogue
+// fetch needs the destination and credential, not a specific model. Same
+// preview semantics — no provider row exists yet, so provider_type is
+// unconstrained and defaults to openai.
+type listModelsRequest struct {
+	BaseURL      string `json:"base_url" binding:"required,url"`
+	APIKey       string `json:"api_key" binding:"required"`
+	ProviderType string `json:"provider_type"`
+}
+
 type createKeyRequest struct {
 	Label            string `json:"label" binding:"required,min=2,max=30"`
-	Plaintext        string `json:"plaintext" binding:"required,min=20"`
+	Plaintext        string `json:"plaintext" binding:"required,min=8"`
 	TestModel        string `json:"test_model" binding:"required,max=100"`
 	ManagementStatus int    `json:"management_status" binding:"omitempty,oneof=1 2"`
 }
 
 type updateKeyRequest struct {
 	Label            string  `json:"label" binding:"required,min=2,max=30"`
-	Plaintext        *string `json:"plaintext" binding:"omitempty,min=20"`
+	Plaintext        *string `json:"plaintext" binding:"omitempty,min=8"`
 	TestModel        string  `json:"test_model" binding:"required,max=100"`
 	ManagementStatus *int    `json:"management_status" binding:"omitempty,oneof=1 2"`
 }
@@ -265,7 +275,36 @@ func PostProviderTestKey(svc *service.ProviderService) gin.HandlerFunc {
 			response.Error(c, errcode.ProviderTestFailed, errcode.GetMessage(errcode.ProviderTestFailed))
 			return
 		}
-		response.Success(c, gin.H{"outcome": int(result.Outcome), "duration_ms": result.DurationMs})
+		response.Success(c, gin.H{"outcome": int(result.Outcome), "duration_ms": result.DurationMs, "detail": result.Detail})
+	}
+}
+
+func PostProviderListModels(svc *service.ProviderService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req listModelsRequest
+		if !bindJSON(c, &req) {
+			return
+		}
+		result, err := svc.ListModelsPreview(c.Request.Context(), req.BaseURL, req.APIKey, req.ProviderType)
+		if err != nil {
+			// The client itself refused the call (e.g. concurrency cap) — not a
+			// real outcome. Mirror PostProviderTestKey's generic mapping rather
+			// than leak the raw client-call error.
+			response.Error(c, errcode.ProviderTestFailed, errcode.GetMessage(errcode.ProviderTestFailed))
+			return
+		}
+		// Normalize a nil slice to [] so the JSON body is always a list, never
+		// null — the frontend iterates it unconditionally. Only models +
+		// outcome are surfaced: the picker shows the categorized outcome, not a
+		// per-fetch detail/duration (unlike the credential test, which does).
+		models := result.Models
+		if models == nil {
+			models = []string{}
+		}
+		response.Success(c, gin.H{
+			"models":  models,
+			"outcome": int(result.Outcome),
+		})
 	}
 }
 

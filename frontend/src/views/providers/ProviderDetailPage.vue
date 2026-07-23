@@ -11,24 +11,34 @@
 
     <n-tabs v-model:value="activeTab" type="line" animated>
       <n-tab-pane name="overview" :tab="t('providers.tabOverview')">
-        <div class="section-card">
-          <div class="overview-toolbar">
-            <n-button @click="showEditProvider = true">{{ t('providers.editProvider') }}</n-button>
+        <div class="section-card overview-card">
+          <div class="overview-head">
+            <h3 class="overview-head__title">{{ t('providers.basicInfo') }}</h3>
+            <n-button size="small" @click="showEditProvider = true">{{ t('providers.editProvider') }}</n-button>
           </div>
-          <n-descriptions :column="1" label-placement="left">
-            <n-descriptions-item :label="t('providers.name')">{{ provider.name }}</n-descriptions-item>
-            <n-descriptions-item :label="t('providers.baseUrl')">{{ provider.base_url }}</n-descriptions-item>
-            <n-descriptions-item :label="t('providers.protocolPrimary')">
-              {{ t('providers.protocol_' + provider.provider_type) }}
-            </n-descriptions-item>
-            <n-descriptions-item :label="t('providers.protocolAdditional')">
-              <span v-if="additionalProtocolLines.length === 0">{{ t('providers.protocolNone') }}</span>
+          <dl class="info-grid">
+            <dt>{{ t('providers.name') }}</dt>
+            <dd>{{ provider.name }}</dd>
+
+            <dt>{{ t('providers.baseUrl') }}</dt>
+            <dd class="mono">{{ provider.base_url }}</dd>
+
+            <dt>{{ t('providers.protocolPrimary') }}</dt>
+            <dd>
+              <n-tag size="small" :bordered="false" round>{{ t('providers.protocol_' + provider.provider_type) }}</n-tag>
+            </dd>
+
+            <dt>{{ t('providers.protocolAdditional') }}</dt>
+            <dd>
+              <span v-if="additionalProtocolLines.length === 0" class="muted">{{ t('providers.protocolNone') }}</span>
               <div v-else class="additional-protocols">
-                <div v-for="line in additionalProtocolLines" :key="line">{{ line }}</div>
+                <div v-for="line in additionalProtocolLines" :key="line" class="mono">{{ line }}</div>
               </div>
-            </n-descriptions-item>
-            <n-descriptions-item :label="t('providers.note')">{{ provider.note || '-' }}</n-descriptions-item>
-          </n-descriptions>
+            </dd>
+
+            <dt>{{ t('providers.note') }}</dt>
+            <dd :class="{ muted: !provider.note }">{{ provider.note || '-' }}</dd>
+          </dl>
         </div>
       </n-tab-pane>
 
@@ -57,6 +67,9 @@
             :bordered="false"
             :single-line="false"
             :row-key="(row: ProviderKey) => row.id"
+            :pagination="keysPagination"
+            @update:page="onKeysPageChange"
+            @update:page-size="onKeysPageSizeChange"
           />
         </div>
 
@@ -73,13 +86,29 @@
             :loading="modelsStore.loading"
             :bordered="false"
             :row-key="(row: LinkedModelRow) => row.candidateId"
+            :pagination="modelsPagination"
+            @update:page="onModelsPageChange"
+            @update:page-size="onModelsPageSizeChange"
           />
         </div>
       </n-tab-pane>
     </n-tabs>
 
-    <KeyEditModal v-model:show="showAddKey" :provider-id="provider.id" @saved="reload" />
-    <KeyEditModal v-model:show="showEditKey" :provider-id="provider.id" :editing-key="editingKey" @saved="reload" />
+    <KeyEditModal
+      v-model:show="showAddKey"
+      :provider-id="provider.id"
+      :base-url="provider.base_url"
+      :provider-type="provider.provider_type"
+      @saved="reload"
+    />
+    <KeyEditModal
+      v-model:show="showEditKey"
+      :provider-id="provider.id"
+      :base-url="provider.base_url"
+      :provider-type="provider.provider_type"
+      :editing-key="editingKey"
+      @saved="reload"
+    />
     <ProviderEditModal v-model:show="showEditProvider" :provider="provider" @updated="reload" />
   </div>
 </template>
@@ -89,7 +118,7 @@ import { computed, h, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import { NButton, NDropdown, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
-import { MoreHorizontal, Plus, PlayCircle } from '@lucide/vue'
+import { ChevronDown, ChevronUp, MoreHorizontal, Plus, PlayCircle } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
 import { useModelsStore } from '../../store/models'
 import type { ModelCandidate } from '../../api/models'
@@ -100,8 +129,10 @@ import EmptyState from '../../components/EmptyState.vue'
 import KeyEditModal from '../../components/providers/KeyEditModal.vue'
 import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
-import { testOutcomeI18nKey } from '../../utils/testOutcomeDisplay'
-import { ALL_PROTOCOLS, parseProtocolConfig } from '../../utils/providerProtocol'
+import { testOutcomeLabel } from '../../utils/testOutcomeDisplay'
+import { enabledProtocolEndpoints } from '../../utils/providerProtocol'
+import { useSingleRowAction } from '../../composables/useSingleRowAction'
+import { useClientPagination } from '../../composables/useClientPagination'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -109,6 +140,20 @@ const dialog = useDialog()
 const message = useMessage()
 const store = useProvidersStore()
 const modelsStore = useModelsStore()
+
+// Independent client-side pagination for the two tables on this page — both are
+// fully-fetched admin lists that can grow long (many keys, or many models
+// mapped to one provider).
+const {
+  pagination: keysPagination,
+  onPageChange: onKeysPageChange,
+  onPageSizeChange: onKeysPageSizeChange,
+} = useClientPagination()
+const {
+  pagination: modelsPagination,
+  onPageChange: onModelsPageChange,
+  onPageSizeChange: onModelsPageSizeChange,
+} = useClientPagination()
 
 const providerId = Number(route.params.id)
 const provider = ref<Provider | null>(null)
@@ -122,6 +167,9 @@ const testingAll = ref(false)
 // testingAll's batch run) so the actions button can show a spinner instead
 // of silently doing nothing until the request resolves.
 const testingKeyId = ref<number | null>(null)
+// Single-flight reorder: only one key can be moving at a time, and the
+// clicked arrow shows a spinner (activeId + direction) while it runs.
+const reorderAction = useSingleRowAction()
 const batchSummary = ref('')
 // Keyed by provider_key.id — populated once per completed batch test,
 // cleared at the start of the next one (see onTestAll). Rendered as a
@@ -142,21 +190,15 @@ const pendingCount = computed(() => {
 // its own URL or a "reuse main base URL" note when its URL is blank.
 const additionalProtocolLines = computed<string[]>(() => {
   if (!provider.value) return []
-  const config = parseProtocolConfig(provider.value.provider_type, provider.value.protocol_endpoints)
-  const lines: string[] = []
-  for (const protocol of ALL_PROTOCOLS) {
-    const entry = config.endpoints[protocol]
-    if (!entry.enabled) continue
-    const urlText = entry.url || t('providers.reuseMainBaseUrl')
-    lines.push(`${t('providers.protocol_' + protocol)}: ${urlText}`)
-  }
-  return lines
+  return enabledProtocolEndpoints(provider.value.provider_type, provider.value.protocol_endpoints).map(
+    ({ protocol, url }) => `${t('providers.protocol_' + protocol)}: ${url || t('providers.reuseMainBaseUrl')}`,
+  )
 })
 
 function batchResultLabel(result: BatchTestResult): string {
   if (result.needs_reentry) return t('providers.needsReentry')
   if (result.skipped || result.outcome === null) return t('providers.testFailed')
-  return t(`providers.${testOutcomeI18nKey(result.outcome)}`) + ` (${result.duration_ms}ms)`
+  return testOutcomeLabel(t, result.outcome) + ` (${result.duration_ms}ms)`
 }
 
 function batchResultTagType(result: BatchTestResult): 'success' | 'warning' | 'error' {
@@ -302,6 +344,31 @@ const keyColumns = computed<DataTableColumns<ProviderKey>>(() => [
       }),
   },
   {
+    title: t('providers.reorderColumn'),
+    key: 'reorder',
+    width: 70,
+    align: 'center',
+    render: (row, index) => {
+      const count = provider.value?.keys.length ?? 0
+      const active = reorderAction.activeId.value
+      const reordering = active !== null
+      const upLoading = active === row.id && reorderAction.direction.value === 'up'
+      const downLoading = active === row.id && reorderAction.direction.value === 'down'
+      return h('div', { style: 'display:inline-flex;align-items:center;gap:2px;justify-content:center' }, [
+        h(
+          NButton,
+          { size: 'small', quaternary: true, circle: true, disabled: reordering || index === 0, loading: upLoading, title: t('providers.moveUp'), onClick: () => onReorder(row.id, 'up') },
+          { icon: () => h(ChevronUp, { size: 16 }) },
+        ),
+        h(
+          NButton,
+          { size: 'small', quaternary: true, circle: true, disabled: reordering || index >= count - 1, loading: downLoading, title: t('providers.moveDown'), onClick: () => onReorder(row.id, 'down') },
+          { icon: () => h(ChevronDown, { size: 16 }) },
+        ),
+      ])
+    },
+  },
+  {
     // Matches the reference project's ApiKeysPage.vue actions-column
     // convention: a single compact "···" dropdown rather than several
     // inline text buttons — the inline-button version made this column
@@ -319,14 +386,10 @@ const keyColumns = computed<DataTableColumns<ProviderKey>>(() => [
           options: [
             { label: t('providers.editKey'), key: 'edit' },
             { label: t('providers.testConnection'), key: 'test', disabled: row.needs_reentry },
-            { label: t('providers.moveUp'), key: 'up' },
-            { label: t('providers.moveDown'), key: 'down' },
           ],
           onSelect: (key: string) => {
             if (key === 'edit') onEditKey(row)
             else if (key === 'test') onTestOneKey(row.id)
-            else if (key === 'up') onReorder(row.id, 'up')
-            else if (key === 'down') onReorder(row.id, 'down')
           },
         },
         {
@@ -358,7 +421,7 @@ async function onTestOneKey(keyId: number) {
     // classifyTestResult and would drift if duplicated here.
     const outcome = updated.last_test_result
     if (outcome === null) return
-    const label = t(`providers.${testOutcomeI18nKey(outcome)}`)
+    const label = testOutcomeLabel(t, outcome)
     if (outcome === 0) message.success(label)
     else message.warning(label)
   } catch (err) {
@@ -369,12 +432,14 @@ async function onTestOneKey(keyId: number) {
 }
 
 async function onReorder(keyId: number, direction: 'up' | 'down') {
-  try {
-    await store.reorderKey(providerId, keyId, direction)
-    await reload()
-  } catch (err) {
-    message.error(displayMessage(err, t))
-  }
+  await reorderAction.run(keyId, async () => {
+    try {
+      await store.reorderKey(providerId, keyId, direction)
+      await reload()
+    } catch (err) {
+      message.error(displayMessage(err, t))
+    }
+  }, direction)
 }
 
 // A key actually contributes to routing only when it's enabled AND has
@@ -477,10 +542,50 @@ async function onTestAll() {
   gap: var(--space-6);
 }
 
-.overview-toolbar {
+.overview-head {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: var(--space-3);
   margin-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.overview-head__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: var(--space-8);
+  row-gap: var(--space-3);
+  margin: 0;
+}
+
+.info-grid dt {
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.info-grid dd {
+  margin: 0;
+  color: var(--color-text);
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.info-grid .mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.info-grid .muted {
+  color: var(--color-text-muted);
 }
 
 .additional-protocols {

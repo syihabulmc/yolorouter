@@ -14,7 +14,7 @@
       <n-select :value="modelValue.providerType" :options="primaryOptions" @update:value="onPrimaryChange" />
     </n-form-item>
 
-    <NCollapse>
+    <NCollapse class="multi-protocol-collapse">
       <NCollapseItem :title="t('providers.multiProtocolTitle')" name="multi-protocol">
         <div v-for="p in additionalProtocols" :key="p" class="protocol-row">
           <NCheckbox :checked="modelValue.endpoints[p].enabled" @update:checked="(checked: boolean) => onToggleEndpoint(p, checked)">
@@ -93,6 +93,11 @@ function onEndpointUrlChange(protocol: ProtocolId, url: string) {
 </script>
 
 <style scoped>
+/* The collapse is not an n-form-item, so it misses the form's field rhythm —
+   add the same breathing room so it never butts against the next field. */
+.multi-protocol-collapse {
+  margin-bottom: 18px;
+}
 .protocol-row {
   display: flex;
   flex-direction: column;

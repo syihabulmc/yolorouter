@@ -220,3 +220,15 @@ a {
     justify-content: flex-start;
   }
 }
+
+/* Shared compact rhythm for the provider dialogs (create / edit / key). naive
+   reserves a full ~24px validation-feedback row under every field even with no
+   error; shrink it and drop the extra item margin so the fields sit tight.
+   One definition here instead of copy-pasted scoped blocks in each modal. */
+.provider-form-dense .n-form-item {
+  margin-bottom: 0;
+}
+
+.provider-form-dense .n-form-item-feedback-wrapper {
+  min-height: 16px;
+}

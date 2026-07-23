@@ -929,3 +929,144 @@ func TestTestFunctionCallingClaudeSuccessOnParseableBody(t *testing.T) {
 		t.Fatalf("expected TestSuccess for a non-error 200 body (anthropic tool_use body classification is deferred), got %v", result.Outcome)
 	}
 }
+
+func TestListModelsOpenAISuccess(t *testing.T) {
+	var gotPath string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[{"id":"deepseek-chat"},{"id":"deepseek-reasoner"}]}`))
+	})
+	defer srv.Close()
+
+	result, err := c.ListModels(context.Background(), protocols.ProtocolOpenAI, srv.URL, "sk-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != TestSuccess {
+		t.Fatalf("expected TestSuccess, got %v (detail %q)", result.Outcome, result.Detail)
+	}
+	if len(result.Models) != 2 || result.Models[0] != "deepseek-chat" || result.Models[1] != "deepseek-reasoner" {
+		t.Fatalf("expected [deepseek-chat deepseek-reasoner], got %v", result.Models)
+	}
+	// A base URL without a version segment must resolve to /v1/models.
+	if gotPath != "/v1/models" {
+		t.Fatalf("expected GET /v1/models, got %q", gotPath)
+	}
+}
+
+func TestListModelsGeminiStripsModelsPrefix(t *testing.T) {
+	var gotPath string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"models":[{"name":"models/gemini-3.5-flash"},{"name":"models/gemini-3.5-pro"}]}`))
+	})
+	defer srv.Close()
+
+	result, err := c.ListModels(context.Background(), protocols.ProtocolGemini, srv.URL, "sk-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Models) != 2 || result.Models[0] != "gemini-3.5-flash" {
+		t.Fatalf("expected the models/ prefix stripped, got %v", result.Models)
+	}
+	// Gemini catalogues are served under /v1beta.
+	if gotPath != "/v1beta/models" {
+		t.Fatalf("expected GET /v1beta/models, got %q", gotPath)
+	}
+}
+
+func TestListModels401ReturnsAuthFailedWithDetail(t *testing.T) {
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid api key"}}`))
+	})
+	defer srv.Close()
+
+	result, _ := c.ListModels(context.Background(), protocols.ProtocolOpenAI, srv.URL, "sk-test")
+	if result.Outcome != TestAuthFailed {
+		t.Fatalf("expected TestAuthFailed, got %v", result.Outcome)
+	}
+	if !strings.Contains(result.Detail, "HTTP 401") || !strings.Contains(result.Detail, "invalid api key") {
+		t.Fatalf("expected detail to carry status and upstream message, got %q", result.Detail)
+	}
+	if len(result.Models) != 0 {
+		t.Fatalf("expected no models on failure, got %v", result.Models)
+	}
+}
+
+func TestListModelsUnreachableOnNetworkError(t *testing.T) {
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {})
+	srv.Close() // close before the call so the dial fails
+
+	result, _ := c.ListModels(context.Background(), protocols.ProtocolOpenAI, srv.URL, "sk-test")
+	if result.Outcome != TestUnreachable {
+		t.Fatalf("expected TestUnreachable, got %v", result.Outcome)
+	}
+}
+
+func TestListModels404ReturnsEmptyCatalogue(t *testing.T) {
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"message":"not found"}}`))
+	})
+	defer srv.Close()
+
+	// A 404 on the catalogue endpoint means "no /models here", not "model not
+	// found": report an empty but successful catalogue so the UI falls back to
+	// manual entry instead of showing a misleading model-not-found error.
+	result, _ := c.ListModels(context.Background(), protocols.ProtocolOpenAI, srv.URL, "sk-test")
+	if result.Outcome != TestSuccess {
+		t.Fatalf("expected TestSuccess (empty catalogue) for a 404, got %v (detail %q)", result.Outcome, result.Detail)
+	}
+	if len(result.Models) != 0 {
+		t.Fatalf("expected no models for a 404 catalogue, got %v", result.Models)
+	}
+}
+
+func TestListModelsFollowsDataPagination(t *testing.T) {
+	var pages []string
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		pages = append(pages, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if r.URL.Query().Get("after_id") == "m2" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"m3"}],"has_more":false}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"m1"},{"id":"m2"}],"has_more":true,"last_id":"m2"}`))
+	})
+	defer srv.Close()
+
+	result, err := c.ListModels(context.Background(), protocols.ProtocolClaude, srv.URL, "sk-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Models) != 3 || result.Models[0] != "m1" || result.Models[2] != "m3" {
+		t.Fatalf("expected the paginated pages merged to [m1 m2 m3], got %v", result.Models)
+	}
+	if len(pages) != 2 || pages[0] != "" || pages[1] != "after_id=m2" {
+		t.Fatalf("expected page 1 unqualified then page 2 with after_id=m2, got %v", pages)
+	}
+}
+
+func TestListModelsFollowsGeminiPagination(t *testing.T) {
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if r.URL.Query().Get("pageToken") == "tok" {
+			_, _ = w.Write([]byte(`{"models":[{"name":"models/gemini-b"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"models":[{"name":"models/gemini-a"}],"nextPageToken":"tok"}`))
+	})
+	defer srv.Close()
+
+	result, _ := c.ListModels(context.Background(), protocols.ProtocolGemini, srv.URL, "sk-test")
+	if len(result.Models) != 2 || result.Models[0] != "gemini-a" || result.Models[1] != "gemini-b" {
+		t.Fatalf("expected [gemini-a gemini-b] across two pages, got %v", result.Models)
+	}
+}

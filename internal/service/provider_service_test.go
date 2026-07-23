@@ -98,6 +98,15 @@ type fakeProviderClient struct {
 	lastProto  protocols.ProtocolID
 	sideEffect func()
 	perTarget  map[string]fakeTargetResponse
+	// models is returned verbatim by ListModels; result.Outcome/Detail drive
+	// its outcome, so a test can canned both a catalogue and a failure shape.
+	models []string
+}
+
+func (f *fakeProviderClient) ListModels(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey string) (ListModelsResult, error) {
+	f.calls++
+	f.lastProto = proto
+	return ListModelsResult{Models: f.models, Outcome: f.result.Outcome, DurationMs: f.result.DurationMs, Detail: f.result.Detail}, f.err
 }
 
 // fakeTargetResponse is one canned (TestResult, error) pair keyed by
@@ -277,18 +286,18 @@ func TestKeyPrefixForClampsToPlaintextLength(t *testing.T) {
 		want      string
 	}{
 		{"empty", "", ""},
-		{"shorter than 4 chars clamps to empty", "abc", ""},
-		{"exactly 4 chars clamps to empty", "abcd", ""},
-		{"between 4 and 14 chars uses len-4", "abcdefgh", "abcd"},
+		{"shorter than the prefix threshold stores nothing", "abc", ""},
+		{"one below the threshold (19 runes) stores nothing", "abcdefghij012345678", ""},
+		{"exactly at the threshold (20 runes) uses the first 10", "abcdefghij0123456789", "abcdefghij"},
 		{"caps at 10 chars for long plaintext", "sk-abcdefghijklmnopqrstuvwxyz1234", "sk-abcdefg"},
 		// Regression: the original byte-sliced
 		// implementation could cut a multi-byte UTF-8 character in half if
-		// one straddled the cutoff, producing invalid UTF-8. Each of these
-		// multi-byte runes (é = 2 bytes, 中 = 3 bytes) sits exactly at the
-		// old byte-index cutoff for its plaintext's length; a rune-safe
-		// implementation must return valid UTF-8 either way.
-		{"multi-byte rune straddling the len-4 cutoff", "café-abcdefghijklmnopqrstuvwxyz1234", "café-abcde"},
-		{"multi-byte rune straddling the 10-rune cap", "sk-中国12345678901234", "sk-中国12345"},
+		// one straddled the cutoff, producing invalid UTF-8. These multi-byte
+		// runes (é = 2 bytes, 中 = 3 bytes) fall within the first 10 runes of a
+		// plaintext long enough to store a prefix; a rune-safe implementation
+		// must return valid UTF-8 either way.
+		{"multi-byte rune within the first 10 runes stays valid UTF-8", "café-abcdefghijklmnopqrstuvwxyz1234", "café-abcde"},
+		{"multi-byte rune near the 10-rune cap stays valid UTF-8", "sk-中国12345678901234ab", "sk-中国12345"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -313,10 +322,10 @@ func TestCreateProviderErrorsWhenEncryptFails(t *testing.T) {
 	}
 }
 
-func TestCreateProviderRejectsPlaintextShorterThan20Chars(t *testing.T) {
+func TestCreateProviderRejectsPlaintextShorterThanMinimum(t *testing.T) {
 	svc, _, _ := newTestProviderService(t)
 	_, err := svc.CreateProvider(context.Background(), CreateProviderInput{
-		Name: "short-key", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "too-short", TestModel: "gpt-4o-mini",
+		Name: "short-key", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "short", TestModel: "gpt-4o-mini",
 	}, time.Now().UTC())
 	if err == nil {
 		t.Fatalf("expected an error for a plaintext shorter than the minimum length")
@@ -954,7 +963,7 @@ func TestCreateProviderKeyRejectsDuplicateLabel(t *testing.T) {
 	}
 }
 
-func TestCreateProviderKeyRejectsPlaintextShorterThan20Chars(t *testing.T) {
+func TestCreateProviderKeyRejectsPlaintextShorterThanMinimum(t *testing.T) {
 	svc, _, _ := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
@@ -965,7 +974,7 @@ func TestCreateProviderKeyRejectsPlaintextShorterThan20Chars(t *testing.T) {
 	}
 
 	_, err = svc.CreateProviderKey(context.Background(), provider.ID, CreateKeyInput{
-		Label: "k2", Plaintext: "too-short", TestModel: "gpt-4o-mini",
+		Label: "k2", Plaintext: "short", TestModel: "gpt-4o-mini",
 	}, now)
 	if err == nil {
 		t.Fatalf("expected an error for a plaintext shorter than the minimum length")
@@ -1560,7 +1569,7 @@ func TestUpdateProviderKeyErrorsWhenLabelStatusUpdateFailsForNonUniqueReason(t *
 	}
 }
 
-func TestUpdateProviderKeyRejectsPlaintextShorterThan20CharsOnEdit(t *testing.T) {
+func TestUpdateProviderKeyRejectsPlaintextShorterThanMinimumOnEdit(t *testing.T) {
 	svc, _, _ := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
@@ -1569,7 +1578,7 @@ func TestUpdateProviderKeyRejectsPlaintextShorterThan20CharsOnEdit(t *testing.T)
 	if err != nil {
 		t.Fatalf("CreateProvider failed: %v", err)
 	}
-	shortPlaintext := "too-short"
+	shortPlaintext := "short"
 
 	_, err = svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
 		Label: provider.Keys[0].Label, Plaintext: &shortPlaintext, TestModel: provider.Keys[0].TestModel,

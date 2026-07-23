@@ -100,6 +100,25 @@ export function protocolEndpointsValid(model: ProtocolConfigModel): boolean {
   return true
 }
 
+// enabledProtocolEndpoints lists the additional (non-primary) protocols a
+// provider also accepts, parsed from its wire fields. Each entry's url may be
+// an empty string, meaning "reuse the provider's base_url" — callers apply
+// that fallback in whatever form they present it (an address, or a note). This
+// is the single walk both the provider list and detail views build on, so the
+// "which extra endpoints does this provider serve" rule lives in one place.
+export function enabledProtocolEndpoints(
+  providerType: string,
+  protocolEndpointsJson: string,
+): { protocol: ProtocolId; url: string }[] {
+  const config = parseProtocolConfig(providerType, protocolEndpointsJson)
+  const result: { protocol: ProtocolId; url: string }[] = []
+  for (const protocol of ALL_PROTOCOLS) {
+    const entry = config.endpoints[protocol]
+    if (entry.enabled) result.push({ protocol, url: entry.url })
+  }
+  return result
+}
+
 export function serializeProtocolConfig(model: ProtocolConfigModel): {
   provider_type: string
   protocol_endpoints: string

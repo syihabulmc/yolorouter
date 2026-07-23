@@ -72,10 +72,12 @@ func computeRunningStatus(keys []model.ProviderKey, destinationVersion int) stri
 // key-match check. Treat it as frozen once a release ships.
 const providerKeyFingerprintProbe = "yolorouter-provider-key-fingerprint-probe-v1"
 
-// minKeyPlaintextLength enforces the minimum-length rule: a
-// key shorter than this would let key_prefix's "keep the last 4 chars
-// hidden" math expose most/all of a short secret if the database leaks.
-const minKeyPlaintextLength = 20
+// minKeyPlaintextLength is a low sanity floor that rejects empty or
+// obviously mistyped keys without rejecting any legitimately short one.
+// Disclosure risk from short keys is handled separately by keyPrefixFor, which
+// stores no plaintext prefix below keyPrefixSafeMinLength — so lowering this
+// floor never exposes more of a secret than before.
+const minKeyPlaintextLength = 8
 
 type ProviderService struct {
 	db        *gorm.DB
@@ -220,21 +222,40 @@ func (s *ProviderService) toProviderView(provider *model.Provider, keys []model.
 	}
 }
 
-// keyPrefixFor computes the key_prefix:
-// min(10, max(0, len(plaintext)-4)) characters from the start, never
-// exposing the last 4+ characters of the secret.
+const (
+	// keyPrefixMaxExposed is the most leading characters keyPrefixFor ever
+	// stores in plaintext.
+	keyPrefixMaxExposed = 10
+	// keyPrefixMinHidden is the fewest trailing characters keyPrefixFor always
+	// withholds, so the stored prefix never reaches the end of the secret.
+	keyPrefixMinHidden = 4
+	// keyPrefixMinSafeUnknown is how many characters must stay unknown after a
+	// database leak for the remaining secret to resist brute-forcing.
+	keyPrefixMinSafeUnknown = 10
+	// keyPrefixSafeMinLength is the shortest key for which any prefix is
+	// stored: expose the first keyPrefixMaxExposed and at least
+	// keyPrefixMinSafeUnknown must remain hidden. Below it, keyPrefixFor stores
+	// nothing and the admin identifies the key by its label — preserving the
+	// leak-resistance the previous accept-time minimum gave, without blocking
+	// the (now permitted) shorter keys some upstreams issue.
+	keyPrefixSafeMinLength = keyPrefixMaxExposed + keyPrefixMinSafeUnknown
+)
+
+// keyPrefixFor computes the key_prefix: up to the first keyPrefixMaxExposed
+// characters, always hiding the last keyPrefixMinHidden+, and nothing at all
+// for a key below keyPrefixSafeMinLength.
 func keyPrefixFor(plaintext string) string {
 	// Rune-sliced, not byte-sliced: the byte
 	// version could cut a multi-byte UTF-8 character in half if one
 	// happened to straddle the cutoff, producing an invalid UTF-8
 	// key_prefix that then round-trips through JSON as U+FFFD.
 	runes := []rune(plaintext)
-	n := len(runes) - 4
-	if n < 0 {
-		n = 0
+	if len(runes) < keyPrefixSafeMinLength {
+		return ""
 	}
-	if n > 10 {
-		n = 10
+	n := len(runes) - keyPrefixMinHidden
+	if n > keyPrefixMaxExposed {
+		n = keyPrefixMaxExposed
 	}
 	return string(runes[:n])
 }
@@ -965,6 +986,14 @@ func (s *ProviderService) ReorderProviderKey(providerID, keyID uint, direction s
 // unchanged.
 func (s *ProviderService) TestKeyPreview(ctx context.Context, baseURL, apiKey, model, providerType string) (TestResult, error) {
 	return s.client.TestChatCompletion(ctx, protocolForProviderType(providerType), baseURL, apiKey, model)
+}
+
+// ListModelsPreview fetches the upstream model catalogue for a candidate
+// credential (POST .../providers/list-models) so the admin UI can offer a
+// picker instead of a free-text model field. Like TestKeyPreview it is
+// stateless — nothing is persisted and no later request trusts the result.
+func (s *ProviderService) ListModelsPreview(ctx context.Context, baseURL, apiKey, providerType string) (ListModelsResult, error) {
+	return s.client.ListModels(ctx, protocolForProviderType(providerType), baseURL, apiKey)
 }
 
 // TestProviderKey retests an existing key's stored plaintext

@@ -51,6 +51,7 @@ import EmptyState from '../../components/EmptyState.vue'
 import NewProviderModal from '../../components/providers/NewProviderModal.vue'
 import { columnTitle } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
+import { enabledProtocolEndpoints } from '../../utils/providerProtocol'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -89,6 +90,18 @@ const RUNNING_STATUS_DISPLAY: Record<string, { i18nKey: string; type: 'default' 
 
 function runningStatusDisplay(status: string) {
   return RUNNING_STATUS_DISPLAY[status] ?? RUNNING_STATUS_DISPLAY.unavailable
+}
+
+// Every distinct address this provider actually serves on: the primary
+// base_url plus each enabled additional-protocol endpoint (an endpoint with an
+// empty URL reuses base_url, so it collapses into the same entry). Deduped so
+// a provider whose extra protocols all reuse base_url still shows one address.
+function serviceAddresses(row: Provider): string[] {
+  const urls = [row.base_url]
+  for (const { url } of enabledProtocolEndpoints(row.provider_type, row.protocol_endpoints)) {
+    urls.push(url || row.base_url)
+  }
+  return [...new Set(urls)]
 }
 
 // Mirrors ProviderDetailPage.vue's onToggleProviderStatus, scoped to a list
@@ -132,7 +145,12 @@ const columns = computed<DataTableColumns<Provider>>(() => [
     title: columnTitle(t('providers.baseUrl'), t('providers.baseUrl_tip')),
     key: 'base_url',
     minWidth: 240,
-    render: (row) => h('span', { class: 'provider-url-cell' }, row.base_url),
+    render: (row) =>
+      h(
+        'div',
+        { class: 'provider-url-cell' },
+        serviceAddresses(row).map((url) => h('div', { key: url, class: 'provider-url-line' }, url)),
+      ),
   },
   {
     title: columnTitle(t('providers.runningStatusColumn'), t('providers.runningStatusColumn_tip')),
@@ -180,8 +198,15 @@ const columns = computed<DataTableColumns<Provider>>(() => [
 }
 
 :deep(.provider-url-cell) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   color: var(--color-text-muted);
   font-size: var(--text-xs);
   font-family: var(--font-mono);
+}
+
+:deep(.provider-url-line) {
+  word-break: break-all;
 }
 </style>

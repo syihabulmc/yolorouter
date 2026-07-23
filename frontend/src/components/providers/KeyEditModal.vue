@@ -9,7 +9,16 @@
     :close-on-esc="false"
     @update:show="onUpdateShow"
   >
-    <n-form require-mark-placement="left" ref="formRef" :model="form" :rules="rules">
+    <n-form
+      require-mark-placement="left"
+      ref="formRef"
+      :model="form"
+      :rules="rules"
+      class="provider-form-dense"
+      label-placement="left"
+      label-align="right"
+      label-width="auto"
+    >
       <n-form-item path="label">
         <template #label>
           <HelpLabel :tip="t('providers.keyLabel_tip')">{{ t('providers.keyLabel') }}</HelpLabel>
@@ -23,12 +32,12 @@
         <n-input v-model:value="form.plaintext" type="password" show-password-on="click"
           :placeholder="plaintextPlaceholder" />
       </n-form-item>
-      <n-form-item path="testModel">
-        <template #label>
-          <HelpLabel :tip="t('providers.testModel_tip')">{{ t('providers.testModel') }}</HelpLabel>
-        </template>
-        <n-input v-model:value="form.testModel" :placeholder="t('providers.testModelHint')" />
-      </n-form-item>
+      <ProviderModelTester
+        v-model:value="form.testModel"
+        :base-url="baseUrl"
+        :api-key="form.plaintext"
+        :provider-type="providerType"
+      />
       <n-form-item>
         <template #label>
           <HelpLabel :tip="t('providers.statusEnabled_tip')">{{ t('providers.statusEnabled') }}</HelpLabel>
@@ -52,10 +61,17 @@ import { useMessage, type FormInst, type FormRules } from 'naive-ui'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
 import type { ProviderKey } from '../../api/providers'
-import { keyLabelRule, keyPlaintextRule, testModelRule } from '../../utils/providerValidators'
+import { keyLabelRule, keyPlaintextRule } from '../../utils/providerValidators'
 import HelpLabel from '../HelpLabel.vue'
+import ProviderModelTester from './ProviderModelTester.vue'
 
-const props = defineProps<{ show: boolean; providerId: number; editingKey?: ProviderKey | null }>()
+const props = defineProps<{
+  show: boolean
+  providerId: number
+  baseUrl: string
+  providerType: string
+  editingKey?: ProviderKey | null
+}>()
 const emit = defineEmits<{ 'update:show': [boolean]; saved: [] }>()
 
 const { t } = useI18n()
@@ -74,7 +90,6 @@ const form = reactive({ label: '', plaintext: '', testModel: '', enabled: false 
 const rules = computed<FormRules>(() => ({
   label: keyLabelRule(t),
   plaintext: keyPlaintextRule(t, !props.editingKey),
-  testModel: testModelRule(t),
 }))
 
 // The plaintext placeholder previously always

@@ -74,6 +74,16 @@ export interface UpdateKeyInput {
 export interface TestKeyResult {
   outcome: number
   duration_ms: number
+  // detail is a concise, admin-facing diagnostic string for a failed test
+  // (HTTP status + the upstream's own error message when present). Empty on
+  // success. Shown expandable in the setup UI to help tell a bad key from a
+  // wrong model from a blocked address.
+  detail: string
+}
+
+export interface ListModelsResult {
+  models: string[]
+  outcome: number
 }
 
 export function listProviders(): Promise<{ list: Provider[] }> {
@@ -105,6 +115,19 @@ export function testKeyPreview(baseUrl: string, apiKey: string, model: string, p
   return apiFetch('/api/admin/providers/test-key', {
     method: 'POST',
     body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model, provider_type: providerType }),
+  })
+}
+
+// listModelsPreview fetches the upstream model catalogue for a candidate
+// credential so the setup UI can offer a picker instead of a free-text model
+// field. Stateless preview — nothing is persisted. A non-success outcome
+// (with an optional detail) means the catalogue could not be retrieved (bad
+// key, unreachable, or the upstream simply doesn't expose /v1/models), in
+// which case the caller falls back to manual model entry.
+export function listModelsPreview(baseUrl: string, apiKey: string, providerType: string): Promise<ListModelsResult> {
+  return apiFetch('/api/admin/providers/list-models', {
+    method: 'POST',
+    body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, provider_type: providerType }),
   })
 }
 

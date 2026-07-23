@@ -47,6 +47,7 @@ func newProviderTestRouterWithClient(t *testing.T, client service.ProviderClient
 	admin.GET("/providers", GetProviders(svc))
 	admin.POST("/providers", PostProvider(svc))
 	admin.POST("/providers/test-key", PostProviderTestKey(svc))
+	admin.POST("/providers/list-models", PostProviderListModels(svc))
 	admin.GET("/providers/:id", GetProvider(svc))
 	admin.PATCH("/providers/:id", PatchProvider(svc))
 	admin.PATCH("/providers/:id/status", PatchProviderStatus(svc))
@@ -76,6 +77,10 @@ func (alwaysSuccessClient) TestFunctionCalling(ctx context.Context, proto protoc
 	return service.TestResult{Outcome: service.TestSuccess, DurationMs: 5}, nil
 }
 
+func (alwaysSuccessClient) ListModels(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey string) (service.ListModelsResult, error) {
+	return service.ListModelsResult{Models: []string{"model-a", "model-b"}, Outcome: service.TestSuccess, DurationMs: 5}, nil
+}
+
 // modelNotFoundClient always classifies as TestModelNotFound, which
 // classifyTestResult (internal/service/provider_service.go) never
 // overwrites verification_status for — a freshly created key stays
@@ -96,6 +101,10 @@ func (modelNotFoundClient) TestFunctionCalling(ctx context.Context, proto protoc
 	return service.TestResult{Outcome: service.TestModelNotFound, DurationMs: 3}, nil
 }
 
+func (modelNotFoundClient) ListModels(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey string) (service.ListModelsResult, error) {
+	return service.ListModelsResult{Outcome: service.TestModelNotFound, DurationMs: 3, Detail: "HTTP 404"}, nil
+}
+
 // erroringClient always returns an error from the client call itself (e.g.
 // a concurrency cap rejection), never a TestResult outcome — exercises
 // PostProviderTestKey's ProviderTestFailed mapping.
@@ -111,6 +120,10 @@ func (erroringClient) TestStreamingCompletion(ctx context.Context, proto protoco
 
 func (erroringClient) TestFunctionCalling(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (service.TestResult, error) {
 	return service.TestResult{}, errors.New("client refused the call")
+}
+
+func (erroringClient) ListModels(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey string) (service.ListModelsResult, error) {
+	return service.ListModelsResult{}, errors.New("client refused the call")
 }
 
 // createProviderForTest creates a provider (with alwaysSuccessClient's
@@ -498,6 +511,49 @@ func TestPostProviderTestKeyReturns400WhenClientErrors(t *testing.T) {
 	r, _ := newProviderTestRouterWithClient(t, erroringClient{})
 	w, env := doJSON(t, r, http.MethodPost, "/api/admin/providers/test-key",
 		map[string]interface{}{"base_url": "https://api.example.com/v1", "api_key": "sk-abcdefghijklmnopqrstuvwxyz1234", "model": "gpt-4o-mini"}, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+	if env.Code != errcode.ProviderTestFailed {
+		t.Fatalf("expected code %d, got %d", errcode.ProviderTestFailed, env.Code)
+	}
+}
+
+func TestPostProviderListModelsReturnsCatalogue(t *testing.T) {
+	r, _ := newProviderTestRouterWithClient(t, alwaysSuccessClient{})
+	w, env := doJSON(t, r, http.MethodPost, "/api/admin/providers/list-models",
+		map[string]interface{}{"base_url": "https://api.example.com/v1", "api_key": "sk-abcdefghijklmnopqrstuvwxyz1234"}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var data struct {
+		Models  []string `json:"models"`
+		Outcome int      `json:"outcome"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if data.Outcome != int(service.TestSuccess) {
+		t.Fatalf("expected outcome %d, got %d", service.TestSuccess, data.Outcome)
+	}
+	if len(data.Models) != 2 || data.Models[0] != "model-a" {
+		t.Fatalf("expected [model-a model-b], got %v", data.Models)
+	}
+}
+
+func TestPostProviderListModelsMissingAPIKeyReturns400(t *testing.T) {
+	r, _ := newProviderTestRouterWithClient(t, alwaysSuccessClient{})
+	w, _ := doJSON(t, r, http.MethodPost, "/api/admin/providers/list-models",
+		map[string]interface{}{"base_url": "https://api.example.com/v1"}, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPostProviderListModelsReturns400WhenClientErrors(t *testing.T) {
+	r, _ := newProviderTestRouterWithClient(t, erroringClient{})
+	w, env := doJSON(t, r, http.MethodPost, "/api/admin/providers/list-models",
+		map[string]interface{}{"base_url": "https://api.example.com/v1", "api_key": "sk-abcdefghijklmnopqrstuvwxyz1234"}, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
 	}

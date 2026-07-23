@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/yolorouter/yolorouter/internal/middleware"
 	"github.com/yolorouter/yolorouter/internal/protocols"
@@ -57,6 +59,25 @@ type TestResult struct {
 	// service layer's verification_status write rules
 	// depend on this bit and never re-parse the raw HTTP body themselves.
 	IsModelScoped bool
+	// Detail is a concise, admin-facing diagnostic string for a failed test:
+	// the HTTP status plus the upstream's own error message when present
+	// (e.g. `HTTP 401: invalid api key`). Empty on success. It is surfaced
+	// only in the provider setup UI to help an operator tell apart a bad key
+	// from a wrong model from a blocked address — never returned to end
+	// users, so echoing the upstream message here is intentional.
+	Detail string
+}
+
+// ListModelsResult is what ProviderClient returns for a model-catalogue
+// fetch. On success Outcome is TestSuccess and Models holds the upstream
+// model ids; on failure Models is empty and Outcome/Detail describe why,
+// classified the same way as a credential test so the UI can reuse one set
+// of friendly messages.
+type ListModelsResult struct {
+	Models     []string
+	Outcome    TestOutcome
+	DurationMs int64
+	Detail     string
 }
 
 // ProviderClient is implemented by HTTPProviderClient in production and by
@@ -76,6 +97,11 @@ type ProviderClient interface {
 	// TestFunctionCalling validates that baseURL+model can return a
 	// structurally valid tool_calls response to a minimal tool definition.
 	TestFunctionCalling(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error)
+	// ListModels fetches the upstream model catalogue for a credential
+	// (openai/anthropic/responses: GET /v1/models; gemini: GET /v1beta/models),
+	// used to populate the admin UI's test-model picker before a provider row
+	// exists. It never persists anything.
+	ListModels(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey string) (ListModelsResult, error)
 }
 
 const (
@@ -257,9 +283,16 @@ func (c *HTTPProviderClient) runTestRequest(
 // readBoundedBody applies the same "don't trust an unbounded upstream body"
 // limit every test method needs before classifying a non-streaming response.
 func readBoundedBody(resp *http.Response) ([]byte, bool) {
-	limited := io.LimitReader(resp.Body, providerClientMaxBodyBytes+1)
+	return readBoundedBodyN(resp, providerClientMaxBodyBytes)
+}
+
+// readBoundedBodyN is readBoundedBody with a caller-chosen cap, so a
+// model-catalogue fetch (which can legitimately be much larger than a test
+// ping reply) can read up to its own higher limit.
+func readBoundedBodyN(resp *http.Response, maxBytes int64) ([]byte, bool) {
+	limited := io.LimitReader(resp.Body, maxBytes+1)
 	body, err := io.ReadAll(limited)
-	if err != nil || len(body) > providerClientMaxBodyBytes {
+	if err != nil || int64(len(body)) > maxBytes {
 		return nil, false
 	}
 	return body, true
@@ -296,6 +329,173 @@ func chatCompletionPayload(proto protocols.ProtocolID, model string) map[string]
 			"max_tokens": 1,
 		}
 	}
+}
+
+// providerModelsMaxBodyBytes bounds a model-list response. It is far larger
+// than providerClientMaxBodyBytes (a test call reads only a tiny ping reply)
+// because an aggregator's /v1/models can legitimately enumerate hundreds of
+// models and run well past 64KiB.
+const providerModelsMaxBodyBytes = 1 << 20
+
+// providerModelsURL builds the model-catalogue endpoint for proto using the
+// same version-aware joiner as the credential test, so a base URL with or
+// without an explicit /v1 (or /v1beta) segment resolves correctly.
+func providerModelsURL(baseURL string, proto protocols.ProtocolID) string {
+	if proto == protocols.ProtocolGemini {
+		return protocols.JoinUpstreamURL(baseURL, "/models", proto)
+	}
+	return protocols.JoinUpstreamURL(baseURL, "/v1/models", proto)
+}
+
+// providerModelsMaxPages caps how many catalogue pages ListModels follows — a
+// backstop against an upstream that returns an endless pagination cursor. Real
+// catalogues (a few hundred models at ~100/page) stay well under it.
+const providerModelsMaxPages = 20
+
+// ListModels implements ProviderClient. See the interface comment. It reuses
+// the credential-test transport (SSRF-safe, no redirects), concurrency cap and
+// per-call timeout, and follows pagination (Anthropic has_more/last_id, Gemini
+// nextPageToken) within that single timeout. A non-200 first page is classified
+// with the same status mapping as a credential test so the UI shows one error
+// set — except a 404, which for a catalogue fetch means the upstream simply
+// exposes no /models endpoint: that is reported as an empty (successful)
+// catalogue so the UI offers manual model entry instead of "model not found".
+func (c *HTTPProviderClient) ListModels(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey string) (ListModelsResult, error) {
+	if !c.limiter.TryAcquire() {
+		return ListModelsResult{}, fmt.Errorf("too many concurrent provider test calls in flight")
+	}
+	defer c.limiter.Release()
+
+	ctx, cancel := context.WithTimeout(ctx, providerClientTimeout)
+	defer cancel()
+
+	baseModelsURL := providerModelsURL(baseURL, proto)
+	models := make([]string, 0)
+	var nextParam, nextValue string
+	start := time.Now()
+
+	for page := 0; page < providerModelsMaxPages; page++ {
+		pageURL, err := modelsPageURL(baseModelsURL, nextParam, nextValue)
+		if err != nil {
+			return ListModelsResult{}, fmt.Errorf("build request: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+		if err != nil {
+			return ListModelsResult{}, fmt.Errorf("build request: %w", err)
+		}
+		// SetupRequest applies the protocol-correct auth header (Bearer for
+		// openai/responses, x-api-key for anthropic, x-goog-api-key for gemini);
+		// its Content-Type header is harmless on a bodyless GET.
+		requestEncoderFor(proto).SetupRequest(req, apiKey)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			// First-page transport failure is a real "can't reach it"; on a
+			// later page keep the models already gathered rather than throwing
+			// away a partial-but-useful catalogue.
+			if page == 0 {
+				return ListModelsResult{Outcome: TestUnreachable, DurationMs: time.Since(start).Milliseconds()}, nil
+			}
+			break
+		}
+		body, ok := readBoundedBodyN(resp, providerModelsMaxBodyBytes)
+		_ = resp.Body.Close()
+		if !ok {
+			if page == 0 {
+				return ListModelsResult{Outcome: TestUpstreamError, DurationMs: time.Since(start).Milliseconds(), Detail: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
+			}
+			break
+		}
+		if resp.StatusCode == http.StatusNotFound && page == 0 {
+			// No catalogue endpoint — an empty catalogue, not a missing model.
+			// Fall through to the empty-success return below.
+			break
+		}
+		if resp.StatusCode != http.StatusOK {
+			if page == 0 {
+				// model="" — none of the model-scoped branches apply here.
+				res := classifyResponse(proto, resp, body, "", time.Since(start).Milliseconds())
+				return ListModelsResult{Outcome: res.Outcome, DurationMs: res.DurationMs, Detail: res.Detail}, nil
+			}
+			break
+		}
+		pageModels, np, nv := parseModelPage(proto, body)
+		models = append(models, pageModels...)
+		if np == "" {
+			break
+		}
+		nextParam, nextValue = np, nv
+	}
+	return ListModelsResult{Models: models, Outcome: TestSuccess, DurationMs: time.Since(start).Milliseconds()}, nil
+}
+
+// modelsPageURL builds the URL for one catalogue page: baseModelsURL for the
+// first page (param ""), or baseModelsURL with the pagination cursor set for a
+// later page. net/url does the escaping and ?/& handling, and Set preserves
+// any query params already on the base URL.
+func modelsPageURL(baseModelsURL, param, value string) (string, error) {
+	if param == "" {
+		return baseModelsURL, nil
+	}
+	u, err := url.Parse(baseModelsURL)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set(param, value)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// parseModelPage extracts one page of model ids from a 200 catalogue body and
+// returns the pagination cursor (param name + value) for the next page, or ""
+// when there is none. openai/anthropic/responses share
+// {"data":[{"id":...}],"has_more","last_id"} (only Anthropic actually
+// paginates; OpenAI omits has_more). gemini returns
+// {"models":[{"name":"models/<id>"}],"nextPageToken"}, whose "models/" prefix
+// is stripped.
+func parseModelPage(proto protocols.ProtocolID, body []byte) (ids []string, nextParam, nextValue string) {
+	if proto == protocols.ProtocolGemini {
+		var parsed struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			return nil, "", ""
+		}
+		out := make([]string, 0, len(parsed.Models))
+		for _, m := range parsed.Models {
+			if id := strings.TrimPrefix(m.Name, "models/"); id != "" {
+				out = append(out, id)
+			}
+		}
+		if parsed.NextPageToken != "" {
+			return out, "pageToken", parsed.NextPageToken
+		}
+		return out, "", ""
+	}
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		HasMore bool   `json:"has_more"`
+		LastID  string `json:"last_id"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, "", ""
+	}
+	out := make([]string, 0, len(parsed.Data))
+	for _, m := range parsed.Data {
+		if m.ID != "" {
+			out = append(out, m.ID)
+		}
+	}
+	if parsed.HasMore && parsed.LastID != "" {
+		return out, "after_id", parsed.LastID
+	}
+	return out, "", ""
 }
 
 func (c *HTTPProviderClient) TestChatCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
@@ -579,13 +779,86 @@ func (c *HTTPProviderClient) TestFunctionCalling(ctx context.Context, proto prot
 	})
 }
 
-// classifyResponse maps an HTTP response into one of the 9 TestOutcome
+// classifyResponse maps a non-streaming test/list response to a TestResult
+// and, for every non-success outcome, attaches an admin-facing Detail string
+// (HTTP status + the upstream's own error message when present). The
+// outcome classification itself lives in classifyResponseByStatus.
+func classifyResponse(proto protocols.ProtocolID, resp *http.Response, body []byte, model string, durationMs int64) TestResult {
+	res := classifyResponseByStatus(proto, resp, body, model, durationMs)
+	if res.Outcome != TestSuccess && res.Outcome != TestVerificationUnsupported {
+		res.Detail = upstreamErrorDetail(proto, resp.StatusCode, body)
+	}
+	return res
+}
+
+// upstreamErrorDetail builds the concise, admin-facing diagnostic string for
+// a failed response: the HTTP status, plus the upstream's own error message
+// (truncated) when the body carries a recognizable one.
+// maxUpstreamDetailBytes bounds the upstream error message kept in a Detail
+// string — long enough to be diagnostic, short enough not to bloat the field.
+const maxUpstreamDetailBytes = 300
+
+func upstreamErrorDetail(proto protocols.ProtocolID, statusCode int, body []byte) string {
+	msg := extractUpstreamMessage(proto, body)
+	if msg == "" {
+		return fmt.Sprintf("HTTP %d", statusCode)
+	}
+	if len(msg) > maxUpstreamDetailBytes {
+		msg = truncateRuneSafe(msg, maxUpstreamDetailBytes) + "…"
+	}
+	return fmt.Sprintf("HTTP %d: %s", statusCode, msg)
+}
+
+// extractUpstreamMessage pulls the human-readable error text from an upstream
+// error body, falling back to a trimmed snippet of the raw body for shapes
+// this codebase does not model (gemini errors, plain-text gateways, etc.).
+func extractUpstreamMessage(proto protocols.ProtocolID, body []byte) string {
+	if proto == protocols.ProtocolClaude {
+		if e := parseClaudeErrorBody(body); e != nil && e.Error != nil {
+			if m := strings.TrimSpace(e.Error.Message); m != "" {
+				return m
+			}
+		}
+	} else if e := parseErrorBody(body); e != nil && e.Error != nil {
+		if m := strings.TrimSpace(e.Error.Message); m != "" {
+			return m
+		}
+	}
+	// Raw-body fallback: cap the byte slice BEFORE converting so an
+	// unrecognized megabyte-sized error page (the ListModels path reads up to
+	// 1 MiB) isn't fully allocated as a string just to keep a short snippet.
+	raw := body
+	if len(raw) > maxUpstreamDetailBytes {
+		raw = raw[:maxUpstreamDetailBytes]
+	}
+	return strings.TrimSpace(truncateRuneSafe(string(raw), maxUpstreamDetailBytes))
+}
+
+// truncateRuneSafe returns s truncated to at most maxBytes bytes, backing off
+// to the nearest whole-rune boundary so the result is always valid UTF-8 —
+// never a multi-byte character (e.g. Chinese, common in upstream error
+// messages) sliced in half. It also strips a trailing partial rune left by a
+// caller's own byte-slice. No truncation marker is appended; callers add one.
+func truncateRuneSafe(s string, maxBytes int) string {
+	if len(s) > maxBytes {
+		s = s[:maxBytes]
+	}
+	for len(s) > 0 {
+		if r, size := utf8.DecodeLastRuneInString(s); r != utf8.RuneError || size > 1 {
+			break
+		}
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// classifyResponseByStatus maps an HTTP response into one of the 9 TestOutcome
 // categories. The status-code switch itself is protocol-neutral — every
 // protocol here uses the same HTTP status conventions (401 auth, 403
 // permission, 404 not-found, 429 rate/quota, 5xx upstream) — only the
 // body-shape predicates it calls out to (isValidSuccessBody,
 // isModelScopedError, isQuotaError, isModelNotFoundError) branch on proto.
-func classifyResponse(proto protocols.ProtocolID, resp *http.Response, body []byte, model string, durationMs int64) TestResult {
+func classifyResponseByStatus(proto protocols.ProtocolID, resp *http.Response, body []byte, model string, durationMs int64) TestResult {
 	switch resp.StatusCode {
 	case http.StatusOK:
 		if proto == protocols.ProtocolGemini || proto == protocols.ProtocolResponses {

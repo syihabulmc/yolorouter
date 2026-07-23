@@ -14,7 +14,6 @@ import (
 	"io"
 	"strconv"
 	"time"
-	"unicode/utf8"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -141,15 +140,9 @@ func truncateInlineBody(s string) string {
 	if len(s) <= maxInlineBodyBytes {
 		return s
 	}
-	cut := s[:maxInlineBodyBytes]
-	// Trim any trailing bytes left by slicing a multi-byte rune in half at the
-	// cap boundary (an incomplete encoding decodes as RuneError with size 1).
-	for len(cut) > 0 {
-		if r, size := utf8.DecodeLastRuneInString(cut); r != utf8.RuneError || size > 1 {
-			break
-		}
-		cut = cut[:len(cut)-1]
-	}
+	// truncateRuneSafe (provider_client.go) caps to the byte limit and backs
+	// off a partial rune at the boundary; append a byte-count marker on top.
+	cut := truncateRuneSafe(s, maxInlineBodyBytes)
 	return cut + fmt.Sprintf("\n\n… [truncated: showing first %d of %d bytes]", len(cut), len(s))
 }
 

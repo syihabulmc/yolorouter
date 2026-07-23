@@ -38,7 +38,7 @@ export function keyLabelRule(t: (key: string) => string): FormItemRule[] {
 export function keyPlaintextRule(t: (key: string) => string, required: boolean): FormItemRule[] {
   return [
     { required, message: t('providers.fieldRequired'), trigger: ['blur', 'input'] },
-    { min: 20, message: t('providers.keyPlaintextTooShort'), trigger: ['blur', 'input'] },
+    { min: 8, message: t('providers.keyPlaintextTooShort'), trigger: ['blur', 'input'] },
   ]
 }
 
