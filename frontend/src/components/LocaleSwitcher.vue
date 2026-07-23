@@ -24,22 +24,18 @@ import { computed, h } from 'vue'
 import { NIcon, type DropdownOption } from 'naive-ui'
 import { Globe, ChevronDown, Check } from '@lucide/vue'
 import { useLocaleStore } from '../store/locale'
+import { LOCALES } from '../i18n'
 
 const locale = useLocaleStore()
 
-const languages: { label: string; value: 'zh-CN' | 'en' }[] = [
-  { label: '简体中文', value: 'zh-CN' },
-  { label: 'English', value: 'en' },
-]
-
 const currentLabel = computed(
-  () => languages.find((l) => l.value === locale.locale)?.label ?? languages[0].label,
+  () => LOCALES.find((l) => l.value === locale.locale)?.label ?? LOCALES[0].label,
 )
 
 // A leading check mark marks the active language; inactive rows reserve the
 // same slot (a transparent placeholder) so labels stay left-aligned.
 const options = computed<DropdownOption[]>(() =>
-  languages.map((l) => ({
+  LOCALES.map((l) => ({
     label: l.label,
     key: l.value,
     icon: () =>
