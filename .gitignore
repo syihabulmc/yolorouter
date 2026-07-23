@@ -24,3 +24,10 @@ backups/
 # placeholder page lives at web/placeholder.html instead, tracked normally
 # since it's outside this directory entirely.
 web/dist/
+
+# wrangler local cache for the Cloudflare Worker under deploy/
+.wrangler/
+.superpowers/
+
+# Cloudflare Worker source is kept private (first-party infra, not published)
+deploy/cloudflare-worker/

@@ -74,12 +74,19 @@ type upstreamStatus struct {
 	UnavailableModels  int64 `json:"unavailable_models"`
 }
 
+type setupStatus struct {
+	Providers     int64 `json:"providers"`
+	EnabledModels int64 `json:"enabled_models"`
+	APIKeys       int64 `json:"api_keys"`
+}
+
 type dashboardBody struct {
 	Today          todayMetrics    `json:"today"`
 	Trend          []trendPoint    `json:"trend"`
 	TopCallers     []topCaller     `json:"top_callers"`
 	RecentFailures []recentFailure `json:"recent_failures"`
 	UpstreamStatus upstreamStatus  `json:"upstream_status"`
+	Setup          setupStatus     `json:"setup"`
 }
 
 // insertRequestLog is a thin helper around model.RequestLog construction.
@@ -157,6 +164,9 @@ func TestGetDashboardReturnsZeroEnvelopeOnFreshDB(t *testing.T) {
 	}
 	if body.UpstreamStatus != (upstreamStatus{}) {
 		t.Fatalf("expected zero upstream status, got %+v", body.UpstreamStatus)
+	}
+	if body.Setup != (setupStatus{}) {
+		t.Fatalf("expected zero setup status, got %+v", body.Setup)
 	}
 }
 
@@ -565,6 +575,60 @@ func TestGetDashboardUpstreamStatusCountsCorrectly(t *testing.T) {
 	}
 	if body.UpstreamStatus.UnavailableModels != 2 {
 		t.Fatalf("UnavailableModels: want 2, got %d", body.UpstreamStatus.UnavailableModels)
+	}
+}
+
+func TestGetDashboardSetupStatusCountsFunnelEntities(t *testing.T) {
+	r, db := newDashboardTestRouter(t)
+
+	// Providers count every row regardless of management_status: 1 enabled +
+	// 1 disabled = 2, so a disabled-only deployment still reports the provider
+	// step as done.
+	pEnabled := model.Provider{Name: "pa", ProviderType: "openai", BaseURL: "https://a.example.com/v1", ManagementStatus: model.ProviderStatusEnabled}
+	pDisabled := model.Provider{Name: "pb", ProviderType: "openai", BaseURL: "https://b.example.com/v1", ManagementStatus: model.ProviderStatusDisabled}
+	if err := db.Create(&pEnabled).Error; err != nil {
+		t.Fatalf("create pEnabled: %v", err)
+	}
+	if err := db.Create(&pDisabled).Error; err != nil {
+		t.Fatalf("create pDisabled: %v", err)
+	}
+
+	// EnabledModels counts management_status=Enabled only: 1 of 2.
+	mEnabled := model.Model{Name: "me", ManagementStatus: model.ModelStatusEnabled}
+	mDisabled := model.Model{Name: "md", ManagementStatus: model.ModelStatusDisabled}
+	if err := db.Create(&mEnabled).Error; err != nil {
+		t.Fatalf("create mEnabled: %v", err)
+	}
+	if err := db.Create(&mDisabled).Error; err != nil {
+		t.Fatalf("create mDisabled: %v", err)
+	}
+
+	// APIKeys counts active (non-revoked) only: 1 of 2.
+	kActive := model.APIKey{KeyHash: "h-active", KeyPrefix: "pk-a", OwnerLabel: "a", Status: model.APIKeyStatusActive}
+	kRevoked := model.APIKey{KeyHash: "h-revoked", KeyPrefix: "pk-r", OwnerLabel: "r", Status: model.APIKeyStatusRevoked}
+	if err := db.Create(&kActive).Error; err != nil {
+		t.Fatalf("create kActive: %v", err)
+	}
+	if err := db.Create(&kRevoked).Error; err != nil {
+		t.Fatalf("create kRevoked: %v", err)
+	}
+
+	w, env := doJSON(t, r, http.MethodGet, "/api/admin/dashboard", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var body dashboardBody
+	if err := json.Unmarshal(env.Data, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.Setup.Providers != 2 {
+		t.Fatalf("Setup.Providers: want 2 (enabled+disabled), got %d", body.Setup.Providers)
+	}
+	if body.Setup.EnabledModels != 1 {
+		t.Fatalf("Setup.EnabledModels: want 1 (enabled only), got %d", body.Setup.EnabledModels)
+	}
+	if body.Setup.APIKeys != 1 {
+		t.Fatalf("Setup.APIKeys: want 1 (active only), got %d", body.Setup.APIKeys)
 	}
 }
 

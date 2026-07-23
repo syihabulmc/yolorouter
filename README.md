@@ -2,7 +2,7 @@
 
 # Yolorouter
 
-**A self-hosted, OpenAI-compatible LLM gateway with multi-provider failover, key rotation, and a built-in admin console.**
+**A free, self-hosted, OpenAI-compatible LLM gateway with multi-provider failover, key rotation, and a built-in admin console.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/yolorouter/yolorouter/actions/workflows/ci.yml/badge.svg)](https://github.com/yolorouter/yolorouter/actions/workflows/ci.yml)
@@ -14,7 +14,7 @@ English · [简体中文](README_zh.md)
 
 [Quick start](#quick-start) · [Configuration](#configuration) · [Architecture](#architecture) · [Contributing](#contributing)
 
-⚡ **Low-overhead streaming proxy** · 📦 **Single binary, zero external deps** · 🔁 **Automatic failover + key rotation** · 📊 **Built-in cost & usage analytics**
+⚡ **Low-overhead streaming proxy** · 🆓 **Free & open-source** · 📦 **Single binary, zero external deps** · 🔁 **Automatic failover + key rotation** · 📊 **Built-in cost & usage analytics**
 
 </div>
 
@@ -61,8 +61,17 @@ Install yolorouter as a boot-persistent background service (systemd on Linux,
 launchd on macOS):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yolorouter/yolorouter/main/scripts/install.sh | bash
+curl -fsSL https://get.yolorouter.com/install.sh | bash
+# or straight from GitHub:
+# curl -fsSL https://raw.githubusercontent.com/yolorouter/yolorouter/main/scripts/install.sh | bash
 ```
+
+> **In mainland China** (or any network where GitHub is slow or blocked), use
+> the accelerated mirror — same installer, routed through a Cloudflare proxy,
+> and self-update stays on the mirror automatically:
+> ```bash
+> curl -fsSL https://gh.yolorouter.com/install.sh | bash
+> ```
 
 The installer picks a UI language (Chinese/English) as its first step, detects
 your OS/arch, downloads and sha256-verifies the matching release, sets up a
@@ -71,12 +80,14 @@ Re-run the same command to upgrade (your config and database are preserved, and
 the database is backed up first). Uninstall with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yolorouter/yolorouter/main/scripts/install.sh | bash -s -- --uninstall
+curl -fsSL https://get.yolorouter.com/install.sh | bash -s -- --uninstall
+# China mirror: curl -fsSL https://gh.yolorouter.com/install.sh | bash -s -- --uninstall
 ```
 
 Optional environment overrides: `YOLO_LANG=zh|en`, `YOLO_SCOPE=system|user`,
-`YOLO_VERSION=vX.Y.Z`, `YOLO_REPO=owner/repo`. A system install needs root/sudo;
-without them the installer falls back to a user-level service.
+`YOLO_VERSION=vX.Y.Z`, `YOLO_REPO=owner/repo`, `YOLO_MIRROR=https://host/`. A
+system install needs root/sudo; without them the installer falls back to a
+user-level service.
 
 ### Run a release binary
 

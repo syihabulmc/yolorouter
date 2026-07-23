@@ -18,9 +18,19 @@
 #   YOLO_SCOPE=system|user   force install level, skip the scope prompt
 #   YOLO_VERSION=vX.Y.Z      pin a specific release (default: latest)
 #   YOLO_REPO=owner/repo     override the download repo (default: yolorouter/yolorouter)
+#   YOLO_MIRROR=https://host/  prefix every GitHub request with a mirror (e.g. a
+#                            Cloudflare proxy) for networks where GitHub is slow
+#                            or blocked. Trailing slash required. When set, it is
+#                            also handed to the service so self-update uses it.
 #   YOLO_UNINSTALL=1         uninstall instead of install (same as --uninstall)
 
 set -euo pipefail
+
+# Mirror-default anchor. A no-op default for direct installs, but the mainland
+# install proxy rewrites exactly this line (replacing the empty default with its
+# own host) so `curl <proxy>/install.sh | bash` routes through the mirror with
+# no env var to set. Keep this line verbatim; the proxy matches it literally.
+: "${YOLO_MIRROR:=}"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -83,6 +93,21 @@ warn() { printf '%s\n' "${C_YELLOW}${C_BOLD} ! ${C_RESET} $*" >&2; }
 die()  { printf '%s\n' "${C_RED}${C_BOLD} ✗ ${C_RESET} $*" >&2; exit 1; }
 
 available() { command -v "$1" >/dev/null 2>&1; }
+
+# Prefix a GitHub URL with YOLO_MIRROR when set, so a mainland install can route
+# every GitHub request (version lookup, binary, checksums) through a mirror;
+# a plain passthrough when YOLO_MIRROR is empty.
+mirror_url() {
+  if [ -n "${YOLO_MIRROR:-}" ]; then
+    # Strip ALL trailing slashes, then join with exactly one, so any number of
+    # trailing slashes on YOLO_MIRROR still yields a valid single-slash join.
+    local base="${YOLO_MIRROR}"
+    while [ "${base%/}" != "${base}" ]; do base="${base%/}"; done
+    printf '%s/%s' "${base}" "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Cleanup
@@ -283,7 +308,7 @@ resolve_version() {
   fi
   info "$(m '查询最新版本...' 'Resolving latest release...')"
   local json
-  json="$(curl -fsSL "${GITHUB_API}/releases/latest" 2>/dev/null || true)"
+  json="$(curl -fsSL "$(mirror_url "${GITHUB_API}/releases/latest")" 2>/dev/null || true)"
   # Trailing `|| true`: under `set -o pipefail` a no-match grep makes the whole
   # substitution non-zero, and a bare assignment would then abort via `set -e`
   # BEFORE the friendly `[ -n "${TAG}" ] || die` guard below ever runs.
@@ -309,8 +334,8 @@ sha256_of() {
 download_and_extract() {
   TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t yoloinstall)"
   local asset="${BINARY_NAME}_${TAG}_${OS}_${ARCH}.tar.gz"
-  local asset_url="${GITHUB_DL}/download/${TAG}/${asset}"
-  local sums_url="${GITHUB_DL}/download/${TAG}/checksums.txt"
+  local asset_url; asset_url="$(mirror_url "${GITHUB_DL}/download/${TAG}/${asset}")"
+  local sums_url; sums_url="$(mirror_url "${GITHUB_DL}/download/${TAG}/checksums.txt")"
 
   info "$(printf "$(m '下载 %s' 'Downloading %s')" "${asset}")"
   curl -fsSL "${asset_url}" -o "${TMP_DIR}/${asset}" \
@@ -496,9 +521,20 @@ systemd_user_unit_path()   { printf '%s/.config/systemd/user/%s.service' "${HOME
 launchd_daemon_plist()     { printf '/Library/LaunchDaemons/%s.plist' "${LAUNCHD_LABEL}"; }
 launchd_agent_plist()      { printf '%s/Library/LaunchAgents/%s.plist' "${HOME}" "${LAUNCHD_LABEL}"; }
 
+# The systemd Environment= line that hands the mirror to the service so its
+# self-update path routes through the same mirror; empty (no mirror) collapses
+# to a harmless blank line in the unit. Shared by both unit writers.
+systemd_proxy_env() {
+  [ -n "${YOLO_MIRROR:-}" ] && printf 'Environment=YOLO_UPDATE_GITHUB_PROXY=%s' "${YOLO_MIRROR}"
+  # Without this the no-mirror case returns the failed test's status 1, which
+  # aborts the caller's `proxy_env="$(...)"` assignment under `set -e`.
+  return 0
+}
+
 write_systemd_system() {
   local unit; unit="$(systemd_system_unit_path)"
   info "$(printf "$(m '写入 systemd 单元 %s' 'Writing systemd unit %s')" "${unit}")"
+  local proxy_env; proxy_env="$(systemd_proxy_env)"
   ${SUDO} tee "${unit}" >/dev/null <<EOF
 [Unit]
 Description=Yolorouter Service
@@ -514,7 +550,7 @@ Group=${SVC_USER}
 Restart=always
 RestartSec=3
 LimitNOFILE=65536
-
+${proxy_env}
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -535,6 +571,7 @@ write_systemd_user() {
   local unit; unit="$(systemd_user_unit_path)"
   info "$(printf "$(m '写入 systemd 用户单元 %s' 'Writing systemd user unit %s')" "${unit}")"
   mkdir -p "$(dirname "${unit}")"
+  local proxy_env; proxy_env="$(systemd_proxy_env)"
   cat > "${unit}" <<EOF
 [Unit]
 Description=Yolorouter Service
@@ -546,7 +583,7 @@ ExecStart=${BIN_DIR}/${BINARY_NAME} serve
 WorkingDirectory=${APP_HOME}
 Restart=always
 RestartSec=3
-
+${proxy_env}
 [Install]
 WantedBy=default.target
 EOF
@@ -572,6 +609,12 @@ write_launchd() {
   fi
   info "$(printf "$(m '写入 launchd 配置 %s' 'Writing launchd plist %s')" "${plist}")"
   priv mkdir -p "$(dirname "${plist}")"
+  # Hand the mirror to the service so self-update routes through it too.
+  local proxy_env_line=""
+  if [ -n "${YOLO_MIRROR:-}" ]; then
+    proxy_env_line="  <key>EnvironmentVariables</key>
+  <dict><key>YOLO_UPDATE_GITHUB_PROXY</key><string>${YOLO_MIRROR}</string></dict>"
+  fi
   priv tee "${plist}" >/dev/null <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -585,6 +628,7 @@ write_launchd() {
   </array>
   <key>WorkingDirectory</key><string>${APP_HOME}</string>
 ${run_user_line}
+${proxy_env_line}
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${APP_HOME}/logs/server.log</string>
@@ -744,8 +788,6 @@ print_summary() {
   printf '\n'
   printf '%s\n' "$(m "  改端口 = 编辑 ${APP_HOME}/configs/config.yaml 的 server.port 后重启服务。" \
                      "  Change port = edit server.port in ${APP_HOME}/configs/config.yaml, then restart.")"
-  printf '%s\n' "$(m "  需要 PostgreSQL？编辑同一文件的 database 段后重启。" \
-                     "  Need PostgreSQL? Edit the database section in that file, then restart.")"
 }
 
 # ---------------------------------------------------------------------------

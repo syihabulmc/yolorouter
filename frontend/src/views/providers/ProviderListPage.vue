@@ -10,7 +10,7 @@
       </template>
     </PageHeader>
 
-    <EmptyState v-if="!store.loading && store.list.length === 0" :title="t('providers.listEmpty')">
+    <EmptyState v-if="!store.loading && store.list.length === 0" :icon="Server" :title="t('providers.listEmpty')">
       <template #action>
         <n-button type="primary" @click="showCreate = true">{{ t('providers.createButton') }}</n-button>
       </template>
@@ -42,7 +42,7 @@ import { computed, h, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
-import { Plus } from '@lucide/vue'
+import { Plus, Server } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
 import type { Provider } from '../../api/providers'

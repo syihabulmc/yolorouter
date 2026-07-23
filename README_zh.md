@@ -2,7 +2,7 @@
 
 # Yolorouter
 
-**自托管、兼容 OpenAI 的 LLM 网关：多供应商 failover、上游 Key 自动切换，内置管理后台。**
+**免费、自托管、兼容 OpenAI 的 LLM 网关：多供应商 failover、上游 Key 自动切换，内置管理后台。**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/yolorouter/yolorouter/actions/workflows/ci.yml/badge.svg)](https://github.com/yolorouter/yolorouter/actions/workflows/ci.yml)
@@ -14,7 +14,7 @@
 
 [快速开始](#快速开始) · [配置](#配置) · [架构](#架构) · [贡献](#贡献)
 
-⚡ **低开销流式代理** · 📦 **单二进制 · 零外部依赖** · 🔁 **自动 failover + Key 轮换** · 📊 **内置用量与成本分析**
+⚡ **低开销流式代理** · 🆓 **免费开源** · 📦 **单二进制 · 零外部依赖** · 🔁 **自动 failover + Key 轮换** · 📊 **内置用量与成本分析**
 
 </div>
 
@@ -56,20 +56,32 @@
 把 yolorouter 安装成开机自启的后台服务（Linux 用 systemd，macOS 用 launchd）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yolorouter/yolorouter/main/scripts/install.sh | bash
+curl -fsSL https://get.yolorouter.com/install.sh | bash
+# 或直接走 GitHub：
+# curl -fsSL https://raw.githubusercontent.com/yolorouter/yolorouter/main/scripts/install.sh | bash
 ```
+
+> **🇨🇳 国内加速安装**：如果你在国内、直连 GitHub 慢或不通，用下面这条加速命令
+> （同一个安装器，经 Cloudflare 代理下载，装完后的自动升级也会一直走加速通道，
+> 无需任何额外配置）：
+> ```bash
+> curl -fsSL https://gh.yolorouter.com/install.sh | bash
+> ```
+> 若要把一台**已装好的普通机器**切换到加速通道，编辑 `config.yaml` 在 `update`
+> 段加一行 `github_proxy: https://gh.yolorouter.com/` 后重启服务即可。
 
 脚本第一步让你选界面语言（中文/英文），随后自动探测系统架构、下载并做 sha256
 校验、建立一个自包含的 app-home 目录，最后启动服务并做健康检查。重跑同一条命令
 即可升级（配置和数据库原样保留，升级前会先自动备份数据库）。卸载：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yolorouter/yolorouter/main/scripts/install.sh | bash -s -- --uninstall
+curl -fsSL https://get.yolorouter.com/install.sh | bash -s -- --uninstall
+# 国内加速：curl -fsSL https://gh.yolorouter.com/install.sh | bash -s -- --uninstall
 ```
 
 可选环境变量覆盖：`YOLO_LANG=zh|en`、`YOLO_SCOPE=system|user`、
-`YOLO_VERSION=vX.Y.Z`、`YOLO_REPO=owner/repo`。系统级安装需要 root/sudo；没有时脚本
-会自动退回用户级服务。
+`YOLO_VERSION=vX.Y.Z`、`YOLO_REPO=owner/repo`、`YOLO_MIRROR=https://host/`。系统级
+安装需要 root/sudo；没有时脚本会自动退回用户级服务。
 
 ### 运行发布二进制
 

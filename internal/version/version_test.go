@@ -37,3 +37,27 @@ func TestResolveRepo(t *testing.T) {
 		})
 	}
 }
+
+// TestProxyURL covers the passthrough (empty proxy) and the trailing-slash
+// normalization, so a proxy with or without a trailing slash both produce
+// exactly one separator before the target URL.
+func TestProxyURL(t *testing.T) {
+	const raw = "https://github.com/yolorouter/yolorouter/releases/latest"
+	tests := []struct {
+		name  string
+		proxy string
+		want  string
+	}{
+		{name: "empty proxy passes through", proxy: "", want: raw},
+		{name: "proxy with trailing slash", proxy: "https://gh.example.com/", want: "https://gh.example.com/" + raw},
+		{name: "proxy without trailing slash", proxy: "https://gh.example.com", want: "https://gh.example.com/" + raw},
+		{name: "proxy with multiple trailing slashes", proxy: "https://gh.example.com///", want: "https://gh.example.com/" + raw},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ProxyURL(tc.proxy, raw); got != tc.want {
+				t.Fatalf("ProxyURL(%q, raw) = %q, want %q", tc.proxy, got, tc.want)
+			}
+		})
+	}
+}

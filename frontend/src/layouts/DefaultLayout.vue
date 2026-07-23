@@ -19,20 +19,16 @@
         </RouterLink>
 
         <div class="sidebar-nav-main">
-          <SidebarNav :items="navItems" :collapsed="collapsed" />
-        </div>
-
-        <div style="flex: 1" />
-
-        <div class="sidebar-nav-bottom">
-          <SidebarNav :items="bottomNavItems" :collapsed="collapsed" />
+          <SidebarNav
+            :items="navItems"
+            :collapsed="collapsed"
+            :soon-label="t('nav.soonBadge')"
+            :soon-tooltip="t('nav.comingSoon')"
+          />
         </div>
 
         <div class="sidebar-bottom">
-          <div v-if="!collapsed" class="sidebar-locale">
-            <LocaleSwitcher />
-          </div>
-          <n-dropdown :options="userMenuOptions" placement="top-start" @select="onUserMenuSelect">
+          <n-dropdown :options="userMenuOptions" placement="top-start" @select="onLogout">
             <button class="sidebar-user" :class="{ 'sidebar-user--collapsed': collapsed }">
               <span class="sidebar-user__avatar">{{ userInitial }}</span>
               <span v-if="!collapsed" class="sidebar-user__name">{{ authStore.username }}</span>
@@ -86,6 +82,22 @@
         </n-space>
       </template>
     </n-modal>
+
+    <n-modal v-model:show="showLanguage" preset="card" :title="t('nav.language')" style="max-width: 340px">
+      <div class="lang-options">
+        <button
+          v-for="lang in LOCALES"
+          :key="lang.value"
+          type="button"
+          class="lang-option"
+          :class="{ 'lang-option--active': lang.value === localeStore.locale }"
+          @click="onSelectLanguage(lang.value)"
+        >
+          <span>{{ lang.label }}</span>
+          <NIcon v-if="lang.value === localeStore.locale" :size="16"><Check /></NIcon>
+        </button>
+      </div>
+    </n-modal>
   </n-layout>
 </template>
 
@@ -93,15 +105,30 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { useDialog, useMessage, type DropdownOption, type FormInst, type FormRules } from 'naive-ui'
+import { NIcon, useDialog, useMessage, type DropdownOption, type FormInst, type FormRules } from 'naive-ui'
 import SidebarNav, { type NavItem } from '../components/SidebarNav.vue'
-import { BarChart3, Box, Info, Key, LayoutGrid, ScrollText, Server } from '@lucide/vue'
+import {
+  BarChart3,
+  Box,
+  Check,
+  Info,
+  Key,
+  KeyRound,
+  Languages,
+  LayoutGrid,
+  Receipt,
+  ScrollText,
+  Server,
+  Tags,
+  TrendingDown,
+} from '@lucide/vue'
 import { useAuthStore } from '../store/auth'
 import { useUpdateStore } from '../store/update'
+import { useLocaleStore } from '../store/locale'
+import { LOCALES, type Locale } from '../i18n'
 import { APIError, displayMessage } from '../api/client'
 import { ACCOUNT_SESSION_INVALID } from '../api/errcodes'
 import { passwordStrengthRule, confirmPasswordRule } from '../utils/authValidators'
-import LocaleSwitcher from '../components/LocaleSwitcher.vue'
 import HelpLabel from '../components/HelpLabel.vue'
 import logo from '../assets/logo.svg'
 
@@ -110,6 +137,7 @@ const router = useRouter()
 const authStore = useAuthStore()
 const dialog = useDialog()
 const message = useMessage()
+const localeStore = useLocaleStore()
 
 const collapsed = ref(false)
 const updateStore = useUpdateStore()
@@ -123,29 +151,43 @@ onMounted(() => {
   void updateStore.checkForUpdates()
 })
 
-// computed rather than a plain array so the labels stay in sync when the
-// user switches locale without needing to re-open the dropdown.
+// A single ordered list where static group headers interleave with standalone
+// links, so the sidebar renders the full information architecture in one pass.
+// computed rather than a plain array so labels (and the update badge) stay in
+// sync when the user switches locale or a new version is detected.
+//
+// Short nav.* labels are used here (e.g. "用量统计") rather than the pages'
+// own longer PageHeader titles, so the sidebar reads cleanly while each page
+// keeps its fuller heading. Entries carrying `disabled` are placeholders for
+// features that aren't built yet. `onClick` entries open a modal instead of
+// navigating.
 const navItems = computed<NavItem[]>(() => [
-  { key: 'dashboard', label: t('common.dashboard'), icon: LayoutGrid, to: '/' },
-  { key: 'analytics', label: t('analytics.pageTitle'), icon: BarChart3, to: '/analytics' },
-  { key: 'requestLogs', label: t('requestLogs.pageTitle'), icon: ScrollText, to: '/request-logs' },
-  { key: 'providers', label: t('providers.pageTitle'), icon: Server, to: '/providers' },
-  { key: 'models', label: t('models.pageTitle'), icon: Box, to: '/models' },
-  { key: 'apikeys', label: t('apiKeys.pageTitle'), icon: Key, to: '/api-keys' },
+  { key: 'overview', label: t('nav.overview'), icon: LayoutGrid, to: '/' },
+
+  { key: 'group-analytics', label: t('nav.groupAnalytics'), group: true },
+  { key: 'usage', label: t('nav.usage'), icon: BarChart3, to: '/analytics' },
+  { key: 'log-audit', label: t('nav.logAudit'), icon: ScrollText, to: '/request-logs' },
+  { key: 'cost-stats', label: t('nav.costStats'), icon: Receipt, disabled: true },
+
+  { key: 'group-models', label: t('nav.groupModels'), group: true },
+  { key: 'providers', label: t('nav.providers'), icon: Server, to: '/providers' },
+  { key: 'models', label: t('nav.models'), icon: Box, to: '/models' },
+
+  { key: 'tokens', label: t('nav.tokens'), icon: Key, to: '/api-keys' },
+
+  { key: 'cost-optimization', label: t('nav.costOptimization'), icon: TrendingDown, disabled: true },
+
+  { key: 'group-system', label: t('nav.groupSystem'), group: true },
+  { key: 'system-info', label: t('nav.systemInfo'), icon: Info, to: '/system', badge: updateStore.hasUpdate },
+  { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
+  { key: 'change-password', label: t('auth.changePasswordTitle'), icon: KeyRound, onClick: () => (showChangePassword.value = true) },
+  { key: 'model-pricing', label: t('nav.modelPricing'), icon: Tags, disabled: true },
 ])
 
-// System sits apart from the primary navigation — pinned to the bottom above
-// the locale/user controls — because it's a settings-style destination, not a
-// day-to-day workspace. Its `badge` lights the red dot when an update is
-// available.
-const bottomNavItems = computed<NavItem[]>(() => [
-  { key: 'system', label: t('system.pageTitle'), icon: Info, to: '/system', badge: updateStore.hasUpdate },
-])
-
-// computed rather than a plain array so the labels stay in sync when the
-// user switches locale without needing to re-open the dropdown.
+// Just "logout" now — change password moved into the System Settings group in
+// the sidebar. computed rather than a plain array so the label stays in sync
+// when the user switches locale without needing to re-open the dropdown.
 const userMenuOptions = computed<DropdownOption[]>(() => [
-  { label: t('auth.changePasswordTitle'), key: 'change-password' },
   { label: t('auth.logout'), key: 'logout' },
 ])
 
@@ -154,32 +196,39 @@ const userMenuOptions = computed<DropdownOption[]>(() => [
 // initial, not a truncation artifact.
 const userInitial = computed(() => (authStore.username?.[0] ?? '?').toUpperCase())
 
-function onUserMenuSelect(key: string) {
-  if (key === 'change-password') {
-    showChangePassword.value = true
-  } else if (key === 'logout') {
-    dialog.warning({
-      title: t('auth.logoutConfirmTitle'),
-      content: t('auth.logoutConfirmContent'),
-      positiveText: t('auth.logout'),
-      negativeText: t('common.cancel'),
-      onPositiveClick: async () => {
-        try {
-          await authStore.logout()
-        } catch (err) {
-          if (err instanceof APIError && err.code === ACCOUNT_SESSION_INVALID) {
-            // The session was already gone server-side — api/auth.ts's
-            // session-invalid handling already cleared local auth state
-            // and navigated to /login, so there's nothing left to do here.
-            return
-          }
-          message.error(displayMessage(err, t))
+// Logout is the dropdown's only entry, so this runs straight from @select
+// without switching on the key.
+function onLogout() {
+  dialog.warning({
+    title: t('auth.logoutConfirmTitle'),
+    content: t('auth.logoutConfirmContent'),
+    positiveText: t('auth.logout'),
+    negativeText: t('common.cancel'),
+    onPositiveClick: async () => {
+      try {
+        await authStore.logout()
+      } catch (err) {
+        if (err instanceof APIError && err.code === ACCOUNT_SESSION_INVALID) {
+          // The session was already gone server-side — api/auth.ts's
+          // session-invalid handling already cleared local auth state
+          // and navigated to /login, so there's nothing left to do here.
           return
         }
-        router.push('/login')
-      },
-    })
-  }
+        message.error(displayMessage(err, t))
+        return
+      }
+      router.push('/login')
+    },
+  })
+}
+
+// Language picker — the corner switcher was removed in favor of a "Language"
+// entry in the System Settings group, which opens this modal. The option list
+// (LOCALES) and check-mark treatment are shared with the LocaleSwitcher.
+const showLanguage = ref(false)
+function onSelectLanguage(value: Locale) {
+  localeStore.setLocale(value)
+  showLanguage.value = false
 }
 
 const showChangePassword = ref(false)
@@ -260,6 +309,7 @@ async function onChangePasswordSubmit() {
 
 .sidebar-logo {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 0.5rem;
   height: 64px;
@@ -273,24 +323,37 @@ async function onChangePasswordSubmit() {
   padding: 0;
 }
 
+/* The nav is the one flexible region: it takes the space between the fixed logo
+   and account footer and scrolls internally, so on short viewports every entry
+   (including language / password / logout) stays reachable instead of being
+   clipped. min-height:0 lets a flex child actually shrink below its content
+   height, which is what enables the scroll. */
 .sidebar-nav-main {
+  flex: 1 1 auto;
+  min-height: 0;
   margin-top: var(--space-2);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
 }
 
-.sidebar-nav-bottom {
-  margin-bottom: var(--space-2);
+.sidebar-nav-main::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar-nav-main::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: var(--radius-full);
 }
 
 .sidebar-bottom {
   display: flex;
+  flex-shrink: 0;
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3) 16px var(--space-4);
   border-top: 1px solid var(--color-border);
-}
-
-.sidebar-locale {
-  display: flex;
 }
 
 .sidebar-user {
@@ -344,8 +407,43 @@ async function onChangePasswordSubmit() {
 }
 
 .layout-content {
+  position: relative;
   height: 100dvh;
   overflow: auto;
+}
+
+/* Language picker rows inside the modal — a check mark on the right marks the
+   active language, matching the shared LocaleSwitcher's treatment. */
+.lang-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.lang-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 42px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.lang-option:hover {
+  background: var(--color-surface-hover);
+}
+
+.lang-option--active {
+  color: var(--color-accent);
+  font-weight: 600;
 }
 
 @media (max-width: 640px) {

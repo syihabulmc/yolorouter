@@ -51,12 +51,23 @@ export interface UpstreamStatus {
   unavailable_models: number
 }
 
+// SetupStatus drives the onboarding funnel banner: raw existence counts for
+// the "add provider -> enable a model -> create an API key" sequence. Kept
+// separate from UpstreamStatus health signals — these answer "what to set up
+// next", not "is it healthy".
+export interface SetupStatus {
+  providers: number
+  enabled_models: number
+  api_keys: number
+}
+
 export interface DashboardData {
   today: TodayMetrics
   trend: TrendPoint[]
   top_callers: TopCaller[]
   recent_failures: RecentFailure[]
   upstream_status: UpstreamStatus
+  setup: SetupStatus
 }
 
 export function getDashboard(): Promise<DashboardData> {

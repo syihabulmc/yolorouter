@@ -48,6 +48,45 @@ func TestLoadGeneratesDefaultConfigWhenMissing(t *testing.T) {
 	}
 }
 
+// TestLoadSeedsGitHubProxyFromEnv covers a mirror install: install.sh exports
+// YOLO_UPDATE_GITHUB_PROXY, and the first generated config must record it under
+// update.github_proxy so self-update uses the mirror without any manual edit.
+// The strict re-parse of the written file also proves github_proxy is a known
+// field, so a documented manual edit does not trip KnownFields(true).
+func TestLoadSeedsGitHubProxyFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	}()
+	t.Setenv("YOLO_UPDATE_GITHUB_PROXY", "https://gh.example.com/")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load should generate config: %v", err)
+	}
+	if cfg.Update.GitHubProxy != "https://gh.example.com/" {
+		t.Fatalf("github_proxy = %q, want it seeded from the env var", cfg.Update.GitHubProxy)
+	}
+
+	// A strict re-parse of the just-written file must accept github_proxy.
+	cfg2, err := Load("")
+	if err != nil {
+		t.Fatalf("strict reload of generated config failed: %v", err)
+	}
+	if cfg2.Update.GitHubProxy != "https://gh.example.com/" {
+		t.Fatalf("github_proxy not persisted across reload: %q", cfg2.Update.GitHubProxy)
+	}
+}
+
 // TestLoadRejectsMultiDocumentYAML guards against yaml.Decoder.Decode's
 // single-call behavior: it only consumes the first "---"-delimited
 // document in a stream, so a config.yaml with two documents would have its
@@ -317,6 +356,47 @@ func TestLoadAcceptsUpdateSection(t *testing.T) {
 	if cfg.Update.GitHubRepo != "fork/ce" {
 		t.Fatalf("expected GitHubRepo fork/ce, got %q", cfg.Update.GitHubRepo)
 	}
+}
+
+// TestLoadFillsGitHubProxyFromEnvOnExistingConfig covers a mirror installer
+// upgrading a prior direct install: config.yaml already exists (so it is never
+// regenerated), yet the proxy env the installer injects into the service unit
+// must still take effect — but only when the file leaves github_proxy empty.
+func TestLoadFillsGitHubProxyFromEnvOnExistingConfig(t *testing.T) {
+	base := "server:\n  port: 8080\ndatabase:\n  driver: sqlite\n  sqlite_path: ./data/x.db\n" +
+		"security:\n  provider_master_key: \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n"
+
+	t.Run("empty in file is filled from env", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(path, []byte(base+"update:\n  enabled: true\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		t.Setenv("YOLO_UPDATE_GITHUB_PROXY", "https://gh.example.com/")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.Update.GitHubProxy != "https://gh.example.com/" {
+			t.Fatalf("github_proxy = %q, want filled from env", cfg.Update.GitHubProxy)
+		}
+	})
+
+	t.Run("explicit value in file wins over env", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(path, []byte(base+"update:\n  enabled: true\n  github_proxy: \"https://in-file.example/\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		t.Setenv("YOLO_UPDATE_GITHUB_PROXY", "https://gh.example.com/")
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.Update.GitHubProxy != "https://in-file.example/" {
+			t.Fatalf("github_proxy = %q, want the explicit config value to win", cfg.Update.GitHubProxy)
+		}
+	})
 }
 
 // TestLoadRejectsInvalidGitHubRepo drives every malformed shape through

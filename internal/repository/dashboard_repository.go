@@ -172,6 +172,46 @@ type UpstreamStatusDTO struct {
 	UnavailableModels  int64 `json:"unavailable_models"`
 }
 
+// SetupStatusDTO reports how far the operator has progressed through the
+// one-time onboarding funnel (add provider -> enable a model -> create an API
+// key). The dashboard uses it to show the single next setup action before any
+// traffic has been recorded. Each field is a raw existence count, deliberately
+// independent of the routability-health signals in UpstreamStatusDTO: the
+// funnel answers "what should I set up next", while the upstream card answers
+// "is what I set up healthy".
+type SetupStatusDTO struct {
+	Providers     int64 `json:"providers"`      // total provider rows, any status
+	EnabledModels int64 `json:"enabled_models"` // models with management_status=Enabled
+	APIKeys       int64 `json:"api_keys"`       // active (non-revoked) API keys
+}
+
+// GetSetupStatus counts the onboarding-funnel entities:
+//   - Providers: every provider row regardless of management_status, so a
+//     provider that was added then disabled still counts as "provider step
+//     done" (the next action is fixing it, surfaced by the upstream card, not
+//     re-adding one)
+//   - EnabledModels: models with management_status=Enabled — an API key can
+//     only meaningfully allowlist a model that is switched on
+//   - APIKeys: non-revoked keys — an existing key means the "create a key"
+//     step is complete even while waiting for the first request
+func GetSetupStatus(db *gorm.DB) (SetupStatusDTO, error) {
+	var s SetupStatusDTO
+	if err := db.Model(&model.Provider{}).Count(&s.Providers).Error; err != nil {
+		return s, err
+	}
+	if err := db.Model(&model.Model{}).
+		Where("management_status = ?", model.ModelStatusEnabled).
+		Count(&s.EnabledModels).Error; err != nil {
+		return s, err
+	}
+	if err := db.Model(&model.APIKey{}).
+		Where("status = ?", model.APIKeyStatusActive).
+		Count(&s.APIKeys).Error; err != nil {
+		return s, err
+	}
+	return s, nil
+}
+
 // GetUpstreamStatus counts:
 //   - AvailableProviders: providers with management_status=Enabled
 //   - AbnormalKeys: provider_keys with management_status=Enabled but

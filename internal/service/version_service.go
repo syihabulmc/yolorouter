@@ -36,6 +36,7 @@ type VersionStatus struct {
 // simultaneous refreshes into one GitHub call, and a mutex guards the cache.
 type VersionService struct {
 	repo    string
+	proxy   string // non-empty routes the release lookup through a mirror prefix
 	baseURL string // "https://api.github.com" in production; tests inject a httptest URL
 	client  *http.Client
 
@@ -60,10 +61,13 @@ type versionCacheEntry struct {
 // NewVersionService builds a service for the given resolved "owner/repo".
 // An empty repo disables the service: Check short-circuits to CheckFailed
 // without ever touching the network (see ResolveRepo in internal/version for
-// how an empty repo is produced from config + the compiled-in default).
-func NewVersionService(repo string) *VersionService {
+// how an empty repo is produced from config + the compiled-in default). A
+// non-empty proxy routes the release lookup through a mirror prefix (for
+// deployments where GitHub is slow or blocked); empty means direct GitHub.
+func NewVersionService(repo, proxy string) *VersionService {
 	return &VersionService{
 		repo:    repo,
+		proxy:   proxy,
 		baseURL: "https://api.github.com",
 		client:  &http.Client{Timeout: 10 * time.Second},
 		posTTL:  10 * time.Minute,
@@ -181,7 +185,7 @@ type githubRelease struct {
 // distinguish "couldn't fetch" from "fetched". The entry's fetchedAt starts
 // the positive-or-negative cache clock.
 func (s *VersionService) fetchLatest(ctx context.Context) *versionCacheEntry {
-	url := fmt.Sprintf("%s/repos/%s/releases/latest", s.baseURL, s.repo)
+	url := version.ProxyURL(s.proxy, fmt.Sprintf("%s/repos/%s/releases/latest", s.baseURL, s.repo))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return s.failEntry()

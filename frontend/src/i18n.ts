@@ -4,6 +4,15 @@ import en from './locales/en'
 
 export type Locale = 'zh-CN' | 'en'
 
+// The user-selectable languages, in display order. Single source of truth so
+// the header language switcher and the settings language picker can't drift —
+// adding a language is a one-line edit here. Labels are the language's own
+// endonym (shown to users), hence the non-English literals.
+export const LOCALES: { label: string; value: Locale }[] = [
+  { label: '简体中文', value: 'zh-CN' },
+  { label: 'English', value: 'en' },
+]
+
 const STORAGE_KEY = 'yolorouter-locale'
 
 // Guards against a corrupted/stale localStorage value (or one written by a

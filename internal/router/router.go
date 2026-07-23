@@ -296,7 +296,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// resolves its repo from updateCfg + the compiled-in default (see
 	// version.ResolveRepo); an empty resolved repo disables the check and is
 	// surfaced as check_failed, not an error.
-	versionSvc := service.NewVersionService(version.ResolveRepo(updateCfg.Enabled, updateCfg.GitHubRepo))
+	versionSvc := service.NewVersionService(version.ResolveRepo(updateCfg.Enabled, updateCfg.GitHubRepo), updateCfg.GitHubProxy)
 	protected.GET("/system/version", handler.GetSystemVersion(handler.SystemInfo{
 		Version:   version.Version,
 		Commit:    version.Commit,

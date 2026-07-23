@@ -10,150 +10,160 @@
   <div class="dashboard-page">
     <PageHeader :eyebrow="t('dashboard.eyebrow')" :title="t('dashboard.pageTitle')" :description="t('dashboard.pageDescription')" />
 
-    <EmptyState v-if="!loading && isEmpty" :title="t('dashboard.emptyTitle')" :description="t('dashboard.emptyDesc')" />
+    <!-- Setup guidance banner. Shown only before any real traffic has been
+         recorded, and adapts to the current setup step so a fresh deployment
+         always has a clear next action instead of a blank overview. -->
+    <div v-if="!loading && setupStep" class="setup-banner">
+      <div class="icon-tile">
+        <component :is="setupStep.icon" :size="22" :stroke-width="1.75" />
+      </div>
+      <div class="setup-banner__body">
+        <h3 class="setup-banner__title">{{ t(setupStep.titleKey) }}</h3>
+        <p class="setup-banner__desc">{{ t(setupStep.descKey) }}</p>
+      </div>
+      <NButton v-if="setupStep.ctaKey && setupStep.to" type="primary" @click="router.push(setupStep.to)">{{ t(setupStep.ctaKey) }}</NButton>
+    </div>
 
-    <template v-else>
-      <!-- KPI cards row -->
-      <div class="kpi-row">
-        <div class="kpi">
-          <div class="kpi__icon kpi__icon--accent">
-            <Activity :size="18" />
-          </div>
-          <div class="kpi__body">
-            <div class="kpi__label">
-              <HelpLabel :tip="t('dashboard.callsCard_tip')">{{ t('dashboard.callsCard') }}</HelpLabel>
-            </div>
-            <div class="kpi__value">{{ formatNumber(data?.today.calls ?? 0) }}</div>
-            <div class="kpi__sub">{{ t('dashboard.callsCard_sub') }}</div>
-          </div>
+    <!-- KPI cards row -->
+    <div class="kpi-row">
+      <div class="kpi">
+        <div class="kpi__icon kpi__icon--accent">
+          <Activity :size="18" />
         </div>
-
-        <div class="kpi">
-          <div class="kpi__icon kpi__icon--success">
-            <DollarSign :size="18" />
+        <div class="kpi__body">
+          <div class="kpi__label">
+            <HelpLabel :tip="t('dashboard.callsCard_tip')">{{ t('dashboard.callsCard') }}</HelpLabel>
           </div>
-          <div class="kpi__body">
-            <div class="kpi__label">
-              <HelpLabel :tip="t('dashboard.costCard_tip')">{{ t('dashboard.costCard') }}</HelpLabel>
-            </div>
-            <div class="kpi__value">¥{{ formatMicros(data?.today.total_cost_micros ?? 0) }}</div>
-            <div class="kpi__sub">{{ t('dashboard.costCard_sub') }}</div>
-          </div>
-        </div>
-
-        <div class="kpi">
-          <div class="kpi__icon kpi__icon--purple">
-            <TrendingUp :size="18" />
-          </div>
-          <div class="kpi__body">
-            <div class="kpi__label">
-              <HelpLabel :tip="t('dashboard.successRateCard_tip')">{{ t('dashboard.successRateCard') }}</HelpLabel>
-            </div>
-            <div class="kpi__value">{{ formatRate(data?.today.success_rate ?? 0) }}</div>
-            <div class="kpi__sub">{{ t('dashboard.successRateCard_sub') }}</div>
-          </div>
-        </div>
-
-        <div class="kpi">
-          <div class="kpi__icon kpi__icon--warning">
-            <AlertTriangle :size="18" />
-          </div>
-          <div class="kpi__body">
-            <div class="kpi__label">
-              <HelpLabel :tip="t('dashboard.unknownCostCard_tip')">{{ t('dashboard.unknownCostCard') }}</HelpLabel>
-            </div>
-            <div class="kpi__value">{{ formatNumber(data?.today.unknown_cost_calls ?? 0) }}</div>
-            <div class="kpi__sub">{{ t('dashboard.unknownCostCard_sub') }}</div>
-          </div>
+          <div class="kpi__value">{{ formatNumber(data?.today.calls ?? 0) }}</div>
+          <div class="kpi__sub">{{ t('dashboard.callsCard_sub') }}</div>
         </div>
       </div>
 
-      <!-- Trend chart -->
-      <section class="section-card">
-        <header class="section-head">
-          <h2 class="section-title">{{ t('dashboard.trendTitle') }}</h2>
-          <span class="section-sub">{{ t('dashboard.trendSub') }}</span>
-        </header>
-        <TrendChart :points="data?.trend ?? []" />
-      </section>
-
-      <!-- Two-column: top callers + recent failures -->
-      <div class="two-col">
-        <section class="section-card">
-          <header class="section-head">
-            <h2 class="section-title">{{ t('dashboard.topCallersTitle') }}</h2>
-            <span class="section-sub">{{ t('dashboard.topCallersSub') }}</span>
-          </header>
-          <div v-if="!data?.top_callers?.length" class="section-empty">{{ t('dashboard.topCallersEmpty') }}</div>
-          <ul v-else class="caller-list">
-            <li v-for="(c, i) in data.top_callers" :key="c.api_key_id" class="caller-row">
-              <span class="caller-rank">{{ i + 1 }}</span>
-              <span class="caller-label">{{ c.owner_label || t('dashboard.unknownCaller') }}</span>
-              <span class="caller-meta">{{ formatNumber(c.calls) }} {{ t('dashboard.callsUnit') }}</span>
-              <span class="caller-cost">¥{{ formatMicros(c.cost_micros) }}</span>
-            </li>
-          </ul>
-        </section>
-
-        <section class="section-card">
-          <header class="section-head">
-            <h2 class="section-title">{{ t('dashboard.recentFailuresTitle') }}</h2>
-            <span class="section-sub">{{ t('dashboard.recentFailuresSub') }}</span>
-          </header>
-          <div v-if="!data?.recent_failures?.length" class="section-empty">{{ t('dashboard.recentFailuresEmpty') }}</div>
-          <ul v-else class="failure-list">
-            <li
-              v-for="f in data.recent_failures"
-              :key="f.request_id"
-              class="failure-row"
-              :title="t('dashboard.viewRequestDetail')"
-              @click="goToRequestLog(f.request_id)"
-            >
-              <div class="failure-main">
-                <span class="failure-status" :class="failureStatusClass(f.status_code)">{{ f.status_code }}</span>
-                <span class="failure-model">{{ f.model_name || '—' }}</span>
-                <span class="failure-reason">{{ f.fail_reason || t('dashboard.noFailReason') }}</span>
-              </div>
-              <div class="failure-meta">
-                <span>{{ formatRelativeTime(f.created_at) }}</span>
-                <span>{{ f.duration_ms }}ms</span>
-              </div>
-            </li>
-          </ul>
-        </section>
+      <div class="kpi">
+        <div class="kpi__icon kpi__icon--success">
+          <DollarSign :size="18" />
+        </div>
+        <div class="kpi__body">
+          <div class="kpi__label">
+            <HelpLabel :tip="t('dashboard.costCard_tip')">{{ t('dashboard.costCard') }}</HelpLabel>
+          </div>
+          <div class="kpi__value">¥{{ formatMicros(data?.today.total_cost_micros ?? 0) }}</div>
+          <div class="kpi__sub">{{ t('dashboard.costCard_sub') }}</div>
+        </div>
       </div>
 
-      <!-- Upstream status -->
+      <div class="kpi">
+        <div class="kpi__icon kpi__icon--purple">
+          <TrendingUp :size="18" />
+        </div>
+        <div class="kpi__body">
+          <div class="kpi__label">
+            <HelpLabel :tip="t('dashboard.successRateCard_tip')">{{ t('dashboard.successRateCard') }}</HelpLabel>
+          </div>
+          <div class="kpi__value">{{ formatRate(data?.today.success_rate ?? 0) }}</div>
+          <div class="kpi__sub">{{ t('dashboard.successRateCard_sub') }}</div>
+        </div>
+      </div>
+
+      <div class="kpi">
+        <div class="kpi__icon kpi__icon--warning">
+          <AlertTriangle :size="18" />
+        </div>
+        <div class="kpi__body">
+          <div class="kpi__label">
+            <HelpLabel :tip="t('dashboard.unknownCostCard_tip')">{{ t('dashboard.unknownCostCard') }}</HelpLabel>
+          </div>
+          <div class="kpi__value">{{ formatNumber(data?.today.unknown_cost_calls ?? 0) }}</div>
+          <div class="kpi__sub">{{ t('dashboard.unknownCostCard_sub') }}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Trend chart -->
+    <section class="section-card">
+      <header class="section-head">
+        <h2 class="section-title">{{ t('dashboard.trendTitle') }}</h2>
+        <span class="section-sub">{{ t('dashboard.trendSub') }}</span>
+      </header>
+      <TrendChart :points="data?.trend ?? []" />
+    </section>
+
+    <!-- Two-column: top callers + recent failures -->
+    <div class="two-col">
       <section class="section-card">
         <header class="section-head">
-          <h2 class="section-title">{{ t('dashboard.upstreamTitle') }}</h2>
+          <h2 class="section-title">{{ t('dashboard.topCallersTitle') }}</h2>
+          <span class="section-sub">{{ t('dashboard.topCallersSub') }}</span>
         </header>
-        <div class="upstream-row">
-          <div class="upstream-item">
-            <span class="upstream-value upstream-value--success">{{ data?.upstream_status.available_providers ?? 0 }}</span>
-            <span class="upstream-label">
-              <HelpLabel :tip="t('dashboard.upstreamProviders_tip')">{{ t('dashboard.upstreamProviders') }}</HelpLabel>
-            </span>
-          </div>
-          <div class="upstream-item">
-            <span class="upstream-value" :class="{ 'upstream-value--warning': (data?.upstream_status.abnormal_keys ?? 0) > 0 }">
-              {{ data?.upstream_status.abnormal_keys ?? 0 }}
-            </span>
-            <span class="upstream-label">
-              <HelpLabel :tip="t('dashboard.upstreamAbnormalKeys_tip')">{{ t('dashboard.upstreamAbnormalKeys') }}</HelpLabel>
-            </span>
-          </div>
-          <div class="upstream-item">
-            <span class="upstream-value" :class="{ 'upstream-value--danger': (data?.upstream_status.unavailable_models ?? 0) > 0 }">
-              {{ data?.upstream_status.unavailable_models ?? 0 }}
-            </span>
-            <span class="upstream-label">
-              <HelpLabel :tip="t('dashboard.upstreamUnavailableModels_tip')">{{ t('dashboard.upstreamUnavailableModels') }}</HelpLabel>
-            </span>
-          </div>
-        </div>
+        <div v-if="!data?.top_callers?.length" class="section-empty">{{ t('dashboard.topCallersEmpty') }}</div>
+        <ul v-else class="caller-list">
+          <li v-for="(c, i) in data.top_callers" :key="c.api_key_id" class="caller-row">
+            <span class="caller-rank">{{ i + 1 }}</span>
+            <span class="caller-label">{{ c.owner_label || t('dashboard.unknownCaller') }}</span>
+            <span class="caller-meta">{{ formatNumber(c.calls) }} {{ t('dashboard.callsUnit') }}</span>
+            <span class="caller-cost">¥{{ formatMicros(c.cost_micros) }}</span>
+          </li>
+        </ul>
       </section>
-    </template>
+
+      <section class="section-card">
+        <header class="section-head">
+          <h2 class="section-title">{{ t('dashboard.recentFailuresTitle') }}</h2>
+          <span class="section-sub">{{ t('dashboard.recentFailuresSub') }}</span>
+        </header>
+        <div v-if="!data?.recent_failures?.length" class="section-empty">{{ t('dashboard.recentFailuresEmpty') }}</div>
+        <ul v-else class="failure-list">
+          <li
+            v-for="f in data.recent_failures"
+            :key="f.request_id"
+            class="failure-row"
+            :title="t('dashboard.viewRequestDetail')"
+            @click="goToRequestLog(f.request_id)"
+          >
+            <div class="failure-main">
+              <span class="failure-status" :class="failureStatusClass(f.status_code)">{{ f.status_code }}</span>
+              <span class="failure-model">{{ f.model_name || '—' }}</span>
+              <span class="failure-reason">{{ f.fail_reason || t('dashboard.noFailReason') }}</span>
+            </div>
+            <div class="failure-meta">
+              <span>{{ formatRelativeTime(f.created_at) }}</span>
+              <span>{{ f.duration_ms }}ms</span>
+            </div>
+          </li>
+        </ul>
+      </section>
+    </div>
+
+    <!-- Upstream status -->
+    <section class="section-card">
+      <header class="section-head">
+        <h2 class="section-title">{{ t('dashboard.upstreamTitle') }}</h2>
+      </header>
+      <div class="upstream-row">
+        <div class="upstream-item">
+          <span class="upstream-value upstream-value--success">{{ data?.upstream_status.available_providers ?? 0 }}</span>
+          <span class="upstream-label">
+            <HelpLabel :tip="t('dashboard.upstreamProviders_tip')">{{ t('dashboard.upstreamProviders') }}</HelpLabel>
+          </span>
+        </div>
+        <div class="upstream-item">
+          <span class="upstream-value" :class="{ 'upstream-value--warning': (data?.upstream_status.abnormal_keys ?? 0) > 0 }">
+            {{ data?.upstream_status.abnormal_keys ?? 0 }}
+          </span>
+          <span class="upstream-label">
+            <HelpLabel :tip="t('dashboard.upstreamAbnormalKeys_tip')">{{ t('dashboard.upstreamAbnormalKeys') }}</HelpLabel>
+          </span>
+        </div>
+        <div class="upstream-item">
+          <span class="upstream-value" :class="{ 'upstream-value--danger': (data?.upstream_status.unavailable_models ?? 0) > 0 }">
+            {{ data?.upstream_status.unavailable_models ?? 0 }}
+          </span>
+          <span class="upstream-label">
+            <HelpLabel :tip="t('dashboard.upstreamUnavailableModels_tip')">{{ t('dashboard.upstreamUnavailableModels') }}</HelpLabel>
+          </span>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -161,10 +171,10 @@
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { useMessage } from 'naive-ui'
-import { Activity, AlertTriangle, DollarSign, TrendingUp } from '@lucide/vue'
+import { NButton, useMessage } from 'naive-ui'
+import type { Component } from 'vue'
+import { Activity, AlertTriangle, Boxes, DollarSign, Hourglass, KeyRound, Server, TrendingUp } from '@lucide/vue'
 import PageHeader from '../../components/PageHeader.vue'
-import EmptyState from '../../components/EmptyState.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import TrendChart from '../../components/dashboard/TrendChart.vue'
 import { getDashboard, type DashboardData } from '../../api/analytics'
@@ -178,29 +188,42 @@ const message = useMessage()
 const data = ref<DashboardData | null>(null)
 const loading = ref(true)
 
-// isEmpty distinguishes "first load not done yet" (loading=true) from
-// "envelope loaded but every section is empty" (which is the only case the
-// empty state should cover — a dashboard with today's calls=0 but a 7-day
-// trend still has something to show).
-const isEmpty = computed(() => {
-  if (!data.value) return true
+// The dashboard skeleton (KPI cards, trend, upstream status) always renders so
+// a fresh deployment sees a real overview reading zero rather than a blank
+// page. Before any request traffic exists we surface a setup-guidance banner
+// that points at the single next action in the onboarding funnel: add a
+// provider, then enable a model, then create an API key. The final "waiting for
+// traffic" step has no CTA — everything is configured and there is nothing left
+// to click. Provider/model/key readiness comes from raw existence counts; key
+// verification health is surfaced separately by the upstream-status card.
+interface SetupStep {
+  titleKey: string
+  descKey: string
+  icon: Component
+  ctaKey?: string
+  to?: string
+}
+
+const setupStep = computed<SetupStep | null>(() => {
   const d = data.value
-  // Upstream health is meaningful even with zero request traffic — a freshly
-  // set-up deployment with abnormal keys or unavailable models must NOT be
-  // hidden behind "no data". Show the dashboard
-  // as long as any provider/model signal exists.
-  const hasUpstreamSignal =
-    d.upstream_status.available_providers > 0 ||
-    d.upstream_status.abnormal_keys > 0 ||
-    d.upstream_status.unavailable_models > 0
-  return (
-    d.today.calls === 0 &&
-    d.today.unknown_cost_calls === 0 &&
-    d.trend.every((p) => p.calls === 0) &&
-    d.top_callers.length === 0 &&
-    d.recent_failures.length === 0 &&
-    !hasUpstreamSignal
-  )
+  if (!d) return null
+  const hasTraffic =
+    d.today.calls > 0 ||
+    d.trend.some((p) => p.calls > 0) ||
+    d.top_callers.length > 0 ||
+    d.recent_failures.length > 0
+  if (hasTraffic) return null
+  const s = d.setup
+  if (s.providers === 0) {
+    return { titleKey: 'dashboard.setupProviderTitle', descKey: 'dashboard.setupProviderDesc', icon: Server, ctaKey: 'dashboard.setupProviderCta', to: '/providers' }
+  }
+  if (s.enabled_models === 0) {
+    return { titleKey: 'dashboard.setupModelTitle', descKey: 'dashboard.setupModelDesc', icon: Boxes, ctaKey: 'dashboard.setupModelCta', to: '/models' }
+  }
+  if (s.api_keys === 0) {
+    return { titleKey: 'dashboard.setupKeyTitle', descKey: 'dashboard.setupKeyDesc', icon: KeyRound, ctaKey: 'dashboard.setupKeyCta', to: '/api-keys' }
+  }
+  return { titleKey: 'dashboard.setupWaitingTitle', descKey: 'dashboard.setupWaitingDesc', icon: Hourglass }
 })
 
 async function reload() {
@@ -267,6 +290,40 @@ function goToRequestLog(requestId: string) {
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
+}
+
+.setup-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+}
+
+.setup-banner__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.setup-banner__title {
+  font-size: var(--text-base);
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.setup-banner__desc {
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 640px) {
+  .setup-banner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 
 .kpi-row {

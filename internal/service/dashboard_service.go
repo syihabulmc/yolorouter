@@ -48,6 +48,7 @@ type DashboardData struct {
 	TopCallers     []repository.TopCaller       `json:"top_callers"`
 	RecentFailures []RecentFailureView          `json:"recent_failures"`
 	UpstreamStatus repository.UpstreamStatusDTO `json:"upstream_status"`
+	Setup          repository.SetupStatusDTO    `json:"setup"`
 }
 
 // RecentFailureView is the display-safe projection of a RequestLog row in
@@ -103,12 +104,18 @@ func (s *DashboardService) GetDashboard() (*DashboardData, error) {
 		return nil, err
 	}
 
+	setup, err := repository.GetSetupStatus(s.db)
+	if err != nil {
+		return nil, err
+	}
+
 	return &DashboardData{
 		Today:          *today,
 		Trend:          trend,
 		TopCallers:     topCallers,
 		RecentFailures: toRecentFailureViews(failures),
 		UpstreamStatus: upstream,
+		Setup:          setup,
 	}, nil
 }
 
