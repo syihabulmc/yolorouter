@@ -20,6 +20,7 @@
           </template>
           <n-input v-model:value="basicForm.baseUrl" placeholder="https://api.example.com/v1" />
         </n-form-item>
+        <ProtocolConfigFields v-model="basicForm.protocol" />
         <n-form-item path="note">
           <template #label>
             <HelpLabel :tip="t('providers.note_tip')">{{ t('providers.note') }}</HelpLabel>
@@ -71,8 +72,10 @@ import { useMessage, type FormInst, type FormRules } from 'naive-ui'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
 import HelpLabel from '../HelpLabel.vue'
+import ProtocolConfigFields from './ProtocolConfigFields.vue'
 import { providerNameRule, baseUrlRule, noteRule, keyLabelRule, keyPlaintextRule, testModelRule } from '../../utils/providerValidators'
 import { testOutcomeI18nKey } from '../../utils/testOutcomeDisplay'
+import { emptyProtocolConfig, protocolEndpointsValid, serializeProtocolConfig, type ProtocolConfigModel } from '../../utils/providerProtocol'
 
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ 'update:show': [boolean] }>()
@@ -84,7 +87,7 @@ const store = useProvidersStore()
 const step = ref(1)
 const basicFormRef = ref<FormInst | null>(null)
 const keyFormRef = ref<FormInst | null>(null)
-const basicForm = reactive({ name: '', baseUrl: '', note: '' })
+const basicForm = reactive({ name: '', baseUrl: '', note: '', protocol: emptyProtocolConfig('openai') as ProtocolConfigModel })
 const keyForm = reactive({ label: '', plaintext: '', testModel: '' })
 const testing = ref(false)
 const submitting = ref(false)
@@ -126,6 +129,7 @@ watch(
       basicForm.name = ''
       basicForm.baseUrl = ''
       basicForm.note = ''
+      basicForm.protocol = emptyProtocolConfig('openai')
       keyForm.label = ''
       keyForm.plaintext = ''
       keyForm.testModel = ''
@@ -144,6 +148,10 @@ async function onNextStep() {
   } catch {
     return
   }
+  if (!protocolEndpointsValid(basicForm.protocol)) {
+    message.error(t('providers.protocolEndpointUrlInvalid'))
+    return
+  }
   step.value = 2
 }
 
@@ -156,7 +164,10 @@ async function onTestConnection() {
   testing.value = true
   testOutcome.value = null
   try {
-    const result = await store.testKeyPreview(basicForm.baseUrl, keyForm.plaintext, keyForm.testModel)
+    // Preview only tests the selected primary protocol (basicForm.protocol.providerType) —
+    // any additional protocol_endpoints configured in step 1 are NOT covered here;
+    // those get their own authoritative per-destination test on actual create.
+    const result = await store.testKeyPreview(basicForm.baseUrl, keyForm.plaintext, keyForm.testModel, basicForm.protocol.providerType)
     testOutcome.value = result.outcome
   } catch (err) {
     message.error(displayMessage(err, t))
@@ -181,6 +192,7 @@ async function onSubmit() {
       key_plaintext: keyForm.plaintext,
       test_model: keyForm.testModel,
       management_status: 1, // this drawer's fixed behavior: the first key is always submitted requesting enabled (server independently re-verifies before honoring it)
+      ...serializeProtocolConfig(basicForm.protocol),
     })
     onUpdateShow(false)
   } catch (err) {

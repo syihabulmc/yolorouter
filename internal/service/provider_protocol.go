@@ -75,7 +75,16 @@ func ValidateProtocolEndpoints(raw string) (string, error) {
 // normalizeProtocolEndpoints re-serializes a validated endpoints map with
 // keys in sorted order, so callers can rely on the stored JSON text being
 // stable for equal maps regardless of the order keys were supplied in.
+//
+// An empty map canonicalizes to "" (not "{}") so that "no additional
+// protocols" has a single stored representation. Otherwise "" and "{}" would
+// compare unequal, and a name-only edit whose UI re-submits the empty config
+// as "" against a provider stored as "{}" (or vice versa) would spuriously
+// bump destination_version and force every key to re-verify.
 func normalizeProtocolEndpoints(endpoints map[string]string) string {
+	if len(endpoints) == 0 {
+		return ""
+	}
 	keys := make([]string, 0, len(endpoints))
 	for k := range endpoints {
 		keys = append(keys, k)

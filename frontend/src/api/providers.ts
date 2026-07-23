@@ -25,6 +25,7 @@ export interface Provider {
   running_status: 'not_configured' | 'pending_test' | 'available' | 'partial' | 'unavailable'
   keys: ProviderKey[]
   created_at: string
+  protocol_endpoints: string
 }
 
 export interface BatchTestResult {
@@ -44,12 +45,16 @@ export interface CreateProviderInput {
   key_plaintext: string
   test_model: string
   management_status?: number
+  provider_type?: string
+  protocol_endpoints?: string
 }
 
 export interface UpdateProviderInput {
   name: string
   base_url: string
   note?: string
+  provider_type?: string
+  protocol_endpoints?: string
 }
 
 export interface CreateKeyInput {
@@ -91,10 +96,15 @@ export function setProviderStatus(id: number, enabled: boolean): Promise<void> {
   return apiFetch(`/api/admin/providers/${id}/status`, { method: 'PATCH', body: JSON.stringify({ enabled }) })
 }
 
-export function testKeyPreview(baseUrl: string, apiKey: string, model: string): Promise<TestKeyResult> {
+// testKeyPreview checks a key against a single protocol — the selected
+// primary (providerType) — before the provider exists. It does NOT cover
+// any additional protocol_endpoints the create form may also configure;
+// the authoritative multi-endpoint verification happens on actual create
+// via each destination's own server-side test (verifyKeyAllDestinations).
+export function testKeyPreview(baseUrl: string, apiKey: string, model: string, providerType: string): Promise<TestKeyResult> {
   return apiFetch('/api/admin/providers/test-key', {
     method: 'POST',
-    body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model }),
+    body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model, provider_type: providerType }),
   })
 }
 

@@ -151,13 +151,19 @@ type CreateProviderInput struct {
 type UpdateProviderInput struct {
 	Name    string
 	BaseURL string
-	Note    string
-	// ProviderType and ProtocolEndpoints follow PATCH semantics: an empty
-	// value means "omitted from this request, leave unchanged" — NOT
-	// CreateProviderInput's "empty means default/clear" meaning. See
-	// UpdateProvider's doc comment for why.
-	ProviderType      string
-	ProtocolEndpoints string
+	// Note, ProviderType and ProtocolEndpoints follow PATCH semantics via
+	// pointers: nil means "not supplied in this request, leave unchanged".
+	// A non-nil pointer is authoritative and applied as given — even if it
+	// points at an empty string — unlike CreateProviderInput's plain string
+	// fields, where empty always means "default/clear". A present-empty Note
+	// clears the note; a present-empty ProviderType normalizes to "openai"
+	// (see ValidateProviderType); a present-empty ProtocolEndpoints clears all
+	// additional protocols (see ValidateProtocolEndpoints). Name and BaseURL
+	// stay plain strings (binding:"required", always resent). See
+	// UpdateProvider's doc comment for why this distinction matters.
+	Note              *string
+	ProviderType      *string
+	ProtocolEndpoints *string
 }
 
 type ProviderKeyView struct {
@@ -384,16 +390,19 @@ func isSortOrderUniqueViolation(err error) bool {
 // much as changing base_url does, so both must invalidate every key's
 // authorization the same way.
 //
-// PATCH-omitted-field semantics: input.ProviderType/ProtocolEndpoints being
-// empty means "not supplied in this request, leave unchanged" — unlike
-// CreateProvider, where an empty ProviderType legitimately means "default to
-// openai". Treating an omitted field the same as CreateProvider's empty-
-// means-default rule would silently flip an existing anthropic provider
-// back to openai (and bump destination_version) on every unrelated
-// name/note-only edit. So only normalize+compare through the validators
-// when the caller actually supplied a non-empty value; otherwise the
-// provider's own current stored value is reused untouched for both the
-// compare and the write.
+// PATCH field-presence semantics: input.Note/ProviderType/ProtocolEndpoints
+// are *string. nil means "not supplied in this request, leave unchanged" — a
+// name-only edit that omits these fields must not silently clear an existing
+// provider's note, flip an anthropic provider back to openai, or drop its
+// extra endpoints. A non-nil pointer is authoritative and applied as given,
+// even when it points at an empty string: a present-empty Note clears the
+// note, a present-empty ProviderType normalizes to "openai" via
+// ValidateProviderType, and a present-empty ProtocolEndpoints clears all
+// additional protocols via ValidateProtocolEndpoints. This lets the edit UI —
+// which always sends these fields — legitimately clear the last extra
+// endpoint or repoint the primary protocol without a stale leftover entry
+// surviving in the stored JSON. Name and BaseURL stay plain strings because
+// they carry binding:"required" and are always resent.
 func (s *ProviderService) UpdateProvider(id uint, input UpdateProviderInput, now time.Time) (*ProviderView, error) {
 	provider, err := repository.FindProviderByID(s.db, id)
 	if err != nil {
@@ -403,21 +412,30 @@ func (s *ProviderService) UpdateProvider(id uint, input UpdateProviderInput, now
 		return nil, err
 	}
 
-	providerType := provider.ProviderType
-	if input.ProviderType != "" {
-		normalized, err := ValidateProviderType(input.ProviderType)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", errcode.ErrProviderProtocolInvalid, err)
+	resolvePatchField := func(current string, input *string, validate func(string) (string, error)) (string, error) {
+		if input == nil {
+			return current, nil
 		}
-		providerType = normalized
+		normalized, err := validate(*input)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", errcode.ErrProviderProtocolInvalid, err)
+		}
+		return normalized, nil
 	}
-	protocolEndpoints := provider.ProtocolEndpoints
-	if input.ProtocolEndpoints != "" {
-		normalized, err := ValidateProtocolEndpoints(input.ProtocolEndpoints)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", errcode.ErrProviderProtocolInvalid, err)
-		}
-		protocolEndpoints = normalized
+
+	providerType, err := resolvePatchField(provider.ProviderType, input.ProviderType, ValidateProviderType)
+	if err != nil {
+		return nil, err
+	}
+	protocolEndpoints, err := resolvePatchField(provider.ProtocolEndpoints, input.ProtocolEndpoints, ValidateProtocolEndpoints)
+	if err != nil {
+		return nil, err
+	}
+	// Note has no validator; nil = leave the stored note untouched (an omitted
+	// field must not clobber it), a present value (incl. empty = clear) wins.
+	note := provider.Note
+	if input.Note != nil {
+		note = *input.Note
 	}
 
 	// These writes previously ran
@@ -443,7 +461,7 @@ func (s *ProviderService) UpdateProvider(id uint, input UpdateProviderInput, now
 				return err
 			}
 		}
-		if err := repository.UpdateProviderNameNote(tx, id, input.Name, input.Note, now); err != nil {
+		if err := repository.UpdateProviderNameNote(tx, id, input.Name, note, now); err != nil {
 			if isUniqueViolation(err) {
 				return errcode.ErrProviderNameTaken
 			}

@@ -12,9 +12,21 @@
     <n-tabs v-model:value="activeTab" type="line" animated>
       <n-tab-pane name="overview" :tab="t('providers.tabOverview')">
         <div class="section-card">
+          <div class="overview-toolbar">
+            <n-button @click="showEditProvider = true">{{ t('providers.editProvider') }}</n-button>
+          </div>
           <n-descriptions :column="1" label-placement="left">
             <n-descriptions-item :label="t('providers.name')">{{ provider.name }}</n-descriptions-item>
             <n-descriptions-item :label="t('providers.baseUrl')">{{ provider.base_url }}</n-descriptions-item>
+            <n-descriptions-item :label="t('providers.protocolPrimary')">
+              {{ t('providers.protocol_' + provider.provider_type) }}
+            </n-descriptions-item>
+            <n-descriptions-item :label="t('providers.protocolAdditional')">
+              <span v-if="additionalProtocolLines.length === 0">{{ t('providers.protocolNone') }}</span>
+              <div v-else class="additional-protocols">
+                <div v-for="line in additionalProtocolLines" :key="line">{{ line }}</div>
+              </div>
+            </n-descriptions-item>
             <n-descriptions-item :label="t('providers.note')">{{ provider.note || '-' }}</n-descriptions-item>
           </n-descriptions>
         </div>
@@ -68,6 +80,7 @@
 
     <KeyEditDrawer v-model:show="showAddKey" :provider-id="provider.id" @saved="reload" />
     <KeyEditDrawer v-model:show="showEditKey" :provider-id="provider.id" :editing-key="editingKey" @saved="reload" />
+    <ProviderEditDrawer v-model:show="showEditProvider" :provider="provider" @updated="reload" />
   </div>
 </template>
 
@@ -85,8 +98,10 @@ import type { BatchTestResult, Provider, ProviderKey } from '../../api/providers
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import KeyEditDrawer from '../../components/providers/KeyEditDrawer.vue'
+import ProviderEditDrawer from '../../components/providers/ProviderEditDrawer.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { testOutcomeI18nKey } from '../../utils/testOutcomeDisplay'
+import { ALL_PROTOCOLS, parseProtocolConfig } from '../../utils/providerProtocol'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -101,6 +116,7 @@ const activeTab = ref('overview')
 const showAddKey = ref(false)
 const showEditKey = ref(false)
 const editingKey = ref<ProviderKey | null>(null)
+const showEditProvider = ref(false)
 const testingAll = ref(false)
 // Tracks the single key currently running its own "Test Connection" (distinct from
 // testingAll's batch run) so the actions button can show a spinner instead
@@ -119,6 +135,22 @@ const batchResultByKeyId = ref<Record<number, BatchTestResult>>({})
 const pendingCount = computed(() => {
   if (!provider.value) return null
   return provider.value.keys.filter((k) => !k.needs_reentry).length
+})
+
+// Display lines for the Overview's "additional protocols" row: one line per
+// enabled non-primary protocol (parsed from protocol_endpoints), showing
+// its own URL or a "reuse main base URL" note when its URL is blank.
+const additionalProtocolLines = computed<string[]>(() => {
+  if (!provider.value) return []
+  const config = parseProtocolConfig(provider.value.provider_type, provider.value.protocol_endpoints)
+  const lines: string[] = []
+  for (const protocol of ALL_PROTOCOLS) {
+    const entry = config.endpoints[protocol]
+    if (!entry.enabled) continue
+    const urlText = entry.url || t('providers.reuseMainBaseUrl')
+    lines.push(`${t('providers.protocol_' + protocol)}: ${urlText}`)
+  }
+  return lines
 })
 
 function batchResultLabel(result: BatchTestResult): string {
@@ -443,6 +475,18 @@ async function onTestAll() {
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
+}
+
+.overview-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--space-4);
+}
+
+.additional-protocols {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .keys-toolbar {

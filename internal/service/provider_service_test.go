@@ -154,6 +154,14 @@ func testMasterKey() []byte {
 	return key
 }
 
+// strptr returns a pointer to s, for populating UpdateProviderInput's
+// *string fields (ProviderType/ProtocolEndpoints) where a non-nil pointer —
+// even to an empty string — is the "field present, apply it" signal, as
+// opposed to nil ("field absent, leave unchanged").
+func strptr(s string) *string {
+	return &s
+}
+
 func newTestProviderService(t *testing.T) (*ProviderService, *gorm.DB, *fakeProviderClient) {
 	t.Helper()
 	db := testutil.NewSQLiteDB(t)
@@ -488,7 +496,7 @@ func TestUpdateProviderErrorsWhenNameNoteUpdateFailsForNonUniqueReason(t *testin
 
 	// Same BaseURL — skips UpdateProviderBaseURL entirely, isolating the
 	// UpdateProviderNameNote failure.
-	_, err = svc.UpdateProvider(provider.ID, UpdateProviderInput{Name: "renamed", Note: "n", BaseURL: provider.BaseURL}, now)
+	_, err = svc.UpdateProvider(provider.ID, UpdateProviderInput{Name: "renamed", Note: strptr("n"), BaseURL: provider.BaseURL}, now)
 	if err == nil || errors.Is(err, errcode.ErrProviderNameTaken) {
 		t.Fatalf("expected a raw DB error (not ErrProviderNameTaken), got %v", err)
 	}
@@ -551,7 +559,7 @@ func TestUpdateProviderProtocolChangeBumpsDestinationVersionAndPersists(t *testi
 
 	updated, err := svc.UpdateProvider(created.ID, UpdateProviderInput{
 		Name: created.Name, BaseURL: created.BaseURL,
-		ProviderType: "anthropic", ProtocolEndpoints: `{"responses":"https://gw/v1"}`,
+		ProviderType: strptr("anthropic"), ProtocolEndpoints: strptr(`{"responses":"https://gw/v1"}`),
 	}, now)
 	if err != nil {
 		t.Fatalf("UpdateProvider failed: %v", err)
@@ -583,7 +591,7 @@ func TestUpdateProviderProtocolEndpointsSemanticReSubmitDoesNotBumpVersion(t *te
 
 	updated, err := svc.UpdateProvider(created.ID, UpdateProviderInput{
 		Name: created.Name, BaseURL: created.BaseURL,
-		ProtocolEndpoints: `{"responses":"https://gw/r","anthropic":"https://gw/a"}`,
+		ProtocolEndpoints: strptr(`{"responses":"https://gw/r","anthropic":"https://gw/a"}`),
 	}, now)
 	if err != nil {
 		t.Fatalf("UpdateProvider failed: %v", err)
@@ -607,10 +615,193 @@ func TestUpdateProviderRejectsInvalidProviderType(t *testing.T) {
 	}
 
 	_, err = svc.UpdateProvider(created.ID, UpdateProviderInput{
-		Name: created.Name, BaseURL: created.BaseURL, ProviderType: "not-a-real-protocol",
+		Name: created.Name, BaseURL: created.BaseURL, ProviderType: strptr("not-a-real-protocol"),
 	}, now)
 	if !errors.Is(err, errcode.ErrProviderProtocolInvalid) {
 		t.Fatalf("expected ErrProviderProtocolInvalid, got %v", err)
+	}
+}
+
+// TestUpdateProviderClearingLastEndpointRemovesItAndBumpsVersion is the
+// regression test for finding 1(a): the edit UI always sends
+// protocol_endpoints, and disabling the last extra endpoint must send an
+// authoritative empty string that actually clears the stored value — not a
+// value silently ignored because ProtocolEndpoints used to be a plain string
+// indistinguishable from "not supplied".
+func TestUpdateProviderClearingLastEndpointRemovesItAndBumpsVersion(t *testing.T) {
+	svc, db, _ := newTestProviderService(t)
+	now := time.Now().UTC()
+	created, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234",
+		TestModel: "gpt-4o-mini", ManagementStatus: model.ProviderStatusEnabled,
+		ProviderType: "openai", ProtocolEndpoints: `{"anthropic":""}`,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if created.ProtocolEndpoints != `{"anthropic":""}` {
+		t.Fatalf("expected seeded protocol_endpoints, got %q", created.ProtocolEndpoints)
+	}
+	// The freshly-created, server-verified key must start authorized against
+	// the current destination (needs_reentry=false) so the test can prove the
+	// PATCH below is what flips it.
+	if created.Keys[0].NeedsReentry {
+		t.Fatalf("expected the newly-created key to be authorized against the initial destination, got needs_reentry=true")
+	}
+
+	updated, err := svc.UpdateProvider(created.ID, UpdateProviderInput{
+		Name: created.Name, BaseURL: created.BaseURL,
+		ProviderType: strptr("openai"), ProtocolEndpoints: strptr(""),
+	}, now)
+	if err != nil {
+		t.Fatalf("UpdateProvider failed: %v", err)
+	}
+	if updated.ProtocolEndpoints != "" {
+		t.Fatalf("expected protocol_endpoints cleared to empty, got %q", updated.ProtocolEndpoints)
+	}
+	if !updated.Keys[0].NeedsReentry {
+		t.Fatalf("expected clearing the last endpoint to bump destination_version and require key re-entry, got needs_reentry=false")
+	}
+
+	var stored model.Provider
+	if err := db.Where("id = ?", created.ID).First(&stored).Error; err != nil {
+		t.Fatalf("reload provider failed: %v", err)
+	}
+	if stored.ProtocolEndpoints != "" {
+		t.Fatalf("expected protocol_endpoints persisted as empty in storage, got %q", stored.ProtocolEndpoints)
+	}
+}
+
+// TestUpdateProviderSwitchingPrimaryToSoleExtraEndpointClearsStaleOverride
+// is the regression test for finding 1(b): switching the primary protocol
+// to what used to be the sole extra endpoint (the edit UI auto-unchecks
+// that now-primary entry and serializes protocol_endpoints to "") must not
+// leave the OLD {"<newprimary>":"<url>"} entry behind — negotiate's
+// egressBaseURL would otherwise keep using that stale URL to override the
+// new primary's base_url instead of routing to base_url directly.
+func TestUpdateProviderSwitchingPrimaryToSoleExtraEndpointClearsStaleOverride(t *testing.T) {
+	svc, db, _ := newTestProviderService(t)
+	now := time.Now().UTC()
+	created, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234",
+		TestModel: "gpt-4o-mini", ManagementStatus: model.ProviderStatusEnabled,
+		ProviderType: "openai", ProtocolEndpoints: `{"anthropic":"https://old.example.com"}`,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+
+	updated, err := svc.UpdateProvider(created.ID, UpdateProviderInput{
+		Name: created.Name, BaseURL: created.BaseURL,
+		ProviderType: strptr("anthropic"), ProtocolEndpoints: strptr(""),
+	}, now)
+	if err != nil {
+		t.Fatalf("UpdateProvider failed: %v", err)
+	}
+	if updated.ProviderType != "anthropic" {
+		t.Fatalf("expected provider_type=anthropic, got %q", updated.ProviderType)
+	}
+	if updated.ProtocolEndpoints != "" {
+		t.Fatalf("expected protocol_endpoints cleared (no stale anthropic override), got %q", updated.ProtocolEndpoints)
+	}
+	if !updated.Keys[0].NeedsReentry {
+		t.Fatalf("expected switching the primary protocol to bump destination_version and require key re-entry, got needs_reentry=false")
+	}
+
+	var stored model.Provider
+	if err := db.Where("id = ?", created.ID).First(&stored).Error; err != nil {
+		t.Fatalf("reload provider failed: %v", err)
+	}
+	if stored.ProviderType != "anthropic" || stored.ProtocolEndpoints != "" {
+		t.Fatalf("expected stored provider_type=anthropic, protocol_endpoints=\"\" (no stale override), got provider_type=%q protocol_endpoints=%q",
+			stored.ProviderType, stored.ProtocolEndpoints)
+	}
+}
+
+// TestUpdateProviderNoteOmittedPreservedPresentEmptyClears is the regression
+// test for the Note clobber gap: Note is a *string with the same nil-vs-present
+// semantics as ProviderType/ProtocolEndpoints — an omitted note (nil) must
+// leave the stored note untouched (a name/protocol edit must not silently wipe
+// it), while a present note (including empty) is authoritative and clears it.
+func TestUpdateProviderNoteOmittedPreservedPresentEmptyClears(t *testing.T) {
+	svc, db, _ := newTestProviderService(t)
+	now := time.Now().UTC()
+	created, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234",
+		TestModel: "gpt-4o-mini", ManagementStatus: model.ProviderStatusEnabled, Note: "keep me",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+
+	// PATCH omits note (nil) — a name-only edit must preserve the stored note.
+	if _, err := svc.UpdateProvider(created.ID, UpdateProviderInput{Name: "renamed", BaseURL: created.BaseURL}, now); err != nil {
+		t.Fatalf("UpdateProvider (note omitted) failed: %v", err)
+	}
+	var afterOmit model.Provider
+	if err := db.Where("id = ?", created.ID).First(&afterOmit).Error; err != nil {
+		t.Fatalf("reload provider failed: %v", err)
+	}
+	if afterOmit.Note != "keep me" {
+		t.Fatalf("expected an omitted note to be preserved, got %q", afterOmit.Note)
+	}
+
+	// PATCH with a present-empty note explicitly clears it.
+	if _, err := svc.UpdateProvider(created.ID, UpdateProviderInput{Name: "renamed", BaseURL: created.BaseURL, Note: strptr("")}, now); err != nil {
+		t.Fatalf("UpdateProvider (note cleared) failed: %v", err)
+	}
+	var afterClear model.Provider
+	if err := db.Where("id = ?", created.ID).First(&afterClear).Error; err != nil {
+		t.Fatalf("reload provider failed: %v", err)
+	}
+	if afterClear.Note != "" {
+		t.Fatalf("expected a present-empty note to clear it, got %q", afterClear.Note)
+	}
+}
+
+// TestUpdateProviderNameOnlyPatchLeavesProtocolUnchanged proves the nil-vs-
+// present distinction: a PATCH that omits ProviderType/ProtocolEndpoints
+// (nil, not empty-string) must leave an existing non-default protocol
+// configuration untouched and must NOT bump destination_version — otherwise
+// every plain name/note edit through the UI would spuriously invalidate
+// every key's authorization.
+func TestUpdateProviderNameOnlyPatchLeavesProtocolUnchanged(t *testing.T) {
+	svc, db, _ := newTestProviderService(t)
+	now := time.Now().UTC()
+	created, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234",
+		TestModel: "gpt-4o-mini", ManagementStatus: model.ProviderStatusEnabled,
+		ProviderType: "anthropic", ProtocolEndpoints: `{"responses":"https://gw.example.com/v1"}`,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+
+	updated, err := svc.UpdateProvider(created.ID, UpdateProviderInput{
+		Name: "renamed", Note: strptr("updated note"), BaseURL: created.BaseURL,
+		// ProviderType/ProtocolEndpoints intentionally omitted (nil).
+	}, now)
+	if err != nil {
+		t.Fatalf("UpdateProvider failed: %v", err)
+	}
+	if updated.Name != "renamed" {
+		t.Fatalf("expected name updated, got %q", updated.Name)
+	}
+	if updated.ProviderType != "anthropic" || updated.ProtocolEndpoints != `{"responses":"https://gw.example.com/v1"}` {
+		t.Fatalf("expected provider_type/protocol_endpoints unchanged by a name-only PATCH, got provider_type=%q protocol_endpoints=%q",
+			updated.ProviderType, updated.ProtocolEndpoints)
+	}
+	if updated.Keys[0].NeedsReentry {
+		t.Fatalf("expected a name-only PATCH to NOT bump destination_version, got needs_reentry=true")
+	}
+
+	var stored model.Provider
+	if err := db.Where("id = ?", created.ID).First(&stored).Error; err != nil {
+		t.Fatalf("reload provider failed: %v", err)
+	}
+	if stored.ProviderType != "anthropic" || stored.ProtocolEndpoints != `{"responses":"https://gw.example.com/v1"}` {
+		t.Fatalf("expected stored provider_type/protocol_endpoints unchanged, got provider_type=%q protocol_endpoints=%q",
+			stored.ProviderType, stored.ProtocolEndpoints)
 	}
 }
 

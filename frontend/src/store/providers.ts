@@ -31,13 +31,29 @@ export const useProvidersStore = defineStore('providers', {
     },
     async create(input: CreateProviderInput): Promise<Provider> {
       const created = await providersApi.createProvider(input)
-      await this.fetchList()
+      // Best-effort refresh: the create already committed on the server, so a
+      // failed list refresh must not surface as a create failure (which would
+      // report an error for a change that actually landed). The list refreshes
+      // again on the next navigation/fetch.
+      await this.refreshListBestEffort()
       return created
     },
     async update(id: number, input: UpdateProviderInput): Promise<Provider> {
       const updated = await providersApi.updateProvider(id, input)
-      await this.fetchList()
+      // Best-effort refresh (see create): a failed list refresh must not mask a
+      // committed PATCH — the edit drawer would otherwise report failure and
+      // stay open even though the server persisted the change (and may have
+      // invalidated keys).
+      await this.refreshListBestEffort()
       return updated
+    },
+    async refreshListBestEffort() {
+      try {
+        await this.fetchList()
+      } catch {
+        // Ignore: the underlying mutation already succeeded; the list will
+        // refresh on the next navigation/fetch.
+      }
     },
     // Deliberately does NOT refetch the list: ProviderDetailPage is the
     // only caller, and it already reloads its own single-provider detail
@@ -66,8 +82,8 @@ export const useProvidersStore = defineStore('providers', {
     async testAll(providerId: number, enabledKeyCount: number) {
       return providersApi.testAllProviderKeys(providerId, enabledKeyCount)
     },
-    async testKeyPreview(baseUrl: string, apiKey: string, model: string): Promise<TestKeyResult> {
-      return providersApi.testKeyPreview(baseUrl, apiKey, model)
+    async testKeyPreview(baseUrl: string, apiKey: string, model: string, providerType: string): Promise<TestKeyResult> {
+      return providersApi.testKeyPreview(baseUrl, apiKey, model, providerType)
     },
   },
 })

@@ -34,16 +34,20 @@ type createProviderRequest struct {
 }
 
 type updateProviderRequest struct {
-	Name    string `json:"name" binding:"required,min=2,max=50"`
-	BaseURL string `json:"base_url" binding:"required,url,max=255"`
-	Note    string `json:"note" binding:"max=200"`
+	Name    string  `json:"name" binding:"required,min=2,max=50"`
+	BaseURL string  `json:"base_url" binding:"required,url,max=255"`
+	Note    *string `json:"note" binding:"omitempty,max=200"`
 	// ProviderType and ProtocolEndpoints are deliberately unconstrained by
 	// gin binding tags, same reasoning as createProviderRequest's: validated
 	// in the service layer so a bad value surfaces as a clean 400. Both are
-	// optional and, unlike create, an omitted (empty) value here means
-	// "leave unchanged" — PATCH semantics — not "reset to default/empty".
-	ProviderType      string `json:"provider_type"`
-	ProtocolEndpoints string `json:"protocol_endpoints"`
+	// *string, not string, to distinguish "field absent from the JSON body"
+	// (nil — PATCH semantics, leave unchanged) from "field present, possibly
+	// an empty string" (non-nil — authoritative, applied as given): the edit
+	// UI always sends protocol_endpoints and legitimately needs to send an
+	// empty string to clear all extra endpoints, which a plain string field
+	// couldn't distinguish from "not supplied".
+	ProviderType      *string `json:"provider_type"`
+	ProtocolEndpoints *string `json:"protocol_endpoints"`
 }
 
 type setStatusRequest struct {

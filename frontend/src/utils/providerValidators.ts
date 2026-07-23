@@ -1,4 +1,5 @@
 import type { FormItemRule } from 'naive-ui'
+import { isValidEndpointUrl } from './providerProtocol'
 
 // Mirrors the backend's own binding tags (createProviderRequest / createKeyRequest
 // / updateKeyRequest in internal/handler/provider_handler.go) so NewProviderDrawer.vue
@@ -46,4 +47,16 @@ export function testModelRule(t: (key: string) => string): FormItemRule[] {
     { required: true, message: t('providers.fieldRequired'), trigger: ['blur', 'input'] },
     { max: 100, message: t('providers.testModelTooLong'), trigger: ['blur', 'input'] },
   ]
+}
+
+// Mirrors the backend's ValidateProtocolEndpoints (internal/service/provider_protocol.go):
+// an empty string is valid (means "reuse the provider's base_url"), otherwise the
+// value must parse as an absolute http(s) URL with a non-empty host.
+export function protocolEndpointUrlRule(t: (key: string) => string): FormItemRule {
+  return {
+    trigger: ['blur', 'input'],
+    validator: (_rule, value: string) => {
+      return isValidEndpointUrl(value) ? true : new Error(t('providers.protocolEndpointUrlInvalid'))
+    },
+  }
 }

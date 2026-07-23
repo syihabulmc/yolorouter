@@ -51,6 +51,20 @@ func TestValidateProtocolEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("empty object canonicalizes to empty string", func(t *testing.T) {
+		// "{}" and "" both mean "no additional protocols"; they must
+		// normalize to the same stored form so a name-only edit that
+		// re-submits the empty config never spuriously bumps
+		// destination_version.
+		got, err := ValidateProtocolEndpoints("{}")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "" {
+			t.Fatalf("got %q, want empty string (empty object canonicalized)", got)
+		}
+	})
+
 	t.Run("single reuse-base-url entry", func(t *testing.T) {
 		got, err := ValidateProtocolEndpoints(`{"anthropic":""}`)
 		if err != nil {
