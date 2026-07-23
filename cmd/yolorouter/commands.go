@@ -23,6 +23,7 @@ var commands = []Command{
 	{Name: "db:backup", Usage: "back up the database", Run: runDBBackup},
 	{Name: "db:reset", Usage: "drop all tables and re-migrate (dangerous)", Run: runDBReset},
 	{Name: "update", Usage: "update to the latest GitHub release", Run: runUpdate},
+	{Name: "stop", Usage: "stop the running server", Run: runStop},
 }
 
 // dispatch resolves args[0] against the command table and runs it,

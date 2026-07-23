@@ -45,6 +45,38 @@ func runServe(ctx context.Context, args []string) error {
 	defer func() { _ = unlockInstance() }()
 	defer func() { _ = app.Close() }()
 
+	// Beyond the shared instance lock above, serve holds a dedicated
+	// serve-liveness lock for its entire lifetime. Only a running serve takes
+	// this lock (db:reset and other maintenance commands take just the instance
+	// lock), so `stop` can use it to tell "a server is running" apart from
+	// "some maintenance command is holding the instance lock" — a distinction
+	// the pid file alone cannot make, since a crashed server leaves a stale one.
+	serveLockPath := serveInstanceLockPath(app.Config.Database.SQLitePath)
+	unlockServe, err := database.AcquireInstanceLock(serveLockPath)
+	if err != nil {
+		return fmt.Errorf("cannot start: %w", err)
+	}
+	defer func() { _ = unlockServe() }()
+
+	// Record our pid so `stop` knows which process to signal, and stand up
+	// the platform stop waiter (a no-op on unix, a named event on windows).
+	// The pid file is written only after the serve lock is held, and its
+	// removal defer is registered after the serve-unlock defer so it runs first
+	// (LIFO): the pid file is removed and the event handle closed while the
+	// serve lock is still held, so a held serve lock always implies a valid
+	// pid file.
+	pidPath := instancePIDPath(app.Config.Database.SQLitePath)
+	if err := writePIDFile(pidPath); err != nil {
+		return fmt.Errorf("write pid file: %w", err)
+	}
+	defer func() { _ = os.Remove(pidPath) }()
+
+	stopCh, stopCleanup, err := newStopWaiter(app.Config.Database.SQLitePath)
+	if err != nil {
+		return fmt.Errorf("init stop waiter: %w", err)
+	}
+	defer stopCleanup()
+
 	// router.New validates the embedded frontend build (if any) and must run
 	// before any database migration: it has no side effects of its own, so
 	// rejecting a broken embedded build here guarantees a bad deploy never
@@ -153,6 +185,8 @@ func runServe(ctx context.Context, args []string) error {
 		return fmt.Errorf("http server failed: %w", err)
 	case <-sigCh:
 		logger.Info("shutdown signal received")
+	case <-stopCh:
+		logger.Info("external stop requested")
 	case <-ctx.Done():
 		// Derived from the ctx passed in by main() (via dispatch), not
 		// context.Background(), so a caller-cancelled ctx (e.g. in a test)

@@ -64,3 +64,5 @@ jobs:
         run: make embed-frontend
       - name: Build embedded binary
         run: go build -tags embed -o /dev/null ./cmd/yolorouter
+      - name: Cross-compile check (windows)
+        run: GOOS=windows GOARCH=amd64 go build ./...

@@ -2,8 +2,8 @@ package bootstrap
 
 import (
 	"os"
+	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/yolorouter/yolorouter/internal/config"
@@ -49,8 +49,10 @@ func TestInitLoadsConfigAndConnectsDatabase(t *testing.T) {
 // 0600. syscall.Umask is process-global state, so this test must not be
 // marked t.Parallel().
 func TestInitCreatesSQLiteFileWithRestrictivePermissions(t *testing.T) {
-	old := syscall.Umask(0o022)
-	defer syscall.Umask(old)
+	if runtime.GOOS == "windows" {
+		t.Skip("asserts unix file-permission bits")
+	}
+	defer withUmask(0o022)()
 
 	dir := t.TempDir()
 	oldWd, err := os.Getwd()

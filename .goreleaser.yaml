@@ -28,6 +28,8 @@ builds:
       - linux_arm64
       - darwin_amd64
       - darwin_arm64
+      - windows_amd64
+      - windows_arm64
     ldflags:
       - -s -w
       # goreleaser's {{ .Version }} STRIPS the leading "v" from the tag, so
@@ -44,6 +46,10 @@ builds:
 
 archives:
   - formats: [tar.gz]
+    # Windows users expect a .zip; keep tar.gz for unix targets.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     # Archive name carries the leading v (v0.1.0) to match tag_name, so the
     # `update` command's matchAsset — which keys off tag_name — finds the
     # right file: yolorouter_v{tag}_{os}_{arch}.tar.gz

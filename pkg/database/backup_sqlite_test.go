@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
+	"runtime"
 	"testing"
 	// database.go (same package) imports github.com/glebarez/sqlite, which
 	// transitively registers the "sqlite" database/sql driver via its init().
@@ -16,22 +16,6 @@ import (
 	// name — so we rely on the registration already pulled in transitively
 	// instead of duplicating it (see migration_test.go for the same note).
 )
-
-// withUmask temporarily sets the process umask (Unix-only, matching this
-// project's macOS/Linux-only scope) and returns a restore func — some
-// permission regression tests would otherwise pass or fail depending on
-// whatever umask happens to be set in the environment running them (e.g. a
-// CI container with umask 077 would mask SQLite's own default 0644 create
-// mode down to 0600 by coincidence, hiding a real regression).
-//
-// syscall.Umask mutates process-wide state, not anything per-goroutine or
-// per-test — callers of this helper must NOT call t.Parallel(), or a
-// concurrently-running test doing its own file creation could observe (or
-// race to set) the wrong umask.
-func withUmask(mask int) func() {
-	old := syscall.Umask(mask)
-	return func() { syscall.Umask(old) }
-}
 
 // decompressToSQLite gunzips gzPath to a temp file and opens it, so tests
 // can actually query the backed-up data rather than just checking the gzip
@@ -242,6 +226,9 @@ func TestSQLiteModeRWDoesNotCreateMissingFile(t *testing.T) {
 // local users for the window between VACUUM INTO and the gzip step
 // reading it.
 func TestVacuumSnapshotIntoTempFilePreservesPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("asserts unix file-permission bits")
+	}
 	// Pinned so this test's pass/fail doesn't depend on whatever umask the
 	// environment running it happens to have — without this, a CI
 	// container with umask 077 would mask SQLite's own default 0644 create

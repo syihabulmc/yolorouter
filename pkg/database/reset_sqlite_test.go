@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	// database.go (same package) imports github.com/glebarez/sqlite, which
@@ -70,6 +71,9 @@ func TestResetSQLiteRecreatesDatabase(t *testing.T) {
 // applies on a normal first boot. Pinned to umask 022 (see withUmask) so
 // this can't pass by coincidence under a more restrictive ambient umask.
 func TestResetSQLiteRecreatesWithRestrictivePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("asserts unix file-permission bits")
+	}
 	defer withUmask(0o022)()
 
 	dir := t.TempDir()
