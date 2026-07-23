@@ -14,11 +14,12 @@
 
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { BarChart, LineChart } from 'echarts/charts'
+import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import {
   DataZoomComponent,
   GridComponent,
   LegendComponent,
+  MarkLineComponent,
   TooltipComponent,
 } from 'echarts/components'
 
@@ -26,12 +27,23 @@ use([
   CanvasRenderer,
   BarChart,
   LineChart,
+  PieChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
   DataZoomComponent,
+  MarkLineComponent,
 ])
 
 // Re-export VChart so callers can `import { VChart } from '@/utils/echarts'`
 // and get both the component and the registration in one import.
 export { default as VChart } from 'vue-echarts'
+
+// Chart palette. ECharts canvas can't resolve CSS custom properties, so these
+// mirror the design tokens (styles/tokens.less) as hex literals for use in
+// chart option objects. Shared here so every chart draws from one definition
+// instead of re-declaring the same hex in each component.
+export const CHART_ACCENT = '#6467f2'
+export const CHART_TEXT_MUTED = '#909399'
+export const CHART_GRID_LINE = '#f0f0f3'
+export const CHART_AXIS_LINE = '#e0e0e6'

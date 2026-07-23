@@ -32,15 +32,28 @@ func generateRequestID() string {
 // (utils/money.ts) — the two must agree.
 const microsPerUnit = 1_000_000
 
-// computeCost returns the cost in integer micros (major-unit × 1e6, i.e. CNY
-// to 6 decimal places) and whether the cost is "known".
+// costBreakdown is the per-request cost result: the billed cost plus the two
+// cache-economics figures the cost view surfaces. Known=false means usage or
+// pricing was missing — every field is 0 but the row must NOT read as "free".
+type costBreakdown struct {
+	CostMicros int64
+	// CacheReadSavedMicros: how much cheaper the cache-read tokens were than
+	// reprocessing them at the input price. CacheWriteExtraMicros: the premium
+	// paid to establish the cache versus billing those tokens at the input
+	// price. Both non-negative; net cache saving = read saved − write extra.
+	CacheReadSavedMicros  int64
+	CacheWriteExtraMicros int64
+	Known                 bool
+}
+
+// computeCost returns the cost breakdown in integer micros (major-unit × 1e6,
+// i.e. CNY to 6 decimal places) and whether the cost is "known".
 // Unknown = usage missing — the row records cost_micros=0 with
 // cost_known=false so the dashboard never shows it as a free request.
-// Candidate prices are CNY per million tokens;
-// cache-read/write pricing is deferred to a later module.
-func computeCost(cand *model.ModelCandidate, usage *Usage) (micros int64, known bool) {
+// Candidate prices are CNY per million tokens.
+func computeCost(cand *model.ModelCandidate, usage *Usage) costBreakdown {
 	if usage == nil || cand == nil {
-		return 0, false
+		return costBreakdown{}
 	}
 	// cost = (prompt − cache_read) × input_price
 	//      + cache_read × cache_read_price
@@ -69,11 +82,22 @@ func computeCost(cand *model.ModelCandidate, usage *Usage) (micros int64, known 
 		float64(cacheRead)/1_000_000*cacheReadPrice +
 		float64(cacheWrite)/1_000_000*cacheWritePrice +
 		float64(usage.CompletionTokens)/1_000_000*cand.OutputPrice
+	// Cache economics, both against the input price as the "no cache" baseline.
+	// Reads save when priced below input; writes cost a premium when priced
+	// above it. Each is floored at 0 so a candidate whose cache price sits on
+	// the wrong side of input never turns into a negative on the other line.
+	cacheReadSaved := max(0, float64(cacheRead)/1_000_000*(cand.InputPrice-cacheReadPrice))
+	cacheWriteExtra := max(0, float64(cacheWrite)/1_000_000*(cacheWritePrice-cand.InputPrice))
 	// Scale CNY to integer micros so cumulative budget accounting stays
 	// exact-integer (no float drift) while keeping 6-decimal cost precision.
 	// (microsPerUnit is a distinct constant from the /1_000_000 above, which is
 	// the "price per million tokens" divisor — same literal, different meaning.)
-	return int64(cost*microsPerUnit + 0.5), true
+	return costBreakdown{
+		CostMicros:            int64(cost*microsPerUnit + 0.5),
+		CacheReadSavedMicros:  int64(cacheReadSaved*microsPerUnit + 0.5),
+		CacheWriteExtraMicros: int64(cacheWriteExtra*microsPerUnit + 0.5),
+		Known:                 true,
+	}
 }
 
 // safeUpstreamMessage produces the message shown to the caller for a 4xx
@@ -103,7 +127,7 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 	}
 	rc.StatusCode = statusCode
 	durationMs := time.Since(start).Milliseconds()
-	costMicros, costKnown := computeCost(rc.Candidate, rc.Usage)
+	cost := computeCost(rc.Candidate, rc.Usage)
 
 	var providerID *uint
 	if rc.Provider != nil {
@@ -125,21 +149,23 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 	}
 
 	logRow := &model.RequestLog{
-		RequestID:        rc.RequestID,
-		APIKeyID:         &apiKeyID,
-		ModelName:        rc.OriginalModel,
-		ProviderID:       providerID,
-		IsStream:         rc.IsStream,
-		StatusCode:       statusCode,
-		InputTokens:      inputTokens,
-		OutputTokens:     outputTokens,
-		CacheWriteTokens: cacheWriteTokens,
-		CacheReadTokens:  cacheReadTokens,
-		CostMicros:       costMicros,
-		CostKnown:        costKnown,
-		FailReason:       failPtr,
-		Attempts:         len(rc.Attempts),
-		DurationMs:       durationMs,
+		RequestID:             rc.RequestID,
+		APIKeyID:              &apiKeyID,
+		ModelName:             rc.OriginalModel,
+		ProviderID:            providerID,
+		IsStream:              rc.IsStream,
+		StatusCode:            statusCode,
+		InputTokens:           inputTokens,
+		OutputTokens:          outputTokens,
+		CacheWriteTokens:      cacheWriteTokens,
+		CacheReadTokens:       cacheReadTokens,
+		CostMicros:            cost.CostMicros,
+		CostKnown:             cost.Known,
+		CacheReadSavedMicros:  cost.CacheReadSavedMicros,
+		CacheWriteExtraMicros: cost.CacheWriteExtraMicros,
+		FailReason:            failPtr,
+		Attempts:              len(rc.Attempts),
+		DurationMs:            durationMs,
 	}
 	// Keep every attempt's order / key label / failure cause, not
 	// just the count. Stored as JSON so the query page can render it
@@ -155,8 +181,8 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 		logger.Error("gateway: write request log failed",
 			zap.String("request_id", rc.RequestID), zap.Error(err))
 	}
-	if costKnown && costMicros > 0 {
-		if err := repository.IncrementAPIKeyBudgetSpent(s.db, rc.APIKeyID, costMicros); err != nil {
+	if cost.Known && cost.CostMicros > 0 {
+		if err := repository.IncrementAPIKeyBudgetSpent(s.db, rc.APIKeyID, cost.CostMicros); err != nil {
 			logger.Error("gateway: increment budget spent failed",
 				zap.String("request_id", rc.RequestID), zap.Error(err))
 		}
