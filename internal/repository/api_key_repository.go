@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
 
 // ErrEmptyCustomAllowlist is returned by UpdateAPIKey when an update would
@@ -19,6 +20,18 @@ import (
 // allowlist — such a key could call nothing. The service translates it to the
 // caller-facing errcode; this package stays storage-only.
 var ErrEmptyCustomAllowlist = errors.New("custom scope requires at least one model")
+
+// validateCSPInvariants is the per-key custom-system-prompt resulting-state
+// rule: when the override is on and CSP is enabled, the key must carry its own
+// non-empty prompt text — otherwise it toggles CSP on with nothing to send.
+// Centralized so CreateAPIKey's initial-state guard and UpdateAPIKey's
+// under-lock re-read can't drift apart.
+func validateCSPInvariants(override, enabled bool, text string) error {
+	if override && enabled && text == "" {
+		return errcode.ErrCustomSystemPromptEmpty
+	}
+	return nil
+}
 
 func FindAPIKeyByID(db *gorm.DB, id uint) (*model.APIKey, error) {
 	var k model.APIKey
@@ -102,8 +115,13 @@ func SearchAPIKeys(db *gorm.DB, f APIKeyFilter, offset, limit int) ([]model.APIK
 
 // CreateAPIKey inserts the key row then its allowlist rows in one transaction,
 // so a partial write can never leave a key with fewer whitelisted models than
-// requested (at least one is required at create time).
+// requested (at least one is required at create time). The CSP initial-state
+// guard runs before the insert: override && enabled with empty text would
+// produce a key that toggles CSP on but has nothing to send.
 func CreateAPIKey(db *gorm.DB, key *model.APIKey, modelIDs []uint, now time.Time) error {
+	if err := validateCSPInvariants(key.CustomSystemPromptEnabledOverride, key.CustomSystemPromptEnabled, key.CustomSystemPrompt); err != nil {
+		return err
+	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		key.CreatedAt = now
 		key.UpdatedAt = now
@@ -154,7 +172,7 @@ func FindAPIKeyModelsByAPIKeyIDs(db *gorm.DB, apiKeyIDs []uint) ([]model.APIKeyM
 // UpdateAPIKey applies a sparse column update (only keys present in updates)
 // and reconciles the allowlist — all in one transaction. modelIDs == nil
 // leaves the allowlist unchanged; modelIDs == [] clears it; a non-nil slice
-// replaces it. Two invariants are enforced here rather than in the service,
+// replaces it. Three invariants are enforced here rather than in the service,
 // because only this layer sees the *resulting* state atomically: the column
 // update takes a row lock, the flag is re-read under that lock, and the
 // decision is made on what the key will actually end up as, not on the request
@@ -163,22 +181,77 @@ func FindAPIKeyModelsByAPIKeyIDs(db *gorm.DB, apiKeyIDs []uint) ([]model.APIKeyM
 // covers every path that lands there, including a sparse PATCH that flips
 // allow_all_models off without supplying ids. Returns ErrEmptyCustomAllowlist
 // when the second invariant would be violated (rolls back the whole update).
-// scopeChanged tells the second check whether this update touched
+// (3) A key with the CSP override on and CSP enabled must carry non-empty
+// prompt text — otherwise it toggles CSP on with nothing to send; this is
+// checked on every exit path so a combined PATCH that rewrites the allowlist
+// or flips scope in the same call as the CSP fields can't bypass it. Returns
+// errcode.ErrCustomSystemPromptEmpty when the third invariant would be
+// violated. scopeChanged tells the second check whether this update touched
 // allow_all_models (the caller knows; the repo doesn't probe the updates map
 // for it) — a scope flip to custom with ids omitted must re-validate the
 // inherited allowlist, an unrelated field edit must not.
-func UpdateAPIKey(db *gorm.DB, id uint, updates map[string]interface{}, modelIDs []uint, scopeChanged bool, now time.Time) error {
+//
+// expectedUpdatedAt optionally enables compare-and-set: when non-nil the
+// UPDATE is qualified with `AND updated_at = ?`, and 0 rows affected means
+// another writer committed first (the row's updated_at no longer matches the
+// snapshot the caller read) → errcode.ErrAPIKeyConflict. A nil pointer
+// disables CAS entirely (the legacy behavior used by EditKeyModal/CreateKeyModal
+// and every path that doesn't carry an authoritative GET snapshot) — those
+// callers don't have a fresher-than-the-list baseline to compare against, so a
+// CAS check there would only false-positive on benign concurrent edits. The
+// row's updated_at column is the CAS token: every UpdateAPIKey bumps it under
+// the row lock the same UPDATE takes, so a concurrent writer that committed
+// between the caller's GET and this UPDATE is observable as a mismatch.
+func UpdateAPIKey(db *gorm.DB, id uint, updates map[string]interface{}, modelIDs []uint, scopeChanged bool, now time.Time, expectedUpdatedAt *time.Time) error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		// updated_at is always bumped — even a whitelist-only change is a real
 		// edit and should refresh the row's last-modified timestamp. This UPDATE
 		// also locks the row for the rest of the transaction.
 		updates["updated_at"] = now
-		if err := tx.Model(&model.APIKey{}).Where("id = ?", id).Updates(updates).Error; err != nil {
-			return err
+		// Qualify the UPDATE with the CAS predicate when the caller supplied an
+		// expected updated_at. RowsAffected == 0 under CAS means the row was
+		// modified after the caller's GET — surface a conflict rather than
+		// silently overwriting the newer state. Without CAS the UPDATE is
+		// unconditional (matching the pre-CAS behavior): the service layer has
+		// already checked existence, so 0 rows is not a distinguishable signal
+		// here.
+		query := tx.Model(&model.APIKey{}).Where("id = ?", id)
+		if expectedUpdatedAt != nil {
+			query = query.Where("updated_at = ?", *expectedUpdatedAt)
+		}
+		res := query.Updates(updates)
+		if res.Error != nil {
+			return res.Error
+		}
+		if expectedUpdatedAt != nil && res.RowsAffected == 0 {
+			return errcode.ErrAPIKeyConflict
+		}
+		// checkCSP re-reads the merged CSP columns under the row lock the UPDATE
+		// just took, so every exit path decides on the *resulting* row rather
+		// than the request shape. override=false inherits the global default and
+		// never uses this key's own text, so only override && enabled requires
+		// non-empty text. A sparse PATCH that sets enabled=true alone can't be
+		// caught by validating the request fields in isolation (the prior text
+		// may be empty); this re-read sees the merged result. The three allowlist
+		// branches below (all-models clear, explicit allowlist replace, and the
+		// unchanged-allowlist fall-through) all converge on this single tail
+		// call, so a combined PATCH that flips scope or rewrites the allowlist in
+		// the same call as the CSP fields can't bypass the guard via an early
+		// return.
+		checkCSP := func() error {
+			var csp model.APIKey
+			if err := tx.Select("custom_system_prompt_enabled_override, custom_system_prompt_enabled, custom_system_prompt").
+				Where("id = ?", id).First(&csp).Error; err != nil {
+				return err
+			}
+			return validateCSPInvariants(csp.CustomSystemPromptEnabledOverride, csp.CustomSystemPromptEnabled, csp.CustomSystemPrompt)
 		}
 		// Re-read the flag under the lock the UPDATE just took, so the effective
 		// value includes any allow_all_models change we just wrote and can't race
-		// a concurrent scope change.
+		// a concurrent scope change. The branches below are mutually exclusive
+		// (if/else-if/else) so the tail checkCSP runs exactly once per update
+		// after every happy path; the ErrEmptyCustomAllowlist cases short-circuit
+		// before it (they leave nothing for CSP to say).
 		var k model.APIKey
 		if err := tx.Select("allow_all_models").Where("id = ?", id).First(&k).Error; err != nil {
 			return err
@@ -186,34 +259,40 @@ func UpdateAPIKey(db *gorm.DB, id uint, updates map[string]interface{}, modelIDs
 		if k.AllowAllModels {
 			// All-models keys own no allowlist rows: clear any that exist and
 			// ignore whatever the caller supplied.
-			return tx.Where("api_key_id = ?", id).Delete(&model.APIKeyModel{}).Error
-		}
-		// Custom scope. Enforce a non-empty *resulting* allowlist.
-		if modelIDs != nil {
-			// Explicit replacement.
+			if err := tx.Where("api_key_id = ?", id).Delete(&model.APIKeyModel{}).Error; err != nil {
+				return err
+			}
+		} else if modelIDs != nil {
+			// Custom scope, explicit allowlist replacement. Empty slice is the
+			// "clear" sentinel and is rejected here — a custom key must keep at
+			// least one model.
 			if len(modelIDs) == 0 {
 				return ErrEmptyCustomAllowlist
 			}
 			if err := tx.Where("api_key_id = ?", id).Delete(&model.APIKeyModel{}).Error; err != nil {
 				return err
 			}
-			return insertAPIKeyModels(tx, id, modelIDs, now)
-		}
-		// Allowlist left unchanged. If this update just switched scope to custom
-		// (the flag is in updates), the rows it inherits must be non-empty — a
-		// true->false flip supplying no ids would otherwise leave an empty custom
-		// key. An update that doesn't touch scope skips this, so a sparse PATCH
-		// (e.g. remark-only) never re-validates rows it isn't changing.
-		if scopeChanged {
-			var cnt int64
-			if err := tx.Model(&model.APIKeyModel{}).Where("api_key_id = ?", id).Count(&cnt).Error; err != nil {
+			if err := insertAPIKeyModels(tx, id, modelIDs, now); err != nil {
 				return err
 			}
-			if cnt == 0 {
-				return ErrEmptyCustomAllowlist
+		} else {
+			// Allowlist left unchanged. If this update just switched scope to
+			// custom (the flag is in updates), the rows it inherits must be
+			// non-empty — a true->false flip supplying no ids would otherwise
+			// leave an empty custom key. An update that doesn't touch scope
+			// skips this, so a sparse PATCH (e.g. remark-only) never re-validates
+			// rows it isn't changing.
+			if scopeChanged {
+				var cnt int64
+				if err := tx.Model(&model.APIKeyModel{}).Where("api_key_id = ?", id).Count(&cnt).Error; err != nil {
+					return err
+				}
+				if cnt == 0 {
+					return ErrEmptyCustomAllowlist
+				}
 			}
 		}
-		return nil
+		return checkCSP()
 	})
 }
 

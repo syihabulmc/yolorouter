@@ -18,15 +18,19 @@ const (
 	AccountPageForbidden      = 10009 // page-level RBAC: the user's group has no access to this admin page
 
 	// === API Key errors (11xxx) — "API Key security model" ===
-	APIKeyNotFound        = 11001
-	APIKeyInvalid         = 11002
-	APIKeyExpired         = 11003
-	APIKeyRevoked         = 11004
-	APIKeyRateLimitedRPM  = 11005
-	APIKeyRateLimitedTPM  = 11006
-	APIKeyRateLimitedConc = 11007
-	APIKeyBudgetExceeded  = 11008
-	APIKeyEmptyAllowlist  = 11009
+	APIKeyNotFound             = 11001
+	APIKeyInvalid              = 11002
+	APIKeyExpired              = 11003
+	APIKeyRevoked              = 11004
+	APIKeyRateLimitedRPM       = 11005
+	APIKeyRateLimitedTPM       = 11006
+	APIKeyRateLimitedConc      = 11007
+	APIKeyBudgetExceeded       = 11008
+	APIKeyEmptyAllowlist       = 11009
+	CustomSystemPromptTooLong  = 11010 // custom system prompt text exceeds the max rune length
+	CustomSystemPromptEmpty    = 11011 // enabled is true but the prompt text is empty
+	CustomSystemPromptConflict = 11012 // optimistic-lock CAS miss on system_settings PUT (another writer committed first)
+	APIKeyConflict             = 11013 // optimistic-lock CAS miss on api_keys PATCH (another writer committed first)
 
 	// === Provider errors (12xxx) ===
 	ProviderNotFound         = 12001
@@ -108,15 +112,19 @@ var ErrorMessages = map[int]string{
 	AccountSetupTokenInvalid:  "setup token invalid or missing",
 	AccountPageForbidden:      "your user group does not have access to this page",
 
-	APIKeyNotFound:        "api key not found",
-	APIKeyInvalid:         "api key invalid",
-	APIKeyExpired:         "api key expired",
-	APIKeyRevoked:         "api key revoked",
-	APIKeyRateLimitedRPM:  "rate limit exceeded (requests per minute)",
-	APIKeyRateLimitedTPM:  "rate limit exceeded (tokens per minute)",
-	APIKeyRateLimitedConc: "rate limit exceeded (concurrent requests)",
-	APIKeyBudgetExceeded:  "budget limit exceeded",
-	APIKeyEmptyAllowlist:  "model_ids must contain at least one model unless allow_all_models is true",
+	APIKeyNotFound:             "api key not found",
+	APIKeyInvalid:              "api key invalid",
+	APIKeyExpired:              "api key expired",
+	APIKeyRevoked:              "api key revoked",
+	APIKeyRateLimitedRPM:       "rate limit exceeded (requests per minute)",
+	APIKeyRateLimitedTPM:       "rate limit exceeded (tokens per minute)",
+	APIKeyRateLimitedConc:      "rate limit exceeded (concurrent requests)",
+	APIKeyBudgetExceeded:       "budget limit exceeded",
+	APIKeyEmptyAllowlist:       "model_ids must contain at least one model unless allow_all_models is true",
+	CustomSystemPromptTooLong:  "custom system prompt is too long",
+	CustomSystemPromptEmpty:    "custom system prompt text must not be empty when enabled",
+	CustomSystemPromptConflict: "custom system prompt was modified concurrently, please refresh and retry",
+	APIKeyConflict:             "api key was modified concurrently, please refresh and retry",
 
 	ProviderNotFound:         "provider not found",
 	ProviderNameTaken:        "provider name already taken",
@@ -172,15 +180,19 @@ var (
 	ErrAccountLastAdminProtected = errors.New(ErrorMessages[AccountLastAdminProtected])
 	ErrAccountSetupAlreadyDone   = errors.New(ErrorMessages[AccountSetupAlreadyDone])
 
-	ErrAPIKeyNotFound        = errors.New(ErrorMessages[APIKeyNotFound])
-	ErrAPIKeyInvalid         = errors.New(ErrorMessages[APIKeyInvalid])
-	ErrAPIKeyExpired         = errors.New(ErrorMessages[APIKeyExpired])
-	ErrAPIKeyRevoked         = errors.New(ErrorMessages[APIKeyRevoked])
-	ErrAPIKeyRateLimitedRPM  = errors.New(ErrorMessages[APIKeyRateLimitedRPM])
-	ErrAPIKeyRateLimitedTPM  = errors.New(ErrorMessages[APIKeyRateLimitedTPM])
-	ErrAPIKeyRateLimitedConc = errors.New(ErrorMessages[APIKeyRateLimitedConc])
-	ErrAPIKeyBudgetExceeded  = errors.New(ErrorMessages[APIKeyBudgetExceeded])
-	ErrAPIKeyEmptyAllowlist  = errors.New(ErrorMessages[APIKeyEmptyAllowlist])
+	ErrAPIKeyNotFound             = errors.New(ErrorMessages[APIKeyNotFound])
+	ErrAPIKeyInvalid              = errors.New(ErrorMessages[APIKeyInvalid])
+	ErrAPIKeyExpired              = errors.New(ErrorMessages[APIKeyExpired])
+	ErrAPIKeyRevoked              = errors.New(ErrorMessages[APIKeyRevoked])
+	ErrAPIKeyRateLimitedRPM       = errors.New(ErrorMessages[APIKeyRateLimitedRPM])
+	ErrAPIKeyRateLimitedTPM       = errors.New(ErrorMessages[APIKeyRateLimitedTPM])
+	ErrAPIKeyRateLimitedConc      = errors.New(ErrorMessages[APIKeyRateLimitedConc])
+	ErrAPIKeyBudgetExceeded       = errors.New(ErrorMessages[APIKeyBudgetExceeded])
+	ErrAPIKeyEmptyAllowlist       = errors.New(ErrorMessages[APIKeyEmptyAllowlist])
+	ErrCustomSystemPromptTooLong  = errors.New(ErrorMessages[CustomSystemPromptTooLong])
+	ErrCustomSystemPromptEmpty    = errors.New(ErrorMessages[CustomSystemPromptEmpty])
+	ErrCustomSystemPromptConflict = errors.New(ErrorMessages[CustomSystemPromptConflict])
+	ErrAPIKeyConflict             = errors.New(ErrorMessages[APIKeyConflict])
 
 	ErrProviderNotFound         = errors.New(ErrorMessages[ProviderNotFound])
 	ErrProviderNameTaken        = errors.New(ErrorMessages[ProviderNameTaken])

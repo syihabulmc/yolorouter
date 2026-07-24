@@ -11,12 +11,16 @@ import (
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
-// jsonHasTrailingContent reports whether dec has any non-whitespace content left
-// after decoding one top-level JSON value (a second value, stray bytes, a lone
-// ']' or '}', etc.). dec.More() misses trailing ']'/'}' because it returns false
-// for them, so this instead requires that decoding once more strictly returns
-// io.EOF (trailing whitespace/newlines still count as EOF).
-func jsonHasTrailingContent(dec *json.Decoder) bool {
+// JSONHasTrailingContent reports whether dec has any non-whitespace content
+// left after decoding one top-level JSON value (a second value, stray bytes, a
+// lone ']' or '}', etc.). dec.More() misses trailing ']'/'}' because it
+// returns false for them, so this instead requires that decoding once more
+// strictly returns io.EOF (trailing whitespace/newlines still count as EOF).
+//
+// Exported so the gateway can reuse the same trailing-content check when
+// decoding strict one-object bodies for custom system prompt injection,
+// keeping a single source of truth for what "reject trailing JSON" means.
+func JSONHasTrailingContent(dec *json.Decoder) bool {
 	var rest json.RawMessage
 	return !errors.Is(dec.Decode(&rest), io.EOF)
 }
@@ -60,7 +64,7 @@ func OptimizeBody(body []byte, irReq *protocols.IRRequest, withCacheControl bool
 	}
 	// Reject trailing content (a second JSON value / stray bytes after the body):
 	// we must not silently forward only the first object and drop the rest.
-	if jsonHasTrailingContent(dec) {
+	if JSONHasTrailingContent(dec) {
 		return body, false
 	}
 
@@ -92,7 +96,7 @@ func InjectCacheControl(body []byte, customPrompt string) []byte {
 	if m == nil {
 		return body
 	}
-	if jsonHasTrailingContent(dec) {
+	if JSONHasTrailingContent(dec) {
 		return body
 	}
 	if customPrompt != "" {
@@ -122,7 +126,7 @@ func InjectCustomSystemPromptOnly(body []byte, customPrompt string) []byte {
 	if m == nil {
 		return body
 	}
-	if jsonHasTrailingContent(dec) {
+	if JSONHasTrailingContent(dec) {
 		return body
 	}
 	injectCustomSystemPromptClaude(m, customPrompt)

@@ -13,3 +13,21 @@ export function modelIdsRule(t: (key: string) => string, required: boolean): For
     { required, type: 'array', trigger: ['change', 'blur'], message: t('apiKeys.modelAllowlistRequired') },
   ]
 }
+
+// Custom system prompt rule: when a key overrides the global setting AND
+// enables the override, the prompt text must be non-empty (the backend
+// rejects enabled+empty as errcode 11011). The 2000-rune cap mirrors the
+// service layer's MaxCustomSystemPromptLen so the client rejects oversized
+// input before the round-trip.
+export function customSystemPromptRule(
+  t: (key: string) => string,
+  override: boolean,
+  enabled: boolean,
+): FormItemRule[] {
+  const required = override && enabled
+  return [
+    { required, trigger: ['blur', 'input'], message: t('apiKeys.cspRequiredWhenEnabled') },
+    { max: 2000, type: 'string', trigger: ['blur', 'input'], message: t('apiKeys.cspTooLong') },
+  ]
+}
+

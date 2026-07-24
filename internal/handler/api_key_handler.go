@@ -3,6 +3,7 @@ package handler
 
 import (
 	"errors"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -36,6 +37,11 @@ type createAPIKeyRequest struct {
 	// ModelIDs: dive,required rejects a 0 id (models are 1-indexed
 	// autoincrement); the not-empty-when-custom rule is enforced in the service.
 	ModelIDs []uint `json:"model_ids" binding:"omitempty,dive,required"`
+	// CSP per-key override at create time (value types — false/"" is the
+	// wire default meaning "inherit the global setting").
+	CustomSystemPromptEnabledOverride bool   `json:"custom_system_prompt_enabled_override"`
+	CustomSystemPromptEnabled         bool   `json:"custom_system_prompt_enabled"`
+	CustomSystemPrompt                string `json:"custom_system_prompt"`
 	limitFields
 }
 
@@ -46,6 +52,9 @@ type createAPIKeyRequest struct {
 // (non-nil empty slice) means "clear the whitelist". Go's
 // encoding/json does distinguish these ([] -> non-nil empty, omitted -> nil),
 // and service.UpdateAPIKey keys off `ModelIDs != nil` to tell them apart.
+// ExpectedUpdatedAt carries the caller's CAS snapshot (from a prior GET) —
+// when present the service/repo pair qualifies the UPDATE with it and a
+// mismatch returns 11013 (409). Omitted on legacy callers (EditKeyModal etc.).
 type updateAPIKeyRequest struct {
 	OwnerLabel *string `json:"owner_label" binding:"omitempty,max=50"`
 	Remark     *string `json:"remark" binding:"omitempty,max=200"`
@@ -54,6 +63,13 @@ type updateAPIKeyRequest struct {
 	// now-unused allowlist.
 	AllowAllModels *bool  `json:"allow_all_models"`
 	ModelIDs       []uint `json:"model_ids" binding:"omitempty,dive,required"`
+	// CSP per-key override PATCH fields (pointer — nil means leave unchanged).
+	CustomSystemPromptEnabledOverride *bool   `json:"custom_system_prompt_enabled_override"`
+	CustomSystemPromptEnabled         *bool   `json:"custom_system_prompt_enabled"`
+	CustomSystemPrompt                *string `json:"custom_system_prompt"`
+	// ExpectedUpdatedAt is the optimistic-lock CAS token (RFC3339). Optional —
+	// omitted means "no CAS" (the legacy behavior for EditKeyModal/CreateKeyModal).
+	ExpectedUpdatedAt *time.Time `json:"expected_updated_at" binding:"omitempty"`
 	limitFields
 }
 
@@ -91,6 +107,14 @@ func writeAPIKeyServiceError(c *gin.Context, err error) {
 		response.Error(c, errcode.ModelNotFound, errcode.GetMessage(errcode.ModelNotFound))
 	case errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist):
 		response.Error(c, errcode.APIKeyEmptyAllowlist, errcode.GetMessage(errcode.APIKeyEmptyAllowlist))
+	case errors.Is(err, errcode.ErrCustomSystemPromptTooLong):
+		response.Error(c, errcode.CustomSystemPromptTooLong, errcode.GetMessage(errcode.CustomSystemPromptTooLong))
+	case errors.Is(err, errcode.ErrCustomSystemPromptEmpty):
+		response.Error(c, errcode.CustomSystemPromptEmpty, errcode.GetMessage(errcode.CustomSystemPromptEmpty))
+	case errors.Is(err, errcode.ErrAPIKeyConflict):
+		// 409 is not produced by httpStatusForCode's range mapping; set it
+		// explicitly, mirroring the system_settings CAS-conflict path.
+		response.ErrorStatus(c, http.StatusConflict, errcode.APIKeyConflict, errcode.GetMessage(errcode.APIKeyConflict))
 	default:
 		response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
 	}
@@ -142,6 +166,9 @@ func PostAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			AllowAllModels: req.AllowAllModels, ModelIDs: req.ModelIDs,
 			ExpiresAt: req.ExpiresAt, RPMLimit: req.RPMLimit, TPMLimit: req.TPMLimit,
 			ConcurrencyLimit: req.ConcurrencyLimit, BudgetLimitMicros: req.BudgetLimitMicros,
+			CustomSystemPromptEnabledOverride: req.CustomSystemPromptEnabledOverride,
+			CustomSystemPromptEnabled:         req.CustomSystemPromptEnabled,
+			CustomSystemPrompt:                req.CustomSystemPrompt,
 		}, timeNow())
 		if err != nil {
 			writeAPIKeyServiceError(c, err)
@@ -187,6 +214,10 @@ func PatchAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			AllowAllModels: req.AllowAllModels, ModelIDs: req.ModelIDs,
 			ExpiresAt: req.ExpiresAt, RPMLimit: req.RPMLimit, TPMLimit: req.TPMLimit,
 			ConcurrencyLimit: req.ConcurrencyLimit, BudgetLimitMicros: req.BudgetLimitMicros,
+			CustomSystemPromptEnabledOverride: req.CustomSystemPromptEnabledOverride,
+			CustomSystemPromptEnabled:         req.CustomSystemPromptEnabled,
+			CustomSystemPrompt:                req.CustomSystemPrompt,
+			ExpectedUpdatedAt:                 req.ExpectedUpdatedAt,
 		}, timeNow())
 		if err != nil {
 			writeAPIKeyServiceError(c, err)

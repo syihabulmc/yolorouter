@@ -49,6 +49,30 @@ func TestProviderKeyErrorCodesHaveMessagesAndSentinels(t *testing.T) {
 	}
 }
 
+func TestCustomSystemPromptErrorCodesRegistered(t *testing.T) {
+	cases := []struct {
+		code int
+		err  error
+	}{
+		{CustomSystemPromptTooLong, ErrCustomSystemPromptTooLong},
+		{CustomSystemPromptEmpty, ErrCustomSystemPromptEmpty},
+		{CustomSystemPromptConflict, ErrCustomSystemPromptConflict},
+	}
+	for _, c := range cases {
+		msg, ok := ErrorMessages[c.code]
+		if !ok || msg == "" {
+			t.Fatalf("code %d: missing ErrorMessages entry", c.code)
+		}
+		// sentinel text must equal the map's single source of truth
+		if c.err == nil || c.err.Error() != msg {
+			t.Fatalf("code %d: sentinel error text %q does not match ErrorMessages %q", c.code, c.err, msg)
+		}
+		if GetMessage(c.code) == "unknown error" {
+			t.Fatalf("code %d: GetMessage returned unknown", c.code)
+		}
+	}
+}
+
 func TestModelErrorCodesAreUniqueWithMessagesAndSentinels(t *testing.T) {
 	cases := []struct {
 		code int

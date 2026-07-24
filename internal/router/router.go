@@ -275,6 +275,13 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	protected.PATCH("/api-keys/:id", handler.PatchAPIKey(apiKeySvc))
 	protected.PATCH("/api-keys/:id/revoke", handler.PatchAPIKeyRevoke(apiKeySvc))
 
+	// Custom system prompt (global setting). Read returns the authoritative
+	// DB state; PUT uses CAS on version. Registered alongside the other admin
+	// resources under the session-protected group.
+	settingsSvc := service.NewSystemSettingsService(db)
+	protected.GET("/system-settings/custom-system-prompt", handler.GetCustomSystemPrompt(settingsSvc))
+	protected.PUT("/system-settings/custom-system-prompt", handler.PutCustomSystemPrompt(settingsSvc))
+
 	// Dashboard / analytics / request logs.
 	// All three are read-only queries over request_logs (written by the
 	// gateway), layered handler → service → repository. The
@@ -325,7 +332,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// gateway.PostChatCompletions/RelayService.Handle dispatch by request
 	// path (gateway.IngressProtocol) to pick the caller's actual wire
 	// protocol.
-	relaySvc := gateway.NewRelayService(db, providerMasterKey, allowPrivateUpstreams)
+	relaySvc := gateway.NewRelayService(db, providerMasterKey, allowPrivateUpstreams, settingsSvc)
 
 	v1 := gatewayGroup(r, "/v1", bodiesDir, db)
 	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))

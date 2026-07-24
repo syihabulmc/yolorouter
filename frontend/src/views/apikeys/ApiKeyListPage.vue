@@ -70,6 +70,14 @@
 
     <CreateKeyModal v-model:show="showCreate" @created="onCreated" />
     <EditKeyModal v-if="editingId" :key="editingId" :show="showEdit" :api-key-id="editingId" @update:show="onEditShow" @saved="onSaved" />
+    <KeyCustomPromptModal
+      v-if="cspKeyId"
+      :key="cspKeyId"
+      :show="showCsp"
+      :api-key-id="cspKeyId"
+      @update:show="onCspShow"
+      @saved="onCspSaved"
+    />
   </div>
 </template>
 
@@ -87,6 +95,7 @@ import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import CreateKeyModal from '../../components/apikeys/CreateKeyModal.vue'
 import EditKeyModal from '../../components/apikeys/EditKeyModal.vue'
+import KeyCustomPromptModal from '../../components/apikeys/KeyCustomPromptModal.vue'
 
 const { t } = useI18n()
 const dialog = useDialog()
@@ -95,6 +104,12 @@ const store = useApiKeysStore()
 const showCreate = ref(false)
 const showEdit = ref(false)
 const editingId = ref<number | null>(null)
+// CSP modal state — cspKeyId doubles as the v-if that mounts the modal, and
+// the :key that forces a fresh remount per row. The modal performs its own
+// authoritative GET on open, so only the key id is forwarded from the list
+// row (the row's CSP snapshot may already be stale).
+const showCsp = ref(false)
+const cspKeyId = ref<number | null>(null)
 // Live draft of the filter controls; the server filters only update when the
 // user hits Enter or the Search button, matching the request-logs page.
 const draft = reactive({ query: store.query, owner: store.owner, status: store.status as string | null })
@@ -186,6 +201,25 @@ function onEditShow(v: boolean) {
   if (!v) editingId.value = null
 }
 
+function openCsp(row: APIKey) {
+  // Only the id is forwarded — the modal does its own GET on mount to avoid
+  // initializing from a potentially stale list row.
+  cspKeyId.value = row.id
+  showCsp.value = true
+}
+
+function onCspShow(v: boolean) {
+  showCsp.value = v
+  if (!v) cspKeyId.value = null
+}
+
+function onCspSaved() {
+  showCsp.value = false
+  cspKeyId.value = null
+  message.success(t('apiKeys.saveSuccess'))
+  void reload()
+}
+
 function confirmRevoke(row: APIKey) {
   dialog.warning({
     title: t('apiKeys.confirmRevokeTitle'),
@@ -260,7 +294,7 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
     // Actions column — no tooltip.
     title: t('common.actions'),
     key: 'actions',
-    width: 150,
+    width: 230,
     render: (row) => {
       const revoked = row.display_status === 'revoked'
       return h(
@@ -269,6 +303,11 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
         {
           default: () => [
             h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openEdit(row.id) }, { default: () => t('apiKeys.editLimits') }),
+            // CSP action is only meaningful on a live key — a revoked key
+            // routes no requests so its prompt has no effect.
+            revoked
+              ? null
+              : h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openCsp(row) }, { default: () => t('apiKeys.cspAction') }),
             revoked
               ? null
               : h(NButton, { size: 'small', text: true, type: 'error', onClick: () => confirmRevoke(row) }, { default: () => t('apiKeys.revoke') }),

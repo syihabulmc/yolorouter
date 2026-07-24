@@ -68,6 +68,12 @@ func (s *RelayService) buildUpstreamBody(
 		outBody = injected
 	}
 
+	// Apply the resolved custom system prompt after stream-usage injection so
+	// it operates on the final egress-encoded body. No-op when disabled or the
+	// ingress path is outside the chat allowlist; malformed bodies are
+	// returned unchanged by the injector.
+	outBody = applyCustomSystemPrompt(rc, egress.Protocol, outBody)
+
 	path := egressCodecs.RequestEncoder.EgressPath(providerModelName, rc.IsStream)
 	url := protocols.JoinUpstreamURL(egress.BaseURL, path, egress.Protocol)
 	if egress.Protocol == protocols.ProtocolGemini && rc.IsStream {

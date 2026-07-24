@@ -42,6 +42,32 @@ func IngressProtocol(requestPath string) protocols.ProtocolID {
 	}
 }
 
+// IsChatEndpoint reports whether an ingress path carries a system-prompt
+// surface that the gateway can inject a custom system prompt into: chat
+// completions, messages, responses, and Gemini's generateContent /
+// streamGenerateContent actions. It is the path-level counterpart of
+// IngressProtocol -- the same set of routes IngressProtocol maps to a
+// chat-shaped protocol is also the set into which a custom system prompt can
+// be injected -- but stricter: IngressProtocol falls back to ProtocolOpenAI
+// for unrecognized paths (so /v1/embeddings would otherwise look "openai"),
+// so the explicit path allowlist is required to keep non-chat OpenAI routes
+// out of the injection path.
+//
+// Gemini's route is a wildcard {model}:{action}, so non-chat actions on the
+// same prefix (countTokens / embedContent / unknown) are excluded: only the
+// two generateContent suffixes carry a systemInstruction field.
+func IsChatEndpoint(requestPath string) bool {
+	switch requestPath {
+	case "/v1/chat/completions", "/v1/messages", "/v1/responses":
+		return true
+	}
+	if strings.HasPrefix(requestPath, geminiIngressPathPrefix) {
+		return strings.HasSuffix(requestPath, ":generateContent") ||
+			strings.HasSuffix(requestPath, ":streamGenerateContent")
+	}
+	return false
+}
+
 // primaryProtocol returns the protocol a provider natively speaks, derived
 // from its provider_type column. An empty or unrecognized provider_type is
 // treated as openai.

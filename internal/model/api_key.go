@@ -35,10 +35,17 @@ type APIKey struct {
 	// AllowAllModels, when true, lets the key call any enabled model and the
 	// api_key_models allowlist is ignored (see gateway enforcement). False keeps
 	// the strict allowlist where an empty list permits no models.
-	AllowAllModels bool       `gorm:"column:allow_all_models" json:"allow_all_models"`
-	CreatedAt      time.Time  `gorm:"column:created_at" json:"created_at"`
-	RevokedAt      *time.Time `gorm:"column:revoked_at" json:"-"`
-	UpdatedAt      time.Time  `gorm:"column:updated_at" json:"updated_at"`
+	AllowAllModels bool `gorm:"column:allow_all_models" json:"allow_all_models"`
+	// CustomSystemPromptEnabledOverride: true means this key explicitly
+	// overrides the global default; false means inherit system_settings. When
+	// override is true, CustomSystemPromptEnabled and CustomSystemPrompt take
+	// effect; otherwise they are ignored.
+	CustomSystemPromptEnabledOverride bool       `gorm:"column:custom_system_prompt_enabled_override" json:"custom_system_prompt_enabled_override"`
+	CustomSystemPromptEnabled         bool       `gorm:"column:custom_system_prompt_enabled" json:"custom_system_prompt_enabled"`
+	CustomSystemPrompt                string     `gorm:"column:custom_system_prompt" json:"custom_system_prompt"`
+	CreatedAt                         time.Time  `gorm:"column:created_at" json:"created_at"`
+	RevokedAt                         *time.Time `gorm:"column:revoked_at" json:"-"`
+	UpdatedAt                         time.Time  `gorm:"column:updated_at" json:"updated_at"`
 }
 
 func (APIKey) TableName() string { return "api_keys" }

@@ -16,6 +16,12 @@ export interface APIKey {
   budget_spent_micros: number
   allow_all_models: boolean
   model_ids: number[]
+  // Per-key custom-system-prompt override. When the override flag is false,
+  // the enabled/text pair is ignored and the key inherits the global
+  // custom-system-prompt setting; when true, the key uses its own values.
+  custom_system_prompt_enabled_override: boolean
+  custom_system_prompt_enabled: boolean
+  custom_system_prompt: string
   created_at: string
   updated_at: string
 }
@@ -49,6 +55,12 @@ export interface CreateAPIKeyInput {
   tpm_limit?: number
   concurrency_limit?: number
   budget_limit_micros?: number
+  // CSP fields default to inherit (override=false) when omitted — the create
+  // form no longer collects them; they're configured post-creation via the
+  // dedicated KeyCustomPromptModal.
+  custom_system_prompt_enabled_override?: boolean
+  custom_system_prompt_enabled?: boolean
+  custom_system_prompt?: string
 }
 
 export interface CreateAPIKeyResult {
@@ -59,7 +71,11 @@ export interface CreateAPIKeyResult {
 // UpdateAPIKeyInput is a sparse PATCH. Numeric limits: undefined = leave
 // unchanged; 0 = clear sentinel; positive = set. model_ids: undefined =
 // unchanged; an array (including empty) replaces the whitelist. owner_label /
-// remark: undefined = unchanged.
+// remark: undefined = unchanged. expected_updated_at: when set, the backend
+// qualifies the UPDATE with `AND updated_at = ?` and returns 11013 (409) if
+// another writer committed first — the optimistic-lock CAS token captured by
+// KeyCustomPromptModal's authoritative GET on open. Omitted by legacy callers
+// (EditKeyModal/CreateKeyModal) to keep their non-CAS behavior.
 export interface UpdateAPIKeyInput {
   owner_label?: string
   remark?: string
@@ -70,6 +86,10 @@ export interface UpdateAPIKeyInput {
   tpm_limit?: number
   concurrency_limit?: number
   budget_limit_micros?: number
+  custom_system_prompt_enabled_override?: boolean
+  custom_system_prompt_enabled?: boolean
+  custom_system_prompt?: string
+  expected_updated_at?: string
 }
 
 export interface APIKeyListParams {

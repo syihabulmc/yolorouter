@@ -106,18 +106,26 @@ type RelayService struct {
 	masterKey []byte
 	client    *UpstreamClient
 	limiter   *Limiter
+	// settingsProvider is the read-only window into the cached global custom
+	// system prompt. Nil when no provider is wired in (router passes nil until
+	// the system settings service is registered); Handle nil-checks before
+	// reading it, so a nil provider simply means no global prompt is applied.
+	settingsProvider SettingsProvider
 }
 
 // NewRelayService wires the gateway with the already-decoded AES master key
 // (the same one provider_service uses to decrypt the keys it now routes to).
 // allowPrivate is forwarded to the upstream client's SSRF transport (config.
 // SecurityConfig.AllowPrivateUpstreams) so LAN/localhost providers relay.
-func NewRelayService(db *gorm.DB, masterKey []byte, allowPrivate bool) *RelayService {
+// sp is the read-only custom system prompt provider; nil is valid and
+// disables global prompt injection (per-key overrides still apply).
+func NewRelayService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp SettingsProvider) *RelayService {
 	return &RelayService{
-		db:        db,
-		masterKey: masterKey,
-		client:    NewUpstreamClient(allowPrivate),
-		limiter:   NewLimiter(),
+		db:               db,
+		masterKey:        masterKey,
+		client:           NewUpstreamClient(allowPrivate),
+		limiter:          NewLimiter(),
+		settingsProvider: sp,
 	}
 }
 
@@ -150,6 +158,11 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// instead of always assuming OpenAI.
 	ingress := IngressProtocol(c.Request.URL.Path)
 	rc.Ingress = ingress
+	// Capture the raw path for the custom system prompt injection allowlist.
+	// Gemini's route is a wildcard :modelaction, so the path (not the resolved
+	// protocol) is the only thing that distinguishes generateContent from
+	// countTokens / embedContent.
+	rc.IngressPath = c.Request.URL.Path
 	// Put rc on the gin context so WriteOpenAIError*
 	// (called from many exit paths below, and potentially from further down
 	// the chain) can stash the local error JSON into rc.ResponseBody without
@@ -282,6 +295,29 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	rc.OriginalModel = meta.Model
 	rc.IsStream = meta.Stream
 	rc.WantsStreamUsage = meta.WantsStreamUsage
+
+	// Resolve the two-level custom system prompt: a per-key override wins
+	// outright (short-circuit so a stalled settings read can't block an
+	// override key); otherwise fall through to the global cached value.
+	// On global read error leave the prompt disabled — fail-open behavior
+	// guidance, never block the request on a settings hiccup.
+	if apiKey.CustomSystemPromptEnabledOverride {
+		rc.CustomSystemPromptEnabled = apiKey.CustomSystemPromptEnabled
+		rc.CustomSystemPrompt = apiKey.CustomSystemPrompt
+	} else if s.settingsProvider != nil {
+		g, _, err := s.settingsProvider.CustomSystemPrompt(c.Request.Context())
+		if err != nil {
+			// Fail-open: the service returns last-known-good (or zero/disabled
+			// on cold start) alongside the error; apply it so a transient
+			// settings hiccup never downgrades behavior, and log for
+			// observability. The negative-TTL in the service ensures this
+			// log fires at most once per failure window, not per request.
+			logger.Warn("gateway: custom system prompt read failed",
+				zap.String("request_id", rc.RequestID), zap.Error(err))
+		}
+		rc.CustomSystemPromptEnabled = g.Enabled
+		rc.CustomSystemPrompt = g.Text
+	}
 
 	// Step 4: model exists and is enabled. A model disabled by an admin
 	// must not route even if its candidates are still enabled.

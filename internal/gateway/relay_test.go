@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -16,8 +17,20 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
+	"github.com/yolorouter/yolorouter/internal/settings"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
+
+// stubSettingsProvider implements SettingsProvider for tests (disabled by
+// default). Tests that need a specific prompt can swap the value on the
+// returned struct after construction.
+type stubSettingsProvider struct {
+	val settings.CustomSystemPromptSetting
+}
+
+func (s stubSettingsProvider) CustomSystemPrompt(_ context.Context) (settings.CustomSystemPromptSetting, int64, error) {
+	return s.val, 1, nil
+}
 
 // newRelaySvc builds a RelayService and swaps in a plain transport so the
 // test can dial a loopback-bound httptest server — safehttp.NewTransport()
@@ -27,7 +40,7 @@ import (
 func newRelaySvc(t *testing.T, db *gorm.DB) *RelayService {
 	t.Helper()
 	masterKey := bytes.Repeat([]byte{0x42}, 32)
-	svc := NewRelayService(db, masterKey, false)
+	svc := NewRelayService(db, masterKey, false, stubSettingsProvider{})
 	svc.client.httpClient.Transport = &http.Transport{}
 	return svc
 }

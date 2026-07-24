@@ -19,10 +19,8 @@ import (
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
-// RelayContext is one gateway request's lifecycle state. Sharply trimmed vs
-// the reference project's RelayContext: no IR/compression/custom-prompt/
-// Vision Bridge fields — only what v0.1's
-// pass-through + Key rotation + failover + logging actually needs.
+// RelayContext holds per-request relay state for the gateway pass-through,
+// key rotation, failover, and request logging.
 type RelayContext struct {
 	RequestID     string
 	OriginalModel string // external model name; every response model field is rewritten to this
@@ -31,6 +29,16 @@ type RelayContext struct {
 	// once in Handle from c.Request.URL.Path. Every gateway call site that
 	// already has rc in scope reads this instead of recomputing it.
 	Ingress protocols.ProtocolID
+	// IngressPath is the caller's request path, captured at Handle entry. The
+	// custom system prompt injection allowlist keys off it: Gemini's route is
+	// a wildcard :modelaction and the ingress protocol falls back to
+	// ProtocolOpenAI for non-generateContent actions, so the path alone
+	// distinguishes countTokens / embedContent from real chat.
+	IngressPath string
+	// CustomSystemPromptEnabled / CustomSystemPrompt are the two-level-resolved
+	// prompt for this request. Empty or disabled means no injection.
+	CustomSystemPromptEnabled bool
+	CustomSystemPrompt        string
 	// WantsStreamUsage is true when the caller set
 	// stream_options.include_usage=true. Controls whether usage frames
 	// collected upstream are forwarded to the caller (the gateway always

@@ -8,6 +8,7 @@ package service
 import (
 	"errors"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
@@ -60,8 +61,14 @@ type APIKeyView struct {
 	BudgetSpentMicros int64      `json:"budget_spent_micros"`
 	AllowAllModels    bool       `json:"allow_all_models"`
 	ModelIDs          []uint     `json:"model_ids"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	// CSP per-key override: when CustomSystemPromptEnabledOverride is true the
+	// key uses its own CustomSystemPromptEnabled/CustomSystemPrompt pair
+	// instead of the system-wide default.
+	CustomSystemPromptEnabledOverride bool      `json:"custom_system_prompt_enabled_override"`
+	CustomSystemPromptEnabled         bool      `json:"custom_system_prompt_enabled"`
+	CustomSystemPrompt                string    `json:"custom_system_prompt"`
+	CreatedAt                         time.Time `json:"created_at"`
+	UpdatedAt                         time.Time `json:"updated_at"`
 }
 
 type CreateAPIKeyInput struct {
@@ -74,6 +81,11 @@ type CreateAPIKeyInput struct {
 	TPMLimit          *int
 	ConcurrencyLimit  *int
 	BudgetLimitMicros *int64
+	// CSP per-key override fields at create time (value types — zero is the
+	// wire default and means "inherit the global setting").
+	CustomSystemPromptEnabledOverride bool
+	CustomSystemPromptEnabled         bool
+	CustomSystemPrompt                string
 }
 
 // CreateAPIKeyResult carries the plaintext key exactly once — PlaintextKey is
@@ -90,6 +102,11 @@ type CreateAPIKeyResult struct {
 // leave whitelist unchanged; a non-nil slice replaces it (empty slice clears
 // it). ExpiresAt has no clear-sentinel (no clean zero-value wire
 // representation) — to remove an expiry, revoke and create a new key.
+// ExpectedUpdatedAt enables optimistic locking: when non-nil the repository
+// qualifies its UPDATE with `AND updated_at = ?` and the PATCH returns 11013
+// if another writer committed first. Only KeyCustomPromptModal populates this
+// (it does a fresh GET before editing); EditKeyModal/CreateKeyModal omit it,
+// preserving their legacy non-CAS behavior.
 type UpdateAPIKeyInput struct {
 	OwnerLabel        *string
 	Remark            *string
@@ -100,6 +117,12 @@ type UpdateAPIKeyInput struct {
 	TPMLimit          *int
 	ConcurrencyLimit  *int
 	BudgetLimitMicros *int64
+	// CSP per-key override PATCH fields (pointer — nil means leave unchanged).
+	CustomSystemPromptEnabledOverride *bool
+	CustomSystemPromptEnabled         *bool
+	CustomSystemPrompt                *string
+	// ExpectedUpdatedAt is the optimistic-lock CAS token (nil = no CAS).
+	ExpectedUpdatedAt *time.Time
 }
 
 func (s *APIKeyService) ListAPIKeys(q, owner, status string, page, pageSize int) ([]APIKeyView, int64, error) {
@@ -139,7 +162,22 @@ func (s *APIKeyService) ListAPIKeys(q, owner, status string, page, pageSize int)
 	return views, total, nil
 }
 
+// validateCSPLen enforces the rune-count bound on custom system prompt text.
+// Empty text is allowed here (the empty-when-enabled rule is a separate
+// invariant owned by the repository layer); the caller passes the text it's
+// about to persist and this helper rejects anything past the cap. Centralized
+// so the Create and Update paths can't drift on the boundary check.
+func validateCSPLen(text string) error {
+	if text != "" && utf8.RuneCountInString(text) > MaxCustomSystemPromptLen {
+		return errcode.ErrCustomSystemPromptTooLong
+	}
+	return nil
+}
+
 func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*CreateAPIKeyResult, error) {
+	if err := validateCSPLen(input.CustomSystemPrompt); err != nil {
+		return nil, err
+	}
 	modelIDs := uniqueUint(input.ModelIDs)
 	if input.AllowAllModels {
 		// An all-models key owns no allowlist rows; drop any ids the caller sent
@@ -161,17 +199,20 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 		return nil, err
 	}
 	key := &model.APIKey{
-		KeyHash:           hashToken(rawKey),
-		KeyPrefix:         truncatePrefix(rawKey),
-		OwnerLabel:        input.OwnerLabel,
-		Remark:            input.Remark,
-		Status:            model.APIKeyStatusActive,
-		AllowAllModels:    input.AllowAllModels,
-		ExpiresAt:         input.ExpiresAt,
-		RPMLimit:          limitPtrOrNil(input.RPMLimit),
-		TPMLimit:          limitPtrOrNil(input.TPMLimit),
-		ConcurrencyLimit:  limitPtrOrNil(input.ConcurrencyLimit),
-		BudgetLimitMicros: limitPtrOrNil(input.BudgetLimitMicros),
+		KeyHash:                           hashToken(rawKey),
+		KeyPrefix:                         truncatePrefix(rawKey),
+		OwnerLabel:                        input.OwnerLabel,
+		Remark:                            input.Remark,
+		Status:                            model.APIKeyStatusActive,
+		AllowAllModels:                    input.AllowAllModels,
+		ExpiresAt:                         input.ExpiresAt,
+		RPMLimit:                          limitPtrOrNil(input.RPMLimit),
+		TPMLimit:                          limitPtrOrNil(input.TPMLimit),
+		ConcurrencyLimit:                  limitPtrOrNil(input.ConcurrencyLimit),
+		BudgetLimitMicros:                 limitPtrOrNil(input.BudgetLimitMicros),
+		CustomSystemPromptEnabledOverride: input.CustomSystemPromptEnabledOverride,
+		CustomSystemPromptEnabled:         input.CustomSystemPromptEnabled,
+		CustomSystemPrompt:                input.CustomSystemPrompt,
 	}
 	if err := repository.CreateAPIKey(s.db, key, modelIDs, now); err != nil {
 		return nil, err
@@ -204,6 +245,12 @@ func (s *APIKeyService) UpdateAPIKey(id uint, input UpdateAPIKeyInput, now time.
 		return nil, err
 	}
 
+	if input.CustomSystemPrompt != nil {
+		if err := validateCSPLen(*input.CustomSystemPrompt); err != nil {
+			return nil, err
+		}
+	}
+
 	updates := map[string]interface{}{}
 	if input.OwnerLabel != nil {
 		updates["owner_label"] = *input.OwnerLabel
@@ -230,6 +277,15 @@ func (s *APIKeyService) UpdateAPIKey(id uint, input UpdateAPIKeyInput, now time.
 	if scopeChanged {
 		updates["allow_all_models"] = *input.AllowAllModels
 	}
+	if input.CustomSystemPromptEnabledOverride != nil {
+		updates["custom_system_prompt_enabled_override"] = *input.CustomSystemPromptEnabledOverride
+	}
+	if input.CustomSystemPromptEnabled != nil {
+		updates["custom_system_prompt_enabled"] = *input.CustomSystemPromptEnabled
+	}
+	if input.CustomSystemPrompt != nil {
+		updates["custom_system_prompt"] = *input.CustomSystemPrompt
+	}
 
 	// nil modelIDs leaves the allowlist untouched; a non-nil slice (after dedup)
 	// replaces it. Switching to all-models discards the allowlist in the repo, so
@@ -249,7 +305,7 @@ func (s *APIKeyService) UpdateAPIKey(id uint, input UpdateAPIKeyInput, now time.
 		}
 	}
 
-	if err := repository.UpdateAPIKey(s.db, id, updates, modelIDs, scopeChanged, now); err != nil {
+	if err := repository.UpdateAPIKey(s.db, id, updates, modelIDs, scopeChanged, now, input.ExpectedUpdatedAt); err != nil {
 		if errors.Is(err, repository.ErrEmptyCustomAllowlist) {
 			return nil, errcode.ErrAPIKeyEmptyAllowlist
 		}
@@ -303,7 +359,10 @@ func toAPIKeyView(k model.APIKey, modelIDs []uint, now time.Time) APIKeyView {
 		ExpiresAt: k.ExpiresAt, RPMLimit: k.RPMLimit, TPMLimit: k.TPMLimit,
 		ConcurrencyLimit: k.ConcurrencyLimit, BudgetLimitMicros: k.BudgetLimitMicros,
 		BudgetSpentMicros: k.BudgetSpentMicros, AllowAllModels: k.AllowAllModels, ModelIDs: modelIDs,
-		CreatedAt: k.CreatedAt, UpdatedAt: k.UpdatedAt,
+		CustomSystemPromptEnabledOverride: k.CustomSystemPromptEnabledOverride,
+		CustomSystemPromptEnabled:         k.CustomSystemPromptEnabled,
+		CustomSystemPrompt:                k.CustomSystemPrompt,
+		CreatedAt:                         k.CreatedAt, UpdatedAt: k.UpdatedAt,
 	}
 }
 

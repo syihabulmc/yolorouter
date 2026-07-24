@@ -175,7 +175,7 @@ const navItems = computed<NavItem[]>(() => [
 
   { key: 'tokens', label: t('nav.tokens'), icon: Key, to: '/api-keys' },
 
-  { key: 'cost-optimization', label: t('nav.costOptimization'), icon: TrendingDown, disabled: true },
+  { key: 'cost-optimization', label: t('nav.costOptimization'), icon: TrendingDown, to: '/cost-optimization' },
 
   { key: 'group-system', label: t('nav.groupSystem'), group: true },
   // Hidden from the sidebar for now; the /system route and page code stay wired up.

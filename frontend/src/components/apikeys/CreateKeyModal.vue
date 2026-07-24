@@ -1,7 +1,9 @@
 <!-- frontend/src/components/apikeys/CreateKeyModal.vue
      Two-step modal: form -> one-time plaintext reveal. The plaintext is the
      only chance to see the full key; closing without
-     ticking "I have saved it" requires a second confirmation. -->
+     ticking "I have saved it" requires a second confirmation. Per-key
+     custom-system-prompt is configured post-creation via
+     KeyCustomPromptModal.vue. -->
 <template>
   <n-modal
     :show="show"
@@ -163,7 +165,8 @@ function initialForm() {
 const form = reactive(initialForm())
 
 // model_ids is required only for a custom allowlist — an all-models key needs
-// no selection.
+// no selection. Custom-system-prompt is configured post-creation via a
+// dedicated modal, so the create form has no CSP field to validate.
 const rules = computed<FormRules>(() => ({
   model_ids: modelIdsRule(t, !form.allow_all_models),
 }))

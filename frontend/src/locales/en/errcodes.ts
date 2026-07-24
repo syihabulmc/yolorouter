@@ -27,4 +27,8 @@ export const errcodes: Record<number, string> = {
   12104: 'This provider is already a candidate for this model',
   12105: 'This candidate has not passed the basic test — run "Basic Text" from the candidate row "..." menu first',
   14005: 'Request log not found or has been cleaned up',
+  11010: 'Custom system prompt is too long',
+  11011: 'Custom system prompt must not be empty when enabled',
+  11012: 'Custom system prompt was modified concurrently, please refresh and retry',
+  11013: 'This API key was modified concurrently, please refresh and retry',
 }

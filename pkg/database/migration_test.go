@@ -78,9 +78,10 @@ func TestGetCurrentVersionOnFreshSQLiteDB(t *testing.T) {
 	// 00008_request_logs_status_index.sql + 00009_request_logs_request_id_index.sql +
 	// 00010_request_logs_cache_tokens.sql + 00011_create_request_log_bodies.sql +
 	// 00012_provider_protocol_endpoints.sql + 00013_request_logs_cache_savings.sql +
-	// 00014_api_keys_allow_all_models.sql).
-	if version != 14 {
-		t.Fatalf("expected version 14 after all migrations, got %d", version)
+	// 00014_api_keys_allow_all_models.sql +
+	// 00015_system_settings_and_custom_system_prompt.sql).
+	if version != 15 {
+		t.Fatalf("expected version 15 after all migrations, got %d", version)
 	}
 }
 
@@ -190,5 +191,53 @@ func TestRollbackToVersionZero(t *testing.T) {
 	}
 	if version != 0 {
 		t.Fatalf("expected version 0 after rollback, got %d", version)
+	}
+}
+
+// TestMigration00015SystemSettingsAndCSPColumns verifies that migration 00015
+// creates the system_settings table with both seed rows and adds the three
+// custom-system-prompt columns to api_keys with the expected defaults.
+func TestMigration00015SystemSettingsAndCSPColumns(t *testing.T) {
+	db := newMemoryDB(t)
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	// system_settings table exists with both seed rows.
+	var enabledValue string
+	err := db.QueryRow("SELECT value FROM system_settings WHERE key = 'custom_system_prompt_enabled'").Scan(&enabledValue)
+	if err != nil {
+		t.Fatalf("seed row custom_system_prompt_enabled missing: %v", err)
+	}
+	if enabledValue != "false" {
+		t.Fatalf("enabled seed = %q, want false", enabledValue)
+	}
+
+	var textValue string
+	err = db.QueryRow("SELECT value FROM system_settings WHERE key = 'custom_system_prompt'").Scan(&textValue)
+	if err != nil {
+		t.Fatalf("seed row custom_system_prompt missing: %v", err)
+	}
+	if textValue != "" {
+		t.Fatalf("text seed = %q, want empty", textValue)
+	}
+
+	// api_keys gained the three columns with safe defaults — insert a row
+	// using only NOT NULL pre-existing columns and read the new columns back.
+	res, err := db.Exec(`INSERT INTO api_keys (key_hash, key_prefix, status, budget_spent_micros, created_at, updated_at) VALUES ('h', 'sk-x', 1, 0, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`)
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	rowID, _ := res.LastInsertId()
+
+	var cspEnabled int
+	var cspOverride int
+	var cspText string
+	err = db.QueryRow("SELECT custom_system_prompt_enabled, custom_system_prompt_enabled_override, custom_system_prompt FROM api_keys WHERE id = ?", rowID).Scan(&cspEnabled, &cspOverride, &cspText)
+	if err != nil {
+		t.Fatalf("read api key csp columns: %v", err)
+	}
+	if cspEnabled != 0 || cspOverride != 0 || cspText != "" {
+		t.Fatalf("csp columns default not false/false/empty: enabled=%d override=%d text=%q", cspEnabled, cspOverride, cspText)
 	}
 }

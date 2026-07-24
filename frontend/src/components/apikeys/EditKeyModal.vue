@@ -3,7 +3,8 @@
      fields use "clear = unlimited" semantics: an empty input maps to the
      backend's 0-sentinel which clears the column. Expiry can be set or moved
      later but not cleared (backend has no clear-sentinel for timestamps) —
-     to remove an expiry, revoke and re-create. -->
+     to remove an expiry, revoke and re-create. Per-key custom-system-prompt
+     has its own dedicated modal (KeyCustomPromptModal.vue). -->
 <template>
   <n-modal
     :show="show"

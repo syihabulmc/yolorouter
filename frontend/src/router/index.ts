@@ -5,6 +5,7 @@ import LoginPage from '../views/auth/LoginPage.vue'
 import DashboardPage from '../views/dashboard/DashboardPage.vue'
 import AnalyticsPage from '../views/analytics/AnalyticsPage.vue'
 import CostStatsPage from '../views/costs/CostStatsPage.vue'
+import CostOptimizationPage from '../views/costs/CostOptimizationPage.vue'
 import RequestLogListPage from '../views/request-logs/RequestLogListPage.vue'
 import RequestLogDetailPage from '../views/request-logs/RequestLogDetailPage.vue'
 import ProviderListPage from '../views/providers/ProviderListPage.vue'
@@ -27,6 +28,7 @@ export const router = createRouter({
         { path: '', component: DashboardPage },
         { path: 'analytics', component: AnalyticsPage },
         { path: 'costs', component: CostStatsPage },
+        { path: 'cost-optimization', component: CostOptimizationPage },
         { path: 'request-logs', component: RequestLogListPage },
         { path: 'request-logs/:requestId', component: RequestLogDetailPage },
         { path: 'providers', component: ProviderListPage },
