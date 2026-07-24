@@ -430,6 +430,37 @@ func TestRelayModelNotAllowed(t *testing.T) {
 	}
 }
 
+// TestRelayAllowAllModelsBypassesAllowlist: a key flagged allow_all_models
+// reaches the upstream even with an empty allowlist and a model it never listed.
+func TestRelayAllowAllModelsBypassesAllowlist(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstreamHit := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	svc := newRelaySvc(t, db)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	// Empty allowlist, but the key is flagged to permit any model.
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
+	apiKey.AllowAllModels = true
+
+	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (allow_all_models bypasses allowlist); body = %s", w.Code, w.Body.String())
+	}
+	if !upstreamHit {
+		t.Error("upstream must be called when allow_all_models permits the model")
+	}
+}
+
 // TestRelayRevokedKey: a revoked key is rejected with 401 and
 // never reaches the upstream.
 func TestRelayRevokedKey(t *testing.T) {

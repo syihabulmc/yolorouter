@@ -33,7 +33,16 @@
         </template>
         <n-input v-model:value="form.remark" type="textarea" :autosize="{ minRows: 2 }" :maxlength="200" />
       </n-form-item>
-      <n-form-item path="model_ids">
+      <n-form-item>
+        <template #label>
+          <HelpLabel :tip="t('apiKeys.modelScope_tip')">{{ t('apiKeys.modelScope') }}</HelpLabel>
+        </template>
+        <n-radio-group v-model:value="form.allow_all_models">
+          <n-radio :value="true">{{ t('apiKeys.modelScopeAll') }}</n-radio>
+          <n-radio :value="false">{{ t('apiKeys.modelScopeCustom') }}</n-radio>
+        </n-radio-group>
+      </n-form-item>
+      <n-form-item v-if="!form.allow_all_models" path="model_ids">
         <template #label>
           <HelpLabel :tip="t('apiKeys.modelAllowlist_tip')">{{ t('apiKeys.modelAllowlist') }}</HelpLabel>
         </template>
@@ -51,30 +60,36 @@
         </template>
         <NDatePicker v-model:value="form.expires_at" type="datetime" clearable class="full-width" />
       </n-form-item>
-      <n-form-item>
-        <template #label>
-          <HelpLabel :tip="t('apiKeys.rpmLimit_tip')">{{ t('apiKeys.rpmLimit') }}</HelpLabel>
-        </template>
-        <n-input-number v-model:value="form.rpm_limit" :min="0" :placeholder="t('apiKeys.limitHint')" class="full-width" />
-      </n-form-item>
-      <n-form-item>
-        <template #label>
-          <HelpLabel :tip="t('apiKeys.tpmLimit_tip')">{{ t('apiKeys.tpmLimit') }}</HelpLabel>
-        </template>
-        <n-input-number v-model:value="form.tpm_limit" :min="0" :placeholder="t('apiKeys.limitHint')" class="full-width" />
-      </n-form-item>
-      <n-form-item>
-        <template #label>
-          <HelpLabel :tip="t('apiKeys.concurrencyLimit_tip')">{{ t('apiKeys.concurrencyLimit') }}</HelpLabel>
-        </template>
-        <n-input-number v-model:value="form.concurrency_limit" :min="0" :placeholder="t('apiKeys.limitHint')" class="full-width" />
-      </n-form-item>
-      <n-form-item>
-        <template #label>
-          <HelpLabel :tip="t('apiKeys.budgetLimit_tip')">{{ t('apiKeys.budgetLimit') }}</HelpLabel>
-        </template>
-        <n-input-number v-model:value="form.budget_amount" :min="0" :step="0.01" :placeholder="t('apiKeys.limitHint')" class="full-width" />
-      </n-form-item>
+
+      <div class="limit-section">
+        <div class="limit-section__label">{{ t('apiKeys.limitsSection') }}</div>
+        <div class="limit-grid">
+          <n-form-item>
+            <template #label>
+              <HelpLabel :tip="t('apiKeys.rpmLimit_tip')">{{ t('apiKeys.rpmLimit') }}</HelpLabel>
+            </template>
+            <n-input-number v-model:value="form.rpm_limit" :min="0" :placeholder="t('apiKeys.limitHint')" class="full-width" />
+          </n-form-item>
+          <n-form-item>
+            <template #label>
+              <HelpLabel :tip="t('apiKeys.tpmLimit_tip')">{{ t('apiKeys.tpmLimit') }}</HelpLabel>
+            </template>
+            <n-input-number v-model:value="form.tpm_limit" :min="0" :placeholder="t('apiKeys.limitHint')" class="full-width" />
+          </n-form-item>
+          <n-form-item>
+            <template #label>
+              <HelpLabel :tip="t('apiKeys.concurrencyLimit_tip')">{{ t('apiKeys.concurrencyLimit') }}</HelpLabel>
+            </template>
+            <n-input-number v-model:value="form.concurrency_limit" :min="0" :placeholder="t('apiKeys.limitHint')" class="full-width" />
+          </n-form-item>
+          <n-form-item>
+            <template #label>
+              <HelpLabel :tip="t('apiKeys.budgetLimit_tip')">{{ t('apiKeys.budgetLimit') }}</HelpLabel>
+            </template>
+            <n-input-number v-model:value="form.budget_amount" :min="0" :step="0.01" :placeholder="t('apiKeys.limitHint')" class="full-width" />
+          </n-form-item>
+        </div>
+      </div>
     </n-form>
 
     <div v-else class="plaintext-step">
@@ -104,12 +119,13 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NCheckbox, NDatePicker, useDialog, useMessage, type FormInst, type FormRules } from 'naive-ui'
+import { NCheckbox, NDatePicker, NRadio, NRadioGroup, useDialog, useMessage, type FormInst, type FormRules } from 'naive-ui'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import type { CreateAPIKeyInput } from '../../api/apiKeys'
 import { toMicros } from '../../utils/money'
+import { modelIdsRule } from '../../utils/apiKeyValidators'
 import HelpLabel from '../HelpLabel.vue'
 
 const props = defineProps<{ show: boolean }>()
@@ -132,6 +148,9 @@ function initialForm() {
   return {
     owner_label: '',
     remark: '',
+    // Default new keys to all-models access; users opt into a specific
+    // allowlist via the model-scope toggle.
+    allow_all_models: true,
     model_ids: [] as number[],
     expires_at: null as number | null,
     rpm_limit: null as number | null,
@@ -143,8 +162,10 @@ function initialForm() {
 
 const form = reactive(initialForm())
 
+// model_ids is required only for a custom allowlist — an all-models key needs
+// no selection.
 const rules = computed<FormRules>(() => ({
-  model_ids: [{ required: true, type: 'array', trigger: ['change', 'blur'], message: t('apiKeys.modelAllowlistRequired') }],
+  model_ids: modelIdsRule(t, !form.allow_all_models),
 }))
 
 const modelOptions = computed(() =>
@@ -172,6 +193,7 @@ async function onGenerate() {
     const input: CreateAPIKeyInput = {
       owner_label: form.owner_label || undefined,
       remark: form.remark || undefined,
+      allow_all_models: form.allow_all_models,
       model_ids: form.model_ids,
       expires_at: form.expires_at != null ? new Date(form.expires_at).toISOString() : undefined,
       rpm_limit: form.rpm_limit ?? undefined,
@@ -239,6 +261,29 @@ function reset() {
 <style scoped>
 .full-width {
   width: 100%;
+}
+
+/* Group the rate/budget caps under a labelled divider so they read as one
+   "limits" block, set apart from the identity and scope fields above. */
+.limit-section {
+  margin-top: 4px;
+  padding-top: 16px;
+  border-top: 1px solid var(--n-divider-color, rgba(0, 0, 0, 0.09));
+}
+
+.limit-section__label {
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--n-text-color-3, rgba(0, 0, 0, 0.45));
+}
+
+/* Each limit holds at most a handful of digits, so a full-width row per field
+   stretches the modal needlessly. Lay them two per row; each control fills its
+   own cell. */
+.limit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 16px;
 }
 
 .plaintext-step {

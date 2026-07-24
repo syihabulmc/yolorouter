@@ -94,6 +94,156 @@ func TestCreateAPIKeyRejectsNonexistentModel(t *testing.T) {
 	}
 }
 
+func TestCreateAPIKeyAllowAllModels(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+
+	// AllowAllModels wins even if the caller also sends ids — the service owns
+	// the invariant, so the join table stays empty regardless of the frontend.
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+		OwnerLabel: "wide", AllowAllModels: true, ModelIDs: []uint{mid},
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	if !result.APIKey.AllowAllModels {
+		t.Fatalf("expected AllowAllModels true in view")
+	}
+	if len(result.APIKey.ModelIDs) != 0 {
+		t.Fatalf("all-models key should have no allowlist rows, got %v", result.APIKey.ModelIDs)
+	}
+	var stored model.APIKey
+	if err := db.First(&stored, result.APIKey.ID).Error; err != nil {
+		t.Fatalf("load stored: %v", err)
+	}
+	if !stored.AllowAllModels {
+		t.Fatalf("allow_all_models must persist as true")
+	}
+}
+
+func TestUpdateAPIKeyTogglesAllowAllModels(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Switch to all-models while still sending a populated allowlist — the
+	// service must clear it anyway, not trust the caller.
+	allow := true
+	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
+		AllowAllModels: &allow, ModelIDs: []uint{mid},
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("update to allow-all: %v", err)
+	}
+	if !view.AllowAllModels {
+		t.Fatalf("expected AllowAllModels true after update")
+	}
+	if len(view.ModelIDs) != 0 {
+		t.Fatalf("switching to all-models should clear the allowlist, got %v", view.ModelIDs)
+	}
+
+	// Switch back to a custom allowlist.
+	deny := false
+	view2, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
+		AllowAllModels: &deny, ModelIDs: []uint{mid},
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("update to custom: %v", err)
+	}
+	if view2.AllowAllModels {
+		t.Fatalf("expected AllowAllModels false after switching back")
+	}
+	if len(view2.ModelIDs) != 1 || view2.ModelIDs[0] != mid {
+		t.Fatalf("custom allowlist not restored: %v", view2.ModelIDs)
+	}
+}
+
+func TestCreateAPIKeyRejectsEmptyCustomAllowlist(t *testing.T) {
+	svc, _ := newAPIKeyServiceForTest(t)
+	_, err := svc.CreateAPIKey(CreateAPIKeyInput{AllowAllModels: false, ModelIDs: nil}, time.Now().UTC())
+	if !errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist) {
+		t.Fatalf("expected ErrAPIKeyEmptyAllowlist, got %v", err)
+	}
+}
+
+func TestUpdateAPIKeyRejectsEmptyCustomAllowlist(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Switching to custom scope while clearing the allowlist must be rejected.
+	deny := false
+	if _, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
+		AllowAllModels: &deny, ModelIDs: []uint{},
+	}, time.Now().UTC()); !errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist) {
+		t.Fatalf("expected ErrAPIKeyEmptyAllowlist, got %v", err)
+	}
+
+	// The rejected update rolls back — the original allowlist stays intact.
+	view, err := svc.GetAPIKey(created.APIKey.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(view.ModelIDs) != 1 || view.ModelIDs[0] != mid {
+		t.Fatalf("rejected update must leave the allowlist intact, got %v", view.ModelIDs)
+	}
+}
+
+func TestUpdateAPIKeyRejectsAllToCustomWithoutModels(t *testing.T) {
+	svc, _ := newAPIKeyServiceForTest(t)
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{AllowAllModels: true}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// A sparse PATCH flipping all-models off without supplying any ids would
+	// leave a custom key with an empty allowlist — it can call nothing.
+	deny := false
+	if _, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
+		AllowAllModels: &deny,
+	}, time.Now().UTC()); !errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist) {
+		t.Fatalf("expected ErrAPIKeyEmptyAllowlist, got %v", err)
+	}
+
+	// The rejected transition rolls back — the key stays all-models.
+	view, err := svc.GetAPIKey(created.APIKey.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !view.AllowAllModels {
+		t.Fatalf("rejected transition must roll back; key should stay all-models")
+	}
+}
+
+func TestUpdateAPIKeyScopeOmittedLeavesAllowlist(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// A remark-only PATCH (no scope flag, no model_ids) must leave the custom
+	// allowlist intact — it must never force-clear off a stale flag read.
+	remark := "note"
+	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{Remark: &remark}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("update remark: %v", err)
+	}
+	if view.AllowAllModels {
+		t.Fatalf("remark-only update must not flip AllowAllModels")
+	}
+	if len(view.ModelIDs) != 1 || view.ModelIDs[0] != mid {
+		t.Fatalf("remark-only update must preserve the allowlist, got %v", view.ModelIDs)
+	}
+}
+
 func TestGetAPIKeyReturnsWhitelist(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	m1 := seedModelForAPIKeyTest(t, db, "m1")

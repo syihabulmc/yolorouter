@@ -27,9 +27,15 @@ type limitFields struct {
 type createAPIKeyRequest struct {
 	OwnerLabel string `json:"owner_label" binding:"omitempty,max=50"`
 	Remark     string `json:"remark" binding:"omitempty,max=200"`
-	// ModelIDs is required and must have at least one entry;
-	// dive,required rejects a 0 id (models are 1-indexed autoincrement).
-	ModelIDs []uint `json:"model_ids" binding:"required,min=1,dive,required"`
+	// AllowAllModels lets the key call any enabled model. When true the
+	// allowlist is bypassed and model_ids may be empty; when false (the wire
+	// default) model_ids must name at least one model — enforced in the service
+	// (gin's required_without only checks a slice is non-nil, so an explicit
+	// empty [] would slip past a binding tag).
+	AllowAllModels bool `json:"allow_all_models"`
+	// ModelIDs: dive,required rejects a 0 id (models are 1-indexed
+	// autoincrement); the not-empty-when-custom rule is enforced in the service.
+	ModelIDs []uint `json:"model_ids" binding:"omitempty,dive,required"`
 	limitFields
 }
 
@@ -43,7 +49,11 @@ type createAPIKeyRequest struct {
 type updateAPIKeyRequest struct {
 	OwnerLabel *string `json:"owner_label" binding:"omitempty,max=50"`
 	Remark     *string `json:"remark" binding:"omitempty,max=200"`
-	ModelIDs   []uint  `json:"model_ids" binding:"omitempty,dive,required"`
+	// AllowAllModels is a pointer so an omitted field leaves the flag unchanged;
+	// switching it on lets the caller send an empty model_ids to clear the
+	// now-unused allowlist.
+	AllowAllModels *bool  `json:"allow_all_models"`
+	ModelIDs       []uint `json:"model_ids" binding:"omitempty,dive,required"`
 	limitFields
 }
 
@@ -79,6 +89,8 @@ func writeAPIKeyServiceError(c *gin.Context, err error) {
 		response.Error(c, errcode.APIKeyNotFound, errcode.GetMessage(errcode.APIKeyNotFound))
 	case errors.Is(err, errcode.ErrModelNotFound):
 		response.Error(c, errcode.ModelNotFound, errcode.GetMessage(errcode.ModelNotFound))
+	case errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist):
+		response.Error(c, errcode.APIKeyEmptyAllowlist, errcode.GetMessage(errcode.APIKeyEmptyAllowlist))
 	default:
 		response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
 	}
@@ -126,7 +138,8 @@ func PostAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			return
 		}
 		result, err := svc.CreateAPIKey(service.CreateAPIKeyInput{
-			OwnerLabel: req.OwnerLabel, Remark: req.Remark, ModelIDs: req.ModelIDs,
+			OwnerLabel: req.OwnerLabel, Remark: req.Remark,
+			AllowAllModels: req.AllowAllModels, ModelIDs: req.ModelIDs,
 			ExpiresAt: req.ExpiresAt, RPMLimit: req.RPMLimit, TPMLimit: req.TPMLimit,
 			ConcurrencyLimit: req.ConcurrencyLimit, BudgetLimitMicros: req.BudgetLimitMicros,
 		}, timeNow())
@@ -170,7 +183,8 @@ func PatchAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			return
 		}
 		view, err := svc.UpdateAPIKey(id, service.UpdateAPIKeyInput{
-			OwnerLabel: req.OwnerLabel, Remark: req.Remark, ModelIDs: req.ModelIDs,
+			OwnerLabel: req.OwnerLabel, Remark: req.Remark,
+			AllowAllModels: req.AllowAllModels, ModelIDs: req.ModelIDs,
 			ExpiresAt: req.ExpiresAt, RPMLimit: req.RPMLimit, TPMLimit: req.TPMLimit,
 			ConcurrencyLimit: req.ConcurrencyLimit, BudgetLimitMicros: req.BudgetLimitMicros,
 		}, timeNow())

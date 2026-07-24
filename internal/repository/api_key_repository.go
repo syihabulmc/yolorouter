@@ -1,7 +1,11 @@
-// Package repository provides APIKey / APIKeyModel pure data access.
+// Package repository provides APIKey / APIKeyModel data access. Most functions
+// are pure storage; UpdateAPIKey additionally enforces a couple of
+// resulting-state invariants that the DB can't express and that need the
+// transaction's row lock to check atomically (see its doc comment).
 package repository
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -9,6 +13,12 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/model"
 )
+
+// ErrEmptyCustomAllowlist is returned by UpdateAPIKey when an update would
+// leave a custom-scope key (allow_all_models=false) with an explicitly-empty
+// allowlist — such a key could call nothing. The service translates it to the
+// caller-facing errcode; this package stays storage-only.
+var ErrEmptyCustomAllowlist = errors.New("custom scope requires at least one model")
 
 func FindAPIKeyByID(db *gorm.DB, id uint) (*model.APIKey, error) {
 	var k model.APIKey
@@ -142,23 +152,65 @@ func FindAPIKeyModelsByAPIKeyIDs(db *gorm.DB, apiKeyIDs []uint) ([]model.APIKeyM
 }
 
 // UpdateAPIKey applies a sparse column update (only keys present in updates)
-// and, when modelIDs is non-nil, replaces the allowlist — all in one
-// transaction. modelIDs == nil leaves the whitelist unchanged; modelIDs == []
-// clears it (an empty whitelist is allowed).
-func UpdateAPIKey(db *gorm.DB, id uint, updates map[string]interface{}, modelIDs []uint, now time.Time) error {
+// and reconciles the allowlist — all in one transaction. modelIDs == nil
+// leaves the allowlist unchanged; modelIDs == [] clears it; a non-nil slice
+// replaces it. Two invariants are enforced here rather than in the service,
+// because only this layer sees the *resulting* state atomically: the column
+// update takes a row lock, the flag is re-read under that lock, and the
+// decision is made on what the key will actually end up as, not on the request
+// shape. (1) An all-models key owns no allowlist rows. (2) A custom key must
+// end up with a non-empty allowlist — otherwise it could call nothing; this
+// covers every path that lands there, including a sparse PATCH that flips
+// allow_all_models off without supplying ids. Returns ErrEmptyCustomAllowlist
+// when the second invariant would be violated (rolls back the whole update).
+// scopeChanged tells the second check whether this update touched
+// allow_all_models (the caller knows; the repo doesn't probe the updates map
+// for it) — a scope flip to custom with ids omitted must re-validate the
+// inherited allowlist, an unrelated field edit must not.
+func UpdateAPIKey(db *gorm.DB, id uint, updates map[string]interface{}, modelIDs []uint, scopeChanged bool, now time.Time) error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		// updated_at is always bumped — even a whitelist-only change is a real
-		// edit and should refresh the row's last-modified timestamp.
+		// edit and should refresh the row's last-modified timestamp. This UPDATE
+		// also locks the row for the rest of the transaction.
 		updates["updated_at"] = now
 		if err := tx.Model(&model.APIKey{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 			return err
 		}
+		// Re-read the flag under the lock the UPDATE just took, so the effective
+		// value includes any allow_all_models change we just wrote and can't race
+		// a concurrent scope change.
+		var k model.APIKey
+		if err := tx.Select("allow_all_models").Where("id = ?", id).First(&k).Error; err != nil {
+			return err
+		}
+		if k.AllowAllModels {
+			// All-models keys own no allowlist rows: clear any that exist and
+			// ignore whatever the caller supplied.
+			return tx.Where("api_key_id = ?", id).Delete(&model.APIKeyModel{}).Error
+		}
+		// Custom scope. Enforce a non-empty *resulting* allowlist.
 		if modelIDs != nil {
+			// Explicit replacement.
+			if len(modelIDs) == 0 {
+				return ErrEmptyCustomAllowlist
+			}
 			if err := tx.Where("api_key_id = ?", id).Delete(&model.APIKeyModel{}).Error; err != nil {
 				return err
 			}
-			if err := insertAPIKeyModels(tx, id, modelIDs, now); err != nil {
+			return insertAPIKeyModels(tx, id, modelIDs, now)
+		}
+		// Allowlist left unchanged. If this update just switched scope to custom
+		// (the flag is in updates), the rows it inherits must be non-empty — a
+		// true->false flip supplying no ids would otherwise leave an empty custom
+		// key. An update that doesn't touch scope skips this, so a sparse PATCH
+		// (e.g. remark-only) never re-validates rows it isn't changing.
+		if scopeChanged {
+			var cnt int64
+			if err := tx.Model(&model.APIKeyModel{}).Where("api_key_id = ?", id).Count(&cnt).Error; err != nil {
 				return err
+			}
+			if cnt == 0 {
+				return ErrEmptyCustomAllowlist
 			}
 		}
 		return nil
@@ -195,9 +247,11 @@ func FindAPIKeyByHash(db *gorm.DB, hash string) (*model.APIKey, error) {
 }
 
 // HasAPIKeyModelAccess reports whether modelID is in the key's allowlist.
-// Stored by id, so renaming a model does not break
-// whitelists. A key with an empty whitelist
-// matches nothing — creating one is allowed, the gateway rejects every call.
+// Stored by id, so renaming a model does not break allowlists. An empty
+// allowlist matches nothing; the gateway only consults this for custom-scope
+// keys (all-models keys bypass it upstream), and UpdateAPIKey/CreateAPIKey keep
+// a custom key's allowlist non-empty — so a false result here is the
+// defense-in-depth floor, not an expected steady state.
 func HasAPIKeyModelAccess(db *gorm.DB, apiKeyID, modelID uint) (bool, error) {
 	var cnt int64
 	if err := db.Model(&model.APIKeyModel{}).

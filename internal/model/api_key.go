@@ -32,9 +32,13 @@ type APIKey struct {
 	ConcurrencyLimit  *int       `gorm:"column:concurrency_limit" json:"concurrency_limit"`
 	BudgetLimitMicros *int64     `gorm:"column:budget_limit_micros" json:"budget_limit_micros"`
 	BudgetSpentMicros int64      `gorm:"column:budget_spent_micros" json:"budget_spent_micros"`
-	CreatedAt         time.Time  `gorm:"column:created_at" json:"created_at"`
-	RevokedAt         *time.Time `gorm:"column:revoked_at" json:"-"`
-	UpdatedAt         time.Time  `gorm:"column:updated_at" json:"updated_at"`
+	// AllowAllModels, when true, lets the key call any enabled model and the
+	// api_key_models allowlist is ignored (see gateway enforcement). False keeps
+	// the strict allowlist where an empty list permits no models.
+	AllowAllModels bool       `gorm:"column:allow_all_models" json:"allow_all_models"`
+	CreatedAt      time.Time  `gorm:"column:created_at" json:"created_at"`
+	RevokedAt      *time.Time `gorm:"column:revoked_at" json:"-"`
+	UpdatedAt      time.Time  `gorm:"column:updated_at" json:"updated_at"`
 }
 
 func (APIKey) TableName() string { return "api_keys" }

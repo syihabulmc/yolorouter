@@ -58,6 +58,7 @@ type APIKeyView struct {
 	ConcurrencyLimit  *int       `json:"concurrency_limit"`
 	BudgetLimitMicros *int64     `json:"budget_limit_micros"`
 	BudgetSpentMicros int64      `json:"budget_spent_micros"`
+	AllowAllModels    bool       `json:"allow_all_models"`
 	ModelIDs          []uint     `json:"model_ids"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`
@@ -66,6 +67,7 @@ type APIKeyView struct {
 type CreateAPIKeyInput struct {
 	OwnerLabel        string
 	Remark            string
+	AllowAllModels    bool
 	ModelIDs          []uint
 	ExpiresAt         *time.Time
 	RPMLimit          *int
@@ -91,6 +93,7 @@ type CreateAPIKeyResult struct {
 type UpdateAPIKeyInput struct {
 	OwnerLabel        *string
 	Remark            *string
+	AllowAllModels    *bool
 	ModelIDs          []uint
 	ExpiresAt         *time.Time
 	RPMLimit          *int
@@ -138,8 +141,20 @@ func (s *APIKeyService) ListAPIKeys(q, owner, status string, page, pageSize int)
 
 func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*CreateAPIKeyResult, error) {
 	modelIDs := uniqueUint(input.ModelIDs)
-	if err := s.assertModelsExist(modelIDs); err != nil {
-		return nil, err
+	if input.AllowAllModels {
+		// An all-models key owns no allowlist rows; drop any ids the caller sent
+		// so the bypass flag and the join table can never disagree.
+		modelIDs = nil
+	} else {
+		// A custom-scope key must name at least one model — otherwise it could
+		// call nothing. The Update path enforces the same rule atomically in
+		// repository.UpdateAPIKey.
+		if len(modelIDs) == 0 {
+			return nil, errcode.ErrAPIKeyEmptyAllowlist
+		}
+		if err := s.assertModelsExist(modelIDs); err != nil {
+			return nil, err
+		}
 	}
 	rawKey, err := generateAPIKey()
 	if err != nil {
@@ -151,6 +166,7 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 		OwnerLabel:        input.OwnerLabel,
 		Remark:            input.Remark,
 		Status:            model.APIKeyStatusActive,
+		AllowAllModels:    input.AllowAllModels,
 		ExpiresAt:         input.ExpiresAt,
 		RPMLimit:          limitPtrOrNil(input.RPMLimit),
 		TPMLimit:          limitPtrOrNil(input.TPMLimit),
@@ -210,19 +226,33 @@ func (s *APIKeyService) UpdateAPIKey(id uint, input UpdateAPIKeyInput, now time.
 	if input.BudgetLimitMicros != nil {
 		updates["budget_limit_micros"] = numericOrClear(*input.BudgetLimitMicros)
 	}
+	scopeChanged := input.AllowAllModels != nil
+	if scopeChanged {
+		updates["allow_all_models"] = *input.AllowAllModels
+	}
 
-	// nil ModelIDs = leave whitelist untouched; non-nil (after dedup) replaces
-	// it. assertModelsExist is skipped for an empty replacement — clearing the
-	// whitelist is a valid state.
+	// nil modelIDs leaves the allowlist untouched; a non-nil slice (after dedup)
+	// replaces it. Switching to all-models discards the allowlist in the repo, so
+	// skip validating ids the caller may still be sending — mirrors CreateAPIKey.
+	// The resulting-state invariants (all-models owns no rows; a custom key keeps
+	// a non-empty allowlist) are enforced atomically in repository.UpdateAPIKey,
+	// which re-reads the flag under the row lock so a concurrent scope change
+	// can't be clobbered by a stale pre-transaction read.
 	var modelIDs []uint
-	if input.ModelIDs != nil {
+	switch {
+	case scopeChanged && *input.AllowAllModels:
+		modelIDs = nil
+	case input.ModelIDs != nil:
 		modelIDs = uniqueUint(input.ModelIDs)
 		if err := s.assertModelsExist(modelIDs); err != nil {
 			return nil, err
 		}
 	}
 
-	if err := repository.UpdateAPIKey(s.db, id, updates, modelIDs, now); err != nil {
+	if err := repository.UpdateAPIKey(s.db, id, updates, modelIDs, scopeChanged, now); err != nil {
+		if errors.Is(err, repository.ErrEmptyCustomAllowlist) {
+			return nil, errcode.ErrAPIKeyEmptyAllowlist
+		}
 		return nil, err
 	}
 	return s.GetAPIKey(id)
@@ -272,7 +302,7 @@ func toAPIKeyView(k model.APIKey, modelIDs []uint, now time.Time) APIKeyView {
 		Status: k.Status, DisplayStatus: computeAPIKeyDisplayStatus(k, now),
 		ExpiresAt: k.ExpiresAt, RPMLimit: k.RPMLimit, TPMLimit: k.TPMLimit,
 		ConcurrencyLimit: k.ConcurrencyLimit, BudgetLimitMicros: k.BudgetLimitMicros,
-		BudgetSpentMicros: k.BudgetSpentMicros, ModelIDs: modelIDs,
+		BudgetSpentMicros: k.BudgetSpentMicros, AllowAllModels: k.AllowAllModels, ModelIDs: modelIDs,
 		CreatedAt: k.CreatedAt, UpdatedAt: k.UpdatedAt,
 	}
 }

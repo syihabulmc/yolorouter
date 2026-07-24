@@ -26,6 +26,7 @@ const (
 	APIKeyRateLimitedTPM  = 11006
 	APIKeyRateLimitedConc = 11007
 	APIKeyBudgetExceeded  = 11008
+	APIKeyEmptyAllowlist  = 11009
 
 	// === Provider errors (12xxx) ===
 	ProviderNotFound         = 12001
@@ -115,6 +116,7 @@ var ErrorMessages = map[int]string{
 	APIKeyRateLimitedTPM:  "rate limit exceeded (tokens per minute)",
 	APIKeyRateLimitedConc: "rate limit exceeded (concurrent requests)",
 	APIKeyBudgetExceeded:  "budget limit exceeded",
+	APIKeyEmptyAllowlist:  "model_ids must contain at least one model unless allow_all_models is true",
 
 	ProviderNotFound:         "provider not found",
 	ProviderNameTaken:        "provider name already taken",
@@ -178,6 +180,7 @@ var (
 	ErrAPIKeyRateLimitedTPM  = errors.New(ErrorMessages[APIKeyRateLimitedTPM])
 	ErrAPIKeyRateLimitedConc = errors.New(ErrorMessages[APIKeyRateLimitedConc])
 	ErrAPIKeyBudgetExceeded  = errors.New(ErrorMessages[APIKeyBudgetExceeded])
+	ErrAPIKeyEmptyAllowlist  = errors.New(ErrorMessages[APIKeyEmptyAllowlist])
 
 	ErrProviderNotFound         = errors.New(ErrorMessages[ProviderNotFound])
 	ErrProviderNameTaken        = errors.New(ErrorMessages[ProviderNameTaken])

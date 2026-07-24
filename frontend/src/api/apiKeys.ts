@@ -14,6 +14,7 @@ export interface APIKey {
   concurrency_limit: number | null
   budget_limit_micros: number | null
   budget_spent_micros: number
+  allow_all_models: boolean
   model_ids: number[]
   created_at: string
   updated_at: string
@@ -41,6 +42,7 @@ export function toAPIKeyOptions(keys: APIKey[]): SelectOption[] {
 export interface CreateAPIKeyInput {
   owner_label?: string
   remark?: string
+  allow_all_models: boolean
   model_ids: number[]
   expires_at?: string
   rpm_limit?: number
@@ -61,6 +63,7 @@ export interface CreateAPIKeyResult {
 export interface UpdateAPIKeyInput {
   owner_label?: string
   remark?: string
+  allow_all_models?: boolean
   model_ids?: number[]
   expires_at?: string
   rpm_limit?: number

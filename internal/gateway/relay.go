@@ -303,18 +303,21 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 		return
 	}
 
-	// Step 5: allowlist.
-	allowed, err := repository.HasAPIKeyModelAccess(s.db, apiKey.ID, m.ID)
-	if err != nil {
-		logger.Error("gateway: allowlist", zap.String("request_id", rc.RequestID), zap.Error(err))
-		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
-		s.finalize(rc, http.StatusInternalServerError, "db_allowlist: "+err.Error(), start)
-		return
-	}
-	if !allowed {
-		WriteIngressError(c, ingress, http.StatusForbidden, errTypePermission, "model is not in this API key's allowlist", rc.RequestID)
-		s.finalize(rc, http.StatusForbidden, "model_not_allowed", start)
-		return
+	// Step 5: allowlist. A key flagged allow_all_models skips the per-model
+	// check and may call any enabled model.
+	if !apiKey.AllowAllModels {
+		allowed, err := repository.HasAPIKeyModelAccess(s.db, apiKey.ID, m.ID)
+		if err != nil {
+			logger.Error("gateway: allowlist", zap.String("request_id", rc.RequestID), zap.Error(err))
+			WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
+			s.finalize(rc, http.StatusInternalServerError, "db_allowlist: "+err.Error(), start)
+			return
+		}
+		if !allowed {
+			WriteIngressError(c, ingress, http.StatusForbidden, errTypePermission, "model is not in this API key's allowlist", rc.RequestID)
+			s.finalize(rc, http.StatusForbidden, "model_not_allowed", start)
+			return
+		}
 	}
 
 	// Step 6: top-level structural validation (messages non-empty, Claude's
