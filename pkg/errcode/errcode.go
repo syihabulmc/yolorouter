@@ -31,6 +31,8 @@ const (
 	CustomSystemPromptEmpty    = 11011 // enabled is true but the prompt text is empty
 	CustomSystemPromptConflict = 11012 // optimistic-lock CAS miss on system_settings PUT (another writer committed first)
 	APIKeyConflict             = 11013 // optimistic-lock CAS miss on api_keys PATCH (another writer committed first)
+	InputCompressionConflict   = 11014 // optimistic-lock CAS miss on input_compression_enabled PUT (another writer committed first)
+	CompressEnabledRequired    = 11015 // compress_enabled_override is true but compress_enabled is not supplied
 
 	// === Provider errors (12xxx) ===
 	ProviderNotFound         = 12001
@@ -125,6 +127,8 @@ var ErrorMessages = map[int]string{
 	CustomSystemPromptEmpty:    "custom system prompt text must not be empty when enabled",
 	CustomSystemPromptConflict: "custom system prompt was modified concurrently, please refresh and retry",
 	APIKeyConflict:             "api key was modified concurrently, please refresh and retry",
+	InputCompressionConflict:   "input compression setting was modified concurrently, please refresh and retry",
+	CompressEnabledRequired:    "compress_enabled must be set when compress_enabled_override is true",
 
 	ProviderNotFound:         "provider not found",
 	ProviderNameTaken:        "provider name already taken",
@@ -193,6 +197,8 @@ var (
 	ErrCustomSystemPromptEmpty    = errors.New(ErrorMessages[CustomSystemPromptEmpty])
 	ErrCustomSystemPromptConflict = errors.New(ErrorMessages[CustomSystemPromptConflict])
 	ErrAPIKeyConflict             = errors.New(ErrorMessages[APIKeyConflict])
+	ErrInputCompressionConflict   = errors.New(ErrorMessages[InputCompressionConflict])
+	ErrCompressEnabledRequired    = errors.New(ErrorMessages[CompressEnabledRequired])
 
 	ErrProviderNotFound         = errors.New(ErrorMessages[ProviderNotFound])
 	ErrProviderNameTaken        = errors.New(ErrorMessages[ProviderNameTaken])

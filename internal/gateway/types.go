@@ -35,10 +35,30 @@ type RelayContext struct {
 	// ProtocolOpenAI for non-generateContent actions, so the path alone
 	// distinguishes countTokens / embedContent from real chat.
 	IngressPath string
+	// IsChatEndpoint is computed once in Handle from IngressPath. Both the
+	// compression gate and the CSP injection gate read this bool instead of
+	// recomputing IsChatEndpoint(path) independently.
+	IsChatEndpoint bool
 	// CustomSystemPromptEnabled / CustomSystemPrompt are the two-level-resolved
 	// prompt for this request. Empty or disabled means no injection.
 	CustomSystemPromptEnabled bool
 	CustomSystemPrompt        string
+	// CompressEnabled is the two-level-resolved input-compression switch for
+	// this request. When true and the ingress path is a chat endpoint, the
+	// caller's body is run through the compress engine before relay.
+	CompressEnabled bool
+	// CompressSkipReason records why compression was skipped (when it was
+	// enabled but the engine returned Skipped=true). Empty when compression
+	// was disabled, applied successfully, or never attempted.
+	CompressSkipReason string
+	// CompressEstimatedTokensSaved / CompressorsApplied / RequestBodyCompressed
+	// record the outcome of a successful compression pass. RequestBodyCompressed
+	// is the compressed body that upstream encoding (buildUpstreamBody) uses as
+	// its input via EffectiveRequestBody; RequestBody stays the verbatim caller
+	// body for the audit row.
+	CompressEstimatedTokensSaved int
+	CompressorsApplied           []string
+	RequestBodyCompressed        []byte
 	// WantsStreamUsage is true when the caller set
 	// stream_options.include_usage=true. Controls whether usage frames
 	// collected upstream are forwarded to the caller (the gateway always
@@ -127,6 +147,19 @@ func (rc *RelayContext) MarkFirstByteSent() bool {
 	}
 	rc.FirstByteSent = true
 	return true
+}
+
+// EffectiveRequestBody returns the body that upstream encoding should use as
+// its input: the compressed body when a successful compression pass produced
+// one, otherwise the verbatim caller body. buildUpstreamBody reads this
+// instead of RequestBody directly so that both the passthrough (model-field
+// rewrite) and cross-protocol (IR decode/encode) paths consume the compressed
+// body without every call site branching.
+func (rc *RelayContext) EffectiveRequestBody() []byte {
+	if rc.RequestBodyCompressed != nil {
+		return rc.RequestBodyCompressed
+	}
+	return rc.RequestBody
 }
 
 // AttemptRecord is one candidate try (the log keeps every attempt,

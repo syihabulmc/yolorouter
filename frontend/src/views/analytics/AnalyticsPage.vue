@@ -156,8 +156,10 @@ import EmptyState from '../../components/EmptyState.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import AnalyticsFilterBar from '../../components/analytics/AnalyticsFilterBar.vue'
 import { type RangePreset, type TimeRange } from '../../components/analytics/TimeRangeSelect.vue'
+import { initialLast7DaysRange } from '../../utils/timeRange'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
+import { formatNumber, formatRate } from '../../utils/format'
 import { displayMessage } from '../../api/client'
 import {
   exportAnalyticsCSV,
@@ -180,17 +182,10 @@ const message = useMessage()
 
 // Default window = last 7 days (matches the backend's default for
 // dimension=time and feels like a reasonable default for "show me recent
-// usage" without over-querying).
-const initialRange = (): TimeRange => {
-  const now = new Date()
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0)
-  const start = new Date(end)
-  start.setDate(start.getDate() - 7)
-  return { start: start.toISOString(), end: end.toISOString() }
-}
-
+// usage" without over-querying). Shared with the other dashboard pages via
+// utils/timeRange.ts so every dashboard opens on the same window.
 const preset = ref<RangePreset>('last7d')
-const timeRange = ref<TimeRange>(initialRange())
+const timeRange = ref<TimeRange>(initialLast7DaysRange())
 const filter = ref<AnalyticsFilter>({ start: timeRange.value.start, end: timeRange.value.end })
 const dimension = ref<AnalyticsDimension>('model')
 const bucket = ref<AnalyticsBucket>('day')
@@ -339,16 +334,6 @@ function onExport() {
       exporting.value = false
     }, 600)
   }
-}
-
-// === Formatters ===========================================================
-
-function formatNumber(n: number): string {
-  return n.toLocaleString()
-}
-
-function formatRate(r: number): string {
-  return `${(r * 100).toFixed(1)}%`
 }
 
 // === Row keys for NULL-id buckets =========================================

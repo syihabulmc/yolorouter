@@ -16,16 +16,21 @@ import "time"
 // sensitive headers already masked (gateway.SanitizeHeaders) — only the
 // auth headers themselves are excluded from logging, not all headers.
 type RequestLogBody struct {
-	ID                   uint      `gorm:"column:id;primaryKey" json:"id"`
-	RequestID            string    `gorm:"column:request_id;uniqueIndex" json:"request_id"`
-	RequestHeaders       string    `gorm:"column:request_headers" json:"request_headers"`
-	RequestBody          string    `gorm:"column:request_body" json:"request_body"`
-	UpstreamRequestBody  string    `gorm:"column:upstream_request_body" json:"upstream_request_body"`
-	ResponseBody         string    `gorm:"column:response_body" json:"response_body"`
-	UpstreamResponseBody string    `gorm:"column:upstream_response_body" json:"upstream_response_body"`
-	StreamBodyPath       string    `gorm:"column:stream_body_path" json:"stream_body_path"`
-	StreamBodyTruncated  bool      `gorm:"column:stream_body_truncated" json:"stream_body_truncated"`
-	CreatedAt            time.Time `gorm:"column:created_at" json:"created_at"`
+	ID                   uint   `gorm:"column:id;primaryKey" json:"id"`
+	RequestID            string `gorm:"column:request_id;uniqueIndex" json:"request_id"`
+	RequestHeaders       string `gorm:"column:request_headers" json:"request_headers"`
+	RequestBody          string `gorm:"column:request_body" json:"request_body"`
+	UpstreamRequestBody  string `gorm:"column:upstream_request_body" json:"upstream_request_body"`
+	ResponseBody         string `gorm:"column:response_body" json:"response_body"`
+	UpstreamResponseBody string `gorm:"column:upstream_response_body" json:"upstream_response_body"`
+	StreamBodyPath       string `gorm:"column:stream_body_path" json:"stream_body_path"`
+	StreamBodyTruncated  bool   `gorm:"column:stream_body_truncated" json:"stream_body_truncated"`
+	// CompressedRequestBody is the post-compression request body captured
+	// for debugging — empty when compression did not run or the body was not
+	// altered. Stored alongside RequestBody (the original) so the diff is
+	// visible without re-running the compressors.
+	CompressedRequestBody string    `gorm:"column:compressed_request_body" json:"compressed_request_body"`
+	CreatedAt             time.Time `gorm:"column:created_at" json:"created_at"`
 }
 
 func (RequestLogBody) TableName() string { return "request_log_bodies" }

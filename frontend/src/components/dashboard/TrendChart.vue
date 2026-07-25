@@ -6,7 +6,9 @@
      gives us both the component and the registration side-effect. -->
 <template>
   <div class="trend-chart">
-    <div v-if="!points.length" class="trend-empty">{{ t('analytics.noData') }}</div>
+    <div v-if="!points.length" class="trend-empty">
+      <EmptyState :icon="BarChart3" :title="t('analytics.noData')" />
+    </div>
     <VChart
       v-else
       class="trend-vchart"
@@ -20,6 +22,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { BarChart3 } from '@lucide/vue'
+import EmptyState from '../EmptyState.vue'
 // Single import registers every chart type / component we need (side effect)
 // and gives us the VChart component to render with.
 import { VChart } from '../../utils/echarts'

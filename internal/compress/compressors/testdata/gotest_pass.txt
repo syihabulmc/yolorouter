@@ -1,0 +1,78 @@
+=== RUN   TestEstimateTokensSaved
+--- PASS: TestEstimateTokensSaved (0.00s)
+=== RUN   TestShouldAttempt
+--- PASS: TestShouldAttempt (0.00s)
+=== RUN   TestAcceptCompressed
+--- PASS: TestAcceptCompressed (0.00s)
+=== RUN   TestDetectBuildOutput
+--- PASS: TestDetectBuildOutput (0.00s)
+=== RUN   TestDetectPlainTextFallback
+--- PASS: TestDetectPlainTextFallback (0.00s)
+=== RUN   TestLogStripsANSIAndFoldsDupes
+--- PASS: TestLogStripsANSIAndFoldsDupes (0.00s)
+=== RUN   TestLogPreservesDistinctLines
+--- PASS: TestLogPreservesDistinctLines (0.00s)
+=== RUN   TestSpliceBodyReplacesRangeOnly
+--- PASS: TestSpliceBodyReplacesRangeOnly (0.00s)
+=== RUN   TestSpliceBodyNoRepIsIdentity
+--- PASS: TestSpliceBodyNoRepIsIdentity (0.00s)
+=== RUN   TestLocateClaudeLiveZoneToolResult
+--- PASS: TestLocateClaudeLiveZoneToolResult (0.00s)
+=== RUN   TestLocateClaudeSkipsAssistantAndOldUser
+--- PASS: TestLocateClaudeSkipsAssistantAndOldUser (0.00s)
+=== RUN   TestLocateChatLiveZone
+--- PASS: TestLocateChatLiveZone (0.00s)
+=== RUN   TestCompressClaudeShrinksToolResultKeepsRest
+--- PASS: TestCompressClaudeShrinksToolResultKeepsRest (0.00s)
+=== RUN   TestCompressClaudeNoLiveZoneIsIdentity
+--- PASS: TestCompressClaudeNoLiveZoneIsIdentity (0.00s)
+=== RUN   TestCompressClaudeParseErrorIsIdentity
+--- PASS: TestCompressClaudeParseErrorIsIdentity (0.00s)
+=== RUN   TestRelayContextCompressFields
+--- PASS: TestRelayContextCompressFields (0.00s)
+=== RUN   TestInjectCompatResponseHeaders
+--- PASS: TestInjectCompatResponseHeaders (0.01s)
+=== RUN   TestClearCompressAccounting
+--- PASS: TestClearCompressAccounting (0.00s)
+=== RUN   TestCompressDAOGetEnabled
+--- PASS: TestCompressDAOGetEnabled (0.02s)
+=== RUN   TestCompressDAOSetEnabled
+--- PASS: TestCompressDAOSetEnabled (0.01s)
+=== RUN   TestCompressServiceToggle
+--- PASS: TestCompressServiceToggle (0.00s)
+=== RUN   TestCompressHandlerStats
+--- PASS: TestCompressHandlerStats (0.00s)
+=== RUN   TestEffectiveCompressEnabled
+--- PASS: TestEffectiveCompressEnabled (0.00s)
+=== RUN   TestLogConsumerMapsFields
+--- PASS: TestLogConsumerMapsFields (0.00s)
+=== RUN   TestAnalyticsRelayLogColumns
+--- PASS: TestAnalyticsRelayLogColumns (0.00s)
+=== RUN   TestRouterRegistersCompressRoutes
+--- PASS: TestRouterRegistersCompressRoutes (0.00s)
+=== RUN   TestGoTestKeepsFailuresDropsPassNames
+--- PASS: TestGoTestKeepsFailuresDropsPassNames (0.00s)
+=== RUN   TestGoTestPreservesSkipXfailNames
+--- PASS: TestGoTestPreservesSkipXfailNames (0.00s)
+=== RUN   TestGoTestAdversarialKeepsCodeBlock
+--- PASS: TestGoTestAdversarialKeepsCodeBlock (0.00s)
+=== RUN   TestFrozenBoundaryHonored
+--- PASS: TestFrozenBoundaryHonored (0.00s)
+=== RUN   TestBillingAccountingZeroedOnFailure
+    billing_test.go:42: unexpected residual accounting after fail-open
+    billing_test.go:43:
+        	Error Trace:	/internal/relay/billing_test.go:43
+        	Error:      	Not equal:
+        	            	expected: 0
+        	            	actual  : 137
+        	            	Test:       	TestBillingAccountingZeroedOnFailure
+--- FAIL: TestBillingAccountingZeroedOnFailure (0.00s)
+panic: runtime error: invalid memory address or nil pointer dereference [recovered]
+	panic: assignment to entry in nil map
+
+goroutine 51 [running]:
+testing.tRunner.func1.2({0x104a2c0, 0x10b8f30})
+	/usr/local/go/src/testing/testing.go:1631 +0x24a
+/internal/relay/billing.go:88 +0x1f4
+FAIL	/internal/relay	0.213s
+FAIL

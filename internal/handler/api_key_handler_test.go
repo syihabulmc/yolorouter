@@ -226,3 +226,171 @@ func TestPatchAPIKeyWithoutCASKeepsLegacyBehavior(t *testing.T) {
 		t.Fatalf("non-CAS PATCH should succeed, got %d: %s", wp.Code, wp.Body.String())
 	}
 }
+
+// TestPatchAPIKeyCompressOverrideTrueWithoutEnabledReturns400 verifies the
+// service-layer combination rule surfaces over HTTP: override=true without
+// a compress_enabled value must return 400 with errcode 11015, not 500.
+func TestPatchAPIKeyCompressOverrideTrueWithoutEnabledReturns400(t *testing.T) {
+	r, db := newAPIKeyPatchTestRouter(t)
+	now := time.Now().UTC()
+	m := &model.Model{Name: "compress-err-model", ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatalf("seed model: %v", err)
+	}
+	w := postAPIKey(t, r, map[string]any{"allow_all_models": false, "model_ids": []uint{m.ID}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create key: status %d body %s", w.Code, w.Body.String())
+	}
+	var createEnv struct {
+		Data struct {
+			APIKey struct {
+				ID uint `json:"id"`
+			} `json:"api_key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &createEnv); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	wp := patchAPIKey(t, r, createEnv.Data.APIKey.ID, map[string]any{
+		"compress_enabled_override": true,
+	})
+	if wp.Code != http.StatusBadRequest {
+		t.Fatalf("override=true without enabled should return 400, got %d: %s", wp.Code, wp.Body.String())
+	}
+	var errEnv struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal(wp.Body.Bytes(), &errEnv); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if errEnv.Code != 11015 {
+		t.Fatalf("error body should carry errcode 11015, got %d", errEnv.Code)
+	}
+}
+
+// TestPatchAPIKeyCompressOverrideTrueWithEnabledPersists verifies that
+// override=true + enabled writes both columns and they are readable via GET.
+func TestPatchAPIKeyCompressOverrideTrueWithEnabledPersists(t *testing.T) {
+	r, db := newAPIKeyPatchTestRouter(t)
+	now := time.Now().UTC()
+	m := &model.Model{Name: "compress-ok-model", ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatalf("seed model: %v", err)
+	}
+	w := postAPIKey(t, r, map[string]any{"allow_all_models": false, "model_ids": []uint{m.ID}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create key: status %d body %s", w.Code, w.Body.String())
+	}
+	var createEnv struct {
+		Data struct {
+			APIKey struct {
+				ID uint `json:"id"`
+			} `json:"api_key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &createEnv); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	keyID := createEnv.Data.APIKey.ID
+
+	wp := patchAPIKey(t, r, keyID, map[string]any{
+		"compress_enabled_override": true,
+		"compress_enabled":          true,
+	})
+	if wp.Code != http.StatusOK {
+		t.Fatalf("override=true + enabled should succeed, got %d: %s", wp.Code, wp.Body.String())
+	}
+
+	data := getAPIKeyRaw(t, r, keyID)
+	if data["compress_enabled_override"] != true {
+		t.Fatalf("compress_enabled_override should be true, got %v", data["compress_enabled_override"])
+	}
+	if data["compress_enabled"] != true {
+		t.Fatalf("compress_enabled should be true, got %v", data["compress_enabled"])
+	}
+}
+
+// TestPatchAPIKeyCompressOverrideFalseStoresFalse verifies that override=false
+// zeroes both columns regardless of the enabled value sent alongside.
+func TestPatchAPIKeyCompressOverrideFalseStoresFalse(t *testing.T) {
+	r, db := newAPIKeyPatchTestRouter(t)
+	now := time.Now().UTC()
+	m := &model.Model{Name: "compress-off-model", ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatalf("seed model: %v", err)
+	}
+	w := postAPIKey(t, r, map[string]any{
+		"allow_all_models":          false,
+		"model_ids":                 []uint{m.ID},
+		"compress_enabled_override": true,
+		"compress_enabled":          true,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create key: status %d body %s", w.Code, w.Body.String())
+	}
+	var createEnv struct {
+		Data struct {
+			APIKey struct {
+				ID uint `json:"id"`
+			} `json:"api_key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &createEnv); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	keyID := createEnv.Data.APIKey.ID
+
+	wp := patchAPIKey(t, r, keyID, map[string]any{
+		"compress_enabled_override": false,
+		"compress_enabled":          true,
+	})
+	if wp.Code != http.StatusOK {
+		t.Fatalf("override=false should succeed, got %d: %s", wp.Code, wp.Body.String())
+	}
+
+	data := getAPIKeyRaw(t, r, keyID)
+	if data["compress_enabled_override"] != false {
+		t.Fatalf("compress_enabled_override should be false, got %v", data["compress_enabled_override"])
+	}
+	if data["compress_enabled"] != false {
+		t.Fatalf("compress_enabled should be false, got %v", data["compress_enabled"])
+	}
+}
+
+// TestPostAPIKeyCompressFieldsPersisted verifies that compress fields supplied
+// at create time are stored and surfaced in the response.
+func TestPostAPIKeyCompressFieldsPersisted(t *testing.T) {
+	r, db := newAPIKeyPatchTestRouter(t)
+	now := time.Now().UTC()
+	m := &model.Model{Name: "compress-create-model", ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatalf("seed model: %v", err)
+	}
+	w := postAPIKey(t, r, map[string]any{
+		"allow_all_models":          false,
+		"model_ids":                 []uint{m.ID},
+		"compress_enabled_override": true,
+		"compress_enabled":          true,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create with compress should succeed, got %d: %s", w.Code, w.Body.String())
+	}
+	var createEnv struct {
+		Data struct {
+			APIKey struct {
+				CompressEnabledOverride bool `json:"compress_enabled_override"`
+				CompressEnabled         bool `json:"compress_enabled"`
+			} `json:"api_key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &createEnv); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if !createEnv.Data.APIKey.CompressEnabledOverride {
+		t.Fatalf("compress_enabled_override should be true in create response")
+	}
+	if !createEnv.Data.APIKey.CompressEnabled {
+		t.Fatalf("compress_enabled should be true in create response")
+	}
+}

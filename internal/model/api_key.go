@@ -40,12 +40,17 @@ type APIKey struct {
 	// overrides the global default; false means inherit system_settings. When
 	// override is true, CustomSystemPromptEnabled and CustomSystemPrompt take
 	// effect; otherwise they are ignored.
-	CustomSystemPromptEnabledOverride bool       `gorm:"column:custom_system_prompt_enabled_override" json:"custom_system_prompt_enabled_override"`
-	CustomSystemPromptEnabled         bool       `gorm:"column:custom_system_prompt_enabled" json:"custom_system_prompt_enabled"`
-	CustomSystemPrompt                string     `gorm:"column:custom_system_prompt" json:"custom_system_prompt"`
-	CreatedAt                         time.Time  `gorm:"column:created_at" json:"created_at"`
-	RevokedAt                         *time.Time `gorm:"column:revoked_at" json:"-"`
-	UpdatedAt                         time.Time  `gorm:"column:updated_at" json:"updated_at"`
+	CustomSystemPromptEnabledOverride bool   `gorm:"column:custom_system_prompt_enabled_override" json:"custom_system_prompt_enabled_override"`
+	CustomSystemPromptEnabled         bool   `gorm:"column:custom_system_prompt_enabled" json:"custom_system_prompt_enabled"`
+	CustomSystemPrompt                string `gorm:"column:custom_system_prompt" json:"custom_system_prompt"`
+	// CompressEnabledOverride: true means this key explicitly overrides the
+	// global input-compression default; false means inherit system_settings.
+	// When override is true, CompressEnabled takes effect; otherwise ignored.
+	CompressEnabledOverride bool       `gorm:"column:compress_enabled_override" json:"compress_enabled_override"`
+	CompressEnabled         bool       `gorm:"column:compress_enabled" json:"compress_enabled"`
+	CreatedAt               time.Time  `gorm:"column:created_at" json:"created_at"`
+	RevokedAt               *time.Time `gorm:"column:revoked_at" json:"-"`
+	UpdatedAt               time.Time  `gorm:"column:updated_at" json:"updated_at"`
 }
 
 func (APIKey) TableName() string { return "api_keys" }

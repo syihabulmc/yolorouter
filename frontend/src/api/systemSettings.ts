@@ -29,3 +29,26 @@ export function updateCustomSystemPrompt(payload: {
     body: JSON.stringify(payload),
   })
 }
+
+// Global input-compression switch on the same Cost Optimization page. Same
+// authoritative-read + CAS contract as the CSP endpoints above; a concurrent
+// edit surfaces as errcode 11014 (HTTP 409), distinct from 11012 so the page
+// can retry the right setting.
+export interface InputCompressionSetting {
+  enabled: boolean
+  version: number
+}
+
+export function getInputCompression(): Promise<InputCompressionSetting> {
+  return apiFetch('/api/admin/system-settings/input-compression')
+}
+
+export function updateInputCompression(payload: {
+  enabled: boolean
+  version: number
+}): Promise<InputCompressionSetting> {
+  return apiFetch('/api/admin/system-settings/input-compression', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}

@@ -4,7 +4,9 @@
      read at a glance. Precise per-caller figures live in the usage report. -->
 <template>
   <div class="top-spenders">
-    <div v-if="!bars.length" class="top-spenders__empty">{{ t('costs.noData') }}</div>
+    <div v-if="!bars.length" class="top-spenders__empty">
+      <EmptyState :icon="BarChart3" :title="t('costs.noData')" />
+    </div>
     <VChart
       v-else
       class="top-spenders__chart"
@@ -19,6 +21,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { BarChart3 } from '@lucide/vue'
+import EmptyState from '../EmptyState.vue'
 import {
   VChart,
   CHART_ACCENT as ACCENT,
@@ -106,7 +110,9 @@ const option = computed(() => ({
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 120px;
+  /* Match EmptyState's global min-height (220px in styles/global.less) so the
+     empty block never overflows its fixed-height container. */
+  min-height: 220px;
   color: var(--color-text-muted);
   font-size: var(--text-sm);
 }

@@ -32,134 +32,220 @@ const cacheTTL = 30 * time.Second
 // refresh storm and duplicate warning logs when the DB is down.
 const refreshFailureTTL = 5 * time.Second
 
-// SystemSettingsService caches the global custom system prompt and owns its
-// read/write contract. It implements gateway.SettingsProvider (read path) and
-// serves the handler's GET/PUT. CSP is best-effort behavior guidance, NOT a
-// security boundary — on refresh failure it fails OPEN (returns last-known-good
-// or disabled), never blocks the request path.
-type SystemSettingsService struct {
-	db *gorm.DB
+// Cache keys — the singleflight group and the entries map are both keyed by
+// these strings, so each setting gets its own collapse lane and cache slot.
+const (
+	cspCacheKey              = "csp"
+	inputCompressionCacheKey = "input_compression"
+)
 
-	mu                  sync.RWMutex
-	snapshot            settings.CustomSystemPromptSetting
+// settingEntry holds the cached state for one setting key. The cache is shared
+// across all settings (CSP today, input compression switch added on top) so
+// every setting inherits the same five invariants hardened for CSP:
+//
+//  1. On refresh SUCCESS the cache returns its CURRENT snapshot (read under
+//     lock) — NOT the value the reader just returned. This defeats the race
+//     where a concurrent Update committed + published a newer version between
+//     our DB read and our publishIfNewer; publishIfNewer rejects ours and we
+//     must hand singleflight waiters the newer snapshot the cache now holds.
+//  2. publishIfNewer is monotonic (reject ver < current) AND clears the
+//     failure window on any successful DB read regardless of monotonicity.
+//  3. negative-TTL: a failed refresh sets refreshFailureUntil; reads in that
+//     window serve last-known-good (or the zero value on cold start) without
+//     re-querying the DB.
+//  4. The refresh query runs under
+//     context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout) so one
+//     client disconnect can't abort the shared singleflight refresh other
+//     waiters depend on. Handler authoritative reads bind to the request ctx.
+//  5. singleflight collapses concurrent refreshes per setting (keyed by name).
+type settingEntry struct {
+	snapshot            any // typed by the caller: settings.CustomSystemPromptSetting or bool
 	version             int64
 	hasSnapshot         bool
 	refreshExpiry       time.Time
 	refreshFailureUntil time.Time
-	refreshGroup        singleflight.Group
 }
 
-// NewSystemSettingsService constructs the service and primes the cache on the
-// first read.
+// cacheSnapshot is the refresh result carried through singleflight. It carries
+// the cache's current (post-publish) value+version, not the reader's return.
+type cacheSnapshot struct {
+	value   any
+	version int64
+}
+
+// settingReader is the authoritative DB read backing one cache entry. The
+// refresh path binds it to a detached context with refreshTimeout; the
+// implementation must not bind to the caller's request ctx on its own.
+type settingReader func(ctx context.Context) (value any, version int64, err error)
+
+// SystemSettingsService caches the global settings the gateway reads on the
+// hot path (custom system prompt, input-compression switch) and owns their
+// read/write contract. It implements gateway.SettingsProvider (read path) and
+// serves the handler GET/PUT. Every setting here is best-effort behavior
+// guidance, NOT a security boundary — on refresh failure the read path fails
+// OPEN (returns last-known-good or the zero value), never blocks the request.
+type SystemSettingsService struct {
+	db *gorm.DB
+
+	mu           sync.RWMutex
+	entries      map[string]*settingEntry
+	refreshGroup singleflight.Group
+}
+
+// NewSystemSettingsService constructs the service. Both caches prime lazily on
+// the first read.
 func NewSystemSettingsService(db *gorm.DB) *SystemSettingsService {
-	return &SystemSettingsService{db: db}
+	return &SystemSettingsService{
+		db: db,
+		entries: map[string]*settingEntry{
+			cspCacheKey:              {},
+			inputCompressionCacheKey: {},
+		},
+	}
 }
 
-// CustomSystemPrompt returns the cached snapshot (non-blocking). On cold cache
-// or stale snapshot it triggers a singleflight refresh with a strict short
-// timeout; on failure it returns last-known-good + error (fail-open).
-func (s *SystemSettingsService) CustomSystemPrompt(ctx context.Context) (settings.CustomSystemPromptSetting, int64, error) {
-	if cached, ver, ok := s.cached(); ok {
-		return cached, ver, nil
+// cspEntry returns the CSP cache slot. The entries map is populated once in
+// the constructor, so the lookup never misses; the helper exists so callers
+// (and tests) don't sprinkle the string literal across the file.
+func (s *SystemSettingsService) cspEntry() *settingEntry { return s.entries[cspCacheKey] }
+
+// inputCompressionEntry returns the input-compression cache slot.
+func (s *SystemSettingsService) inputCompressionEntry() *settingEntry {
+	return s.entries[inputCompressionCacheKey]
+}
+
+// readCached is the shared hot-path read for any registered setting. It serves
+// fresh cache, else serves last-known-good during a failure window (cold
+// start only), else singleflights one refresh and returns the cache's current
+// snapshot. failOpenZero is the value returned on cold-start failure (CSP:
+// the zero CustomSystemPromptSetting; input compression: false).
+func (s *SystemSettingsService) readCached(
+	ctx context.Context,
+	key string,
+	entry *settingEntry,
+	reader settingReader,
+	failOpenZero any,
+) (any, int64, error) {
+	if v, ver, ok := s.cachedEntry(entry); ok {
+		return v, ver, nil
 	}
-	// Negative cache on cold start (no snapshot yet): if a recent refresh
-	// failed, serve zero/disabled silently instead of re-querying the DB on
-	// every call. CSP is best-effort guidance, not a security gate.
-	if s.inFailureWindow() {
-		return settings.CustomSystemPromptSetting{}, 0, nil
+	// Cold-cache negative TTL: if a recent refresh failed and we have no
+	// snapshot yet, serve the zero value silently instead of re-querying the
+	// DB on every call. (When a snapshot exists, cachedEntry already served it
+	// through the failure window above.)
+	if s.inFailureWindow(entry) {
+		return failOpenZero, 0, nil
 	}
-	// singleflight collapses concurrent refreshes into one DB query.
-	v, err, _ := s.refreshGroup.Do("csp", func() (interface{}, error) {
-		return s.refresh(ctx)
+	// singleflight collapses concurrent refreshes into one DB query per key.
+	v, err, _ := s.refreshGroup.Do(key, func() (interface{}, error) {
+		return s.refreshEntry(ctx, entry, reader)
 	})
 	if err != nil {
-		// fail-open: return last-known-good (or zero) + error
+		// fail-open: serve last-known-good (or the zero value on cold cache) + error
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return s.snapshot, s.version, err
+		if entry.hasSnapshot {
+			return entry.snapshot, entry.version, err
+		}
+		return failOpenZero, 0, err
 	}
-	snap := v.(systemSettingsSnapshot)
-	return snap.Setting, snap.Version, nil
+	snap := v.(cacheSnapshot)
+	return snap.value, snap.version, nil
 }
 
-// systemSettingsSnapshot is the refresh result carried through singleflight.
-type systemSettingsSnapshot struct {
-	Setting settings.CustomSystemPromptSetting
-	Version int64
-}
-
-// inFailureWindow reports whether a recent refresh failed and the
-// negative-TTL cooldown is still active.
-func (s *SystemSettingsService) inFailureWindow() bool {
+// cachedEntry returns the cached snapshot when it is still considered fresh.
+// A snapshot is fresh when refreshExpiry hasn't passed, OR when we're inside a
+// failure window (negative TTL — keep serving last-known-good instead of
+// re-querying the DB while it's down).
+func (s *SystemSettingsService) cachedEntry(entry *settingEntry) (any, int64, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return time.Now().Before(s.refreshFailureUntil)
-}
-
-func (s *SystemSettingsService) cached() (settings.CustomSystemPromptSetting, int64, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if !s.hasSnapshot {
-		return settings.CustomSystemPromptSetting{}, 0, false
+	if !entry.hasSnapshot {
+		return nil, 0, false
 	}
 	now := time.Now()
-	if now.Before(s.refreshExpiry) {
-		return s.snapshot, s.version, true
+	if now.Before(entry.refreshExpiry) {
+		return entry.snapshot, entry.version, true
 	}
-	// Negative TTL: a recent refresh failed — keep serving last-known-good
-	// instead of re-querying the DB on every request.
-	if now.Before(s.refreshFailureUntil) {
-		return s.snapshot, s.version, true
+	if now.Before(entry.refreshFailureUntil) {
+		return entry.snapshot, entry.version, true
 	}
-	return settings.CustomSystemPromptSetting{}, 0, false
+	return nil, 0, false
 }
 
-func (s *SystemSettingsService) refresh(ctx context.Context) (systemSettingsSnapshot, error) {
-	// WithoutCancel detaches the caller's cancellation signal so a single client
-	// disconnect does NOT abort the shared singleflight refresh other waiters
-	// depend on. Only refreshTimeout bounds the query.
+// inFailureWindow reports whether a recent refresh failed and the negative-TTL
+// cooldown is still active.
+func (s *SystemSettingsService) inFailureWindow(entry *settingEntry) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return time.Now().Before(entry.refreshFailureUntil)
+}
+
+// refreshEntry runs the authoritative DB read under a detached context with
+// refreshTimeout, then publishes (monotonically) and returns the cache's
+// CURRENT snapshot — NOT the value just read. See settingEntry invariant 1.
+func (s *SystemSettingsService) refreshEntry(ctx context.Context, entry *settingEntry, reader settingReader) (cacheSnapshot, error) {
+	// WithoutCancel detaches the caller's cancellation signal so a single
+	// client disconnect does NOT abort the shared singleflight refresh other
+	// waiters depend on. Only refreshTimeout bounds the query.
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 	defer cancel()
-	// Bind the query to rctx so the refreshTimeout actually interrupts the DB
-	// call (modernc/sqlite honors ctx cancellation). This keeps the read path
-	// non-blocking even on a slow/hung DB.
-	setting, ver, err := repository.GetCustomSystemPrompt(s.db.WithContext(rctx))
+	val, ver, err := reader(rctx)
 	if err != nil {
 		// Negative TTL: record the failure so subsequent reads serve
 		// last-known-good (or zero) without re-querying the DB.
 		s.mu.Lock()
-		s.refreshFailureUntil = time.Now().Add(refreshFailureTTL)
+		entry.refreshFailureUntil = time.Now().Add(refreshFailureTTL)
 		s.mu.Unlock()
-		return systemSettingsSnapshot{}, err
+		return cacheSnapshot{}, err
 	}
-	s.publishIfNewer(setting, ver)
+	s.publishIfNewer(entry, val, ver)
 	// Return the cache's current snapshot, not the value we just read: if a
-	// concurrent PUT committed and published a newer version between our DB
+	// concurrent Update committed and published a newer version between our DB
 	// read and here, publishIfNewer rejected ours and the cache holds the
 	// newer one. Returning the stale read to singleflight waiters would serve
-	// a superseded prompt despite a completed update.
+	// a superseded value despite a completed update.
 	s.mu.RLock()
-	cur := systemSettingsSnapshot{Setting: s.snapshot, Version: s.version}
+	cur := cacheSnapshot{value: entry.snapshot, version: entry.version}
 	s.mu.RUnlock()
 	return cur, nil
 }
 
 // publishIfNewer writes the cache only when ver >= current version (monotonic).
-// This defeats the "PUT A committed N+1, paused; PUT B published N+2; A then
-// published N+1" rollback.
-func (s *SystemSettingsService) publishIfNewer(setting settings.CustomSystemPromptSetting, ver int64) {
+// This defeats the "Update A committed N+1, paused; Update B published N+2; A
+// then published N+1" rollback. A successful DB read also clears the failure
+// window regardless of the monotonicity check below.
+func (s *SystemSettingsService) publishIfNewer(entry *settingEntry, val any, ver int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// A successful DB read means the DB is healthy — clear the failure
 	// window regardless of the version-monotonicity check below.
-	s.refreshFailureUntil = time.Time{}
-	if s.hasSnapshot && ver < s.version {
+	entry.refreshFailureUntil = time.Time{}
+	if entry.hasSnapshot && ver < entry.version {
 		return
 	}
-	s.snapshot = setting
-	s.version = ver
-	s.hasSnapshot = true
-	s.refreshExpiry = time.Now().Add(cacheTTL)
+	entry.snapshot = val
+	entry.version = ver
+	entry.hasSnapshot = true
+	entry.refreshExpiry = time.Now().Add(cacheTTL)
+}
+
+// --- Custom system prompt ---------------------------------------------------
+
+// CustomSystemPrompt returns the cached snapshot (non-blocking). On cold cache
+// or stale snapshot it triggers a singleflight refresh with a strict short
+// timeout; on failure it returns last-known-good + error (fail-open).
+func (s *SystemSettingsService) CustomSystemPrompt(ctx context.Context) (settings.CustomSystemPromptSetting, int64, error) {
+	v, ver, err := s.readCached(ctx, cspCacheKey, s.cspEntry(),
+		func(ctx context.Context) (any, int64, error) {
+			setting, v, e := repository.GetCustomSystemPrompt(s.db.WithContext(ctx))
+			return setting, v, e
+		},
+		settings.CustomSystemPromptSetting{})
+	if err != nil {
+		return v.(settings.CustomSystemPromptSetting), ver, err
+	}
+	return v.(settings.CustomSystemPromptSetting), ver, nil
 }
 
 // GetCustomSystemPrompt is the authoritative read for the handler GET: it
@@ -188,6 +274,43 @@ func (s *SystemSettingsService) UpdateCustomSystemPrompt(ctx context.Context, ex
 	if err != nil {
 		return settings.CustomSystemPromptSetting{}, 0, err
 	}
-	s.publishIfNewer(setting, ver)
+	s.publishIfNewer(s.cspEntry(), setting, ver)
 	return setting, ver, nil
+}
+
+// --- Input compression switch -----------------------------------------------
+
+// GetInputCompression returns the cached switch (non-blocking). On cold cache
+// or stale snapshot it triggers a singleflight refresh with a strict short
+// timeout; on failure it returns last-known-good + error (fail-open). The
+// gateway hot path uses this so the DB is never queried per request.
+func (s *SystemSettingsService) GetInputCompression(ctx context.Context) (bool, int64, error) {
+	v, ver, err := s.readCached(ctx, inputCompressionCacheKey, s.inputCompressionEntry(),
+		func(ctx context.Context) (any, int64, error) {
+			enabled, v, e := repository.GetInputCompression(s.db.WithContext(ctx))
+			return enabled, v, e
+		},
+		false)
+	return v.(bool), ver, err
+}
+
+// GetInputCompressionForHandler is the authoritative read for the handler GET:
+// it bypasses the cache and reads straight from the DB so the admin always
+// sees authoritative state. Bound to the request ctx so a client disconnect
+// cancels the in-flight DB call.
+func (s *SystemSettingsService) GetInputCompressionForHandler(ctx context.Context) (bool, int64, error) {
+	return repository.GetInputCompression(s.db.WithContext(ctx))
+}
+
+// UpdateInputCompression CAS-updates the single row, then atomically publishes
+// the committed value so subsequent gateway reads see it without an invalidate
+// round-trip. Returns the new version so the PUT response can hand the fresh
+// version to the caller.
+func (s *SystemSettingsService) UpdateInputCompression(ctx context.Context, expectedVersion int64, enabled bool) (bool, int64, error) {
+	got, ver, err := repository.UpdateInputCompression(s.db.WithContext(ctx), expectedVersion, enabled)
+	if err != nil {
+		return false, 0, err
+	}
+	s.publishIfNewer(s.inputCompressionEntry(), got, ver)
+	return got, ver, nil
 }

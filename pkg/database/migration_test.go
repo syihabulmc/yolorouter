@@ -79,9 +79,10 @@ func TestGetCurrentVersionOnFreshSQLiteDB(t *testing.T) {
 	// 00010_request_logs_cache_tokens.sql + 00011_create_request_log_bodies.sql +
 	// 00012_provider_protocol_endpoints.sql + 00013_request_logs_cache_savings.sql +
 	// 00014_api_keys_allow_all_models.sql +
-	// 00015_system_settings_and_custom_system_prompt.sql).
-	if version != 15 {
-		t.Fatalf("expected version 15 after all migrations, got %d", version)
+	// 00015_system_settings_and_custom_system_prompt.sql +
+	// 00016_input_compression.sql).
+	if version != 16 {
+		t.Fatalf("expected version 16 after all migrations, got %d", version)
 	}
 }
 
@@ -239,5 +240,136 @@ func TestMigration00015SystemSettingsAndCSPColumns(t *testing.T) {
 	}
 	if cspEnabled != 0 || cspOverride != 0 || cspText != "" {
 		t.Fatalf("csp columns default not false/false/empty: enabled=%d override=%d text=%q", cspEnabled, cspOverride, cspText)
+	}
+}
+
+// TestMigration00016InputCompression verifies that migration 00016 seeds the
+// input_compression_enabled row in system_settings, adds the two per-key
+// override columns to api_keys, the four savings columns to request_logs,
+// and the debug body column to request_log_bodies — all with safe defaults.
+// Rolling back to version 15 must drop every new column and delete the seed row.
+func TestMigration00016InputCompression(t *testing.T) {
+	db := newMemoryDB(t)
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	// system_settings seed row exists with the off default.
+	var enabledValue string
+	err := db.QueryRow("SELECT value FROM system_settings WHERE key = 'input_compression_enabled'").Scan(&enabledValue)
+	if err != nil {
+		t.Fatalf("seed row input_compression_enabled missing: %v", err)
+	}
+	if enabledValue != "false" {
+		t.Fatalf("input_compression_enabled seed = %q, want false", enabledValue)
+	}
+
+	// api_keys compress columns default to 0 (inherit global default).
+	res, err := db.Exec(`INSERT INTO api_keys (key_hash, key_prefix, status, budget_spent_micros, created_at, updated_at) VALUES ('h2', 'sk-y', 1, 0, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`)
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	apiKeyID, _ := res.LastInsertId()
+
+	var compressEnabled int
+	var compressOverride int
+	err = db.QueryRow("SELECT compress_enabled, compress_enabled_override FROM api_keys WHERE id = ?", apiKeyID).Scan(&compressEnabled, &compressOverride)
+	if err != nil {
+		t.Fatalf("read api key compress columns: %v", err)
+	}
+	if compressEnabled != 0 || compressOverride != 0 {
+		t.Fatalf("api_keys compress defaults not 0/0: enabled=%d override=%d", compressEnabled, compressOverride)
+	}
+
+	// request_logs compress columns default to 0/0/empty/empty.
+	rlRes, err := db.Exec(`INSERT INTO request_logs (request_id, model_name, status_code, created_at) VALUES ('req-1', 'm', 200, '2026-01-01 00:00:00')`)
+	if err != nil {
+		t.Fatalf("create request log: %v", err)
+	}
+	rlID, _ := rlRes.LastInsertId()
+
+	var tokensSaved int
+	var costSaved int64
+	var skipReason string
+	var compressors string
+	err = db.QueryRow("SELECT compress_estimated_tokens_saved, compress_estimated_cost_saved_micros, compress_skip_reason, compressors_applied FROM request_logs WHERE id = ?", rlID).Scan(&tokensSaved, &costSaved, &skipReason, &compressors)
+	if err != nil {
+		t.Fatalf("read request_logs compress columns: %v", err)
+	}
+	if tokensSaved != 0 || costSaved != 0 || skipReason != "" || compressors != "" {
+		t.Fatalf("request_logs compress defaults not 0/0/empty/empty: tokens=%d cost=%d skip=%q compressors=%q", tokensSaved, costSaved, skipReason, compressors)
+	}
+
+	// request_log_bodies compressed_request_body defaults to empty string.
+	rlbRes, err := db.Exec(`INSERT INTO request_log_bodies (request_id, created_at) VALUES ('req-1', '2026-01-01 00:00:00')`)
+	if err != nil {
+		t.Fatalf("create request log body: %v", err)
+	}
+	rlbID, _ := rlbRes.LastInsertId()
+
+	var compressedBody string
+	err = db.QueryRow("SELECT compressed_request_body FROM request_log_bodies WHERE id = ?", rlbID).Scan(&compressedBody)
+	if err != nil {
+		t.Fatalf("read request_log_bodies compress column: %v", err)
+	}
+	if compressedBody != "" {
+		t.Fatalf("compressed_request_body default = %q, want empty", compressedBody)
+	}
+
+	// Rolling back migration 00016 must drop every new column and remove the
+	// seed row.
+	if err := RollbackTo(db, "sqlite", migrations.SQLiteFS, "sqlite", 15); err != nil {
+		t.Fatalf("RollbackTo(15) failed: %v", err)
+	}
+
+	// Seed row must be gone.
+	var remaining string
+	err = db.QueryRow("SELECT value FROM system_settings WHERE key = 'input_compression_enabled'").Scan(&remaining)
+	if err == nil {
+		t.Fatalf("input_compression_enabled seed row still present after rollback: value=%q", remaining)
+	}
+
+	// Helper: scan one column name from a table and return whether it exists.
+	hasColumn := func(table, col string) bool {
+		t.Helper()
+		rows, err := db.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			t.Fatalf("PRAGMA table_info(%s): %v", table, err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var (
+				cid        int
+				name       string
+				colType    string
+				notNull    int
+				defaultVal sql.NullString
+				pk         int
+			)
+			if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultVal, &pk); err != nil {
+				t.Fatalf("scan table_info(%s) row: %v", table, err)
+			}
+			if name == col {
+				return true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate table_info(%s) rows: %v", table, err)
+		}
+		return false
+	}
+
+	for _, c := range []struct{ table, col string }{
+		{"api_keys", "compress_enabled"},
+		{"api_keys", "compress_enabled_override"},
+		{"request_logs", "compress_estimated_tokens_saved"},
+		{"request_logs", "compress_estimated_cost_saved_micros"},
+		{"request_logs", "compress_skip_reason"},
+		{"request_logs", "compressors_applied"},
+		{"request_log_bodies", "compressed_request_body"},
+	} {
+		if hasColumn(c.table, c.col) {
+			t.Fatalf("expected %s.%s to be dropped after rollback to 15", c.table, c.col)
+		}
 	}
 }

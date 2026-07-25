@@ -112,6 +112,7 @@ import CostBreakdownChart from '../../components/costs/CostBreakdownChart.vue'
 import TopSpendersChart from '../../components/costs/TopSpendersChart.vue'
 import BudgetConsumptionTable from '../../components/costs/BudgetConsumptionTable.vue'
 import { formatMicros } from '../../utils/money'
+import { initialLast7DaysRange } from '../../utils/timeRange'
 import { displayMessage } from '../../api/client'
 import { getBudgetRows, getCostStats, type BudgetRow, type CostStats } from '../../api/costs'
 import type { AnalyticsFilter } from '../../api/analytics'
@@ -122,14 +123,7 @@ const message = useMessage()
 // === Time range (drives the window-scoped modules only) ===================
 
 const preset = ref<RangePreset>('last7d')
-const initialRange = (): TimeRange => {
-  const now = new Date()
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0)
-  const start = new Date(end)
-  start.setDate(start.getDate() - 7)
-  return { start: start.toISOString(), end: end.toISOString() }
-}
-const timeRange = ref<TimeRange>(initialRange())
+const timeRange = ref<TimeRange>(initialLast7DaysRange())
 
 function onPresetChange(v: RangePreset) {
   preset.value = v
@@ -227,44 +221,13 @@ watch(
 }
 
 .metric-row {
-  display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: var(--space-4);
 }
 
-.metric {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: var(--space-4);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-lg);
-}
-
-.metric__label {
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-}
-
-.metric__value {
-  font-size: 1.5rem;
-  font-weight: 800;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-text);
-}
 .metric__value--negative {
   color: var(--color-danger, #d03050);
 }
 
-.metric__sub {
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-}
 .metric__sub--split {
   display: flex;
   flex-wrap: wrap;

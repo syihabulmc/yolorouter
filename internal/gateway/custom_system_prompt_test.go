@@ -30,7 +30,7 @@ func TestIsChatEndpointAllowlist(t *testing.T) {
 }
 
 func TestApplyCustomSystemPromptDisabledNoOp(t *testing.T) {
-	rc := &RelayContext{IngressPath: "/v1/chat/completions"}
+	rc := &RelayContext{IngressPath: "/v1/chat/completions", IsChatEndpoint: true}
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
 	out := applyCustomSystemPrompt(rc, protocols.ProtocolOpenAI, body)
 	if string(out) != string(body) {
@@ -41,6 +41,7 @@ func TestApplyCustomSystemPromptDisabledNoOp(t *testing.T) {
 func TestApplyCustomSystemPromptChatAppendsToSystem(t *testing.T) {
 	rc := &RelayContext{
 		IngressPath:               "/v1/chat/completions",
+		IsChatEndpoint:            true,
 		CustomSystemPromptEnabled: true,
 		CustomSystemPrompt:        "BE CONCISE",
 	}
@@ -54,6 +55,7 @@ func TestApplyCustomSystemPromptChatAppendsToSystem(t *testing.T) {
 func TestApplyCustomSystemPromptCountTokensSkipped(t *testing.T) {
 	rc := &RelayContext{
 		IngressPath:               "/v1beta/models/gemini-pro:countTokens",
+		IsChatEndpoint:            false,
 		CustomSystemPromptEnabled: true,
 		CustomSystemPrompt:        "X",
 	}
@@ -67,6 +69,7 @@ func TestApplyCustomSystemPromptCountTokensSkipped(t *testing.T) {
 func TestApplyCustomSystemPromptMalformedBodyUnchanged(t *testing.T) {
 	rc := &RelayContext{
 		IngressPath:               "/v1/chat/completions",
+		IsChatEndpoint:            true,
 		CustomSystemPromptEnabled: true,
 		CustomSystemPrompt:        "X",
 	}

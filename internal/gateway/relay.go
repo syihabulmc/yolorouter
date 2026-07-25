@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/yolorouter/yolorouter/internal/compress"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
@@ -163,6 +164,9 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// protocol) is the only thing that distinguishes generateContent from
 	// countTokens / embedContent.
 	rc.IngressPath = c.Request.URL.Path
+	// Compute once so the compression gate and the CSP injection gate read
+	// the bool instead of recomputing IsChatEndpoint(path) per call site.
+	rc.IsChatEndpoint = IsChatEndpoint(rc.IngressPath)
 	// Put rc on the gin context so WriteOpenAIError*
 	// (called from many exit paths below, and potentially from further down
 	// the chain) can stash the local error JSON into rc.ResponseBody without
@@ -319,6 +323,23 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 		rc.CustomSystemPrompt = g.Text
 	}
 
+	// Two-level resolve for input compression, mirroring the custom system
+	// prompt resolve above: a per-key override wins outright (short-circuit
+	// so a stalled settings read can't block an override key); otherwise fall
+	// through to the global cached value. On global read error leave
+	// compression disabled — fail-open, never block the request on a settings
+	// hiccup.
+	if apiKey.CompressEnabledOverride {
+		rc.CompressEnabled = apiKey.CompressEnabled
+	} else if s.settingsProvider != nil {
+		enabled, _, err := s.settingsProvider.GetInputCompression(c.Request.Context())
+		if err != nil {
+			logger.Warn("gateway: input compression read failed",
+				zap.String("request_id", rc.RequestID), zap.Error(err))
+		}
+		rc.CompressEnabled = enabled
+	}
+
 	// Step 4: model exists and is enabled. A model disabled by an admin
 	// must not route even if its candidates are still enabled.
 	m, err := repository.FindModelByName(s.db, meta.Model)
@@ -374,6 +395,27 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body: "+err.Error(), rc.RequestID)
 		s.finalize(rc, http.StatusBadRequest, "invalid_request: "+err.Error(), start)
 		return
+	}
+
+	// Run input compression on the validated caller body when enabled and the
+	// ingress path is a chat endpoint. Compression mutates only user/tool
+	// content text — the system field CSP injection later appends to is
+	// orthogonal, so running compress first is safe regardless of whether CSP
+	// injection subsequently runs inside buildUpstreamBody. A skipped result
+	// (no live zone, timeout, parse error, ...) leaves the body untouched; the
+	// engine also recovers panics internally and returns the original body.
+	if rc.CompressEnabled && rc.IsChatEndpoint {
+		opts := compress.DefaultOptions()
+		cctx, cancel := context.WithTimeout(c.Request.Context(), opts.Timeout)
+		newBody, cres := compressByIngress(ingress, cctx, body, opts)
+		cancel()
+		if cres.Skipped {
+			rc.CompressSkipReason = string(cres.SkipReason)
+		} else {
+			rc.RequestBodyCompressed = newBody
+			rc.CompressEstimatedTokensSaved = cres.EstimatedTokensSaved
+			rc.CompressorsApplied = cres.CompressorsApplied
+		}
 	}
 
 	// Step 7: candidates filtered by requested capability.
@@ -771,4 +813,22 @@ func makeAttempt(cand model.ModelCandidate, provider *model.Provider, key *model
 		rec.KeyLabel = key.Label
 	}
 	return rec
+}
+
+// compressByIngress dispatches the body to the protocol-specific compress entry
+// point. An unrecognized protocol returns the body unchanged with a no-op
+// result (Skipped=true) so an unknown ingress never breaks the relay.
+func compressByIngress(ingress protocols.ProtocolID, ctx context.Context, body []byte, opts compress.CompressOptions) ([]byte, compress.CompressResult) {
+	switch ingress {
+	case protocols.ProtocolClaude:
+		return compress.CompressClaude(ctx, body, opts)
+	case protocols.ProtocolOpenAI:
+		return compress.CompressChat(ctx, body, opts)
+	case protocols.ProtocolResponses:
+		return compress.CompressResponses(ctx, body, opts)
+	case protocols.ProtocolGemini:
+		return compress.CompressGemini(ctx, body, opts)
+	default:
+		return body, compress.CompressResult{Skipped: true, SkipReason: compress.SkipReasonNoLiveZone}
+	}
 }

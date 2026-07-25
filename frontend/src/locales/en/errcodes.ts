@@ -31,4 +31,6 @@ export const errcodes: Record<number, string> = {
   11011: 'Custom system prompt must not be empty when enabled',
   11012: 'Custom system prompt was modified concurrently, please refresh and retry',
   11013: 'This API key was modified concurrently, please refresh and retry',
+  11014: 'The input compression setting was modified concurrently, please refresh and retry',
+  11015: 'compress_enabled must be set when compress_enabled_override is true',
 }

@@ -22,6 +22,11 @@ export interface APIKey {
   custom_system_prompt_enabled_override: boolean
   custom_system_prompt_enabled: boolean
   custom_system_prompt: string
+  // Per-key input-compression override. Same shape as CSP: override=false
+  // means inherit the global setting; override=true means the key uses its
+  // own compress_enabled flag.
+  compress_enabled_override: boolean
+  compress_enabled: boolean
   created_at: string
   updated_at: string
 }
@@ -89,6 +94,10 @@ export interface UpdateAPIKeyInput {
   custom_system_prompt_enabled_override?: boolean
   custom_system_prompt_enabled?: boolean
   custom_system_prompt?: string
+  // Per-key input-compression override PATCH fields. Same CAS / override
+  // semantics as CSP — see APIKey above.
+  compress_enabled_override?: boolean
+  compress_enabled?: boolean
   expected_updated_at?: string
 }
 

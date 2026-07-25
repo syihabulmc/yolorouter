@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,7 @@ func newAnalyticsTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	admin.GET("/analytics/overview", GetAnalyticsOverview(svc))
 	admin.GET("/analytics/report", GetAnalyticsReport(svc))
 	admin.GET("/analytics/export", ExportAnalyticsCSV(svc))
+	admin.GET("/analytics/compress-stats", GetCompressStats(svc))
 	return r, db
 }
 
@@ -685,6 +687,619 @@ func TestExportAnalyticsCSVRejectsUnknownDimension(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// === Compress stats ======================================================
+
+// compressStatsEnvelop mirrors the response envelope for GetCompressStats —
+// kept local so the test doesn't need to import the service-level Compress*
+// types. Field names match the JSON tags.
+type compressStatsEnvelop struct {
+	Totals struct {
+		TotalCalls           int64 `json:"total_calls"`
+		CompressedCalls      int64 `json:"compressed_calls"`
+		TokensSaved          int64 `json:"tokens_saved"`
+		CostSavedMicros      int64 `json:"cost_saved_micros"`
+		TotalEstimatedTokens int64 `json:"total_estimated_tokens"`
+	} `json:"totals"`
+	SkipReasonBreakdown []struct {
+		SkipReason string `json:"skip_reason"`
+		Calls      int64  `json:"calls"`
+	} `json:"skip_reason_breakdown"`
+	TopAPIKeys []struct {
+		APIKeyID    *uint  `json:"api_key_id"`
+		OwnerLabel  string `json:"owner_label"`
+		Calls       int64  `json:"calls"`
+		TokensSaved int64  `json:"tokens_saved"`
+	} `json:"top_api_keys"`
+	TopModels []struct {
+		ModelName       string `json:"model_name"`
+		TokensSaved     int64  `json:"tokens_saved"`
+		CostSavedMicros int64  `json:"cost_saved_micros"`
+		CompressedCalls int64  `json:"compressed_calls"`
+		TotalCalls      int64  `json:"total_calls"`
+	} `json:"top_models"`
+	TopProviders []struct {
+		ProviderID      *uint  `json:"provider_id"`
+		ProviderName    string `json:"provider_name"`
+		TokensSaved     int64  `json:"tokens_saved"`
+		CostSavedMicros int64  `json:"cost_saved_micros"`
+		CompressedCalls int64  `json:"compressed_calls"`
+		TotalCalls      int64  `json:"total_calls"`
+	} `json:"top_providers"`
+	CompressorHits []struct {
+		Name string `json:"name"`
+		Hits int64  `json:"hits"`
+	} `json:"compressor_hits"`
+	DailySeries []struct {
+		Bucket          string `json:"bucket"`
+		TokensSaved     int64  `json:"tokens_saved"`
+		CostSavedMicros int64  `json:"cost_saved_micros"`
+		CompressedCalls int64  `json:"compressed_calls"`
+	} `json:"daily_series"`
+}
+
+// doCompressStats is a tiny helper: hits the endpoint, unmarshals the
+// envelope, fails the test on any non-200 or unmarshal error.
+func doCompressStats(t *testing.T, r *gin.Engine, query string) compressStatsEnvelop {
+	t.Helper()
+	path := "/api/admin/analytics/compress-stats"
+	if query != "" {
+		path += "?" + query
+	}
+	w, _ := doJSON(t, r, http.MethodGet, path, nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Code int                  `json:"code"`
+		Data compressStatsEnvelop `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return env.Data
+}
+
+// TestGetCompressStatsAggregatesSeededRows exercises the full roll-up:
+// totals, skip-reason breakdown, Top-N api keys, compressor-hit counting
+// (the "diff,gotest,diff" row now counts once per compressor name — the
+// new semantics count ROWS-that-used-the-compressor, not total invocations),
+// and the daily series (now a single GROUP BY query with gap-fill).
+func TestGetCompressStatsAggregatesSeededRows(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+
+	// Seed two api_keys so the Top-N bucket resolves owner_label.
+	key1 := &model.APIKey{OwnerLabel: "alice", KeyHash: "x", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
+	key2 := &model.APIKey{OwnerLabel: "bob", KeyHash: "y", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
+	if err := db.Create(key1).Error; err != nil {
+		t.Fatalf("seed api_key 1: %v", err)
+	}
+	if err := db.Create(key2).Error; err != nil {
+		t.Fatalf("seed api_key 2: %v", err)
+	}
+	// Seed two providers so TopProviders resolves provider_name.
+	prov1 := seedProvider(t, db, "openai-main")
+	prov2 := seedProvider(t, db, "anthropic-main")
+
+	now := time.Now().UTC()
+	day3 := now.Add(-3 * 24 * time.Hour)
+
+	// Row 1 (alice, gpt-4o-mini, openai, compressed, diff+gotest+diff): 100 tokens, 10 cost.
+	seedRequestLog(t, db, "c1", now, func(r *model.RequestLog) {
+		r.APIKeyID = &key1.ID
+		r.ModelName = "gpt-4o-mini"
+		r.ProviderID = &prov1
+		r.InputTokens = 500
+		r.CompressEstimatedTokensSaved = 100
+		r.CompressEstimatedCostSavedMicros = 10
+		r.CompressSkipReason = ""
+		r.CompressorsApplied = "diff,gotest,diff"
+	})
+	// Row 2 (bob, claude-3-haiku, anthropic, compressed, diff): 50 tokens, 5 cost.
+	seedRequestLog(t, db, "c2", now, func(r *model.RequestLog) {
+		r.APIKeyID = &key2.ID
+		r.ModelName = "claude-3-haiku"
+		r.ProviderID = &prov2
+		r.InputTokens = 200
+		r.CompressEstimatedTokensSaved = 50
+		r.CompressEstimatedCostSavedMicros = 5
+		r.CompressSkipReason = ""
+		r.CompressorsApplied = "diff"
+	})
+	// Row 3 (alice, gpt-4o-mini, openai, skipped too_small, 0 tokens, no compressors).
+	seedRequestLog(t, db, "c3", now, func(r *model.RequestLog) {
+		r.APIKeyID = &key1.ID
+		r.ModelName = "gpt-4o-mini"
+		r.ProviderID = &prov1
+		r.InputTokens = 5
+		r.CompressSkipReason = "too_small"
+		r.CompressorsApplied = ""
+	})
+	// Row 4 (alice, gpt-4o-mini, openai, 3 days ago, compressed, gotest): 30 tokens, 3 cost.
+	seedRequestLog(t, db, "c4", day3, func(r *model.RequestLog) {
+		r.APIKeyID = &key1.ID
+		r.ModelName = "gpt-4o-mini"
+		r.ProviderID = &prov1
+		r.InputTokens = 100
+		r.CompressEstimatedTokensSaved = 30
+		r.CompressEstimatedCostSavedMicros = 3
+		r.CompressSkipReason = ""
+		r.CompressorsApplied = "gotest"
+	})
+	// Row 5 (bob, claude-3-haiku, anthropic, compression never attempted).
+	// BOTH compress_skip_reason='' AND compressors_applied='' — this is the
+	// regression case that proves compressed_calls is gated on
+	// compressors_applied, not on compress_skip_reason. Counting this row as
+	// compressed would be the overcount bug.
+	seedRequestLog(t, db, "c5", now, func(r *model.RequestLog) {
+		r.APIKeyID = &key2.ID
+		r.ModelName = "claude-3-haiku"
+		r.ProviderID = &prov2
+		r.InputTokens = 50
+	})
+
+	data := doCompressStats(t, r, "")
+
+	// Totals: 5 total calls, 3 compressed (rows 1, 2, 4 — NOT row 5 which
+	// never attempted), tokens 100+50+30=180, cost 10+5+3=18, total
+	// input_tokens 500+200+5+100+50=855.
+	if data.Totals.TotalCalls != 5 {
+		t.Fatalf("TotalCalls = %d, want 5", data.Totals.TotalCalls)
+	}
+	if data.Totals.CompressedCalls != 3 {
+		t.Fatalf("CompressedCalls = %d, want 3 (row 5 must NOT count)", data.Totals.CompressedCalls)
+	}
+	if data.Totals.TokensSaved != 180 {
+		t.Fatalf("TokensSaved = %d, want 180", data.Totals.TokensSaved)
+	}
+	if data.Totals.CostSavedMicros != 18 {
+		t.Fatalf("CostSavedMicros = %d, want 18", data.Totals.CostSavedMicros)
+	}
+	if data.Totals.TotalEstimatedTokens != 855 {
+		t.Fatalf("TotalEstimatedTokens = %d, want 855", data.Totals.TotalEstimatedTokens)
+	}
+
+	// Skip-reason breakdown is gated on rows that ENTERED the compress stage
+	// (compressors_applied != '' OR compress_skip_reason != ''). Row 5 (both
+	// empty — switch off / never attempted) must NOT appear here; the ''
+	// bucket is "entered + succeeded" only (rows 1, 2, 4), and 'too_small' is
+	// row 3 which entered but skipped.
+	if len(data.SkipReasonBreakdown) != 2 {
+		t.Fatalf("SkipReasonBreakdown len = %d, want 2", len(data.SkipReasonBreakdown))
+	}
+	if data.SkipReasonBreakdown[0].SkipReason != "" || data.SkipReasonBreakdown[0].Calls != 3 {
+		t.Fatalf("SkipReasonBreakdown[0] = %+v, want ''/3 (row 5 must NOT appear)", data.SkipReasonBreakdown[0])
+	}
+	if data.SkipReasonBreakdown[1].SkipReason != "too_small" || data.SkipReasonBreakdown[1].Calls != 1 {
+		t.Fatalf("SkipReasonBreakdown[1] = %+v, want too_small/1", data.SkipReasonBreakdown[1])
+	}
+
+	// Top-N api keys by tokens_saved DESC: alice (130 = 100+30), bob (50).
+	if len(data.TopAPIKeys) != 2 {
+		t.Fatalf("TopAPIKeys len = %d, want 2", len(data.TopAPIKeys))
+	}
+	if data.TopAPIKeys[0].OwnerLabel != "alice" || data.TopAPIKeys[0].TokensSaved != 130 {
+		t.Fatalf("TopAPIKeys[0] = %+v, want alice/130", data.TopAPIKeys[0])
+	}
+	if data.TopAPIKeys[1].OwnerLabel != "bob" || data.TopAPIKeys[1].TokensSaved != 50 {
+		t.Fatalf("TopAPIKeys[1] = %+v, want bob/50", data.TopAPIKeys[1])
+	}
+	// Calls per key: alice has 3 rows (c1, c3, c4); bob has 2 (c2, c5).
+	if data.TopAPIKeys[0].Calls != 3 {
+		t.Fatalf("TopAPIKeys[0].Calls = %d, want 3", data.TopAPIKeys[0].Calls)
+	}
+	if data.TopAPIKeys[1].Calls != 2 {
+		t.Fatalf("TopAPIKeys[1].Calls = %d, want 2", data.TopAPIKeys[1].Calls)
+	}
+
+	// Top-N models by tokens_saved DESC. Only compressed rows (c1, c2, c4)
+	// participate — c3 (skip) and c5 (never attempted) are excluded by the
+	// compressors_applied != '' gate.
+	// gpt-4o-mini: 100+30=130 tokens, 10+3=13 cost, 2 compressed, 2 total.
+	// claude-3-haiku: 50 tokens, 5 cost, 1 compressed, 1 total.
+	if len(data.TopModels) != 2 {
+		t.Fatalf("TopModels len = %d, want 2", len(data.TopModels))
+	}
+	if data.TopModels[0].ModelName != "gpt-4o-mini" || data.TopModels[0].TokensSaved != 130 {
+		t.Fatalf("TopModels[0] = %+v, want gpt-4o-mini/130", data.TopModels[0])
+	}
+	if data.TopModels[0].CostSavedMicros != 13 || data.TopModels[0].CompressedCalls != 2 || data.TopModels[0].TotalCalls != 2 {
+		t.Fatalf("TopModels[0] = %+v, want cost=13/compressed=2/total=2", data.TopModels[0])
+	}
+	if data.TopModels[1].ModelName != "claude-3-haiku" || data.TopModels[1].TokensSaved != 50 {
+		t.Fatalf("TopModels[1] = %+v, want claude-3-haiku/50", data.TopModels[1])
+	}
+	if data.TopModels[1].CostSavedMicros != 5 || data.TopModels[1].CompressedCalls != 1 || data.TopModels[1].TotalCalls != 1 {
+		t.Fatalf("TopModels[1] = %+v, want cost=5/compressed=1/total=1", data.TopModels[1])
+	}
+
+	// Top-N providers by tokens_saved DESC. Same compressed-only gate.
+	// openai-main: 100+30=130 tokens, 10+3=13 cost, 2 compressed, 2 total.
+	// anthropic-main: 50 tokens, 5 cost, 1 compressed, 1 total.
+	if len(data.TopProviders) != 2 {
+		t.Fatalf("TopProviders len = %d, want 2", len(data.TopProviders))
+	}
+	if data.TopProviders[0].ProviderName != "openai-main" || data.TopProviders[0].TokensSaved != 130 {
+		t.Fatalf("TopProviders[0] = %+v, want openai-main/130", data.TopProviders[0])
+	}
+	if data.TopProviders[0].CostSavedMicros != 13 || data.TopProviders[0].CompressedCalls != 2 || data.TopProviders[0].TotalCalls != 2 {
+		t.Fatalf("TopProviders[0] = %+v, want cost=13/compressed=2/total=2", data.TopProviders[0])
+	}
+	if data.TopProviders[1].ProviderName != "anthropic-main" || data.TopProviders[1].TokensSaved != 50 {
+		t.Fatalf("TopProviders[1] = %+v, want anthropic-main/50", data.TopProviders[1])
+	}
+	if data.TopProviders[1].CostSavedMicros != 5 || data.TopProviders[1].CompressedCalls != 1 || data.TopProviders[1].TotalCalls != 1 {
+		t.Fatalf("TopProviders[1] = %+v, want cost=5/compressed=1/total=1", data.TopProviders[1])
+	}
+
+	// Compressor hits: counts ROWS that used each compressor (not total
+	// invocations). c1 "diff,gotest,diff" counts once for diff + once for
+	// gotest; c2 "diff" counts once for diff; c4 "gotest" counts once for
+	// gotest. So diff=2 (c1+c2), gotest=2 (c1+c4), log=0, grep=0.
+	// Zero-hit entries are retained (all four known compressors appear).
+	// Ordered by hits DESC, name ASC: diff(2), gotest(2), grep(0), log(0).
+	if len(data.CompressorHits) != 4 {
+		t.Fatalf("CompressorHits len = %d, want 4 (all known compressors)", len(data.CompressorHits))
+	}
+	if data.CompressorHits[0].Name != "diff" || data.CompressorHits[0].Hits != 2 {
+		t.Fatalf("CompressorHits[0] = %+v, want diff/2 (rows c1+c2)", data.CompressorHits[0])
+	}
+	if data.CompressorHits[1].Name != "gotest" || data.CompressorHits[1].Hits != 2 {
+		t.Fatalf("CompressorHits[1] = %+v, want gotest/2 (rows c1+c4)", data.CompressorHits[1])
+	}
+	if data.CompressorHits[2].Name != "grep" || data.CompressorHits[2].Hits != 0 {
+		t.Fatalf("CompressorHits[2] = %+v, want grep/0", data.CompressorHits[2])
+	}
+	if data.CompressorHits[3].Name != "log" || data.CompressorHits[3].Hits != 0 {
+		t.Fatalf("CompressorHits[3] = %+v, want log/0", data.CompressorHits[3])
+	}
+
+	// Daily series: at least 4 days (gap-filled between day3 and now).
+	// Total tokens across the series = 180; total compressed_calls = 3.
+	if len(data.DailySeries) < 4 {
+		t.Fatalf("DailySeries len = %d, want >= 4 (gap-fill)", len(data.DailySeries))
+	}
+	var seriesTokens int64
+	var seriesCalls int64
+	for _, row := range data.DailySeries {
+		seriesTokens += row.TokensSaved
+		seriesCalls += row.CompressedCalls
+	}
+	if seriesTokens != 180 {
+		t.Fatalf("series TokensSaved sum = %d, want 180", seriesTokens)
+	}
+	if seriesCalls != 3 {
+		t.Fatalf("series CompressedCalls sum = %d, want 3", seriesCalls)
+	}
+	// Newest-first ordering (today at index 0).
+	if data.DailySeries[0].Bucket == "" {
+		t.Fatalf("DailySeries[0].Bucket empty; rows: %+v", data.DailySeries)
+	}
+}
+
+// TestGetCompressStatsEmptyReturnsEmptyArrays verifies that a filter that
+// matches zero rows produces empty arrays (not JSON null) for every slice
+// field — the contract the frontend relies on for .map / .length.
+func TestGetCompressStatsEmptyReturnsEmptyArrays(t *testing.T) {
+	r, _ := newAnalyticsTestRouter(t)
+	// No rows seeded; the default 7-day window still matches nothing.
+	data := doCompressStats(t, r, "")
+
+	if data.SkipReasonBreakdown == nil {
+		t.Fatalf("SkipReasonBreakdown = nil, want empty slice")
+	}
+	if len(data.SkipReasonBreakdown) != 0 {
+		t.Fatalf("SkipReasonBreakdown len = %d, want 0", len(data.SkipReasonBreakdown))
+	}
+	if data.TopAPIKeys == nil {
+		t.Fatalf("TopAPIKeys = nil, want empty slice")
+	}
+	if len(data.TopAPIKeys) != 0 {
+		t.Fatalf("TopAPIKeys len = %d, want 0", len(data.TopAPIKeys))
+	}
+	if data.TopModels == nil {
+		t.Fatalf("TopModels = nil, want empty slice")
+	}
+	if len(data.TopModels) != 0 {
+		t.Fatalf("TopModels len = %d, want 0", len(data.TopModels))
+	}
+	if data.TopProviders == nil {
+		t.Fatalf("TopProviders = nil, want empty slice")
+	}
+	if len(data.TopProviders) != 0 {
+		t.Fatalf("TopProviders len = %d, want 0", len(data.TopProviders))
+	}
+	if data.CompressorHits == nil {
+		t.Fatalf("CompressorHits = nil, want slice")
+	}
+	// CompressorHits now always returns the four known compressors (zero-hit
+	// entries retained) so the UI can show which compressors exist even when
+	// they haven't fired.
+	if len(data.CompressorHits) != 4 {
+		t.Fatalf("CompressorHits len = %d, want 4 (all known, zero-hit)", len(data.CompressorHits))
+	}
+	for _, ch := range data.CompressorHits {
+		if ch.Hits != 0 {
+			t.Fatalf("CompressorHits = %+v, want all zero", data.CompressorHits)
+		}
+	}
+	if data.DailySeries == nil {
+		t.Fatalf("DailySeries = nil, want empty slice")
+	}
+	// DailySeries is still gap-filled (7 days of zeros by default), so it
+	// isn't empty — but it must be a non-nil slice.
+	if len(data.DailySeries) == 0 {
+		t.Fatalf("DailySeries len = 0, want gap-filled days")
+	}
+	// Totals is zero-valued but not nil (struct value, never nil).
+	if data.Totals.TotalCalls != 0 || data.Totals.TokensSaved != 0 {
+		t.Fatalf("Totals = %+v, want all zero", data.Totals)
+	}
+}
+
+// TestGetCompressStatsRespectsAPIKeyFilter verifies the shared filter shape
+// propagates to every sub-query (totals, skip-reasons, Top-N, compressors,
+// daily). An api_key_id filter that matches one key should yield that key's
+// rows only.
+func TestGetCompressStatsRespectsAPIKeyFilter(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+	key1 := &model.APIKey{OwnerLabel: "alice", KeyHash: "x", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
+	key2 := &model.APIKey{OwnerLabel: "bob", KeyHash: "y", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
+	if err := db.Create(key1).Error; err != nil {
+		t.Fatalf("seed api_key 1: %v", err)
+	}
+	if err := db.Create(key2).Error; err != nil {
+		t.Fatalf("seed api_key 2: %v", err)
+	}
+	now := time.Now().UTC()
+	seedRequestLog(t, db, "c1", now, func(r *model.RequestLog) {
+		r.APIKeyID = &key1.ID
+		r.CompressEstimatedTokensSaved = 100
+		r.CompressorsApplied = "diff"
+	})
+	seedRequestLog(t, db, "c2", now, func(r *model.RequestLog) {
+		r.APIKeyID = &key2.ID
+		r.CompressEstimatedTokensSaved = 50
+		r.CompressorsApplied = "gotest"
+	})
+
+	// Filter to alice's key only.
+	data := doCompressStats(t, r, "api_key_id="+strconv.FormatUint(uint64(key1.ID), 10))
+	if data.Totals.TotalCalls != 1 {
+		t.Fatalf("TotalCalls = %d, want 1 (filtered)", data.Totals.TotalCalls)
+	}
+	if data.Totals.TokensSaved != 100 {
+		t.Fatalf("TokensSaved = %d, want 100", data.Totals.TokensSaved)
+	}
+	if len(data.TopAPIKeys) != 1 || data.TopAPIKeys[0].OwnerLabel != "alice" {
+		t.Fatalf("TopAPIKeys = %+v, want alice only", data.TopAPIKeys)
+	}
+	// CompressorHits returns all four known compressors; only diff has a
+	// non-zero hit count (1 row, alice's c1 which used "diff").
+	if len(data.CompressorHits) != 4 {
+		t.Fatalf("CompressorHits len = %d, want 4 (all known)", len(data.CompressorHits))
+	}
+	if data.CompressorHits[0].Name != "diff" || data.CompressorHits[0].Hits != 1 {
+		t.Fatalf("CompressorHits[0] = %+v, want diff/1", data.CompressorHits[0])
+	}
+}
+
+// TestGetCompressStatsLimitParamClampsToMax verifies the limit query param
+// both clamps and defaults correctly. We pass limit=1000 and expect the
+// service to clamp to MaxCompressTopN (20); the row count can't exceed the
+// seeded key count either way, so we verify the request is accepted and
+// returns at most MaxCompressTopN rows.
+func TestGetCompressStatsLimitParamClampsToMax(t *testing.T) {
+	r, _ := newAnalyticsTestRouter(t)
+	// No rows seeded — clamp doesn't change row count, but a 1000 must not
+	// 400 (the parser accepts and clamps).
+	data := doCompressStats(t, r, "limit=1000")
+	if len(data.TopAPIKeys) > service.MaxCompressTopN {
+		t.Fatalf("TopAPIKeys len = %d, want <= %d (clamped)", len(data.TopAPIKeys), service.MaxCompressTopN)
+	}
+}
+
+// TestGetCompressStatsRejectsBadLimit verifies a non-numeric / zero limit
+// produces a 400, not a silent default — same posture as the existing
+// filter-param validators.
+func TestGetCompressStatsRejectsBadLimit(t *testing.T) {
+	r, _ := newAnalyticsTestRouter(t)
+	w, _ := doJSON(t, r, http.MethodGet, "/api/admin/analytics/compress-stats?limit=banana", nil, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for limit=banana, got %d", w.Code)
+	}
+	w, _ = doJSON(t, r, http.MethodGet, "/api/admin/analytics/compress-stats?limit=0", nil, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for limit=0, got %d", w.Code)
+	}
+}
+
+// TestGetCompressStatsRejectsBadStartTime verifies the shared filter parser
+// still runs before compress-stats does its work — a bad start timestamp
+// fails the same way it does for /analytics/overview.
+func TestGetCompressStatsRejectsBadStartTime(t *testing.T) {
+	r, _ := newAnalyticsTestRouter(t)
+	w, _ := doJSON(t, r, http.MethodGet, "/api/admin/analytics/compress-stats?start=not-a-time", nil, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// TestGetCompressStatsTopAPIKeysDropsNullBucketWithinLimit seeds a NULL
+// api_key_id row (auth-failed requests) whose tokens_saved would sort it
+// inside the Top-N window, then asserts the NULL bucket is excluded at the
+// SQL layer (HAVING api_key_id IS NOT NULL) rather than post-fetch in Go.
+//
+// Before the HAVING fix the NULL row consumed a LIMIT slot and was then
+// dropped by a Go loop, so the caller got back limit-1 real keys instead of
+// the requested limit. With 5 real keys + 1 NULL bucket and limit=5, the
+// response must contain all 5 real keys (not 4).
+func TestGetCompressStatsTopAPIKeysDropsNullBucketWithinLimit(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+
+	// Five real keys, each with a distinct tokens_saved so the order is
+	// deterministic. Their values are all BELOW the NULL bucket's 1000 so
+	// the NULL row would land at position 0 inside the LIMIT=5 window.
+	for i := 0; i < 5; i++ {
+		key := &model.APIKey{
+			OwnerLabel: "k" + strconv.Itoa(i),
+			KeyHash:    "h" + strconv.Itoa(i),
+			KeyPrefix:  "sk-",
+			Status:     model.APIKeyStatusActive,
+		}
+		if err := db.Create(key).Error; err != nil {
+			t.Fatalf("seed api_key %d: %v", i, err)
+		}
+		seedRequestLog(t, db, "real"+strconv.Itoa(i), time.Now().UTC(), func(r *model.RequestLog) {
+			r.APIKeyID = &key.ID
+			r.CompressEstimatedTokensSaved = 100 - i // 100, 99, 98, 97, 96
+		})
+	}
+
+	// NULL api_key_id row — sorts first (1000 > 100) and would steal a slot.
+	seedRequestLog(t, db, "null-bucket", time.Now().UTC(), func(r *model.RequestLog) {
+		r.APIKeyID = nil
+		r.CompressEstimatedTokensSaved = 1000
+	})
+
+	data := doCompressStats(t, r, "limit=5")
+	if len(data.TopAPIKeys) != 5 {
+		t.Fatalf("TopAPIKeys len = %d, want 5 (NULL bucket must not consume a LIMIT slot)", len(data.TopAPIKeys))
+	}
+	for _, row := range data.TopAPIKeys {
+		if row.APIKeyID == nil {
+			t.Fatalf("NULL api_key_id row leaked into TopAPIKeys: %+v", row)
+		}
+		if row.OwnerLabel == "" {
+			t.Fatalf("OwnerLabel empty for api_key_id=%v (label resolution broken)", row.APIKeyID)
+		}
+	}
+}
+
+// TestGetCompressStatsTopProvidersDropsNullBucketWithinLimit mirrors the
+// TopAPIKeys NULL-bucket test: seeds a NULL provider_id row whose
+// tokens_saved would sort it first, then asserts the HAVING clause drops it
+// at the SQL layer so all 3 real providers fit within LIMIT=3.
+func TestGetCompressStatsTopProvidersDropsNullBucketWithinLimit(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+
+	// Three real providers with descending tokens_saved so the order is
+	// deterministic. All values are BELOW the NULL bucket's 1000 so the NULL
+	// row would land at position 0 inside the LIMIT=3 window.
+	for i := 0; i < 3; i++ {
+		pid := seedProvider(t, db, "p"+strconv.Itoa(i))
+		seedRequestLog(t, db, "prov"+strconv.Itoa(i), time.Now().UTC(), func(r *model.RequestLog) {
+			r.ProviderID = &pid
+			r.ModelName = "m" + strconv.Itoa(i)
+			r.CompressEstimatedTokensSaved = 100 - i // 100, 99, 98
+			r.CompressorsApplied = "diff"
+		})
+	}
+
+	// NULL provider_id row — sorts first (1000 > 100) and would steal a slot.
+	seedRequestLog(t, db, "null-prov", time.Now().UTC(), func(r *model.RequestLog) {
+		r.ProviderID = nil
+		r.CompressEstimatedTokensSaved = 1000
+		r.CompressorsApplied = "diff"
+	})
+
+	data := doCompressStats(t, r, "limit=3")
+	if len(data.TopProviders) != 3 {
+		t.Fatalf("TopProviders len = %d, want 3 (NULL bucket must not consume a LIMIT slot)", len(data.TopProviders))
+	}
+	for _, row := range data.TopProviders {
+		if row.ProviderID == nil {
+			t.Fatalf("NULL provider_id row leaked into TopProviders: %+v", row)
+		}
+		if row.ProviderName == "" {
+			t.Fatalf("ProviderName empty for provider_id=%v (name resolution broken)", row.ProviderID)
+		}
+	}
+}
+
+// TestGetCompressStatsDailySeriesAscendingWithGapFill seeds compressed rows
+// on two non-adjacent days inside a narrow window, then verifies the daily
+// series:
+//   - is gap-filled (every day in the window appears, even with zero rows),
+//   - is sorted ascending (oldest-first) for a left-to-right trend chart,
+//   - only counts rows where compressors_applied != ”.
+func TestGetCompressStatsDailySeriesAscendingWithGapFill(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+
+	now := time.Now().UTC()
+	// Two rows: today and 2 days ago. The day in between has zero compressed
+	// rows and must still appear as a zero gap-fill row.
+	seedRequestLog(t, db, "c1", now, func(r *model.RequestLog) {
+		r.CompressEstimatedTokensSaved = 100
+		r.CompressorsApplied = "diff"
+	})
+	seedRequestLog(t, db, "c2", now.Add(-2*24*time.Hour), func(r *model.RequestLog) {
+		r.CompressEstimatedTokensSaved = 50
+		r.CompressorsApplied = "gotest"
+	})
+
+	// Use a 4-day window so we know there are exactly 4 buckets.
+	start := now.Add(-3 * 24 * time.Hour).Format(time.RFC3339)
+	end := now.Add(1 * 24 * time.Hour).Format(time.RFC3339)
+	data := doCompressStats(t, r, "start="+start+"&end="+end)
+
+	if len(data.DailySeries) < 4 {
+		t.Fatalf("DailySeries len = %d, want >= 4 (gap-fill)", len(data.DailySeries))
+	}
+	// Ascending: every bucket label must be <= the next (oldest-first).
+	for i := 1; i < len(data.DailySeries); i++ {
+		if data.DailySeries[i].Bucket < data.DailySeries[i-1].Bucket {
+			t.Fatalf("DailySeries not ascending at index %d: %q > %q",
+				i, data.DailySeries[i-1].Bucket, data.DailySeries[i].Bucket)
+		}
+	}
+	// At least one zero-fill row exists between the two seeded days.
+	var zeroRows int
+	for _, row := range data.DailySeries {
+		if row.CompressedCalls == 0 && row.TokensSaved == 0 {
+			zeroRows++
+		}
+	}
+	if zeroRows == 0 {
+		t.Fatalf("no zero-fill rows found; DailySeries = %+v", data.DailySeries)
+	}
+}
+
+// TestGetCompressStatsCompressorHitsCountsRowsNotInvocations verifies the
+// SQL-side compressor-hit counter counts ROWS-that-used-the-compressor, not
+// total invocations. A row listing "log,log,diff" counts once for log and
+// once for diff (not twice for log).
+func TestGetCompressStatsCompressorHitsCountsRowsNotInvocations(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+
+	now := time.Now().UTC()
+	// One row that lists log twice + diff once. Under the old app-side
+	// split, log would get 2 hits. Under the new SQL-side LIKE counting,
+	// log gets 1 (the row used log, regardless of how many times).
+	seedRequestLog(t, db, "c1", now, func(r *model.RequestLog) {
+		r.CompressorsApplied = "log,log,diff"
+	})
+
+	data := doCompressStats(t, r, "")
+
+	// All four known compressors appear; log=1 (not 2), diff=1, gotest=0, grep=0.
+	hitsByName := make(map[string]int64, len(data.CompressorHits))
+	for _, ch := range data.CompressorHits {
+		hitsByName[ch.Name] = ch.Hits
+	}
+	if hitsByName["log"] != 1 {
+		t.Fatalf("log hits = %d, want 1 (row-count, not invocation-count)", hitsByName["log"])
+	}
+	if hitsByName["diff"] != 1 {
+		t.Fatalf("diff hits = %d, want 1", hitsByName["diff"])
+	}
+	if hitsByName["gotest"] != 0 {
+		t.Fatalf("gotest hits = %d, want 0", hitsByName["gotest"])
+	}
+	if hitsByName["grep"] != 0 {
+		t.Fatalf("grep hits = %d, want 0", hitsByName["grep"])
 	}
 }
 

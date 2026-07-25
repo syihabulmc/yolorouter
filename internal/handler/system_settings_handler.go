@@ -29,6 +29,22 @@ type putCustomSystemPromptRequest struct {
 	Version *int64  `json:"version"`
 }
 
+// inputCompressionResponse is the handler-facing response DTO with explicit
+// json tags. There is no neutral DTO to carry (the service returns a bare
+// bool + version), so this wrapper fixes the wire field names (enabled/version).
+type inputCompressionResponse struct {
+	Enabled bool  `json:"enabled"`
+	Version int64 `json:"version"`
+}
+
+// putInputCompressionRequest mirrors putCustomSystemPromptRequest: pointers
+// make absent fields distinguishable from zero values, so a partial body
+// cannot silently flip the switch off.
+type putInputCompressionRequest struct {
+	Enabled *bool  `json:"enabled"`
+	Version *int64 `json:"version"`
+}
+
 // GetCustomSystemPrompt returns the authoritative global state (DB read,
 // bypassing the cache) so the admin always sees the committed value.
 func GetCustomSystemPrompt(svc *service.SystemSettingsService) gin.HandlerFunc {
@@ -72,5 +88,48 @@ func PutCustomSystemPrompt(svc *service.SystemSettingsService) gin.HandlerFunc {
 			return
 		}
 		response.Success(c, customSystemPromptResponse{Enabled: s.Enabled, Text: s.Text, Version: ver})
+	}
+}
+
+// GetInputCompression returns the authoritative global switch state (DB read,
+// bypassing the cache) so the admin always sees the committed value.
+func GetInputCompression(svc *service.SystemSettingsService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		enabled, ver, err := svc.GetInputCompressionForHandler(c.Request.Context())
+		if err != nil {
+			response.InternalError(c, err.Error())
+			return
+		}
+		response.Success(c, inputCompressionResponse{Enabled: enabled, Version: ver})
+	}
+}
+
+// PutInputCompression validates + CAS-updates the global switch. version is
+// required (optimistic lock); enabled must be present (pointer) so a partial
+// body can't silently flip the switch. A CAS miss returns 409 with the
+// InputCompressionConflict code (11014), distinct from the CSP conflict code
+// (11012) so the frontend can route retries to the right setting.
+func PutInputCompression(svc *service.SystemSettingsService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req putInputCompressionRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.ParamError(c, err.Error())
+			return
+		}
+		if req.Enabled == nil || req.Version == nil || *req.Version < 1 {
+			response.ParamError(c, "enabled and version (>=1) are both required")
+			return
+		}
+		enabled, ver, err := svc.UpdateInputCompression(c.Request.Context(), *req.Version, *req.Enabled)
+		if err != nil {
+			if errors.Is(err, errcode.ErrInputCompressionConflict) {
+				// 409 is not produced by httpStatusForCode's range mapping; set it explicitly.
+				response.ErrorStatus(c, http.StatusConflict, errcode.InputCompressionConflict, errcode.GetMessage(errcode.InputCompressionConflict))
+				return
+			}
+			response.InternalError(c, err.Error())
+			return
+		}
+		response.Success(c, inputCompressionResponse{Enabled: enabled, Version: ver})
 	}
 }

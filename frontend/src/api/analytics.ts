@@ -235,3 +235,91 @@ export function buildAnalyticsQuery(filter: AnalyticsFilter): URLSearchParams {
   if (filter.status) params.set('status', filter.status)
   return params
 }
+
+// === Input-compression stats ======================================
+
+// Mirrors internal/service/analytics_service.go's CompressStatsResult. Every
+// array field is guaranteed non-null on the wire (backend normalizes nil →
+// empty []), so call sites can use .map / .length without null-checking.
+export interface CompressTotals {
+  total_calls: number
+  // Count of rows where compress_skip_reason = '' (compression actually ran).
+  compressed_calls: number
+  tokens_saved: number
+  cost_saved_micros: number
+  // SUM(input_tokens) for the same filtered rows, used to display
+  // tokens_saved as a percentage of total input volume.
+  total_estimated_tokens: number
+}
+
+export interface CompressSkipReasonRow {
+  // '' means the OK bucket (compression ran); other values are the short
+  // stable skip codes (e.g. 'too_small', 'unsupported_mime').
+  skip_reason: string
+  calls: number
+}
+
+export interface CompressTopAPIKeyRow {
+  api_key_id: number | null
+  owner_label: string
+  calls: number
+  tokens_saved: number
+}
+
+export interface CompressTopModelRow {
+  model_name: string
+  tokens_saved: number
+  cost_saved_micros: number
+  compressed_calls: number
+  total_calls: number
+}
+
+export interface CompressTopProviderRow {
+  provider_id: number | null
+  provider_name: string
+  tokens_saved: number
+  cost_saved_micros: number
+  compressed_calls: number
+  total_calls: number
+}
+
+export interface CompressorHitRow {
+  // Compressor name (a single value from the comma-joined
+  // compressors_applied column).
+  name: string
+  // Number of requests whose compressors_applied included this compressor.
+  // Backed by SQL `SUM(CASE WHEN compressors_applied LIKE '%name%')`, so a
+  // request using the same compressor on multiple blocks (e.g. "diff,gotest,diff")
+  // counts ONCE — this is request-coverage, not total invocations.
+  hits: number
+}
+
+export interface CompressDailySeriesRow {
+  // "2006-01-02", localized — same format as TimeReportRow.bucket.
+  bucket: string
+  tokens_saved: number
+  cost_saved_micros: number
+  compressed_calls: number
+}
+
+export interface CompressStatsResult {
+  totals: CompressTotals
+  skip_reason_breakdown: CompressSkipReasonRow[]
+  top_api_keys: CompressTopAPIKeyRow[]
+  top_models: CompressTopModelRow[]
+  top_providers: CompressTopProviderRow[]
+  compressor_hits: CompressorHitRow[]
+  daily_series: CompressDailySeriesRow[]
+}
+
+// getCompressStats fetches the input-compression roll-up. limit is the
+// per-api-key Top-N row count (default 5, capped at 20 by the backend);
+// omitted here so the caller can pass undefined and accept the default.
+export function getCompressStats(
+  filter: AnalyticsFilter,
+  limit?: number,
+): Promise<CompressStatsResult> {
+  const params = buildAnalyticsQuery(filter)
+  if (limit != null && limit > 0) params.set('limit', String(limit))
+  return apiFetch(`/api/admin/analytics/compress-stats?${params.toString()}`)
+}

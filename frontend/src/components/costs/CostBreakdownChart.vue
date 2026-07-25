@@ -8,7 +8,9 @@
       <NTabPane :name="'provider'" :tab="t('costs.breakdown.byProvider')" />
       <NTabPane :name="'model'" :tab="t('costs.breakdown.byModel')" />
     </NTabs>
-    <div v-if="!slices.length" class="cost-breakdown__empty">{{ t('costs.noData') }}</div>
+    <div v-if="!slices.length" class="cost-breakdown__empty">
+      <EmptyState :icon="BarChart3" :title="t('costs.noData')" />
+    </div>
     <VChart
       v-else
       class="cost-breakdown__chart"
@@ -23,6 +25,8 @@
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NTabPane, NTabs } from 'naive-ui'
+import { BarChart3 } from '@lucide/vue'
+import EmptyState from '../EmptyState.vue'
 import { VChart, CHART_ACCENT } from '../../utils/echarts'
 import { formatMicros, fromMicros } from '../../utils/money'
 import type { ModelReportRow, ProviderReportRow } from '../../api/analytics'

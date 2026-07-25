@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/yolorouter/yolorouter/internal/model"
@@ -43,15 +44,25 @@ type costBreakdown struct {
 	// price. Both non-negative; net cache saving = read saved − write extra.
 	CacheReadSavedMicros  int64
 	CacheWriteExtraMicros int64
-	Known                 bool
+	// CompressCostSavedMicros is the ESTIMATED input-cost reduction from
+	// input compression — tokensSaved priced at the candidate's input unit
+	// rate. It is an estimate for reporting only; it does NOT participate in
+	// billing (CostMicros above is the billed amount for tokens actually
+	// sent). Zero when usage/pricing is unknown or no tokens were saved.
+	CompressCostSavedMicros int64
+	Known                   bool
 }
 
 // computeCost returns the cost breakdown in integer micros (major-unit × 1e6,
 // i.e. CNY to 6 decimal places) and whether the cost is "known".
 // Unknown = usage missing — the row records cost_micros=0 with
 // cost_known=false so the dashboard never shows it as a free request.
+// compressTokensSaved is the input-compression estimate (chars-saved/4); the
+// matching CompressCostSavedMicros line prices it at the candidate's input
+// rate so the saving is reported on the same basis as the billed cost. It is
+// forced to 0 whenever usage/pricing is unknown, matching CostKnown=false.
 // Candidate prices are CNY per million tokens.
-func computeCost(cand *model.ModelCandidate, usage *Usage) costBreakdown {
+func computeCost(cand *model.ModelCandidate, usage *Usage, compressTokensSaved int) costBreakdown {
 	if usage == nil || cand == nil {
 		return costBreakdown{}
 	}
@@ -92,11 +103,19 @@ func computeCost(cand *model.ModelCandidate, usage *Usage) costBreakdown {
 	// exact-integer (no float drift) while keeping 6-decimal cost precision.
 	// (microsPerUnit is a distinct constant from the /1_000_000 above, which is
 	// the "price per million tokens" divisor — same literal, different meaning.)
+	// Compress savings use the same input rate: tokens × cand.InputPrice/M-tokens
+	// — the /1e6 from per-M pricing and the ×1e6 to micros cancel, leaving
+	// tokens × InputPrice (in micros). Reported only; not added to CostMicros.
+	var compressSavedMicros int64
+	if compressTokensSaved > 0 {
+		compressSavedMicros = int64(float64(compressTokensSaved)*cand.InputPrice + 0.5)
+	}
 	return costBreakdown{
-		CostMicros:            int64(cost*microsPerUnit + 0.5),
-		CacheReadSavedMicros:  int64(cacheReadSaved*microsPerUnit + 0.5),
-		CacheWriteExtraMicros: int64(cacheWriteExtra*microsPerUnit + 0.5),
-		Known:                 true,
+		CostMicros:              int64(cost*microsPerUnit + 0.5),
+		CacheReadSavedMicros:    int64(cacheReadSaved*microsPerUnit + 0.5),
+		CacheWriteExtraMicros:   int64(cacheWriteExtra*microsPerUnit + 0.5),
+		CompressCostSavedMicros: compressSavedMicros,
+		Known:                   true,
 	}
 }
 
@@ -127,7 +146,7 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 	}
 	rc.StatusCode = statusCode
 	durationMs := time.Since(start).Milliseconds()
-	cost := computeCost(rc.Candidate, rc.Usage)
+	cost := computeCost(rc.Candidate, rc.Usage, rc.CompressEstimatedTokensSaved)
 
 	var providerID *uint
 	if rc.Provider != nil {
@@ -148,24 +167,45 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 		cacheReadTokens = rc.Usage.CacheReadTokens
 	}
 
+	// Compression savings are only meaningful when the request actually reached
+	// upstream (len(rc.Attempts) > 0 — the relay loop appends at least one
+	// attempt before sending). A request that compressed the body but was then
+	// rejected pre-relay (no routable candidate, model not found, allowlist
+	// denied) must NOT inflate compress-rate / savings metrics: zero the
+	// savings fields and clear the compressors list. CompressSkipReason is
+	// kept unconditionally — it is audit-only and useful even on pre-relay
+	// failures to diagnose why compression was bypassed.
+	compressTokensSaved := rc.CompressEstimatedTokensSaved
+	compressCostSavedMicros := cost.CompressCostSavedMicros
+	compressorsApplied := joinCompressors(rc.CompressorsApplied)
+	if len(rc.Attempts) == 0 {
+		compressTokensSaved = 0
+		compressCostSavedMicros = 0
+		compressorsApplied = ""
+	}
+
 	logRow := &model.RequestLog{
-		RequestID:             rc.RequestID,
-		APIKeyID:              &apiKeyID,
-		ModelName:             rc.OriginalModel,
-		ProviderID:            providerID,
-		IsStream:              rc.IsStream,
-		StatusCode:            statusCode,
-		InputTokens:           inputTokens,
-		OutputTokens:          outputTokens,
-		CacheWriteTokens:      cacheWriteTokens,
-		CacheReadTokens:       cacheReadTokens,
-		CostMicros:            cost.CostMicros,
-		CostKnown:             cost.Known,
-		CacheReadSavedMicros:  cost.CacheReadSavedMicros,
-		CacheWriteExtraMicros: cost.CacheWriteExtraMicros,
-		FailReason:            failPtr,
-		Attempts:              len(rc.Attempts),
-		DurationMs:            durationMs,
+		RequestID:                        rc.RequestID,
+		APIKeyID:                         &apiKeyID,
+		ModelName:                        rc.OriginalModel,
+		ProviderID:                       providerID,
+		IsStream:                         rc.IsStream,
+		StatusCode:                       statusCode,
+		InputTokens:                      inputTokens,
+		OutputTokens:                     outputTokens,
+		CacheWriteTokens:                 cacheWriteTokens,
+		CacheReadTokens:                  cacheReadTokens,
+		CostMicros:                       cost.CostMicros,
+		CostKnown:                        cost.Known,
+		CacheReadSavedMicros:             cost.CacheReadSavedMicros,
+		CacheWriteExtraMicros:            cost.CacheWriteExtraMicros,
+		CompressEstimatedTokensSaved:     compressTokensSaved,
+		CompressEstimatedCostSavedMicros: compressCostSavedMicros,
+		CompressSkipReason:               rc.CompressSkipReason,
+		CompressorsApplied:               compressorsApplied,
+		FailReason:                       failPtr,
+		Attempts:                         len(rc.Attempts),
+		DurationMs:                       durationMs,
 	}
 	// Keep every attempt's order / key label / failure cause, not
 	// just the count. Stored as JSON so the query page can render it
@@ -204,17 +244,39 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 		streamBodyPath = rc.RequestID + ".stream"
 	}
 	bodyRow := &model.RequestLogBody{
-		RequestID:            rc.RequestID,
-		RequestHeaders:       string(rc.RequestHeaders),
-		RequestBody:          string(rc.RequestBody),
-		UpstreamRequestBody:  string(rc.UpstreamRequestBody),
-		ResponseBody:         string(rc.ResponseBody),
-		UpstreamResponseBody: string(rc.UpstreamResponseBody),
-		StreamBodyPath:       streamBodyPath,
-		StreamBodyTruncated:  rc.streamBodyTruncated,
+		RequestID:             rc.RequestID,
+		RequestHeaders:        string(rc.RequestHeaders),
+		RequestBody:           string(rc.RequestBody),
+		UpstreamRequestBody:   string(rc.UpstreamRequestBody),
+		ResponseBody:          string(rc.ResponseBody),
+		UpstreamResponseBody:  string(rc.UpstreamResponseBody),
+		StreamBodyPath:        streamBodyPath,
+		StreamBodyTruncated:   rc.streamBodyTruncated,
+		CompressedRequestBody: string(rc.RequestBodyCompressed),
 	}
 	if err := repository.UpsertRequestLogBody(s.db, bodyRow); err != nil {
 		logger.Error("gateway: write request log body failed",
 			zap.String("request_id", rc.RequestID), zap.Error(err))
 	}
+}
+
+// joinCompressors collapses the per-block list of compressors that fired into
+// the comma-joined string stored in request_logs.compressors_applied. The
+// compress engine appends one entry per modified block, so the same compressor
+// can appear multiple times when it shrank several blocks; per-block
+// occurrences are preserved (NOT deduped) so downstream stats can count how
+// many times each compressor actually fired. Empty input yields "" (SQL
+// default).
+func joinCompressors(applied []string) string {
+	if len(applied) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(applied))
+	for _, name := range applied {
+		if name == "" {
+			continue
+		}
+		parts = append(parts, name)
+	}
+	return strings.Join(parts, ",")
 }

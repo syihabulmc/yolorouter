@@ -3,17 +3,20 @@
 // service, all SQL lives in the repository.
 //
 // Three routes:
-//   - GET /api/admin/analytics/overview  aggregate MetricTotals for filter
-//   - GET /api/admin/analytics/report    dimension-grouped aggregates
-//   - GET /api/admin/analytics/export    CSV stream of the same report
+//   - GET /api/admin/analytics/overview        aggregate MetricTotals for filter
+//   - GET /api/admin/analytics/report          dimension-grouped aggregates
+//   - GET /api/admin/analytics/export          CSV stream of the same report
+//   - GET /api/admin/analytics/compress-stats  input-compression roll-up
 //
-// Filter shape is identical across the three (start/end/api_key_id/model_name/
+// Filter shape is identical across the four (start/end/api_key_id/model_name/
 // provider_id/status); ?dimension selects the report aggregate, ?bucket
-// selects the time-bucket granularity for dimension=time only.
+// selects the time-bucket granularity for dimension=time only, ?limit
+// selects the per-api-key Top-N row count for compress-stats.
 package handler
 
 import (
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -141,6 +144,28 @@ func ExportAnalyticsCSV(svc *service.AnalyticsService) gin.HandlerFunc {
 	}
 }
 
+// GetCompressStats handles GET /api/admin/analytics/compress-stats — the
+// input-compression roll-up. ?limit= sets the per-api-key Top-N row count
+// (default 5, capped at 20). Other params are the shared filter shape.
+func GetCompressStats(svc *service.AnalyticsService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		filter, ok := parseAnalyticsFilter(c)
+		if !ok {
+			return
+		}
+		topN, ok := parseTopNParam(c)
+		if !ok {
+			return
+		}
+		result, err := svc.GetCompressStats(c.Request.Context(), filter, topN)
+		if err != nil {
+			writeAnalyticsServiceError(c, err)
+			return
+		}
+		response.Success(c, result)
+	}
+}
+
 // parseAnalyticsFilter translates the shared filter query params into a
 // service.AnalyticsFilter. Returns false (after writing a 400 envelope) on
 // any malformed value; the caller must return immediately on false.
@@ -170,6 +195,28 @@ func parseAnalyticsFilter(c *gin.Context) (service.AnalyticsFilter, bool) {
 		return service.AnalyticsFilter{}, false
 	}
 	return filter, true
+}
+
+// parseTopNParam parses the optional ?limit= query param used by compress-stats
+// for the per-api-key Top-N row count. Defaults to service.DefaultCompressTopN
+// when absent; clamped to service.MaxCompressTopN. Returns false (after
+// writing a 400) when the value is present but not a positive integer — same
+// shape as applyUintQueryParam but with a ceiling.
+func parseTopNParam(c *gin.Context) (int, bool) {
+	raw := c.Query("limit")
+	if raw == "" {
+		return service.DefaultCompressTopN, true
+	}
+	v, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || v == 0 {
+		response.ParamError(c, "limit must be a positive integer")
+		return 0, false
+	}
+	n := int(v)
+	if n > service.MaxCompressTopN {
+		n = service.MaxCompressTopN
+	}
+	return n, true
 }
 
 // parseDimensionParam returns the dimension query param, defaulting to

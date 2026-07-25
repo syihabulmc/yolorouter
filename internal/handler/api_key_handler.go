@@ -42,6 +42,10 @@ type createAPIKeyRequest struct {
 	CustomSystemPromptEnabledOverride bool   `json:"custom_system_prompt_enabled_override"`
 	CustomSystemPromptEnabled         bool   `json:"custom_system_prompt_enabled"`
 	CustomSystemPrompt                string `json:"custom_system_prompt"`
+	// Input-compression per-key override at create time (value types — false
+	// is the wire default meaning "inherit the global setting").
+	CompressEnabledOverride bool `json:"compress_enabled_override"`
+	CompressEnabled         bool `json:"compress_enabled"`
 	limitFields
 }
 
@@ -67,6 +71,11 @@ type updateAPIKeyRequest struct {
 	CustomSystemPromptEnabledOverride *bool   `json:"custom_system_prompt_enabled_override"`
 	CustomSystemPromptEnabled         *bool   `json:"custom_system_prompt_enabled"`
 	CustomSystemPrompt                *string `json:"custom_system_prompt"`
+	// Input-compression per-key override PATCH fields (pointer — nil means
+	// leave unchanged). When override is set to true, enabled must also be
+	// supplied; when set to false, enabled is ignored.
+	CompressEnabledOverride *bool `json:"compress_enabled_override"`
+	CompressEnabled         *bool `json:"compress_enabled"`
 	// ExpectedUpdatedAt is the optimistic-lock CAS token (RFC3339). Optional —
 	// omitted means "no CAS" (the legacy behavior for EditKeyModal/CreateKeyModal).
 	ExpectedUpdatedAt *time.Time `json:"expected_updated_at" binding:"omitempty"`
@@ -111,6 +120,8 @@ func writeAPIKeyServiceError(c *gin.Context, err error) {
 		response.Error(c, errcode.CustomSystemPromptTooLong, errcode.GetMessage(errcode.CustomSystemPromptTooLong))
 	case errors.Is(err, errcode.ErrCustomSystemPromptEmpty):
 		response.Error(c, errcode.CustomSystemPromptEmpty, errcode.GetMessage(errcode.CustomSystemPromptEmpty))
+	case errors.Is(err, errcode.ErrCompressEnabledRequired):
+		response.Error(c, errcode.CompressEnabledRequired, errcode.GetMessage(errcode.CompressEnabledRequired))
 	case errors.Is(err, errcode.ErrAPIKeyConflict):
 		// 409 is not produced by httpStatusForCode's range mapping; set it
 		// explicitly, mirroring the system_settings CAS-conflict path.
@@ -169,6 +180,8 @@ func PostAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			CustomSystemPromptEnabledOverride: req.CustomSystemPromptEnabledOverride,
 			CustomSystemPromptEnabled:         req.CustomSystemPromptEnabled,
 			CustomSystemPrompt:                req.CustomSystemPrompt,
+			CompressEnabledOverride:           req.CompressEnabledOverride,
+			CompressEnabled:                   req.CompressEnabled,
 		}, timeNow())
 		if err != nil {
 			writeAPIKeyServiceError(c, err)
@@ -217,6 +230,8 @@ func PatchAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			CustomSystemPromptEnabledOverride: req.CustomSystemPromptEnabledOverride,
 			CustomSystemPromptEnabled:         req.CustomSystemPromptEnabled,
 			CustomSystemPrompt:                req.CustomSystemPrompt,
+			CompressEnabledOverride:           req.CompressEnabledOverride,
+			CompressEnabled:                   req.CompressEnabled,
 			ExpectedUpdatedAt:                 req.ExpectedUpdatedAt,
 		}, timeNow())
 		if err != nil {

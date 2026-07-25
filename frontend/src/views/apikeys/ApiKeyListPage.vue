@@ -78,6 +78,14 @@
       @update:show="onCspShow"
       @saved="onCspSaved"
     />
+    <KeyCompressModal
+      v-if="compressKeyId"
+      :key="compressKeyId"
+      :show="showCompress"
+      :api-key-id="compressKeyId"
+      @update:show="onCompressShow"
+      @saved="onCompressSaved"
+    />
   </div>
 </template>
 
@@ -96,6 +104,7 @@ import EmptyState from '../../components/EmptyState.vue'
 import CreateKeyModal from '../../components/apikeys/CreateKeyModal.vue'
 import EditKeyModal from '../../components/apikeys/EditKeyModal.vue'
 import KeyCustomPromptModal from '../../components/apikeys/KeyCustomPromptModal.vue'
+import KeyCompressModal from '../../components/apikeys/KeyCompressModal.vue'
 
 const { t } = useI18n()
 const dialog = useDialog()
@@ -110,6 +119,11 @@ const editingId = ref<number | null>(null)
 // row (the row's CSP snapshot may already be stale).
 const showCsp = ref(false)
 const cspKeyId = ref<number | null>(null)
+// Compress modal state — mirrors the CSP modal pattern: compressKeyId is
+// both the v-if mount gate and the :key for a fresh remount per row. The
+// modal performs its own authoritative GET on open.
+const showCompress = ref(false)
+const compressKeyId = ref<number | null>(null)
 // Live draft of the filter controls; the server filters only update when the
 // user hits Enter or the Search button, matching the request-logs page.
 const draft = reactive({ query: store.query, owner: store.owner, status: store.status as string | null })
@@ -220,6 +234,25 @@ function onCspSaved() {
   void reload()
 }
 
+function openCompress(row: APIKey) {
+  // Only the id is forwarded — the modal does its own GET on mount to avoid
+  // initializing from a potentially stale list row.
+  compressKeyId.value = row.id
+  showCompress.value = true
+}
+
+function onCompressShow(v: boolean) {
+  showCompress.value = v
+  if (!v) compressKeyId.value = null
+}
+
+function onCompressSaved() {
+  showCompress.value = false
+  compressKeyId.value = null
+  message.success(t('apiKeys.saveSuccess'))
+  void reload()
+}
+
 function confirmRevoke(row: APIKey) {
   dialog.warning({
     title: t('apiKeys.confirmRevokeTitle'),
@@ -294,7 +327,7 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
     // Actions column — no tooltip.
     title: t('common.actions'),
     key: 'actions',
-    width: 230,
+    width: 300,
     render: (row) => {
       const revoked = row.display_status === 'revoked'
       return h(
@@ -308,6 +341,9 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
             revoked
               ? null
               : h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openCsp(row) }, { default: () => t('apiKeys.cspAction') }),
+            revoked
+              ? null
+              : h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openCompress(row) }, { default: () => t('apiKeys.compressAction') }),
             revoked
               ? null
               : h(NButton, { size: 'small', text: true, type: 'error', onClick: () => confirmRevoke(row) }, { default: () => t('apiKeys.revoke') }),

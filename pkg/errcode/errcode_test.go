@@ -73,6 +73,38 @@ func TestCustomSystemPromptErrorCodesRegistered(t *testing.T) {
 	}
 }
 
+func TestInputCompressionConflictCodeRegistered(t *testing.T) {
+	if InputCompressionConflict != 11014 {
+		t.Fatalf("InputCompressionConflict must be 11014, got %d", InputCompressionConflict)
+	}
+	msg, ok := ErrorMessages[InputCompressionConflict]
+	if !ok || msg == "" {
+		t.Fatalf("code %d: missing ErrorMessages entry", InputCompressionConflict)
+	}
+	if ErrInputCompressionConflict == nil || ErrInputCompressionConflict.Error() != msg {
+		t.Fatalf("sentinel error text %q does not match ErrorMessages %q", ErrInputCompressionConflict, msg)
+	}
+	if GetMessage(InputCompressionConflict) == "unknown error" {
+		t.Fatalf("code %d: GetMessage returned unknown", InputCompressionConflict)
+	}
+}
+
+func TestCompressEnabledRequiredCodeRegistered(t *testing.T) {
+	if CompressEnabledRequired != 11015 {
+		t.Fatalf("CompressEnabledRequired must be 11015, got %d", CompressEnabledRequired)
+	}
+	msg, ok := ErrorMessages[CompressEnabledRequired]
+	if !ok || msg == "" {
+		t.Fatalf("code %d: missing ErrorMessages entry", CompressEnabledRequired)
+	}
+	if ErrCompressEnabledRequired == nil || ErrCompressEnabledRequired.Error() != msg {
+		t.Fatalf("sentinel error text %q does not match ErrorMessages %q", ErrCompressEnabledRequired, msg)
+	}
+	if GetMessage(CompressEnabledRequired) == "unknown error" {
+		t.Fatalf("code %d: GetMessage returned unknown", CompressEnabledRequired)
+	}
+}
+
 func TestModelErrorCodesAreUniqueWithMessagesAndSentinels(t *testing.T) {
 	cases := []struct {
 		code int

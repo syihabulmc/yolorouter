@@ -64,11 +64,17 @@ type APIKeyView struct {
 	// CSP per-key override: when CustomSystemPromptEnabledOverride is true the
 	// key uses its own CustomSystemPromptEnabled/CustomSystemPrompt pair
 	// instead of the system-wide default.
-	CustomSystemPromptEnabledOverride bool      `json:"custom_system_prompt_enabled_override"`
-	CustomSystemPromptEnabled         bool      `json:"custom_system_prompt_enabled"`
-	CustomSystemPrompt                string    `json:"custom_system_prompt"`
-	CreatedAt                         time.Time `json:"created_at"`
-	UpdatedAt                         time.Time `json:"updated_at"`
+	CustomSystemPromptEnabledOverride bool   `json:"custom_system_prompt_enabled_override"`
+	CustomSystemPromptEnabled         bool   `json:"custom_system_prompt_enabled"`
+	CustomSystemPrompt                string `json:"custom_system_prompt"`
+	// Input-compression per-key override: when CompressEnabledOverride is
+	// true the key uses its own CompressEnabled flag instead of the
+	// system-wide default; when false the key inherits the global setting
+	// and CompressEnabled is ignored.
+	CompressEnabledOverride bool      `json:"compress_enabled_override"`
+	CompressEnabled         bool      `json:"compress_enabled"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
 }
 
 type CreateAPIKeyInput struct {
@@ -86,6 +92,10 @@ type CreateAPIKeyInput struct {
 	CustomSystemPromptEnabledOverride bool
 	CustomSystemPromptEnabled         bool
 	CustomSystemPrompt                string
+	// Input-compression per-key override at create time (value types —
+	// false is the wire default and means "inherit the global setting").
+	CompressEnabledOverride bool
+	CompressEnabled         bool
 }
 
 // CreateAPIKeyResult carries the plaintext key exactly once — PlaintextKey is
@@ -121,6 +131,12 @@ type UpdateAPIKeyInput struct {
 	CustomSystemPromptEnabledOverride *bool
 	CustomSystemPromptEnabled         *bool
 	CustomSystemPrompt                *string
+	// Input-compression per-key override PATCH fields (pointer — nil means
+	// leave unchanged). When CompressEnabledOverride is set to true,
+	// CompressEnabled must also be supplied; when set to false, any provided
+	// CompressEnabled is ignored (the key inherits the global setting).
+	CompressEnabledOverride *bool
+	CompressEnabled         *bool
 	// ExpectedUpdatedAt is the optimistic-lock CAS token (nil = no CAS).
 	ExpectedUpdatedAt *time.Time
 }
@@ -213,6 +229,8 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 		CustomSystemPromptEnabledOverride: input.CustomSystemPromptEnabledOverride,
 		CustomSystemPromptEnabled:         input.CustomSystemPromptEnabled,
 		CustomSystemPrompt:                input.CustomSystemPrompt,
+		CompressEnabledOverride:           input.CompressEnabledOverride,
+		CompressEnabled:                   input.CompressEnabled,
 	}
 	if err := repository.CreateAPIKey(s.db, key, modelIDs, now); err != nil {
 		return nil, err
@@ -251,7 +269,27 @@ func (s *APIKeyService) UpdateAPIKey(id uint, input UpdateAPIKeyInput, now time.
 		}
 	}
 
+	// Compress override combination rule: the enabled flag is meaningful only
+	// when the override is on. Setting override=false zeroes compress_enabled
+	// for cleanliness (the key inherits the global setting and the stored
+	// enabled value is ignored by the gateway). Setting override=true requires
+	// the caller to also say what to override to. A lone enabled patch (override
+	// left untouched) is allowed and writes just that column.
 	updates := map[string]interface{}{}
+	if input.CompressEnabledOverride != nil {
+		if !*input.CompressEnabledOverride {
+			updates["compress_enabled_override"] = false
+			updates["compress_enabled"] = false
+		} else {
+			if input.CompressEnabled == nil {
+				return nil, errcode.ErrCompressEnabledRequired
+			}
+			updates["compress_enabled_override"] = true
+			updates["compress_enabled"] = *input.CompressEnabled
+		}
+	} else if input.CompressEnabled != nil {
+		updates["compress_enabled"] = *input.CompressEnabled
+	}
 	if input.OwnerLabel != nil {
 		updates["owner_label"] = *input.OwnerLabel
 	}
@@ -362,6 +400,8 @@ func toAPIKeyView(k model.APIKey, modelIDs []uint, now time.Time) APIKeyView {
 		CustomSystemPromptEnabledOverride: k.CustomSystemPromptEnabledOverride,
 		CustomSystemPromptEnabled:         k.CustomSystemPromptEnabled,
 		CustomSystemPrompt:                k.CustomSystemPrompt,
+		CompressEnabledOverride:           k.CompressEnabledOverride,
+		CompressEnabled:                   k.CompressEnabled,
 		CreatedAt:                         k.CreatedAt, UpdatedAt: k.UpdatedAt,
 	}
 }

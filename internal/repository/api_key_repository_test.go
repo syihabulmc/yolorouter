@@ -225,3 +225,66 @@ func TestUpdateAPIKeyCASSucceedsWithFreshSnapshot(t *testing.T) {
 		t.Fatalf("updated_at should bump to newNow, got %v want %v", stored.UpdatedAt, newNow)
 	}
 }
+
+// --- Input-compression per-key override tests --------------------------------
+
+// TestUpdateAPIKeyWritesCompressCols checks that compress columns placed in
+// the updates map are persisted by UpdateAPIKey -- the repository writes
+// whatever the service layer puts into the map, so this confirms the plumbing
+// end-to-end (map -> SQL -> stored row).
+func TestUpdateAPIKeyWritesCompressCols(t *testing.T) {
+	db, key := seedCustomScopeKeyForCSPTest(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	updates := map[string]interface{}{
+		"compress_enabled_override": true,
+		"compress_enabled":          true,
+	}
+	if err := UpdateAPIKey(db, key.ID, updates, nil, false, now, nil); err != nil {
+		t.Fatalf("UpdateAPIKey: %v", err)
+	}
+
+	var stored model.APIKey
+	if err := db.First(&stored, key.ID).Error; err != nil {
+		t.Fatalf("load stored: %v", err)
+	}
+	if !stored.CompressEnabledOverride || !stored.CompressEnabled {
+		t.Fatalf("compress cols not persisted: override=%v enabled=%v",
+			stored.CompressEnabledOverride, stored.CompressEnabled)
+	}
+}
+
+// TestUpdateAPIKeyCompressCASConflict verifies that a stale expectedUpdatedAt
+// returns ErrAPIKeyConflict (11013) even when the updates map contains only
+// compress columns -- the CAS mechanism is column-agnostic.
+func TestUpdateAPIKeyCompressCASConflict(t *testing.T) {
+	db, key := seedCustomScopeKeyForCSPTest(t)
+	t0 := key.UpdatedAt
+
+	// First writer bumps updated_at.
+	t1 := t0.Add(time.Second)
+	updates := map[string]interface{}{
+		"compress_enabled_override": true,
+		"compress_enabled":          true,
+	}
+	if err := UpdateAPIKey(db, key.ID, updates, nil, false, t1, &t0); err != nil {
+		t.Fatalf("CAS update against fresh snapshot should succeed: %v", err)
+	}
+
+	// Second writer reuses the stale t0 snapshot -- must conflict.
+	updates2 := map[string]interface{}{
+		"compress_enabled": false,
+	}
+	err := UpdateAPIKey(db, key.ID, updates2, nil, false, t1.Add(time.Second), &t0)
+	if !errors.Is(err, errcode.ErrAPIKeyConflict) {
+		t.Fatalf("want ErrAPIKeyConflict on stale CAS token, got %v", err)
+	}
+
+	// The conflicting update must roll back -- compress_enabled stays true.
+	var stored model.APIKey
+	if err := db.First(&stored, key.ID).Error; err != nil {
+		t.Fatalf("load stored: %v", err)
+	}
+	if !stored.CompressEnabled {
+		t.Fatalf("stale CAS must not overwrite; compress_enabled should still be true")
+	}
+}

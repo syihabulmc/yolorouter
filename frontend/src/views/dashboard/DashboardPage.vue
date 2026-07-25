@@ -95,7 +95,7 @@
           <h2 class="section-title">{{ t('dashboard.topCallersTitle') }}</h2>
           <span class="section-sub">{{ t('dashboard.topCallersSub') }}</span>
         </header>
-        <div v-if="!data?.top_callers?.length" class="section-empty">{{ t('dashboard.topCallersEmpty') }}</div>
+        <EmptyState v-if="!data?.top_callers?.length" :icon="Activity" :title="t('dashboard.topCallersEmpty')" />
         <ul v-else class="caller-list">
           <li v-for="(c, i) in data.top_callers" :key="c.api_key_id" class="caller-row">
             <span class="caller-rank">{{ i + 1 }}</span>
@@ -111,7 +111,7 @@
           <h2 class="section-title">{{ t('dashboard.recentFailuresTitle') }}</h2>
           <span class="section-sub">{{ t('dashboard.recentFailuresSub') }}</span>
         </header>
-        <div v-if="!data?.recent_failures?.length" class="section-empty">{{ t('dashboard.recentFailuresEmpty') }}</div>
+        <EmptyState v-if="!data?.recent_failures?.length" :icon="AlertTriangle" :title="t('dashboard.recentFailuresEmpty')" />
         <ul v-else class="failure-list">
           <li
             v-for="f in data.recent_failures"
@@ -176,10 +176,12 @@ import type { Component } from 'vue'
 import { Activity, AlertTriangle, Boxes, DollarSign, Hourglass, KeyRound, Server, TrendingUp } from '@lucide/vue'
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
+import EmptyState from '../../components/EmptyState.vue'
 import TrendChart from '../../components/dashboard/TrendChart.vue'
 import { getDashboard, type DashboardData } from '../../api/analytics'
 import { displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
+import { formatNumber, formatRate } from '../../utils/format'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -240,16 +242,6 @@ async function reload() {
 onMounted(() => {
   void reload()
 })
-
-function formatNumber(n: number): string {
-  // toLocaleString respects the user's locale for grouping separators.
-  return n.toLocaleString()
-}
-
-function formatRate(r: number): string {
-  // r is in [0,1]; show one decimal place for a stable column width.
-  return `${(r * 100).toFixed(1)}%`
-}
 
 function failureStatusClass(code: number): string {
   if (code >= 500) return 'failure-status--error'
@@ -425,13 +417,6 @@ function goToRequestLog(requestId: string) {
 .section-sub {
   font-size: var(--text-xs);
   color: var(--color-text-muted);
-}
-
-.section-empty {
-  padding: var(--space-6);
-  text-align: center;
-  color: var(--color-text-muted);
-  font-size: var(--text-sm);
 }
 
 .two-col {

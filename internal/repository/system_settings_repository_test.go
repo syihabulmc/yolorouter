@@ -73,3 +73,76 @@ func TestUpdateCustomSystemPromptReturnsNewSnapshot(t *testing.T) {
 	}
 	_ = settings.CustomSystemPromptSetting{} // keep import if assertions above evolve
 }
+
+// --- Input compression repository -------------------------------------------
+
+// newSettingsTestDBWithIC returns a settings test DB with the
+// input_compression_enabled row also seeded at v1 disabled.
+func newSettingsTestDBWithIC(t *testing.T) *gorm.DB {
+	t.Helper()
+	db := newSettingsTestDB(t)
+	db.Exec(`INSERT INTO system_settings (key, value) VALUES ('input_compression_enabled','false')`)
+	return db
+}
+
+func TestGetInputCompressionReadsSeededRow(t *testing.T) {
+	db := newSettingsTestDBWithIC(t)
+	// Bump to v3 + enabled to confirm version + value are both read.
+	db.Exec(`UPDATE system_settings SET value='true', version=3 WHERE key='input_compression_enabled'`)
+	enabled, ver, err := GetInputCompression(db)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !enabled || ver != 3 {
+		t.Fatalf("want enabled=true/v3, got enabled=%v v%d", enabled, ver)
+	}
+}
+
+func TestGetInputCompressionMissingRowReturnsDefault(t *testing.T) {
+	// newSettingsTestDB seeds only the CSP rows; the IC row is absent.
+	db := newSettingsTestDB(t)
+	enabled, ver, err := GetInputCompression(db)
+	if err != nil {
+		t.Fatalf("missing row: want (false,0,nil), got err=%v", err)
+	}
+	if enabled || ver != 0 {
+		t.Fatalf("want disabled/v0, got enabled=%v v%d", enabled, ver)
+	}
+}
+
+func TestGetInputCompressionRejectsCorruptValue(t *testing.T) {
+	db := newSettingsTestDBWithIC(t)
+	db.Exec(`UPDATE system_settings SET value='maybe' WHERE key='input_compression_enabled'`)
+	if _, _, err := GetInputCompression(db); err == nil {
+		t.Fatal("expected error for corrupt input_compression_enabled value, got nil")
+	}
+}
+
+func TestUpdateInputCompressionSuccess(t *testing.T) {
+	db := newSettingsTestDBWithIC(t)
+	enabled, ver, err := UpdateInputCompression(db, 1, true)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !enabled || ver != 2 {
+		t.Fatalf("want enabled=true/v2, got enabled=%v v%d", enabled, ver)
+	}
+	// Persisted?
+	got, gver, err := GetInputCompression(db)
+	if err != nil || !got || gver != 2 {
+		t.Fatalf("read-back mismatch: enabled=%v v%d err=%v", got, gver, err)
+	}
+}
+
+func TestUpdateInputCompressionCASConflict(t *testing.T) {
+	db := newSettingsTestDBWithIC(t)
+	// First successful update bumps version 1 -> 2.
+	if _, _, err := UpdateInputCompression(db, 1, true); err != nil {
+		t.Fatalf("first update: %v", err)
+	}
+	// Stale expectedVersion=1 must conflict.
+	_, _, err := UpdateInputCompression(db, 1, false)
+	if !errors.Is(err, errcode.ErrInputCompressionConflict) {
+		t.Fatalf("want ErrInputCompressionConflict, got %v", err)
+	}
+}

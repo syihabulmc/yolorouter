@@ -281,6 +281,8 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	settingsSvc := service.NewSystemSettingsService(db)
 	protected.GET("/system-settings/custom-system-prompt", handler.GetCustomSystemPrompt(settingsSvc))
 	protected.PUT("/system-settings/custom-system-prompt", handler.PutCustomSystemPrompt(settingsSvc))
+	protected.GET("/system-settings/input-compression", handler.GetInputCompression(settingsSvc))
+	protected.PUT("/system-settings/input-compression", handler.PutInputCompression(settingsSvc))
 
 	// Dashboard / analytics / request logs.
 	// All three are read-only queries over request_logs (written by the
@@ -294,6 +296,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	protected.GET("/analytics/overview", handler.GetAnalyticsOverview(analyticsSvc))
 	protected.GET("/analytics/report", handler.GetAnalyticsReport(analyticsSvc))
 	protected.GET("/analytics/export", handler.ExportAnalyticsCSV(analyticsSvc))
+	protected.GET("/analytics/compress-stats", handler.GetCompressStats(analyticsSvc))
 
 	requestLogSvc := service.NewRequestLogService(db)
 	protected.GET("/request-logs", handler.GetRequestLogs(requestLogSvc))

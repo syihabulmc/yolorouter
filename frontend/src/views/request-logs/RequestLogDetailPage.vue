@@ -88,7 +88,7 @@
       <!-- Attempts sequence -->
       <section class="section-card">
         <h2 class="section-title">{{ t('requestLogs.sectionAttempts') }}</h2>
-        <p v-if="detail.attempts_detail.length === 0" class="empty-hint">{{ t('requestLogs.attemptsEmpty') }}</p>
+        <EmptyState v-if="detail.attempts_detail.length === 0" :icon="ListChecks" :title="t('requestLogs.attemptsEmpty')" />
         <div v-else class="data-table-wrapper">
           <NDataTable
             :columns="attemptColumns"
@@ -123,13 +123,71 @@
         </NDescriptions>
       </section>
 
+      <!-- Compression outcome: shown when compression was relevant for this
+           request — compressors_applied non-empty, compress_skip_reason
+           non-empty, OR compressed_request_body non-empty (audit body persisted
+           even when pre-relay rejection zeroed compressors_applied). Tokens
+           saved / cost saved are ESTIMATES. Skip reason is i18n'd via the same
+           SKIP_REASON_KEYS mapper the cost-optimization page uses. The
+           compressed body is shown side-by-side with the original in a
+           collapsible card (collapsed by default; both use the same inline
+           truncation guard). -->
+      <section v-if="showCompressSection" class="section-card">
+        <h2 class="section-title">{{ t('requestLogs.sectionCompress') }}</h2>
+        <NDescriptions :column="2" label-placement="left" bordered>
+          <NDescriptionsItem :label="t('requestLogs.fieldCompressTokensSaved')">
+            {{ detail.compress_estimated_tokens_saved.toLocaleString() }}
+          </NDescriptionsItem>
+          <NDescriptionsItem :label="t('requestLogs.fieldCompressCostSaved')">
+            <span v-if="detail.compress_estimated_cost_saved_micros > 0" class="cost-cell">
+              {{ formatMicros(detail.compress_estimated_cost_saved_micros) }} {{ t('requestLogs.currencyUnit') }}
+              <NTag size="tiny" :bordered="false" type="warning">{{ t('requestLogs.estimatedLabel') }}</NTag>
+            </span>
+            <span v-else>—</span>
+          </NDescriptionsItem>
+          <NDescriptionsItem v-if="detail.compressors_applied" :label="t('requestLogs.fieldCompressorsApplied')" :span="2">
+            <NTag v-for="c in detail.compressors_applied.split(',')" :key="c" size="small" :bordered="false" type="info" class="compressor-tag">{{ c }}</NTag>
+          </NDescriptionsItem>
+          <NDescriptionsItem v-if="detail.compress_skip_reason" :label="t('requestLogs.fieldCompressSkipReason')" :span="2">
+            {{ formatSkipReason(detail.compress_skip_reason) }}
+          </NDescriptionsItem>
+          <!-- Pre-relay rejection note: when a request is rejected before
+               reaching upstream, compressors_applied is zeroed (savings not
+               counted) but the compressed body is still persisted for audit.
+               Surface a short note so the empty savings row is not
+               misread as "compression did not run". -->
+          <NDescriptionsItem
+            v-if="!detail.compressors_applied && detail.compressed_request_body"
+            :label="t('requestLogs.fieldCompressorsApplied')"
+            :span="2"
+          >
+            <span class="compress-pre-relay-note">{{ t('requestLogs.compressPreRelayNote') }}</span>
+          </NDescriptionsItem>
+        </NDescriptions>
+
+        <NCollapse v-if="detail.compressed_request_body" class="compress-body-collapse">
+          <NCollapseItem :title="t('requestLogs.compressBodyCompare')" name="compare">
+            <div class="compress-body-grid">
+              <div class="compress-body-col">
+                <p class="compress-body-label">{{ t('requestLogs.compressOriginal') }}</p>
+                <BodyViewer :raw="detail.request_body || ''" />
+              </div>
+              <div class="compress-body-col">
+                <p class="compress-body-label">{{ t('requestLogs.compressCompressed') }}</p>
+                <BodyViewer :raw="detail.compressed_request_body" />
+              </div>
+            </div>
+          </NCollapseItem>
+        </NCollapse>
+      </section>
+
       <!-- Bodies: request/response bodies stored verbatim
            server-side (v0.1 does not scrub body content — only request headers
            are masked). Each inline body is capped server-side (maxInlineBodyBytes)
            with a visible marker so a pathological large body can't freeze the
            tab. Empty string means "not captured" (e.g. an early rejection
-           before the body was read) and renders as NEmpty rather than an empty
-           code block. Stream requests carry the sent SSE on disk instead of in
+           before the body was read) and renders as an EmptyState block rather
+           than an empty code block. Stream requests carry the sent SSE on disk instead of in
            response_body/upstream_response_body — that card is lazy-loaded via
            body/stream (full content, no mid-stream truncation, only a
            1GiB anti-OOM backstop). -->
@@ -149,14 +207,14 @@
              truncation hints, so it doesn't fit either shape. -->
         <NCard v-for="section in bodySections" :key="section.key" size="small" :title="section.title">
           <BodyViewer v-if="section.body" :raw="section.body" />
-          <NEmpty v-else :description="t('requestLogs.bodyNotRecorded')" size="small" />
+          <EmptyState v-else :icon="FileText" :title="t('requestLogs.bodyNotRecorded')" />
         </NCard>
 
         <NCard v-if="detail.has_stream_body" size="small" :title="t('requestLogs.streamBody')">
           <NSpin :show="streamLoading">
             <div class="stream-body-content">
               <BodyViewer v-if="streamBody" :raw="streamBody" />
-              <NEmpty v-else-if="streamLoaded" :description="t('requestLogs.bodyNotRecorded')" size="small" />
+              <EmptyState v-else-if="streamLoaded" :icon="FileText" :title="t('requestLogs.bodyNotRecorded')" />
             </div>
           </NSpin>
           <p v-if="streamPreviewTruncated" class="stream-truncated-hint">
@@ -179,15 +237,17 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   NButton,
   NCard,
+  NCollapse,
+  NCollapseItem,
   NDataTable,
   NDescriptions,
   NDescriptionsItem,
-  NEmpty,
   NSpin,
   NTag,
   useMessage,
   type DataTableColumns,
 } from 'naive-ui'
+import { FileText, ListChecks } from '@lucide/vue'
 import {
   getRequestLogDetail,
   streamRequestLogBody,
@@ -197,6 +257,7 @@ import {
 import { APIError, displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
 import { columnTitle } from '../../utils/columnTitle'
+import { SKIP_REASON_KEYS } from '../../utils/compressSkipReason'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import StatusClassTag from '../../components/request-logs/StatusClassTag.vue'
@@ -306,6 +367,31 @@ const lastAttempt = computed<AttemptRecord | null>(() => {
   return list.length === 0 ? null : list[list.length - 1]
 })
 
+// showCompressSection: compression is relevant when the engine either modified
+// the body (compressors_applied != ''), set a skip reason, or persisted a
+// compressed body for audit. The audit-body term covers pre-relay rejections:
+// when a request is rejected before reaching upstream, compressors_applied is
+// zeroed (savings not counted) but compressed_request_body is still persisted,
+// so the section must stay visible to keep the audit body inspectable.
+const showCompressSection = computed(() => {
+  const d = detail.value
+  if (!d) return false
+  return (
+    d.compressors_applied !== '' ||
+    d.compress_skip_reason !== '' ||
+    d.compressed_request_body !== ''
+  )
+})
+
+// formatSkipReason: mirrors CostOptimizationPage's formatSkipReason, using the
+// shared SKIP_REASON_KEYS map so both views render identical labels.
+function formatSkipReason(code: string): string {
+  if (code === '') return t('costOptimization.skipReasonOk')
+  const key = SKIP_REASON_KEYS[code]
+  if (key) return t(key)
+  return t('costOptimization.skipReasonUnknown', { code })
+}
+
 // ---------- Render helpers ----------
 
 function formatTimeFull(iso: string): string {
@@ -408,12 +494,6 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
   color: var(--color-text);
 }
 
-.empty-hint {
-  color: var(--color-text-muted);
-  font-size: var(--text-sm);
-  margin: 0;
-}
-
 :deep(.mono-cell) {
   font-family: var(--font-mono, monospace);
   font-variant-numeric: tabular-nums;
@@ -452,5 +532,41 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
   margin: var(--space-2) 0 0;
   font-size: var(--text-xs);
   color: var(--color-text-muted, var(--color-text-secondary));
+}
+
+.compressor-tag {
+  margin-right: 4px;
+}
+
+.compress-pre-relay-note {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.compress-body-collapse {
+  margin-top: var(--space-2);
+}
+
+.compress-body-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.compress-body-col {
+  min-width: 0;
+}
+
+.compress-body-label {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 768px) {
+  .compress-body-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

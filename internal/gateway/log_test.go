@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ func TestComputeCost(t *testing.T) {
 	// 1M input @ 1.0 + 0.5M output @ 2.0 = 1.0 + 1.0 = 2.0 CNY = 2_000_000 micros.
 	cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0}
 	usage := &Usage{PromptTokens: 1_000_000, CompletionTokens: 500_000}
-	cost := computeCost(cand, usage)
+	cost := computeCost(cand, usage, 0)
 	if !cost.Known {
 		t.Fatal("expected cost to be known when usage + candidate present")
 	}
@@ -36,7 +37,7 @@ func TestComputeCostCacheEconomics(t *testing.T) {
 		CacheWritePrice: &writePrice,
 	}
 	usage := &Usage{PromptTokens: 1_000_000, CacheReadTokens: 1_000_000, CacheWriteTokens: 1_000_000}
-	cost := computeCost(cand, usage)
+	cost := computeCost(cand, usage, 0)
 	if cost.CacheReadSavedMicros != 2_700_000 {
 		t.Errorf("cache read saved = %d, want 2_700_000", cost.CacheReadSavedMicros)
 	}
@@ -50,7 +51,7 @@ func TestComputeCostNoCachePriceHasNoSavings(t *testing.T) {
 	// there is neither a read saving nor a write premium.
 	cand := &model.ModelCandidate{InputPrice: 2.0, OutputPrice: 4.0}
 	usage := &Usage{PromptTokens: 1_000_000, CacheReadTokens: 500_000, CacheWriteTokens: 500_000}
-	cost := computeCost(cand, usage)
+	cost := computeCost(cand, usage, 0)
 	if cost.CacheReadSavedMicros != 0 || cost.CacheWriteExtraMicros != 0 {
 		t.Errorf("expected 0/0 savings without cache prices, got read=%d write=%d",
 			cost.CacheReadSavedMicros, cost.CacheWriteExtraMicros)
@@ -62,7 +63,7 @@ func TestComputeCostRoundsToMicro(t *testing.T) {
 	// 0.0000015 CNY = 1.5 micros -> rounds to 2 micros.
 	cand := &model.ModelCandidate{InputPrice: 1.5, OutputPrice: 0}
 	usage := &Usage{PromptTokens: 1, CompletionTokens: 0}
-	cost := computeCost(cand, usage)
+	cost := computeCost(cand, usage, 0)
 	if !cost.Known || cost.CostMicros != 2 {
 		t.Fatalf("expected known 2 micros, got %d (known=%v)", cost.CostMicros, cost.Known)
 	}
@@ -71,14 +72,14 @@ func TestComputeCostRoundsToMicro(t *testing.T) {
 func TestComputeCostMissingUsageIsUnknown(t *testing.T) {
 	// Missing usage must be "unknown", never 0 cost.
 	cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 1.0}
-	if cost := computeCost(cand, nil); cost.Known || cost.CostMicros != 0 {
+	if cost := computeCost(cand, nil, 0); cost.Known || cost.CostMicros != 0 {
 		t.Fatalf("expected unknown/0 for nil usage, got %d (known=%v)", cost.CostMicros, cost.Known)
 	}
 }
 
 func TestComputeCostMissingCandidateIsUnknown(t *testing.T) {
 	usage := &Usage{PromptTokens: 100, CompletionTokens: 100}
-	if cost := computeCost(nil, usage); cost.Known || cost.CostMicros != 0 {
+	if cost := computeCost(nil, usage, 0); cost.Known || cost.CostMicros != 0 {
 		t.Fatalf("expected unknown/0 for nil candidate, got %d (known=%v)", cost.CostMicros, cost.Known)
 	}
 }
@@ -180,5 +181,314 @@ func TestGenerateRequestIDUnique(t *testing.T) {
 			t.Fatalf("duplicate id generated: %q", id)
 		}
 		seen[id] = struct{}{}
+	}
+}
+
+// TestComputeCostCompressSavings verifies the ESTIMATED compress saving is
+// priced at the candidate's input rate. 1500 tokens saved @ 2.5 CNY/M =
+// 1500 * 2.5 = 3750 micros (the /1e6 from per-M pricing cancels the ×1e6
+// to micros). Reported only — CostMicros itself is unaffected.
+func TestComputeCostCompressSavings(t *testing.T) {
+	cand := &model.ModelCandidate{InputPrice: 2.5, OutputPrice: 5.0}
+	usage := &Usage{PromptTokens: 100, CompletionTokens: 50}
+	cost := computeCost(cand, usage, 1500)
+	if !cost.Known {
+		t.Fatal("expected cost to be known when usage + candidate present")
+	}
+	if cost.CompressCostSavedMicros != 3750 {
+		t.Errorf("compress cost saved = %d, want 3750 micros", cost.CompressCostSavedMicros)
+	}
+	// Sanity: the billed CostMicros is unaffected by the compress savings line.
+	bare := computeCost(cand, usage, 0)
+	if cost.CostMicros != bare.CostMicros {
+		t.Errorf("compress savings leaked into CostMicros: with=%d without=%d",
+			cost.CostMicros, bare.CostMicros)
+	}
+}
+
+// TestComputeCostCompressSavingsRoundingFractional: a fractional input price
+// must round to the nearest micro (matching the CostMicros rounding policy).
+// 1 token @ 1.5/M = 1.5 micros -> rounds to 2.
+func TestComputeCostCompressSavingsRoundingFractional(t *testing.T) {
+	cand := &model.ModelCandidate{InputPrice: 1.5, OutputPrice: 0}
+	usage := &Usage{PromptTokens: 1, CompletionTokens: 0}
+	cost := computeCost(cand, usage, 1)
+	if cost.CompressCostSavedMicros != 2 {
+		t.Errorf("compress cost saved = %d, want 2 micros after rounding", cost.CompressCostSavedMicros)
+	}
+}
+
+// TestComputeCostCompressSavingsUnknownIsZero: when usage is nil (pricing/
+// usage unknown), cost_saved must be 0 even if tokens_saved > 0 — matching
+// the CostKnown=false semantics so an unknown row never reports a saving.
+func TestComputeCostCompressSavingsUnknownIsZero(t *testing.T) {
+	cand := &model.ModelCandidate{InputPrice: 2.0, OutputPrice: 4.0}
+	if cost := computeCost(cand, nil, 1000); cost.Known || cost.CompressCostSavedMicros != 0 {
+		t.Fatalf("expected unknown/0 compress savings for nil usage, got %d (known=%v)",
+			cost.CompressCostSavedMicros, cost.Known)
+	}
+	if cost := computeCost(nil, &Usage{PromptTokens: 1}, 1000); cost.Known || cost.CompressCostSavedMicros != 0 {
+		t.Fatalf("expected unknown/0 compress savings for nil candidate, got %d (known=%v)",
+			cost.CompressCostSavedMicros, cost.Known)
+	}
+}
+
+// TestFinalizeWritesCompressColumns: when compression ran, the four compress
+// columns on request_logs and compressed_request_body on request_log_bodies
+// are populated. Cost_saved is the tokens-saved × input-price math verified
+// in TestComputeCostCompressSavings; here we verify it persisted end-to-end.
+func TestFinalizeWritesCompressColumns(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	svc := newRelaySvc(t, db)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
+
+	// Cand InputPrice 2.0/M, tokensSaved 1500 -> 1500 * 2.0 = 3000 micros.
+	// rc.Candidate is only read in-memory by computeCost (InputPrice), never
+	// persisted by finalize — so an unpersisted in-memory candidate is enough.
+	cand := &model.ModelCandidate{
+		InputPrice: 2.0, OutputPrice: 4.0, MaxOutput: 128,
+		SupportsStreaming: true, ManagementStatus: model.ModelCandidateStatusEnabled,
+		VerificationStatus: model.ModelVerificationStatusPassed,
+	}
+	rc := &RelayContext{
+		RequestID:                    "req-compress-1",
+		APIKeyID:                     apiKey.ID,
+		Candidate:                    cand,
+		Usage:                        &Usage{PromptTokens: 100, CompletionTokens: 50},
+		CompressEstimatedTokensSaved: 1500,
+		CompressorsApplied:           []string{"whitespace", "whitespace", "contractions"},
+		RequestBodyCompressed:        []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
+		// One successful attempt — the request reached upstream, so the
+		// compress savings are real (not phantom) and must be persisted.
+		Attempts: []AttemptRecord{{
+			CandidateID: cand.ID, ProviderID: 1, ProviderName: "test",
+			Outcome: AttemptSuccess, StatusCode: 200,
+		}},
+	}
+	svc.finalize(rc, 200, "", time.Now())
+
+	row, err := repository.GetRequestLogByRequestID(db, "req-compress-1")
+	if err != nil || row == nil {
+		t.Fatalf("GetRequestLogByRequestID: %v (row=%v)", err, row)
+	}
+	if row.CompressEstimatedTokensSaved != 1500 {
+		t.Errorf("CompressEstimatedTokensSaved = %d, want 1500", row.CompressEstimatedTokensSaved)
+	}
+	if row.CompressEstimatedCostSavedMicros != 3000 {
+		t.Errorf("CompressEstimatedCostSavedMicros = %d, want 3000", row.CompressEstimatedCostSavedMicros)
+	}
+	if row.CompressSkipReason != "" {
+		t.Errorf("CompressSkipReason = %q, want empty (compression ran)", row.CompressSkipReason)
+	}
+	// Per-block occurrences preserved: two "whitespace" entries are both kept
+	// so downstream stats can count how many times each compressor fired.
+	if row.CompressorsApplied != "whitespace,whitespace,contractions" {
+		t.Errorf("CompressorsApplied = %q, want %q", row.CompressorsApplied, "whitespace,whitespace,contractions")
+	}
+	if !row.CostKnown {
+		t.Errorf("CostKnown = false, want true (usage + candidate present)")
+	}
+
+	body, err := repository.GetRequestLogBodyByRequestID(db, "req-compress-1")
+	if err != nil || body == nil {
+		t.Fatalf("GetRequestLogBodyByRequestID: %v (body=%v)", err, body)
+	}
+	if body.CompressedRequestBody != `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}` {
+		t.Errorf("CompressedRequestBody = %q, want the post-compression bytes", body.CompressedRequestBody)
+	}
+}
+
+// TestFinalizeWritesCompressSkippedColumns: when compression was enabled but
+// skipped, skip_reason is populated and the savings/body fields are zero/empty.
+func TestFinalizeWritesCompressSkippedColumns(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	svc := newRelaySvc(t, db)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
+
+	rc := &RelayContext{
+		RequestID:          "req-compress-skip-1",
+		APIKeyID:           apiKey.ID,
+		CompressSkipReason: "too_small",
+	}
+	svc.finalize(rc, 200, "", time.Now())
+
+	row, err := repository.GetRequestLogByRequestID(db, "req-compress-skip-1")
+	if err != nil || row == nil {
+		t.Fatalf("GetRequestLogByRequestID: %v (row=%v)", err, row)
+	}
+	if row.CompressEstimatedTokensSaved != 0 {
+		t.Errorf("CompressEstimatedTokensSaved = %d, want 0 (skipped)", row.CompressEstimatedTokensSaved)
+	}
+	if row.CompressEstimatedCostSavedMicros != 0 {
+		t.Errorf("CompressEstimatedCostSavedMicros = %d, want 0 (skipped)", row.CompressEstimatedCostSavedMicros)
+	}
+	if row.CompressSkipReason != "too_small" {
+		t.Errorf("CompressSkipReason = %q, want %q", row.CompressSkipReason, "too_small")
+	}
+	if row.CompressorsApplied != "" {
+		t.Errorf("CompressorsApplied = %q, want empty (skipped)", row.CompressorsApplied)
+	}
+
+	body, err := repository.GetRequestLogBodyByRequestID(db, "req-compress-skip-1")
+	if err != nil || body == nil {
+		t.Fatalf("GetRequestLogBodyByRequestID: %v (body=%v)", err, body)
+	}
+	if body.CompressedRequestBody != "" {
+		t.Errorf("CompressedRequestBody = %q, want empty (skipped)", body.CompressedRequestBody)
+	}
+}
+
+// TestFinalizeWritesCompressColumnsUncompressed: when compression never ran
+// (CompressEnabled false — fields all zero-value), the four compress columns
+// and compressed_request_body stay at their zero/empty defaults.
+func TestFinalizeWritesCompressColumnsUncompressed(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	svc := newRelaySvc(t, db)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
+
+	rc := &RelayContext{RequestID: "req-nocompress-1", APIKeyID: apiKey.ID}
+	svc.finalize(rc, 200, "", time.Now())
+
+	row, err := repository.GetRequestLogByRequestID(db, "req-nocompress-1")
+	if err != nil || row == nil {
+		t.Fatalf("GetRequestLogByRequestID: %v (row=%v)", err, row)
+	}
+	if row.CompressEstimatedTokensSaved != 0 || row.CompressEstimatedCostSavedMicros != 0 {
+		t.Errorf("compress savings not zero for an uncompressed request: tokens=%d cost=%d",
+			row.CompressEstimatedTokensSaved, row.CompressEstimatedCostSavedMicros)
+	}
+	if row.CompressSkipReason != "" || row.CompressorsApplied != "" {
+		t.Errorf("compress reason/list not empty for an uncompressed request: reason=%q list=%q",
+			row.CompressSkipReason, row.CompressorsApplied)
+	}
+
+	body, err := repository.GetRequestLogBodyByRequestID(db, "req-nocompress-1")
+	if err != nil || body == nil {
+		t.Fatalf("GetRequestLogBodyByRequestID: %v (body=%v)", err, body)
+	}
+	if body.CompressedRequestBody != "" {
+		t.Errorf("CompressedRequestBody = %q, want empty for uncompressed request", body.CompressedRequestBody)
+	}
+}
+
+// TestFinalizeCompressCostSavedZeroWhenPricingUnknown: a request that saved
+// tokens but had no usage (early failure before any attempt) must persist
+// cost_saved=0 even though tokens_saved may be non-zero. This is the case the
+// dashboard cares about: never report a saving on a row whose cost is unknown.
+func TestFinalizeCompressCostSavedZeroWhenPricingUnknown(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	svc := newRelaySvc(t, db)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
+
+	rc := &RelayContext{
+		RequestID:                    "req-unknown-price-1",
+		APIKeyID:                     apiKey.ID,
+		CompressEstimatedTokensSaved: 5000, // large, but no usage to price it
+		CompressorsApplied:           []string{"whitespace"},
+		RequestBodyCompressed:        []byte(`{"model":"gpt-4o"}`),
+		// Usage and Candidate are nil — pricing is unknown, and crucially
+		// Attempts is empty (pre-relay rejection).
+	}
+	svc.finalize(rc, http.StatusInternalServerError, "no_candidate", time.Now())
+
+	row, err := repository.GetRequestLogByRequestID(db, "req-unknown-price-1")
+	if err != nil || row == nil {
+		t.Fatalf("GetRequestLogByRequestID: %v (row=%v)", err, row)
+	}
+	if row.CostKnown {
+		t.Errorf("CostKnown = true, want false (no usage to price)")
+	}
+	if row.CompressEstimatedCostSavedMicros != 0 {
+		t.Errorf("CompressEstimatedCostSavedMicros = %d, want 0 when pricing is unknown",
+			row.CompressEstimatedCostSavedMicros)
+	}
+	// tokens_saved is zeroed too: the request was rejected pre-relay so no
+	// upstream call was made — persisting savings would inflate the compress
+	// rate / savings metrics.
+	if row.CompressEstimatedTokensSaved != 0 {
+		t.Errorf("CompressEstimatedTokensSaved = %d, want 0 (pre-relay rejection)",
+			row.CompressEstimatedTokensSaved)
+	}
+	if row.CompressorsApplied != "" {
+		t.Errorf("CompressorsApplied = %q, want empty (pre-relay rejection)",
+			row.CompressorsApplied)
+	}
+}
+
+// TestFinalizeCompressPhantomSavingsZeroedOnPreRelayRejection: compression
+// modified the body and produced savings, but the request was then rejected
+// before any upstream attempt (no routable candidate, model disabled, etc.).
+// The compress savings fields MUST be zeroed so the stats endpoint does not
+// count phantom savings. CompressSkipReason is kept (audit-only). The
+// compressed body on request_log_bodies is still persisted (for debugging).
+func TestFinalizeCompressPhantomSavingsZeroedOnPreRelayRejection(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	svc := newRelaySvc(t, db)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
+
+	rc := &RelayContext{
+		RequestID:                    "req-phantom-1",
+		APIKeyID:                     apiKey.ID,
+		CompressEstimatedTokensSaved: 1500,
+		CompressorsApplied:           []string{"whitespace", "log"},
+		RequestBodyCompressed:        []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
+		// No Attempts — simulates a pre-relay rejection (e.g. no routable
+		// candidate after compression already ran on the caller body).
+	}
+	// 503 = no routable candidate, the most common post-compress pre-relay path.
+	svc.finalize(rc, http.StatusServiceUnavailable, "no_enabled_candidate", time.Now())
+
+	row, err := repository.GetRequestLogByRequestID(db, "req-phantom-1")
+	if err != nil || row == nil {
+		t.Fatalf("GetRequestLogByRequestID: %v (row=%v)", err, row)
+	}
+	if row.CompressEstimatedTokensSaved != 0 {
+		t.Errorf("CompressEstimatedTokensSaved = %d, want 0 (phantom savings zeroed)",
+			row.CompressEstimatedTokensSaved)
+	}
+	if row.CompressEstimatedCostSavedMicros != 0 {
+		t.Errorf("CompressEstimatedCostSavedMicros = %d, want 0 (phantom savings zeroed)",
+			row.CompressEstimatedCostSavedMicros)
+	}
+	if row.CompressorsApplied != "" {
+		t.Errorf("CompressorsApplied = %q, want empty (phantom savings zeroed)",
+			row.CompressorsApplied)
+	}
+	// CompressSkipReason stays as-is — it's audit-only.
+	// (empty here because compression ran, but the zeroing logic does NOT touch it)
+
+	// The compressed body is still persisted on request_log_bodies for debugging.
+	body, err := repository.GetRequestLogBodyByRequestID(db, "req-phantom-1")
+	if err != nil || body == nil {
+		t.Fatalf("GetRequestLogBodyByRequestID: %v (body=%v)", err, body)
+	}
+	if body.CompressedRequestBody == "" {
+		t.Errorf("CompressedRequestBody should still be persisted for debugging even on pre-relay rejection")
+	}
+}
+
+// TestJoinCompressors covers the comma-join helper directly: per-block
+// occurrences are preserved (NOT deduped) so stats can count how many times
+// each compressor fired, order is preserved, and empty input yields "".
+func TestJoinCompressors(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want string
+	}{
+		{"nil", nil, ""},
+		{"empty", []string{}, ""},
+		{"single", []string{"whitespace"}, "whitespace"},
+		{"distinct", []string{"whitespace", "contractions"}, "whitespace,contractions"},
+		{"duplicates preserved", []string{"whitespace", "contractions", "whitespace", "whitespace"}, "whitespace,contractions,whitespace,whitespace"},
+		{"blanks filtered", []string{"", "whitespace", "", ""}, "whitespace"},
+		{"repeats counted", []string{"log", "log", "diff"}, "log,log,diff"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := joinCompressors(tc.in); got != tc.want {
+				t.Errorf("joinCompressors(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }

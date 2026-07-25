@@ -5,7 +5,9 @@
      ¥X/day") rather than a budget overlay that wouldn't map onto a daily axis. -->
 <template>
   <div class="cost-trend">
-    <div v-if="!rows.length" class="cost-trend__empty">{{ t('costs.noData') }}</div>
+    <div v-if="!rows.length" class="cost-trend__empty">
+      <EmptyState :icon="BarChart3" :title="t('costs.noData')" />
+    </div>
     <VChart
       v-else
       class="cost-trend__chart"
@@ -19,6 +21,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { BarChart3 } from '@lucide/vue'
+import EmptyState from '../EmptyState.vue'
 import {
   VChart,
   CHART_ACCENT as ACCENT,

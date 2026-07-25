@@ -13,6 +13,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"io"
 	"strconv"
@@ -96,6 +97,26 @@ type OverviewRow struct {
 type ReportResult struct {
 	Dimension string      `json:"dimension"`
 	Rows      interface{} `json:"rows"`
+}
+
+// === Input-compression stats DTO =========================================
+
+// CompressStatsResult is the GET /analytics/compress-stats body. Each slice
+// is normalized to empty (never nil) so the JSON never emits null — the
+// frontend can call .map / .length unconditionally.
+//
+// TopAPIKeyLimit echoes the effective limit used for TopAPIKeys so the UI
+// can render "showing top N" deterministically. Totals carries the
+// platform-wide roll-up; SkipReasonBreakdown / CompressorHits / DailySeries
+// are the dimension-specific breakouts the UI renders side-by-side.
+type CompressStatsResult struct {
+	Totals              repository.CompressTotals           `json:"totals"`
+	SkipReasonBreakdown []repository.CompressSkipReasonRow  `json:"skip_reason_breakdown"`
+	TopAPIKeys          []repository.CompressTopAPIKeyRow   `json:"top_api_keys"`
+	TopModels           []repository.CompressTopModelRow    `json:"top_models"`
+	TopProviders        []repository.CompressTopProviderRow `json:"top_providers"`
+	CompressorHits      []repository.CompressorHitRow       `json:"compressor_hits"`
+	DailySeries         []repository.CompressDailySeriesRow `json:"daily_series"`
 }
 
 // === Service =============================================================
@@ -367,4 +388,77 @@ func formatUintPtr(v *uint) string {
 		return ""
 	}
 	return strconv.FormatUint(uint64(*v), 10)
+}
+
+// === Input-compression stats ============================================
+
+// DefaultCompressTopN is the per-api-key Top-N row count when the caller
+// doesn't supply one. Mirrors the dashboard's "top 5 callers" default
+// (rendering 5 rows fits the admin UI's card height).
+const DefaultCompressTopN = 5
+
+// MaxCompressTopN caps the per-api-key Top-N row count. A higher value
+// wastes screen real estate without adding signal — the dashboard's other
+// lists also cap at 20.
+const MaxCompressTopN = 20
+
+// GetCompressStats aggregates the compress_* columns into one response DTO.
+// Clamps the filter window on the day-bucket cap so the daily series and
+// totals aggregate the same range — same reason ResolveTimeRange is applied
+// in runReport. topN is clamped to [1, MaxCompressTopN]; DefaultCompressTopN
+// is used when the caller passes zero.
+//
+// ctx is threaded through to every repository query so a client disconnect
+// cancels in-flight SQL. Every slice in the result is non-nil (empty [] on
+// the wire, never JSON null) so the frontend can call .map / .length without
+// null-checking.
+func (s *AnalyticsService) GetCompressStats(ctx context.Context, filter AnalyticsFilter, topN int) (*CompressStatsResult, error) {
+	if topN <= 0 {
+		topN = DefaultCompressTopN
+	}
+	if topN > MaxCompressTopN {
+		topN = MaxCompressTopN
+	}
+	// Clamp on the day-bucket cap so the daily series walk and the totals
+	// share the exact same [start, end) window.
+	filter = resolveEffectiveRange(filter, BucketDay)
+	rf := toRepoFilter(filter)
+
+	totals, err := repository.AggregateCompressTotals(ctx, s.db, rf)
+	if err != nil {
+		return nil, err
+	}
+	skipReasons, err := repository.AggregateCompressSkipReasons(ctx, s.db, rf)
+	if err != nil {
+		return nil, err
+	}
+	topKeys, err := repository.AggregateCompressTopAPIKeys(ctx, s.db, rf, topN)
+	if err != nil {
+		return nil, err
+	}
+	topModels, err := repository.AggregateCompressTopModels(ctx, s.db, rf, topN)
+	if err != nil {
+		return nil, err
+	}
+	topProviders, err := repository.AggregateCompressTopProviders(ctx, s.db, rf, topN)
+	if err != nil {
+		return nil, err
+	}
+	compressorHits, err := repository.AggregateCompressorHits(ctx, s.db, rf)
+	if err != nil {
+		return nil, err
+	}
+	daily, err := repository.AggregateCompressDailySeries(ctx, s.db, rf, time.Local)
+	if err != nil {
+		return nil, err
+	}
+	return &CompressStatsResult{
+		Totals:              *totals,
+		SkipReasonBreakdown: skipReasons,
+		TopAPIKeys:          topKeys,
+		TopModels:           topModels,
+		TopProviders:        topProviders,
+		CompressorHits:      compressorHits,
+		DailySeries:         daily,
+	}, nil
 }

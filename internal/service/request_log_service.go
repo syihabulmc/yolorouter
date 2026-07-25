@@ -123,6 +123,16 @@ type RequestLogDetail struct {
 	StreamBodyPath       string                  `json:"stream_body_path"`
 	StreamBodyTruncated  bool                    `json:"stream_body_truncated"`
 	HasStreamBody        bool                    `json:"has_stream_body"`
+	// Input-compression audit fields. TokensSaved/CostSavedMicros are the
+	// estimated reduction (zero when compression was off or the request was
+	// rejected pre-relay). SkipReason is '' when compression ran; otherwise a
+	// short code. CompressorsApplied is a comma-joined list. CompressedBody is
+	// the post-compression request body (same truncation guard as request_body).
+	CompressEstimatedTokensSaved int    `json:"compress_estimated_tokens_saved"`
+	CompressEstimatedCostMicros  int64  `json:"compress_estimated_cost_saved_micros"`
+	CompressSkipReason           string `json:"compress_skip_reason"`
+	CompressorsApplied           string `json:"compressors_applied"`
+	CompressedRequestBody        string `json:"compressed_request_body"`
 }
 
 // maxInlineBodyBytes caps each request/response body embedded inline in the
@@ -260,6 +270,11 @@ func (s *RequestLogService) GetRequestLogDetail(requestID string) (*RequestLogDe
 		AttemptsDetail:   attempts,
 		DurationMs:       row.DurationMs,
 		CreatedAt:        row.CreatedAt,
+		// Compress audit fields from the request_logs row.
+		CompressEstimatedTokensSaved: row.CompressEstimatedTokensSaved,
+		CompressEstimatedCostMicros:  row.CompressEstimatedCostSavedMicros,
+		CompressSkipReason:           row.CompressSkipReason,
+		CompressorsApplied:           row.CompressorsApplied,
 	}
 	if bodyRow != nil {
 		detail.RequestHeaders = bodyRow.RequestHeaders // small (masked headers), never capped
@@ -276,6 +291,9 @@ func (s *RequestLogService) GetRequestLogDetail(requestID string) (*RequestLogDe
 		detail.StreamBodyPath = bodyRow.StreamBodyPath
 		detail.StreamBodyTruncated = bodyRow.StreamBodyTruncated
 		detail.HasStreamBody = bodyRow.StreamBodyPath != ""
+		// Compressed body uses the SAME truncation guard as request_body so a
+		// pathological compressed body can't freeze the admin's tab.
+		detail.CompressedRequestBody = truncateInlineBody(bodyRow.CompressedRequestBody)
 	}
 	return detail, nil
 }

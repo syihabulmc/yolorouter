@@ -86,6 +86,13 @@ export interface RequestLogDetail extends RequestLogRow {
   stream_body_path: string
   stream_body_truncated: boolean
   has_stream_body: boolean
+  // Input-compression audit fields. compressors_applied != '' OR
+  // compress_skip_reason != '' means compression was relevant for this request.
+  compress_estimated_tokens_saved: number
+  compress_estimated_cost_saved_micros: number
+  compress_skip_reason: string
+  compressors_applied: string
+  compressed_request_body: string
 }
 
 export interface RequestLogListParams {

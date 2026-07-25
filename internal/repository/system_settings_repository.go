@@ -52,6 +52,71 @@ func GetCustomSystemPrompt(db *gorm.DB) (settings.CustomSystemPromptSetting, int
 	return s, ver, nil
 }
 
+// inputCompressionKey is the single system_settings row holding the global
+// input-compression switch. Its value is strictly "true" or "false"; the row
+// is seeded by migrations/sqlite/00016 and migrations/postgres/00016.
+const inputCompressionKey = "input_compression_enabled"
+
+// GetInputCompression reads the single input_compression_enabled row and
+// returns (enabled, version, nil). A missing row is treated as the implicit
+// default (false, 0) so a not-yet-migrated database behaves as disabled
+// without erroring — the gateway read path must never fail-closed on this.
+// A value outside {"true","false"} is corrupt data and surfaces as an error.
+func GetInputCompression(db *gorm.DB) (enabled bool, version int64, err error) {
+	var row struct {
+		Value   string
+		Version int64
+	}
+	if err = db.Table("system_settings").
+		Select("value, version").
+		Where("key = ?", inputCompressionKey).
+		Take(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, 0, nil
+		}
+		return false, 0, err
+	}
+	switch row.Value {
+	case "true":
+		return true, row.Version, nil
+	case "false":
+		return false, row.Version, nil
+	default:
+		return false, 0, fmt.Errorf("system_settings: corrupt %s value %q", inputCompressionKey, row.Value)
+	}
+}
+
+// UpdateInputCompression CAS-updates the single input_compression_enabled row:
+//
+//	UPDATE system_settings
+//	SET value = ?, version = version + 1
+//	WHERE key = 'input_compression_enabled' AND version = ?
+//
+// RowsAffected == 1 means the CAS held and the row is now at expectedVersion+1;
+// anything else means another writer committed first => conflict. Returns the
+// committed value + new version so the handler can hand the fresh version back
+// to the caller; a second save with the stale version would otherwise always
+// conflict.
+func UpdateInputCompression(db *gorm.DB, expectedVersion int64, enabled bool) (bool, int64, error) {
+	value := "false"
+	if enabled {
+		value = "true"
+	}
+	res := db.Table("system_settings").
+		Where("key = ? AND version = ?", inputCompressionKey, expectedVersion).
+		Updates(map[string]interface{}{
+			"value":   value,
+			"version": gorm.Expr("version + 1"),
+		})
+	if res.Error != nil {
+		return false, 0, res.Error
+	}
+	if res.RowsAffected != 1 {
+		return false, 0, errcode.ErrInputCompressionConflict
+	}
+	return enabled, expectedVersion + 1, nil
+}
+
 // UpdateCustomSystemPrompt CAS-upserts both rows in ONE statement:
 //
 //	UPDATE system_settings

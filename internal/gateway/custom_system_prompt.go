@@ -11,11 +11,13 @@ import (
 )
 
 // SettingsProvider is the read-only window the gateway has into the cached
-// global custom system prompt. Implemented by the system settings service and
-// injected into RelayService by the router. The gateway imports only the
-// neutral settings DTO (not the service package), so there is no import cycle.
+// global custom system prompt and input-compression switch. Implemented by
+// the system settings service and injected into RelayService by the router.
+// The gateway imports only the neutral settings DTO (not the service
+// package), so there is no import cycle.
 type SettingsProvider interface {
 	CustomSystemPrompt(ctx context.Context) (settings.CustomSystemPromptSetting, int64, error)
+	GetInputCompression(ctx context.Context) (bool, int64, error)
 }
 
 const systemPromptSep = "\n\n"
@@ -39,7 +41,7 @@ func applyCustomSystemPrompt(rc *RelayContext, egressProto protocols.ProtocolID,
 	if body == nil || !rc.CustomSystemPromptEnabled || rc.CustomSystemPrompt == "" {
 		return body
 	}
-	if !IsChatEndpoint(rc.IngressPath) {
+	if !rc.IsChatEndpoint {
 		return body
 	}
 	switch egressProto {

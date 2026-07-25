@@ -52,6 +52,7 @@ func UpsertRequestLogBody(db *gorm.DB, body *model.RequestLogBody) error {
 			"request_headers", "request_body", "upstream_request_body",
 			"response_body", "upstream_response_body",
 			"stream_body_path", "stream_body_truncated",
+			"compressed_request_body",
 		}),
 	}).Create(body).Error
 }

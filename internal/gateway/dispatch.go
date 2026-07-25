@@ -42,14 +42,14 @@ func (s *RelayService) buildUpstreamBody(
 
 	var outBody []byte
 	if egress.Passthrough {
-		rewritten, err := passthroughRequestBody(egress.Protocol, rc.RequestBody, providerModelName)
+		rewritten, err := passthroughRequestBody(egress.Protocol, rc.EffectiveRequestBody(), providerModelName)
 		if err != nil {
 			return nil, "", fmt.Errorf("rewrite model field: %w", err)
 		}
 		outBody = rewritten
 	} else {
 		dec := codecsFor(ingress).RequestDecoder
-		ir, err := dec.DecodeRequest(json.RawMessage(rc.RequestBody), providerModelName, rc.IsStream)
+		ir, err := dec.DecodeRequest(json.RawMessage(rc.EffectiveRequestBody()), providerModelName, rc.IsStream)
 		if err != nil {
 			return nil, "", fmt.Errorf("decode ingress request (%s): %w", ingress, err)
 		}

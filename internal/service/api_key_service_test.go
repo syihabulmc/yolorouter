@@ -466,3 +466,220 @@ func TestListAPIKeysFiltersByDisplayStatus(t *testing.T) {
 		}
 	}
 }
+
+// --- Input-compression per-key override tests --------------------------------
+
+// TestCreateAPIKeyPersistsCompressFields verifies both compress columns are
+// written at create time: a key created with override+enabled must carry those
+// exact values in the stored row, and the returned view must surface them.
+func TestCreateAPIKeyPersistsCompressFields(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+		ModelIDs:                []uint{mid},
+		CompressEnabledOverride: true,
+		CompressEnabled:         true,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	if !result.APIKey.CompressEnabledOverride || !result.APIKey.CompressEnabled {
+		t.Fatalf("view should surface compress fields: override=%v enabled=%v",
+			result.APIKey.CompressEnabledOverride, result.APIKey.CompressEnabled)
+	}
+
+	var stored model.APIKey
+	if err := db.First(&stored, result.APIKey.ID).Error; err != nil {
+		t.Fatalf("load stored: %v", err)
+	}
+	if !stored.CompressEnabledOverride || !stored.CompressEnabled {
+		t.Fatalf("stored row should have compress fields set: override=%v enabled=%v",
+			stored.CompressEnabledOverride, stored.CompressEnabled)
+	}
+}
+
+// TestCreateAPIKeyCompressDefaultsToFalse checks that a create call without
+// compress fields defaults both to false (the "inherit global" state).
+func TestCreateAPIKeyCompressDefaultsToFalse(t *testing.T) {
+	svc, _ := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, svc.db, "m1")
+
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+		ModelIDs: []uint{mid},
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	if result.APIKey.CompressEnabledOverride || result.APIKey.CompressEnabled {
+		t.Fatalf("compress fields should default to false: override=%v enabled=%v",
+			result.APIKey.CompressEnabledOverride, result.APIKey.CompressEnabled)
+	}
+}
+
+// TestUpdateAPIKeyCompressOverrideFalseZeroesEnabled checks the override=false
+// combination rule: a PATCH that sets override=false must store
+// compress_enabled=false even when the caller also sends enabled=true. The
+// override is off so the key inherits the global setting and the per-key
+// enabled value is meaningless; zeroing it keeps the row clean.
+func TestUpdateAPIKeyCompressOverrideFalseZeroesEnabled(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{
+		ModelIDs:                []uint{mid},
+		CompressEnabledOverride: true,
+		CompressEnabled:         true,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	overrideFalse := false
+	enabledTrue := true
+	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
+		CompressEnabledOverride: &overrideFalse,
+		CompressEnabled:         &enabledTrue,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if view.CompressEnabledOverride {
+		t.Fatalf("override should be false after PATCH, got %v", view.CompressEnabledOverride)
+	}
+	if view.CompressEnabled {
+		t.Fatalf("enabled should be zeroed to false when override=false, got %v", view.CompressEnabled)
+	}
+
+	// Verify the columns landed in the DB, not just the view.
+	var stored model.APIKey
+	if err := db.First(&stored, created.APIKey.ID).Error; err != nil {
+		t.Fatalf("load stored: %v", err)
+	}
+	if stored.CompressEnabled {
+		t.Fatalf("DB compress_enabled should be false, got %v", stored.CompressEnabled)
+	}
+}
+
+// TestUpdateAPIKeyCompressOverrideTrueRequiresEnabled checks that setting
+// override=true without supplying enabled is rejected -- the override has no
+// meaning without an explicit on/off value to override to.
+func TestUpdateAPIKeyCompressOverrideTrueRequiresEnabled(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{
+		ModelIDs: []uint{mid},
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	overrideTrue := true
+	_, err = svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
+		CompressEnabledOverride: &overrideTrue,
+	}, time.Now().UTC())
+	if !errors.Is(err, errcode.ErrCompressEnabledRequired) {
+		t.Fatalf("expected ErrCompressEnabledRequired, got %v", err)
+	}
+}
+
+// TestUpdateAPIKeyCompressOverrideTrueWithEnabled checks the happy path:
+// override=true + enabled=true stores both columns as-is.
+func TestUpdateAPIKeyCompressOverrideTrueWithEnabled(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{
+		ModelIDs: []uint{mid},
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	overrideTrue := true
+	enabledTrue := true
+	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
+		CompressEnabledOverride: &overrideTrue,
+		CompressEnabled:         &enabledTrue,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !view.CompressEnabledOverride || !view.CompressEnabled {
+		t.Fatalf("both compress fields should be true: override=%v enabled=%v",
+			view.CompressEnabledOverride, view.CompressEnabled)
+	}
+}
+
+// TestUpdateAPIKeyCompressSparsePatchLeavesOverride checks that a lone
+// enabled patch (override pointer nil) writes only the enabled column and
+// leaves the override column untouched -- the sparse-PATCH contract.
+func TestUpdateAPIKeyCompressSparsePatchLeavesOverride(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{
+		ModelIDs:                []uint{mid},
+		CompressEnabledOverride: true,
+		CompressEnabled:         false,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Sparse PATCH: only enabled, override should stay true.
+	enabledTrue := true
+	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
+		CompressEnabled: &enabledTrue,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !view.CompressEnabledOverride {
+		t.Fatalf("override should be untouched (true), got false")
+	}
+	if !view.CompressEnabled {
+		t.Fatalf("enabled should be patched to true, got false")
+	}
+}
+
+// TestListAndGetAPIKeySurfacesCompressFields checks that both the list and
+// detail endpoints surface the compress fields in the view.
+func TestListAndGetAPIKeySurfacesCompressFields(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+		ModelIDs:                []uint{mid},
+		CompressEnabledOverride: true,
+		CompressEnabled:         true,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Detail view.
+	detail, err := svc.GetAPIKey(result.APIKey.ID)
+	if err != nil {
+		t.Fatalf("GetAPIKey: %v", err)
+	}
+	if !detail.CompressEnabledOverride || !detail.CompressEnabled {
+		t.Fatalf("detail view should surface compress: override=%v enabled=%v",
+			detail.CompressEnabledOverride, detail.CompressEnabled)
+	}
+
+	// List view.
+	list, _, err := svc.ListAPIKeys("", "", "", 1, 20)
+	if err != nil {
+		t.Fatalf("ListAPIKeys: %v", err)
+	}
+	var found bool
+	for _, v := range list {
+		if v.ID == result.APIKey.ID {
+			found = true
+			if !v.CompressEnabledOverride || !v.CompressEnabled {
+				t.Fatalf("list view should surface compress: override=%v enabled=%v",
+					v.CompressEnabledOverride, v.CompressEnabled)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("created key not found in list")
+	}
+}

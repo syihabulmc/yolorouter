@@ -1,0 +1,315 @@
+<!-- frontend/src/components/costs/OptimizationSettingsModal.vue
+     The two global cost-optimization switches (custom system prompt + input
+     compression), behind one modal so the CostOptimizationPage can lead with
+     savings data instead of form fields. Each switch keeps its own three-state
+     load + version-CAS save; they are independent settings that fail, retry,
+     and save independently. Emits "saved" after a successful PUT so the page
+     can refresh its CTA banner without re-reading. -->
+<template>
+  <NModal
+    :show="show"
+    preset="card"
+    :title="t('costOptimization.modalTitle')"
+    style="max-width: 640px"
+    :mask-closable="false"
+    :close-on-esc="false"
+    @update:show="(v: boolean) => emit('update:show', v)"
+  >
+    <!-- Custom system prompt -->
+    <section class="setting-block">
+      <div class="setting-block__head">
+        <HelpLabel :tip="t('costOptimization.cspTitle_tip')">{{ t('costOptimization.cspTitle') }}</HelpLabel>
+      </div>
+      <p class="setting-block__desc">{{ t('costOptimization.cspDesc') }}</p>
+      <div v-if="cspLoad === 'loading'" class="setting-block__state"><NSpin /></div>
+      <div v-else-if="cspLoad === 'error'" class="setting-block__state setting-block__state--err">
+        <span>{{ t('costOptimization.loadFailed') }}</span>
+        <NButton size="small" @click="loadCSP">{{ t('costOptimization.retry') }}</NButton>
+      </div>
+      <template v-else>
+        <NForm label-placement="top" :show-require-mark="false">
+          <NFormItem path="enabled">
+            <template #label>
+              <HelpLabel :tip="t('costOptimization.enabled_tip')">{{ t('costOptimization.enabled') }}</HelpLabel>
+            </template>
+            <NSwitch v-model:value="cspForm.enabled" />
+          </NFormItem>
+          <NFormItem path="text">
+            <template #label>
+              <HelpLabel :tip="t('costOptimization.text_tip')">{{ t('costOptimization.text') }}</HelpLabel>
+            </template>
+            <CustomPromptEditor
+              v-model:text="cspForm.text"
+              :rows="6"
+              :placeholder="t('costOptimization.textPlaceholder')"
+            />
+          </NFormItem>
+        </NForm>
+        <div class="setting-block__foot">
+          <span class="setting-block__version">v{{ cspForm.version }}</span>
+          <NButton
+            type="primary"
+            size="small"
+            :loading="cspSaving"
+            :disabled="!cspSetting"
+            @click="saveCSP"
+          >
+            {{ t('costOptimization.save') }}
+          </NButton>
+        </div>
+      </template>
+    </section>
+
+    <!-- Input compression -->
+    <section class="setting-block">
+      <div class="setting-block__head">
+        <HelpLabel :tip="t('costOptimization.inputCompression.titleTip')">
+          {{ t('costOptimization.inputCompression.title') }}
+        </HelpLabel>
+      </div>
+      <p class="setting-block__desc">{{ t('costOptimization.inputCompression.desc') }}</p>
+      <div v-if="icLoad === 'loading'" class="setting-block__state"><NSpin /></div>
+      <div v-else-if="icLoad === 'error'" class="setting-block__state setting-block__state--err">
+        <span>{{ t('costOptimization.loadFailed') }}</span>
+        <NButton size="small" @click="loadIC">{{ t('costOptimization.retry') }}</NButton>
+      </div>
+      <template v-else>
+        <NForm label-placement="top" :show-require-mark="false">
+          <NFormItem path="enabled">
+            <template #label>
+              <HelpLabel :tip="t('costOptimization.inputCompression.enabledTip')">{{ t('costOptimization.enabled') }}</HelpLabel>
+            </template>
+            <NSwitch v-model:value="icForm.enabled" />
+          </NFormItem>
+        </NForm>
+        <div class="setting-block__foot">
+          <span class="setting-block__version">v{{ icForm.version }}</span>
+          <NButton
+            type="primary"
+            size="small"
+            :loading="icSaving"
+            :disabled="!icSetting"
+            @click="saveIC"
+          >
+            {{ t('costOptimization.save') }}
+          </NButton>
+        </div>
+      </template>
+    </section>
+
+    <template #footer>
+      <NSpace justify="end">
+        <NButton @click="emit('update:show', false)">{{ t('costOptimization.close') }}</NButton>
+      </NSpace>
+    </template>
+  </NModal>
+</template>
+
+<script setup lang="ts">
+import { reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { NModal, NForm, NFormItem, NSwitch, NButton, NSpace, NSpin, useMessage } from 'naive-ui'
+import HelpLabel from '../HelpLabel.vue'
+import CustomPromptEditor from '../CustomPromptEditor.vue'
+import { APIError, displayMessage } from '../../api/client'
+import {
+  getCustomSystemPrompt,
+  updateCustomSystemPrompt,
+  getInputCompression,
+  updateInputCompression,
+  type CustomSystemPromptSetting,
+  type InputCompressionSetting,
+} from '../../api/systemSettings'
+import { CUSTOM_SYSTEM_PROMPT_CONFLICT, INPUT_COMPRESSION_CONFLICT } from '../../api/errcodes'
+
+const props = defineProps<{ show: boolean }>()
+const emit = defineEmits<{
+  'update:show': [value: boolean]
+  saved: []
+}>()
+
+const { t } = useI18n()
+const message = useMessage()
+
+// Mirrors internal/service/system_settings_service.go's MaxCustomSystemPromptLen
+// so the client rejects oversized input before the round-trip. Same cap drives
+// the per-key customSystemPromptRule and CustomPromptEditor's counter.
+const MAX_CUSTOM_SYSTEM_PROMPT_LEN = 2000
+
+// Iterate the string as Unicode code points without materializing an array
+// (Array.from would allocate per check). The backend counts runes, so a
+// surrogate-pair emoji still tallies as one character here — matching the
+// per-key CSP rule and CustomPromptEditor's live counter.
+function runeCount(s: string): number {
+  let n = 0
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  for (const _ of s) n++
+  return n
+}
+
+// CSP state — three-state load keeps the form hidden until the GET resolves,
+// so a failed load can't expose editable defaults that would overwrite the
+// real row on save.
+const cspLoad = ref<'loading' | 'error' | 'loaded'>('loading')
+const cspSetting = ref<CustomSystemPromptSetting | null>(null)
+const cspForm = reactive({ enabled: false, text: '', version: 0 })
+const cspSaving = ref(false)
+
+async function loadCSP() {
+  cspLoad.value = 'loading'
+  try {
+    const s = await getCustomSystemPrompt()
+    cspSetting.value = s
+    cspForm.enabled = s.enabled
+    cspForm.text = s.text
+    cspForm.version = s.version
+    cspLoad.value = 'loaded'
+  } catch (err) {
+    cspSetting.value = null
+    cspLoad.value = 'error'
+    if (!(err instanceof APIError)) message.error(displayMessage(err, t))
+  }
+}
+
+async function saveCSP() {
+  // Hard guard: never let a save fire before a successful GET — otherwise a
+  // click during the error state could submit the empty defaults.
+  if (!cspSetting.value || cspSaving.value) return
+  // Client-side validation mirroring the backend (errcode 11010 too-long /
+  // 11011 empty-when-enabled) so the user gets immediate feedback instead
+  // of a round-trip rejection. Rune count matches the server's
+  // MaxCustomSystemPromptLen cap and the per-key CSP rule.
+  if (cspForm.enabled && !cspForm.text.trim()) {
+    message.error(t('costOptimization.emptyTextError'))
+    return
+  }
+  if (runeCount(cspForm.text) > MAX_CUSTOM_SYSTEM_PROMPT_LEN) {
+    message.error(t('costOptimization.tooLongError'))
+    return
+  }
+  cspSaving.value = true
+  try {
+    const updated = await updateCustomSystemPrompt({
+      enabled: cspForm.enabled,
+      text: cspForm.text,
+      version: cspForm.version,
+    })
+    // Adopt the server's new version so a second save uses the right base.
+    cspSetting.value = updated
+    cspForm.version = updated.version
+    cspForm.enabled = updated.enabled
+    cspForm.text = updated.text
+    message.success(t('costOptimization.saved'))
+    emit('saved')
+  } catch (err) {
+    if (err instanceof APIError && err.code === CUSTOM_SYSTEM_PROMPT_CONFLICT) {
+      // Concurrent edit — surface and reload authoritative state.
+      message.error(t('costOptimization.conflict'))
+      void loadCSP()
+    } else {
+      message.error(displayMessage(err, t))
+    }
+  } finally {
+    cspSaving.value = false
+  }
+}
+
+// IC state — same three-state + version-CAS pattern, independent of CSP.
+const icLoad = ref<'loading' | 'error' | 'loaded'>('loading')
+const icSetting = ref<InputCompressionSetting | null>(null)
+const icForm = reactive({ enabled: false, version: 0 })
+const icSaving = ref(false)
+
+async function loadIC() {
+  icLoad.value = 'loading'
+  try {
+    const s = await getInputCompression()
+    icSetting.value = s
+    icForm.enabled = s.enabled
+    icForm.version = s.version
+    icLoad.value = 'loaded'
+  } catch (err) {
+    icSetting.value = null
+    icLoad.value = 'error'
+    if (!(err instanceof APIError)) message.error(displayMessage(err, t))
+  }
+}
+
+async function saveIC() {
+  if (!icSetting.value || icSaving.value) return
+  icSaving.value = true
+  try {
+    const updated = await updateInputCompression({
+      enabled: icForm.enabled,
+      version: icForm.version,
+    })
+    icSetting.value = updated
+    icForm.version = updated.version
+    icForm.enabled = updated.enabled
+    message.success(t('costOptimization.saved'))
+    emit('saved')
+  } catch (err) {
+    if (err instanceof APIError && err.code === INPUT_COMPRESSION_CONFLICT) {
+      message.error(t('costOptimization.inputCompression.conflict'))
+      void loadIC()
+    } else {
+      message.error(displayMessage(err, t))
+    }
+  } finally {
+    icSaving.value = false
+  }
+}
+
+// Reload both whenever the modal opens — picks up external edits made since
+// the last view and resets any stale error state.
+watch(
+  () => props.show,
+  (v) => {
+    if (v) {
+      void loadCSP()
+      void loadIC()
+    }
+  },
+  { immediate: true },
+)
+</script>
+
+<style scoped>
+.setting-block + .setting-block {
+  margin-top: var(--space-5);
+}
+.setting-block__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+  font-weight: 700;
+  color: var(--color-text);
+}
+.setting-block__desc {
+  margin: 0 0 var(--space-3);
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+.setting-block__state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
+}
+.setting-block__state--err {
+  color: var(--color-text-secondary);
+}
+.setting-block__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+.setting-block__version {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+</style>

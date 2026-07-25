@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,11 +27,17 @@ import (
 // default). Tests that need a specific prompt can swap the value on the
 // returned struct after construction.
 type stubSettingsProvider struct {
-	val settings.CustomSystemPromptSetting
+	val             settings.CustomSystemPromptSetting
+	compressEnabled bool
+	compressErr     error
 }
 
 func (s stubSettingsProvider) CustomSystemPrompt(_ context.Context) (settings.CustomSystemPromptSetting, int64, error) {
 	return s.val, 1, nil
+}
+
+func (s stubSettingsProvider) GetInputCompression(_ context.Context) (bool, int64, error) {
+	return s.compressEnabled, 1, s.compressErr
 }
 
 // newRelaySvc builds a RelayService and swaps in a plain transport so the
@@ -39,8 +47,15 @@ func (s stubSettingsProvider) CustomSystemPrompt(_ context.Context) (settings.Cu
 // newTestClient.
 func newRelaySvc(t *testing.T, db *gorm.DB) *RelayService {
 	t.Helper()
+	return newRelaySvcWithSettings(t, db, stubSettingsProvider{})
+}
+
+// newRelaySvcWithSettings is newRelaySvc with a caller-built stub, so a test
+// can pre-seed the global compression / CSP state the gateway reads.
+func newRelaySvcWithSettings(t *testing.T, db *gorm.DB, sp stubSettingsProvider) *RelayService {
+	t.Helper()
 	masterKey := bytes.Repeat([]byte{0x42}, 32)
-	svc := NewRelayService(db, masterKey, false, stubSettingsProvider{})
+	svc := NewRelayService(db, masterKey, false, sp)
 	svc.client.httpClient.Transport = &http.Transport{}
 	return svc
 }
@@ -1034,5 +1049,495 @@ func TestResponsesIngressMissingInputRejected(t *testing.T) {
 	}
 	if upstreamHit {
 		t.Error("upstream must not be called for a responses request missing input")
+	}
+}
+
+// --- Input compression tests -------------------------------------------------
+
+// buildOutputContent returns a >512-byte string of go-test-style output that
+// the compress engine's GoTest/Log compressors will shrink (drops === RUN and
+// --- PASS: boilerplate lines, retaining only the summary tail).
+func buildOutputContent() string {
+	return strings.Repeat("=== RUN   TestFoo\n--- PASS: TestFoo (0.00s)\n", 30) + "PASS\nok  \tpkg\t0.1s\n"
+}
+
+// jsonStr JSON-encodes s as a string literal (including surrounding quotes),
+// safe to concatenate into a JSON body template.
+func jsonStr(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// TestCompressTriggersAcrossProtocols: for each of the four ingress protocols,
+// compression enabled globally shrinks a build-output body before relay.
+// The compressed body reaches the upstream (captured via the RelayContext)
+// and is strictly shorter than the caller's original.
+func TestCompressTriggersAcrossProtocols(t *testing.T) {
+	cases := []struct {
+		name       string
+		path       string
+		externalNm string
+		providerMn string
+		body       func() []byte
+	}{
+		{
+			name:       "openai_chat",
+			path:       "/v1/chat/completions",
+			externalNm: "gpt-4o",
+			providerMn: "gpt-4o-real",
+			body: func() []byte {
+				return []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
+			},
+		},
+		{
+			name:       "claude",
+			path:       "/v1/messages",
+			externalNm: "claude-3-5-sonnet",
+			providerMn: "claude-3-5-sonnet-real",
+			body: func() []byte {
+				return []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"messages":[{"role":"user","content":[{"type":"tool_result","content":` + jsonStr(buildOutputContent()) + `}]}]}`)
+			},
+		},
+		{
+			name:       "responses",
+			path:       "/v1/responses",
+			externalNm: "responses-model",
+			providerMn: "gpt-4o-real",
+			body: func() []byte {
+				return []byte(`{"model":"responses-model","input":[{"role":"user","content":[{"type":"input_text","text":` + jsonStr(buildOutputContent()) + `}]}]}`)
+			},
+		},
+		{
+			name:       "gemini",
+			path:       "/v1beta/models/gemini-2.0-flash:generateContent",
+			externalNm: "gemini-2.0-flash",
+			providerMn: "gpt-4o-real",
+			body: func() []byte {
+				return []byte(`{"contents":[{"role":"user","parts":[{"text":` + jsonStr(buildOutputContent()) + `}]}]}`)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.NewSQLiteDB(t)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"model":"` + tc.providerMn + `","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+			}))
+			defer upstream.Close()
+
+			sp := stubSettingsProvider{compressEnabled: true}
+			svc := newRelaySvcWithSettings(t, db, sp)
+			p := createProvider(t, db, "p1", upstream.URL)
+			createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+			m := createModelAndCandidate(t, db, p, tc.externalNm, tc.providerMn, true, true, 1)
+			apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+			var captured *RelayContext
+			testHookHandleDone = func(rc *RelayContext) { captured = rc }
+			defer func() { testHookHandleDone = nil }()
+
+			origBody := tc.body()
+			c, w := newCtxPath(tc.path, origBody)
+			svc.Handle(c, apiKey)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+			}
+			if captured == nil {
+				t.Fatal("testHookHandleDone was never invoked")
+			}
+			if !captured.CompressEnabled {
+				t.Error("rc.CompressEnabled = false, want true")
+			}
+			if captured.RequestBodyCompressed == nil {
+				t.Fatal("rc.RequestBodyCompressed is nil, compression did not produce a body")
+			}
+			if len(captured.RequestBodyCompressed) >= len(origBody) {
+				t.Errorf("compressed body (%d bytes) is not shorter than original (%d bytes)",
+					len(captured.RequestBodyCompressed), len(origBody))
+			}
+			if captured.CompressEstimatedTokensSaved <= 0 {
+				t.Error("CompressEstimatedTokensSaved should be positive")
+			}
+			if len(captured.CompressorsApplied) == 0 {
+				t.Error("CompressorsApplied should not be empty")
+			}
+			if captured.CompressSkipReason != "" {
+				t.Errorf("CompressSkipReason = %q, want empty (compression applied)", captured.CompressSkipReason)
+			}
+		})
+	}
+}
+
+// TestCompressSkipsNoLiveZone: compression is enabled but the body has no
+// live-zone blocks (last message is assistant — no user/tool text after it).
+// The engine returns Skipped=NoLiveZone, rc.RequestBodyCompressed stays nil,
+// and the request proceeds with the original body.
+func TestCompressSkipsNoLiveZone(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	sp := stubSettingsProvider{compressEnabled: true}
+	svc := newRelaySvcWithSettings(t, db, sp)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	// Last message is assistant — no user/tool content follows, so locate
+	// returns zero live blocks.
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"ok"}]}`)
+	c, w := newCtx(body)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	if captured.RequestBodyCompressed != nil {
+		t.Error("RequestBodyCompressed should be nil when the engine skips")
+	}
+	if captured.CompressSkipReason != "no_live_zone" {
+		t.Errorf("CompressSkipReason = %q, want %q", captured.CompressSkipReason, "no_live_zone")
+	}
+}
+
+// TestCompressDisabledBySwitch: CompressEnabled=false leaves the body
+// untouched — no compression attempt, no skip reason recorded.
+func TestCompressDisabledBySwitch(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	// Global switch off.
+	sp := stubSettingsProvider{compressEnabled: false}
+	svc := newRelaySvcWithSettings(t, db, sp)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
+	c, w := newCtx(origBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	if captured.CompressEnabled {
+		t.Error("rc.CompressEnabled should be false")
+	}
+	if captured.RequestBodyCompressed != nil {
+		t.Error("RequestBodyCompressed should be nil when compression is off")
+	}
+	if captured.CompressSkipReason != "" {
+		t.Errorf("CompressSkipReason = %q, want empty (compression never attempted)", captured.CompressSkipReason)
+	}
+}
+
+// TestCompressNonChatEndpointNotCompressed: a path whose IsChatEndpoint is
+// false (Gemini countTokens) is not compressed even when CompressEnabled is
+// true. rc.RequestBodyCompressed stays nil and no skip reason is recorded
+// (the gate was never entered).
+func TestCompressNonChatEndpointNotCompressed(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	sp := stubSettingsProvider{compressEnabled: true}
+	svc := newRelaySvcWithSettings(t, db, sp)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	// countTokens is under the Gemini prefix but is NOT a generateContent/
+	// streamGenerateContent action — IsChatEndpoint returns false, and the
+	// compression gate is skipped entirely.
+	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
+	c, w := newCtxPath("/v1beta/models/gemini-2.0-flash:countTokens", origBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	if !captured.CompressEnabled {
+		t.Error("rc.CompressEnabled should be true (global switch on)")
+	}
+	if captured.RequestBodyCompressed != nil {
+		t.Error("RequestBodyCompressed should be nil — non-chat endpoints are not compressed")
+	}
+	if captured.CompressSkipReason != "" {
+		t.Errorf("CompressSkipReason = %q, want empty (gate never entered)", captured.CompressSkipReason)
+	}
+}
+
+// TestCompressFailOpenProceeds: compression enabled, engine returns Skipped
+// (no live zone in a body whose only user content is a short string with no
+// compressible anchors). The request must still succeed and the original
+// body is what reaches upstream.
+func TestCompressFailOpenProceeds(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	var upstreamBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	sp := stubSettingsProvider{compressEnabled: true}
+	svc := newRelaySvcWithSettings(t, db, sp)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	// Short prose content with no build-output/diff/grep anchors: the engine
+	// detects PlainText, compressorsFor returns nil, and the pass surfaces
+	// NoMatchingCompressor (skipped). The request must still proceed.
+	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(strings.Repeat("hello world ", 60)) + `}]}`)
+	c, w := newCtx(origBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	if captured.RequestBodyCompressed != nil {
+		t.Error("RequestBodyCompressed should be nil when the engine skips")
+	}
+	if captured.CompressSkipReason == "" {
+		t.Error("CompressSkipReason should record why the engine skipped")
+	}
+	// The original body content reaches upstream unchanged.
+	if !bytes.Contains(upstreamBody, []byte("hello world")) {
+		t.Errorf("upstream body should contain the original (uncompressed) content: %s", upstreamBody)
+	}
+}
+
+// TestCompressOverrideShortCircuitsGlobal: a per-key override (enabled=false)
+// wins over a globally-enabled switch. rc.CompressEnabled must be false and
+// no compression attempt is made.
+func TestCompressOverrideShortCircuitsGlobal(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	// Global switch ON, but per-key override says OFF.
+	sp := stubSettingsProvider{compressEnabled: true}
+	svc := newRelaySvcWithSettings(t, db, sp)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+	apiKey.CompressEnabledOverride = true
+	apiKey.CompressEnabled = false
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
+	c, w := newCtx(origBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	if captured.CompressEnabled {
+		t.Error("rc.CompressEnabled should be false (per-key override wins)")
+	}
+	if captured.RequestBodyCompressed != nil {
+		t.Error("RequestBodyCompressed should be nil when override disables compression")
+	}
+}
+
+// TestCompressOverrideEnablesWhenGlobalOff: the reverse — per-key override
+// (enabled=true) takes effect when the global switch is off.
+func TestCompressOverrideEnablesWhenGlobalOff(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	// Global OFF, per-key override ON.
+	sp := stubSettingsProvider{compressEnabled: false}
+	svc := newRelaySvcWithSettings(t, db, sp)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+	apiKey.CompressEnabledOverride = true
+	apiKey.CompressEnabled = true
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
+	c, w := newCtx(origBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	if !captured.CompressEnabled {
+		t.Error("rc.CompressEnabled should be true (per-key override enables)")
+	}
+	if captured.RequestBodyCompressed == nil {
+		t.Error("RequestBodyCompressed should be non-nil (override enabled compression)")
+	}
+}
+
+// TestCompressGlobalFailOpenOnError: when the settings read returns an error,
+// the gateway leaves compression disabled (fail-open) and the request
+// proceeds normally.
+func TestCompressGlobalFailOpenOnError(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	sp := stubSettingsProvider{compressErr: errors.New("settings db unavailable")}
+	svc := newRelaySvcWithSettings(t, db, sp)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
+	c, w := newCtx(origBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	if captured.CompressEnabled {
+		t.Error("rc.CompressEnabled should be false (fail-open on settings error)")
+	}
+	if captured.RequestBodyCompressed != nil {
+		t.Error("RequestBodyCompressed should be nil when settings read fails")
+	}
+}
+
+// TestCompressAndCSPCoexist: compression and custom system prompt are both
+// enabled. Both apply: the compressed body reaches upstream AND the injected
+// system prompt is present in the upstream body. The two are orthogonal —
+// compress mutates user/tool text, CSP appends to the system field.
+func TestCompressAndCSPCoexist(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	var upstreamBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	// Both globally enabled.
+	sp := stubSettingsProvider{
+		val: settings.CustomSystemPromptSetting{
+			Enabled: true,
+			Text:    "BE CONCISE AND HELPFUL",
+		},
+		compressEnabled: true,
+	}
+	svc := newRelaySvcWithSettings(t, db, sp)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
+	c, w := newCtx(origBody)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	// Compression applied.
+	if captured.RequestBodyCompressed == nil {
+		t.Fatal("RequestBodyCompressed should be non-nil (compression enabled and ran)")
+	}
+	if len(captured.RequestBodyCompressed) >= len(origBody) {
+		t.Errorf("compressed body (%d) should be shorter than original (%d)",
+			len(captured.RequestBodyCompressed), len(origBody))
+	}
+	// CSP resolved.
+	if !captured.CustomSystemPromptEnabled {
+		t.Error("CustomSystemPromptEnabled should be true")
+	}
+	// The upstream body must carry BOTH the injected system prompt AND the
+	// compressed content (=== RUN lines dropped).
+	if !bytes.Contains(upstreamBody, []byte("BE CONCISE AND HELPFUL")) {
+		t.Errorf("upstream body missing the injected system prompt: %s", upstreamBody)
+	}
+	if bytes.Contains(upstreamBody, []byte("=== RUN")) {
+		t.Errorf("upstream body still contains === RUN lines (compression did not shrink the content): %s", upstreamBody)
 	}
 }
