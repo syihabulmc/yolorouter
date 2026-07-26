@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"os"
+
+	// Embed the IANA timezone database so time.LoadLocation works on all
+	// platforms (Windows, minimal Docker) without a system zoneinfo.
+	_ "time/tzdata"
 )
 
 func main() {

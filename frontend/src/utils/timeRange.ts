@@ -23,34 +23,6 @@ export function initialLast7DaysRange(): TimeRange {
 }
 
 /**
- * initialLast7DaysRangeInZone returns the last-7-days window in the SERVER's
- * timezone (UTC offset in minutes, east positive; null → browser zone),
- * matching how the analytics backend defaults a missing range and how
- * TimeRangeSelect resolves the named "last 7 days" preset. Used when a page
- * must reconstruct that default client-side — e.g. a "view logs" link after
- * the custom picker is cleared, where the page's own range is null but the
- * displayed analytics fell back to the server's last-7-days.
- */
-export function initialLast7DaysRangeInZone(offsetMinutes: number | null): TimeRange {
-  const offset = offsetMinutes ?? -new Date().getTimezoneOffset()
-  const zonedNow = new Date(Date.now() + offset * 60_000)
-  const midnightMs = Date.UTC(
-    zonedNow.getUTCFullYear(),
-    zonedNow.getUTCMonth(),
-    zonedNow.getUTCDate(),
-    0,
-    0,
-    0,
-    0,
-  )
-  const end = new Date(midnightMs - offset * 60_000)
-  end.setDate(end.getDate() + 1)
-  const start = new Date(midnightMs - offset * 60_000)
-  start.setDate(start.getDate() - 6) // 7 calendar days inclusive of today
-  return { start: start.toISOString(), end: end.toISOString() }
-}
-
-/**
  * rangeFromQuery returns the reporting window carried in a route query (when
  * drilling from another analytics view), or null when the query carries none
  * so the caller can fall back to the default last-7-day preset.
@@ -114,9 +86,8 @@ export function clampedRangeStart(start: string, end: string): string {
 export function logsRouteWithRange(
   filter: Record<string, string>,
   range: TimeRange,
-  offsetMinutes: number | null,
 ): RouteLocationRaw {
-  const r = range.start && range.end ? range : initialLast7DaysRangeInZone(offsetMinutes)
+  const r = range.start && range.end ? range : initialLast7DaysRange()
   return {
     path: '/request-logs',
     query: { ...filter, start: clampedRangeStart(r.start ?? '', r.end ?? ''), end: r.end ?? '' },

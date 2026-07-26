@@ -196,11 +196,9 @@ func PostLogout(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-// GetMe returns the currently logged-in admin's username plus the server's
-// current timezone offset (minutes east of UTC). The offset lets the browser
-// resolve "Today"/"Yesterday" preset windows in the SERVER's natural day
-// rather than the browser's, so dashboard/analytics ranges line up with the
-// backend's time.Local-based aggregation.
+// GetMe returns the currently logged-in admin's username. The browser sends
+// its own IANA timezone via the ?timezone= param on dashboard/analytics, so
+// the server no longer needs to expose its local offset here.
 func GetMe(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		adminID := c.MustGet(middleware.AdminIDKey).(uint)
@@ -213,15 +211,12 @@ func GetMe(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-// writeMeResponse emits the shared me-shape (username + server timezone
-// offset) used by PostSetup, PostLogin, and GetMe. Centralizing it keeps the
-// three "you are now logged in" responses identical and the timezone offset
-// computation in one place.
+// writeMeResponse emits the shared me-shape used by PostSetup, PostLogin, and
+// GetMe. Centralizing it keeps the three "you are now logged in" responses
+// identical.
 func writeMeResponse(c *gin.Context, admin *model.Admin) {
-	_, offsetSec := time.Now().In(time.Local).Zone()
 	response.Success(c, gin.H{
-		"username":               admin.Username,
-		"server_timezone_offset": offsetSec / 60,
+		"username": admin.Username,
 	})
 }
 

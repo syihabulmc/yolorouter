@@ -80,7 +80,6 @@ import CostTrendChart from '../../components/costs/CostTrendChart.vue'
 import BreakdownTable from '../../components/costs/BreakdownTable.vue'
 import { initialLast7DaysRange, logsRouteWithRange, rangeFromQuery, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage, errorCodeOf } from '../../api/client'
-import { useAuthStore } from '../../store/auth'
 import { getCostStats, type CostStats } from '../../api/costs'
 import { getProvider } from '../../api/providers'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
@@ -91,7 +90,6 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const authStore = useAuthStore()
 
 const providerId = Number(route.params.id)
 // Inherit the reporting window when drilled from another analytics view
@@ -195,7 +193,7 @@ function onSelect(p: { kind: string; model?: string; providerId?: number; apiKey
 }
 
 function goLogs() {
-  router.push(logsRouteWithRange({ provider_id: String(providerId) }, timeRange.value, authStore.serverTimezoneOffset))
+  router.push(logsRouteWithRange({ provider_id: String(providerId) }, timeRange.value))
 }
 
 // First load: for a carried custom range (drilled from another analytics

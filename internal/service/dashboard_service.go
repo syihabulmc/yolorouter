@@ -73,10 +73,13 @@ type RecentFailureView struct {
 // dashboard can't meaningfully render with a missing section, and returning
 // a half-populated envelope would just hide the real error behind zeroes.
 //
-// All time windowing uses time.Local — the
-// dashboard's "today" follows the server's configured timezone.
-func (s *DashboardService) GetDashboard() (*DashboardData, error) {
-	loc := time.Local
+// loc is the client-supplied timezone used for day-bucket windowing so the
+// dashboard's "today" follows the admin's wall clock. nil falls back to the
+// server's local zone.
+func (s *DashboardService) GetDashboard(loc *time.Location) (*DashboardData, error) {
+	if loc == nil {
+		loc = time.Local
+	}
 
 	today, err := repository.GetTodayMetrics(s.db, loc)
 	if err != nil {

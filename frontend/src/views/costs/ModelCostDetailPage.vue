@@ -74,7 +74,6 @@ import CostTrendChart from '../../components/costs/CostTrendChart.vue'
 import BreakdownTable from '../../components/costs/BreakdownTable.vue'
 import { initialLast7DaysRange, logsRouteWithRange, rangeFromQuery, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage } from '../../api/client'
-import { useAuthStore } from '../../store/auth'
 import { getCostStats, type CostStats } from '../../api/costs'
 import type { AnalyticsFilter } from '../../api/analytics'
 
@@ -82,7 +81,6 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const authStore = useAuthStore()
 
 // Identity comes straight from the route — Vue Router already decodes
 // params/query once, so a second decodeURIComponent here would mangle any name
@@ -166,7 +164,7 @@ function onSelect(p: { kind: string; model?: string; providerId?: number; apiKey
 function goLogs() {
   // model_name is passed verbatim (exact match); logsRouteWithRange normalizes
   // a cleared range and clamps to the analytics cap.
-  router.push(logsRouteWithRange({ model_name: name }, timeRange.value, authStore.serverTimezoneOffset))
+  router.push(logsRouteWithRange({ model_name: name }, timeRange.value))
 }
 
 // First load: for a carried custom range (drilled from another analytics

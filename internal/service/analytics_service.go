@@ -68,6 +68,21 @@ type AnalyticsFilter struct {
 	IsStream    *bool
 	StartTime   *time.Time // inclusive
 	EndTime     *time.Time // exclusive
+	// Location is the client-supplied IANA timezone used for day-bucket
+	// grouping so analytics "today" matches the admin's wall clock. nil
+	// falls back to the server's local zone (location()).
+	Location *time.Location
+}
+
+// location returns the effective timezone for day-bucket aggregation,
+// falling back to time.Local when the caller didn't supply one. Centralized
+// here so every repository call site picks up the same zone without each
+// having to repeat the nil-check.
+func (f AnalyticsFilter) location() *time.Location {
+	if f.Location != nil {
+		return f.Location
+	}
+	return time.Local
 }
 
 // OverviewRow is the GET /analytics/overview body. Mirrors
@@ -223,7 +238,7 @@ func (s *AnalyticsService) runReport(dimension, bucket string, filter AnalyticsF
 	case DimensionCaller:
 		return repository.AggregateByCaller(s.db, rf)
 	case DimensionTime:
-		return repository.AggregateByTime(s.db, rf, time.Local, bucket)
+		return repository.AggregateByTime(s.db, rf, filter.location(), bucket)
 	}
 	return nil, ErrInvalidDimension
 }
@@ -251,7 +266,7 @@ func toRepoFilter(f AnalyticsFilter) *repository.RequestLogFilter {
 // range. bucket="" uses the day-bucket cap.
 func resolveEffectiveRange(filter AnalyticsFilter, bucket string) AnalyticsFilter {
 	rf := toRepoFilter(filter)
-	end, start := repository.ResolveTimeRange(rf, time.Local, bucket)
+	end, start := repository.ResolveTimeRange(rf, filter.location(), bucket)
 	filter.StartTime = &start
 	filter.EndTime = &end
 	return filter
@@ -448,7 +463,7 @@ func (s *AnalyticsService) GetCompressStats(ctx context.Context, filter Analytic
 	if err != nil {
 		return nil, err
 	}
-	daily, err := repository.AggregateCompressDailySeries(ctx, s.db, rf, time.Local)
+	daily, err := repository.AggregateCompressDailySeries(ctx, s.db, rf, filter.location())
 	if err != nil {
 		return nil, err
 	}

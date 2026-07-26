@@ -94,7 +94,6 @@ import { formatMicros } from '../../utils/money'
 import { computeDaysToExhaust, formatDaysToExhaustLabel } from '../../utils/budget'
 import { initialLast7DaysRange, logsRouteWithRange, rangeFromQuery, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage, errorCodeOf } from '../../api/client'
-import { useAuthStore } from '../../store/auth'
 import { getCostStats, getKeyBudgetRow, type BudgetRow, type CostStats } from '../../api/costs'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import { API_KEY_NOT_FOUND } from '../../api/errcodes'
@@ -104,7 +103,6 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const authStore = useAuthStore()
 
 const keyId = Number(route.params.id)
 // Inherit the reporting window when drilled from another analytics view
@@ -210,7 +208,7 @@ function onSelect(p: { kind: string; model?: string; providerId?: number; apiKey
 }
 
 function goLogs() {
-  router.push(logsRouteWithRange({ api_key_id: String(keyId) }, timeRange.value, authStore.serverTimezoneOffset))
+  router.push(logsRouteWithRange({ api_key_id: String(keyId) }, timeRange.value))
 }
 
 // First load: for a carried custom range (drilled from another analytics

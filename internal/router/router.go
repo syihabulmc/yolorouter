@@ -138,6 +138,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	r.Use(middleware.RequestID())
 	r.Use(middleware.AccessLog())
 	r.Use(middleware.Recovery())
+	r.Use(middleware.Timezone())
 
 	healthz := func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})

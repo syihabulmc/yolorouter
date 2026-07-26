@@ -194,6 +194,9 @@ func parseAnalyticsFilter(c *gin.Context) (service.AnalyticsFilter, bool) {
 	if !applyTimeQueryParam(c, "end", func(v time.Time) { filter.EndTime = &v }) {
 		return service.AnalyticsFilter{}, false
 	}
+	if loc, ok := c.Get("timezone"); ok {
+		filter.Location = loc.(*time.Location)
+	}
 	return filter, true
 }
 

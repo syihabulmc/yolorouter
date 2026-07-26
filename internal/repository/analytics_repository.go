@@ -333,8 +333,15 @@ func AggregateByTime(db *gorm.DB, f *RequestLogFilter, loc *time.Location, bucke
 		if err != nil {
 			return nil, err
 		}
+		// For hourly buckets, append the UTC offset to the label so fall-back
+		// DST hours (e.g., two 01:00 entries) are distinguishable. Day buckets
+		// never repeat so they stay as YYYY-MM-DD.
+		bucketLabel := cursor.Format(layout)
+		if bucket == TimeBucketHour {
+			bucketLabel = cursor.Format("2006-01-02 15:04 -07:00")
+		}
 		row := TimeReportRow{
-			Bucket:           cursor.Format(layout),
+			Bucket:           bucketLabel,
 			Calls:            m.TotalCalls,
 			SuccessCalls:     m.SuccessCalls,
 			EndedCalls:       m.EndedCalls,
@@ -689,9 +696,23 @@ type CompressDailySeriesRow struct {
 // resulting date is independent of the DB session's TimeZone setting —
 // without it, Postgres evaluates the arithmetic in the session timezone,
 // double-offsetting when the session differs from the application's loc.
-func compressDayExpr(db *gorm.DB, offsetSec int) string {
-	switch db.Dialector.Name() { //nolint:staticcheck // QF1008 false-positive — gorm.DB exposes the driver name only via Dialector.Name()
+// compressDayExprDST builds a SQL day-truncation expression. On Postgres it
+// uses AT TIME ZONE with the IANA zone name (DST-aware — each row is assigned
+// to the correct calendar day even across a DST transition). SQLite has no
+// native named-zone support, so it falls back to the fixed-offset approach
+// (a 1-hour misattribution on DST transition days, acceptable for a trend
+// chart). The zone name comes from time.LoadLocation and is validated against
+// the tz database — safe to interpolate (only [A-Za-z0-9_/-]).
+func compressDayExprDST(db *gorm.DB, loc *time.Location, offsetSec int) string {
+	zoneName := loc.String()
+	switch db.Dialector.Name() { //nolint:staticcheck // QF1008 false-positive
 	case "postgres":
+		if zoneName != "Local" {
+			return fmt.Sprintf(
+				"to_char((created_at AT TIME ZONE '%s')::date, 'YYYY-MM-DD')",
+				zoneName,
+			)
+		}
 		return fmt.Sprintf(
 			"to_char(((created_at AT TIME ZONE 'UTC') + INTERVAL '%d seconds')::date, 'YYYY-MM-DD')",
 			offsetSec,
@@ -719,38 +740,72 @@ func AggregateCompressDailySeries(ctx context.Context, db *gorm.DB, f *RequestLo
 	layout := "2006-01-02"
 	end, start := ResolveTimeRange(f, loc, TimeBucketDay)
 
-	// The UTC offset of the server's timezone at the window start. DST
-	// transitions inside the window can shift a boundary day by one bucket,
-	// which is acceptable for a trend chart.
-	_, offsetSec := start.In(loc).Zone()
-	dayExpr := compressDayExpr(db, offsetSec)
+	byDay := make(map[string]CompressDailySeriesRow)
 
-	var raw []struct {
-		Day             string `gorm:"column:day"`
-		TokensSaved     int64  `gorm:"column:tokens_saved"`
-		CostSavedMicros int64  `gorm:"column:cost_saved_micros"`
-		CompressedCalls int64  `gorm:"column:compressed_calls"`
-	}
-	err := f.applyFilter(db.WithContext(ctx)).
-		Where("compressors_applied != ''").
-		Select(dayExpr + ` AS day,
-			COALESCE(SUM(compress_estimated_tokens_saved), 0) AS tokens_saved,
-			COALESCE(SUM(compress_estimated_cost_saved_micros), 0) AS cost_saved_micros,
-			COUNT(*) AS compressed_calls
-		`).
-		Group(dayExpr).
-		Scan(&raw).Error
-	if err != nil {
-		return nil, err
-	}
-
-	byDay := make(map[string]CompressDailySeriesRow, len(raw))
-	for _, r := range raw {
-		byDay[r.Day] = CompressDailySeriesRow{
-			Bucket:          r.Day,
-			TokensSaved:     r.TokensSaved,
-			CostSavedMicros: r.CostSavedMicros,
-			CompressedCalls: r.CompressedCalls,
+	if db.Dialector.Name() == "postgres" { //nolint:staticcheck // QF1008 false-positive
+		// Postgres: AT TIME ZONE with the IANA zone name is fully DST-aware.
+		_, offsetSec := start.In(loc).Zone()
+		dayExpr := compressDayExprDST(db, loc, offsetSec)
+		var raw []struct {
+			Day             string `gorm:"column:day"`
+			TokensSaved     int64  `gorm:"column:tokens_saved"`
+			CostSavedMicros int64  `gorm:"column:cost_saved_micros"`
+			CompressedCalls int64  `gorm:"column:compressed_calls"`
+		}
+		err := f.applyFilter(db.WithContext(ctx)).
+			Where("compressors_applied != ''").
+			Select(dayExpr + ` AS day,
+				COALESCE(SUM(compress_estimated_tokens_saved), 0) AS tokens_saved,
+				COALESCE(SUM(compress_estimated_cost_saved_micros), 0) AS cost_saved_micros,
+				COUNT(*) AS compressed_calls
+			`).
+			Group(dayExpr).
+			Scan(&raw).Error
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range raw {
+			byDay[r.Day] = CompressDailySeriesRow{
+				Bucket:          r.Day,
+				TokensSaved:     r.TokensSaved,
+				CostSavedMicros: r.CostSavedMicros,
+				CompressedCalls: r.CompressedCalls,
+			}
+		}
+	} else {
+		// SQLite: no native named-zone support. Group by UTC hour in SQL
+		// (efficient), then remap each UTC hour to the correct local
+		// calendar day in Go using time.In(loc) — DST-aware per row.
+		var raw []struct {
+			UTCHour         string `gorm:"column:utc_hour"`
+			TokensSaved     int64  `gorm:"column:tokens_saved"`
+			CostSavedMicros int64  `gorm:"column:cost_saved_micros"`
+			CompressedCalls int64  `gorm:"column:compressed_calls"`
+		}
+		err := f.applyFilter(db.WithContext(ctx)).
+			Where("compressors_applied != ''").
+			Select(`strftime('%Y-%m-%dT%H:00:00', created_at) AS utc_hour,
+				COALESCE(SUM(compress_estimated_tokens_saved), 0) AS tokens_saved,
+				COALESCE(SUM(compress_estimated_cost_saved_micros), 0) AS cost_saved_micros,
+				COUNT(*) AS compressed_calls
+			`).
+			Group("utc_hour").
+			Scan(&raw).Error
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range raw {
+			t, err := time.ParseInLocation("2006-01-02T15:04:05", r.UTCHour, time.UTC)
+			if err != nil {
+				continue
+			}
+			localDay := t.In(loc).Format(layout)
+			row := byDay[localDay]
+			row.Bucket = localDay
+			row.TokensSaved += r.TokensSaved
+			row.CostSavedMicros += r.CostSavedMicros
+			row.CompressedCalls += r.CompressedCalls
+			byDay[localDay] = row
 		}
 	}
 
@@ -870,7 +925,9 @@ func ResolveTimeRange(f *RequestLogFilter, loc *time.Location, bucket string) (e
 	if f.StartTime != nil {
 		start = *f.StartTime
 	} else {
-		start = end.AddDate(0, 0, -defaultTimeLookbackDays)
+		// Calendar arithmetic in the client's timezone so "7 days ago" lands
+		// on local midnight, not UTC midnight (which shifts across DST).
+		start = end.In(loc).AddDate(0, 0, -defaultTimeLookbackDays)
 	}
 	if bucket == TimeBucketHour {
 		if maxDur := time.Duration(maxHourLookbackHours) * time.Hour; end.Sub(start) > maxDur {
@@ -878,7 +935,7 @@ func ResolveTimeRange(f *RequestLogFilter, loc *time.Location, bucket string) (e
 		}
 	} else {
 		if maxDur := time.Duration(maxDayLookbackDays) * 24 * time.Hour; end.Sub(start) > maxDur {
-			start = end.AddDate(0, 0, -maxDayLookbackDays)
+			start = end.In(loc).AddDate(0, 0, -maxDayLookbackDays)
 		}
 	}
 	return end, start

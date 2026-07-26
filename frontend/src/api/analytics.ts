@@ -9,7 +9,7 @@
 // internal/service/analytics_service.go — when those change, update the
 // matching TS interface here in the same commit.
 
-import { apiFetch } from './client'
+import { apiFetch, browserTimezone } from './client'
 
 // === Dashboard =====================================================
 
@@ -227,6 +227,11 @@ export function exportAnalyticsCSV(
 // rest, e.g. the 7-day lookback for dimension=time).
 export function buildAnalyticsQuery(filter: AnalyticsFilter): URLSearchParams {
   const params = new URLSearchParams()
+  // Timezone in the query string so CSV export (which bypasses apiFetch via
+  // <a>.click() and can't carry the X-Timezone header) still gets the right
+  // day grouping. Regular apiFetch calls also send the header (redundant but
+  // harmless — middleware checks header first).
+  if (browserTimezone) params.set('timezone', browserTimezone)
   if (filter.start) params.set('start', filter.start)
   if (filter.end) params.set('end', filter.end)
   if (filter.api_key_id != null) params.set('api_key_id', String(filter.api_key_id))

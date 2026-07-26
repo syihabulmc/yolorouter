@@ -84,6 +84,12 @@ function bodyManagesOwnContentType(body: BodyInit | null | undefined): boolean {
   )
 }
 
+// The browser's IANA timezone (e.g. "Asia/Shanghai"), auto-detected once at
+// module load. Sent as an X-Timezone header on every apiFetch request so the
+// backend can group analytics/dashboard data by the admin's wall-clock day.
+// Also used in export URLs (which bypass apiFetch via <a>.click()).
+export const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+
 export async function apiFetch<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
   const timeoutController = new AbortController()
   const timeoutMs = init?.timeoutMs ?? 30_000
@@ -103,6 +109,7 @@ export async function apiFetch<T>(path: string, init?: RequestInit & { timeoutMs
     // into one case-insensitive container — a plain-object spread breaks for
     // the other two shapes and silently drops headers.
     const headers = new Headers(init?.headers)
+    if (browserTimezone) headers.set('X-Timezone', browserTimezone)
     if (init?.body != null && !bodyManagesOwnContentType(init.body) && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json')
     }
