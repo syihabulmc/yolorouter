@@ -92,6 +92,7 @@
 <script setup lang="ts">
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 import { NButton, NSpace, NTag, useDialog, useMessage, type DataTableColumns, type PaginationProps } from 'naive-ui'
 import { KeyRound, Plus, Search } from '@lucide/vue'
 import { useApiKeysStore } from '../../store/apiKeys'
@@ -107,6 +108,7 @@ import KeyCustomPromptModal from '../../components/apikeys/KeyCustomPromptModal.
 import KeyCompressModal from '../../components/apikeys/KeyCompressModal.vue'
 
 const { t } = useI18n()
+const router = useRouter()
 const dialog = useDialog()
 const message = useMessage()
 const store = useApiKeysStore()
@@ -327,7 +329,7 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
     // Actions column — no tooltip.
     title: t('common.actions'),
     key: 'actions',
-    width: 300,
+    width: 360,
     render: (row) => {
       const revoked = row.display_status === 'revoked'
       return h(
@@ -336,6 +338,13 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
         {
           default: () => [
             h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openEdit(row.id) }, { default: () => t('apiKeys.editLimits') }),
+            // Cost detail is always reachable — a revoked key still has
+            // historical spend worth reviewing.
+            h(
+              NButton,
+              { size: 'small', text: true, type: 'primary', onClick: () => router.push(`/costs/keys/${row.id}`) },
+              { default: () => t('costs.detail.viewCost') },
+            ),
             // CSP action is only meaningful on a live key — a revoked key
             // routes no requests so its prompt has no effect.
             revoked

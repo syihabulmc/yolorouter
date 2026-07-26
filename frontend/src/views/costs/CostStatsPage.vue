@@ -77,13 +77,17 @@
         <div class="section-card__head">
           <HelpLabel :tip="t('costs.breakdown.title_tip')">{{ t('costs.breakdown.title') }}</HelpLabel>
         </div>
-        <CostBreakdownChart :provider-rows="stats?.providerRows ?? []" :model-rows="stats?.modelRows ?? []" />
+        <CostBreakdownChart
+          :provider-rows="stats?.providerRows ?? []"
+          :model-rows="stats?.modelRows ?? []"
+          @select="onBreakdownSelect"
+        />
       </div>
       <div class="section-card">
         <div class="section-card__head">
           <HelpLabel :tip="t('costs.topSpenders.title_tip')">{{ t('costs.topSpenders.title') }}</HelpLabel>
         </div>
-        <TopSpendersChart :rows="stats?.callerRows ?? []" />
+        <TopSpendersChart :rows="stats?.callerRows ?? []" @select="onSpendersSelect" />
       </div>
     </div>
 
@@ -100,6 +104,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
@@ -111,14 +116,32 @@ import CostTrendChart from '../../components/costs/CostTrendChart.vue'
 import CostBreakdownChart from '../../components/costs/CostBreakdownChart.vue'
 import TopSpendersChart from '../../components/costs/TopSpendersChart.vue'
 import BudgetConsumptionTable from '../../components/costs/BudgetConsumptionTable.vue'
-import { formatMicros } from '../../utils/money'
-import { initialLast7DaysRange } from '../../utils/timeRange'
+import { formatMicros, netCacheSavedMicros } from '../../utils/money'
+import { modelCostDetailLocation } from '../../utils/modelCostLocation'
+import { initialLast7DaysRange, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage } from '../../api/client'
 import { getBudgetRows, getCostStats, type BudgetRow, type CostStats } from '../../api/costs'
 import type { AnalyticsFilter } from '../../api/analytics'
 
 const { t } = useI18n()
 const message = useMessage()
+const router = useRouter()
+
+// Chart click-through handlers. The charts emit only presentation-shaped
+// payloads (entity id / model name); routing lives here so the chart stays
+// reusable and free of navigation concerns.
+function onSpendersSelect(p: { apiKeyId: number }) {
+  router.push(withRangeQuery(`/costs/keys/${p.apiKeyId}`, timeRange.value.start, timeRange.value.end))
+}
+
+function onBreakdownSelect(p: { providerId?: number; model?: string }) {
+  const range = { start: timeRange.value.start, end: timeRange.value.end }
+  if (p.providerId != null) {
+    router.push(withRangeQuery(`/costs/providers/${p.providerId}`, range.start, range.end))
+  } else if (p.model != null && p.model !== '') {
+    router.push(withRangeQuery(modelCostDetailLocation(p.model), range.start, range.end))
+  }
+}
 
 // === Time range (drives the window-scoped modules only) ===================
 
@@ -154,9 +177,7 @@ async function loadStats() {
   }
 }
 
-const netCacheSaved = computed(
-  () => (stats.value?.overview.cache_read_saved_micros ?? 0) - (stats.value?.overview.cache_write_extra_micros ?? 0),
-)
+const netCacheSaved = computed(() => netCacheSavedMicros(stats.value?.overview))
 
 // === Budget rows (filter-independent: lifetime counters + fixed burn rate) =
 

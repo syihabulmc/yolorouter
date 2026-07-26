@@ -157,9 +157,17 @@ import HelpLabel from '../../components/HelpLabel.vue'
 import AnalyticsFilterBar from '../../components/analytics/AnalyticsFilterBar.vue'
 import { type RangePreset, type TimeRange } from '../../components/analytics/TimeRangeSelect.vue'
 import { initialLast7DaysRange } from '../../utils/timeRange'
-import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
+import { columnTitle } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
 import { formatNumber, formatRate } from '../../utils/format'
+import {
+  avgDurationColumn,
+  callsColumn,
+  costColumn,
+  successRateColumn,
+  tokenColumn,
+  unknownCostColumn,
+} from '../../utils/analyticsColumns'
 import { displayMessage } from '../../api/client'
 import {
   exportAnalyticsCSV,
@@ -353,74 +361,11 @@ function callerRowKey(r: CallerReportRow): string {
 
 // === Column definitions ===================================================
 //
-// The four dimension tables share the same metric columns (calls /
-// successRate / cost / unknownCost, plus input/output tokens except for
-// provider). The factories below define each metric column ONCE so a column
-// change (label, width, format) lands in every dimension at once instead of
-// being copy-pasted across four DataTableColumns definitions — which had
-// already drifted (unknown_cost width was 150 in model/time, 140 in
-// provider/caller).
-
-type MetricRow = {
-  calls: number
-  success_rate: number
-  cost_micros: number
-  unknown_cost_calls: number
-}
-
-function callsColumn<T extends MetricRow>(): DataTableColumns<T>[number] {
-  return {
-    title: columnTitle(t('analytics.callsColumn'), t('analytics.callsColumn_tip')),
-    key: 'calls',
-    width: 120,
-    align: 'right',
-    render: (r: T) => formatNumber(r.calls),
-  }
-}
-function successRateColumn<T extends MetricRow>(): DataTableColumns<T>[number] {
-  return {
-    title: columnTitle(t('analytics.successRateColumn'), t('analytics.successRateColumn_tip')),
-    key: 'success_rate',
-    width: STATUS_COL_WIDTH,
-    align: 'right',
-    render: (r: T) => formatRate(r.success_rate),
-  }
-}
-function costColumn<T extends MetricRow>(): DataTableColumns<T>[number] {
-  return {
-    title: columnTitle(t('analytics.costColumn'), t('analytics.costColumn_tip')),
-    key: 'cost_micros',
-    width: 140,
-    align: 'right',
-    render: (r: T) => `¥${formatMicros(r.cost_micros)}`,
-  }
-}
-function unknownCostColumn<T extends MetricRow>(): DataTableColumns<T>[number] {
-  return {
-    title: columnTitle(t('analytics.unknownCostColumn'), t('analytics.unknownCostColumn_tip')),
-    key: 'unknown_cost_calls',
-    width: 140,
-    align: 'right',
-    render: (r: T) => formatNumber(r.unknown_cost_calls),
-  }
-}
-// tokenColumn is the shared factory for every right-aligned token count
-// (input / output / cache write / cache read). i18nKey names both the header
-// (`analytics.<i18nKey>`) and its tooltip (`analytics.<i18nKey>_tip`); the
-// column key is the row field to render. Replaces four near-identical factories.
-function tokenColumn<T extends MetricRow>(
-  key: keyof T & string,
-  i18nKey: string,
-  width = 140,
-): DataTableColumns<T>[number] {
-  return {
-    title: columnTitle(t(`analytics.${i18nKey}`), t(`analytics.${i18nKey}_tip`)),
-    key,
-    width,
-    align: 'right',
-    render: (r: T) => formatNumber(r[key] as number),
-  }
-}
+// Dimension (label) columns stay inline here because each is specific to a
+// dimension (model name / provider name / caller / bucket). The shared metric
+// columns (calls / successRate / cost / unknownCost / tokens / avgDuration)
+// come from utils/analyticsColumns.ts so a metric column change lands in every
+// dimension at once instead of being copy-pasted across four column arrays.
 
 const modelColumns = computed<DataTableColumns<ModelReportRow>>(() => [
   {
@@ -429,14 +374,14 @@ const modelColumns = computed<DataTableColumns<ModelReportRow>>(() => [
     minWidth: 200,
     render: (r) => h('span', { class: 'mono-cell' }, r.model_name || '—'),
   },
-  callsColumn<ModelReportRow>(),
-  successRateColumn<ModelReportRow>(),
-  tokenColumn<ModelReportRow>('input_tokens', 'inputTokensColumn'),
-  tokenColumn<ModelReportRow>('output_tokens', 'outputTokensColumn'),
-  tokenColumn<ModelReportRow>('cache_write_tokens', 'cacheWriteTokensColumn', 150),
-  tokenColumn<ModelReportRow>('cache_read_tokens', 'cacheReadTokensColumn', 150),
-  costColumn<ModelReportRow>(),
-  unknownCostColumn<ModelReportRow>(),
+  callsColumn<ModelReportRow>(t),
+  successRateColumn<ModelReportRow>(t),
+  tokenColumn<ModelReportRow>(t, 'input_tokens', 'inputTokensColumn'),
+  tokenColumn<ModelReportRow>(t, 'output_tokens', 'outputTokensColumn'),
+  tokenColumn<ModelReportRow>(t, 'cache_write_tokens', 'cacheWriteTokensColumn', 150),
+  tokenColumn<ModelReportRow>(t, 'cache_read_tokens', 'cacheReadTokensColumn', 150),
+  costColumn<ModelReportRow>(t),
+  unknownCostColumn<ModelReportRow>(t),
 ])
 
 const providerColumns = computed<DataTableColumns<ProviderReportRow>>(() => [
@@ -446,17 +391,11 @@ const providerColumns = computed<DataTableColumns<ProviderReportRow>>(() => [
     minWidth: 200,
     render: (r) => r.provider_name || t('analytics.unroutedBucket'),
   },
-  callsColumn<ProviderReportRow>(),
-  successRateColumn<ProviderReportRow>(),
-  {
-    title: columnTitle(t('analytics.avgDurationColumn'), t('analytics.avgDurationColumn_tip')),
-    key: 'avg_duration_ms',
-    width: 140,
-    align: 'right',
-    render: (r) => `${r.avg_duration_ms.toFixed(0)}ms`,
-  },
-  costColumn<ProviderReportRow>(),
-  unknownCostColumn<ProviderReportRow>(),
+  callsColumn<ProviderReportRow>(t),
+  successRateColumn<ProviderReportRow>(t),
+  avgDurationColumn<ProviderReportRow>(t),
+  costColumn<ProviderReportRow>(t),
+  unknownCostColumn<ProviderReportRow>(t),
 ])
 
 const callerColumns = computed<DataTableColumns<CallerReportRow>>(() => [
@@ -466,14 +405,14 @@ const callerColumns = computed<DataTableColumns<CallerReportRow>>(() => [
     minWidth: 200,
     render: (r) => r.owner_label || t('analytics.unknownCallerBucket'),
   },
-  callsColumn<CallerReportRow>(),
-  successRateColumn<CallerReportRow>(),
-  tokenColumn<CallerReportRow>('input_tokens', 'inputTokensColumn'),
-  tokenColumn<CallerReportRow>('output_tokens', 'outputTokensColumn'),
-  tokenColumn<CallerReportRow>('cache_write_tokens', 'cacheWriteTokensColumn', 150),
-  tokenColumn<CallerReportRow>('cache_read_tokens', 'cacheReadTokensColumn', 150),
-  costColumn<CallerReportRow>(),
-  unknownCostColumn<CallerReportRow>(),
+  callsColumn<CallerReportRow>(t),
+  successRateColumn<CallerReportRow>(t),
+  tokenColumn<CallerReportRow>(t, 'input_tokens', 'inputTokensColumn'),
+  tokenColumn<CallerReportRow>(t, 'output_tokens', 'outputTokensColumn'),
+  tokenColumn<CallerReportRow>(t, 'cache_write_tokens', 'cacheWriteTokensColumn', 150),
+  tokenColumn<CallerReportRow>(t, 'cache_read_tokens', 'cacheReadTokensColumn', 150),
+  costColumn<CallerReportRow>(t),
+  unknownCostColumn<CallerReportRow>(t),
 ])
 
 const timeColumns = computed<DataTableColumns<TimeReportRow>>(() => [
@@ -483,14 +422,14 @@ const timeColumns = computed<DataTableColumns<TimeReportRow>>(() => [
     minWidth: 180,
     render: (r) => h('span', { class: 'mono-cell' }, r.bucket),
   },
-  callsColumn<TimeReportRow>(),
-  successRateColumn<TimeReportRow>(),
-  tokenColumn<TimeReportRow>('input_tokens', 'inputTokensColumn'),
-  tokenColumn<TimeReportRow>('output_tokens', 'outputTokensColumn'),
-  tokenColumn<TimeReportRow>('cache_write_tokens', 'cacheWriteTokensColumn', 150),
-  tokenColumn<TimeReportRow>('cache_read_tokens', 'cacheReadTokensColumn', 150),
-  costColumn<TimeReportRow>(),
-  unknownCostColumn<TimeReportRow>(),
+  callsColumn<TimeReportRow>(t),
+  successRateColumn<TimeReportRow>(t),
+  tokenColumn<TimeReportRow>(t, 'input_tokens', 'inputTokensColumn'),
+  tokenColumn<TimeReportRow>(t, 'output_tokens', 'outputTokensColumn'),
+  tokenColumn<TimeReportRow>(t, 'cache_write_tokens', 'cacheWriteTokensColumn', 150),
+  tokenColumn<TimeReportRow>(t, 'cache_read_tokens', 'cacheReadTokensColumn', 150),
+  costColumn<TimeReportRow>(t),
+  unknownCostColumn<TimeReportRow>(t),
 ])
 </script>
 

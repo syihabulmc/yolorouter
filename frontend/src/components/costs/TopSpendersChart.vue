@@ -14,6 +14,7 @@
       :option="option"
       :update-options="{ notMerge: true }"
       autoresize
+      @click="onChartClick"
     />
   </div>
 </template>
@@ -33,6 +34,7 @@ import { formatMicros, fromMicros } from '../../utils/money'
 import type { CallerReportRow } from '../../api/analytics'
 
 const props = defineProps<{ rows: CallerReportRow[] }>()
+const emit = defineEmits<{ select: [payload: { apiKeyId: number }] }>()
 const { t } = useI18n()
 
 // TOP_N caps the ranking; a boss view wants the handful of biggest drivers,
@@ -46,6 +48,10 @@ interface Bar {
   label: string
   value: number // yuan
   micros: number
+  // Preserved so a chart click can route to the per-key cost detail page.
+  // Null when the source row had no api_key_id (unknown caller) — such bars
+  // are NOT clickable.
+  apiKeyId: number | null
 }
 
 const bars = computed<Bar[]>(() => {
@@ -57,11 +63,22 @@ const bars = computed<Bar[]>(() => {
       label: r.owner_label || t('costs.topSpenders.unknownCaller'),
       micros: r.cost_micros,
       value: fromMicros(r.cost_micros),
+      apiKeyId: r.api_key_id ?? null,
     }))
   // ECharts category axis stacks bottom-to-top, so reverse to put the largest
   // spender at the top of the visible list.
   return positive.reverse()
 })
+
+// onChartClick maps a bar click back to its source row and emits a select
+// event so the parent page can navigate. Bars with a null apiKeyId (unknown
+// caller bucket) are silently ignored — there is no detail page to drill into.
+function onChartClick(params: { dataIndex?: number; name?: string }) {
+  if (params.dataIndex == null) return
+  const bar = bars.value[params.dataIndex]
+  if (!bar || bar.apiKeyId == null) return
+  emit('select', { apiKeyId: bar.apiKeyId })
+}
 
 const chartHeight = computed(() => `${Math.max(bars.value.length * ROW_PX + 24, 120)}px`)
 

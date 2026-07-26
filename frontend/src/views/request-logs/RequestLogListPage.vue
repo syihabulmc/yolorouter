@@ -34,7 +34,7 @@
             clearable
             size="small"
             @keyup.enter="onSearch"
-            @update:value="onFilterChange"
+            @update:value="onRequestIdInput"
           >
             <template #prefix><Search :size="14" /></template>
           </NInput>
@@ -46,7 +46,7 @@
             clearable
             size="small"
             @keyup.enter="onSearch"
-            @update:value="onFilterChange"
+            @update:value="onModelNameInput"
           />
         </div>
         <div class="filter-item">
@@ -128,7 +128,7 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   NButton,
   NDatePicker,
@@ -158,6 +158,7 @@ import EmptyState from '../../components/EmptyState.vue'
 import StatusClassTag from '../../components/request-logs/StatusClassTag.vue'
 
 const { t } = useI18n()
+const route = useRoute()
 const router = useRouter()
 const message = useMessage()
 
@@ -187,6 +188,15 @@ const filter = reactive<ListFilter>({
 // value, so we drive the binding through :value + @update:value instead.
 const streamSelect = ref<'all' | 'stream' | 'non-stream'>('all')
 const timeRange = ref<[number, number] | null>(null)
+
+// Flags tracking whether model_name / request_id originated from a URL
+// query param (a deep link from a cost detail page). Values sourced that
+// way are EXACT identifiers — analytics may carry intentional surrounding
+// whitespace — so they must reach the backend verbatim. The submit-time
+// .trim() in buildListParams serves typed input only, where stray
+// whitespace is unintended; these flags branch that behavior.
+const querySourcedModelName = ref(false)
+const querySourcedRequestId = ref(false)
 
 const rows = ref<RequestLogRow[]>([])
 const total = ref(0)
@@ -260,7 +270,74 @@ onBeforeUnmount(() => {
   }
 })
 
+// URL query keys this page knows how to ingest. Used by hasRelevantQuery
+// to decide whether mount should apply the query before the first load.
+const RELEVANT_QUERY_KEYS = [
+  'request_id', 'model_name', 'api_key_id', 'provider_id',
+  'status', 'is_stream', 'start', 'end',
+] as const
+
+function hasRelevantQuery(): boolean {
+  const q = route.query
+  return RELEVANT_QUERY_KEYS.some((k) => {
+    const v = q[k]
+    return v != null && v !== ''
+  })
+}
+
+// applyQueryFilter maps deep-link query params onto the local filter model.
+// Cost detail pages emit /request-logs?api_key_id=X&start=...&end=... etc.
+// — start/end arrive as RFC3339 strings and are converted to the epoch-ms
+// tuple NDatePicker holds. is_stream's three-state UI value mirrors the
+// streamSelect ref ('all' | 'stream' | 'non-stream'). model_name and
+// request_id are preserved verbatim (see querySourced* flags).
+function applyQueryFilter() {
+  const q = route.query
+  if (typeof q.request_id === 'string' && q.request_id) {
+    filter.request_id = q.request_id
+    querySourcedRequestId.value = true
+  }
+  if (typeof q.model_name === 'string' && q.model_name) {
+    filter.model_name = q.model_name
+    querySourcedModelName.value = true
+  }
+  if (typeof q.api_key_id === 'string' && q.api_key_id) {
+    const n = Number(q.api_key_id)
+    if (!Number.isNaN(n)) filter.api_key_id = n
+  }
+  if (typeof q.provider_id === 'string' && q.provider_id) {
+    const n = Number(q.provider_id)
+    if (!Number.isNaN(n)) filter.provider_id = n
+  }
+  if (typeof q.status === 'string' && q.status) {
+    filter.status = q.status as StatusClass
+  }
+  if (typeof q.is_stream === 'string') {
+    const v: 'all' | 'stream' | 'non-stream' =
+      q.is_stream === 'true' ? 'stream'
+        : q.is_stream === 'false' ? 'non-stream'
+          : 'all'
+    streamSelect.value = v
+    filter.is_stream = v === 'stream' ? true : v === 'non-stream' ? false : null
+  }
+  if (typeof q.start === 'string' && typeof q.end === 'string' && q.start && q.end) {
+    const startMs = Date.parse(q.start)
+    const endMs = Date.parse(q.end)
+    if (!Number.isNaN(startMs) && !Number.isNaN(endMs)) {
+      timeRange.value = [startMs, endMs]
+    }
+  }
+}
+
 onMounted(() => {
+  // Ingest URL query params (deep links from cost detail pages) before the
+  // first load. Guarded so a plain mount (no query) keeps its single
+  // initial reload — applying an empty query would be a no-op but the
+  // guard makes the intent explicit and protects against future side
+  // effects creeping into applyQueryFilter.
+  if (hasRelevantQuery()) {
+    applyQueryFilter()
+  }
   void reload().catch((err) => message.error(displayMessage(err, t)))
   void loadProviders().catch((err) => message.error(displayMessage(err, t)))
   void loadCallers().catch((err) => message.error(displayMessage(err, t)))
@@ -281,8 +358,20 @@ function buildListParams(): RequestLogListParams {
     page: page.value,
     page_size: pageSize.value,
   }
-  if (filter.request_id.trim()) params.request_id = filter.request_id.trim()
-  if (filter.model_name.trim()) params.model_name = filter.model_name.trim()
+  // request_id / model_name: when sourced from a URL query, preserve the
+  // value verbatim (no trim) — analytics-sourced identifiers may carry
+  // intentional surrounding whitespace. For typed input, keep the existing
+  // trim to protect against stray whitespace producing empty params.
+  if (querySourcedRequestId.value) {
+    if (filter.request_id) params.request_id = filter.request_id
+  } else if (filter.request_id.trim()) {
+    params.request_id = filter.request_id.trim()
+  }
+  if (querySourcedModelName.value) {
+    if (filter.model_name) params.model_name = filter.model_name
+  } else if (filter.model_name.trim()) {
+    params.model_name = filter.model_name.trim()
+  }
   if (filter.api_key_id != null) params.api_key_id = filter.api_key_id
   if (filter.provider_id != null) params.provider_id = filter.provider_id
   if (filter.status) params.status = filter.status
@@ -325,6 +414,18 @@ function onFilterChange() {
   }, 300)
 }
 
+// When the user edits a deep-linked request_id / model_name, the value is no
+// longer the verbatim query-sourced one — clear its flag so the debounced
+// search resumes the normal trim path (matching plain typed searches).
+function onRequestIdInput() {
+  querySourcedRequestId.value = false
+  onFilterChange()
+}
+function onModelNameInput() {
+  querySourcedModelName.value = false
+  onFilterChange()
+}
+
 async function onSearch() {
   if (searchTimer) {
     clearTimeout(searchTimer)
@@ -347,6 +448,10 @@ function onReset() {
   filter.is_stream = null
   streamSelect.value = 'all'
   timeRange.value = null
+  // Drop the verbatim-no-trim override too, so post-reset typed searches
+  // return to the normal submit-time trim behavior.
+  querySourcedModelName.value = false
+  querySourcedRequestId.value = false
   page.value = 1
   void reload().catch((err) => message.error(displayMessage(err, t)))
 }

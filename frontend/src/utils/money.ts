@@ -10,6 +10,8 @@
 // project hard-codes CNY today, but the conversion itself is just
 // "major unit <-> micros".
 
+import type { OverviewRow } from '../api/analytics'
+
 // One major unit = 1e6 micro-units, i.e. 6 decimal places of precision.
 export const MICROS_PER_UNIT = 1_000_000
 
@@ -26,4 +28,10 @@ export function fromMicros(micros: number): number {
 /** Converts a major-unit amount to integer micros, rounded so fractional input isn't truncated. */
 export function toMicros(amount: number): number {
   return Math.round(amount * MICROS_PER_UNIT)
+}
+
+// netCacheSavedMicros = cache-read savings minus cache-write extra (negative
+// only when writes exceed reads). Shared by the cost overview cards.
+export function netCacheSavedMicros(ov: OverviewRow | null | undefined): number {
+  return (ov?.cache_read_saved_micros ?? 0) - (ov?.cache_write_extra_micros ?? 0)
 }

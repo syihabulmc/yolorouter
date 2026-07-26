@@ -113,6 +113,18 @@ a {
   background: var(--color-surface);
 }
 
+/* Card section header shared by the per-entity cost detail pages (key / model /
+   provider). Each page overrides only the card padding; the header rule is
+   identical, so it lives here rather than copy-pasted in three scoped blocks. */
+.section-card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  font-weight: 700;
+  color: var(--color-text);
+}
+
 // Shared by every NDataTable-based list page (ProviderListPage.vue,
 // ProviderDetailPage.vue's key list) — these were previously two
 // byte-identical scoped style blocks.

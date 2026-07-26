@@ -16,7 +16,8 @@ import {
   type ProviderReportRow,
   type TimeReportRow,
 } from './analytics'
-import { listAPIKeys, type APIKey } from './apiKeys'
+import { getAPIKey, listAPIKeys, type APIKey } from './apiKeys'
+import { BURN_RATE_WINDOW_DAYS } from '../utils/budget'
 
 // CostStats bundles every window-scoped figure the page renders from the
 // user-selected time range: the spend/savings overview (module: overview
@@ -73,11 +74,6 @@ export interface BudgetRow {
 // silently understate those money figures once a deployment passes one page.
 const BUDGET_KEYS_PAGE_SIZE = 200
 
-// BURN_RATE_WINDOW_DAYS is the fixed lookback the days-to-exhaust estimate
-// divides by. Seven days smooths weekday/weekend swings without reaching so
-// far back that a since-changed usage pattern skews the current rate.
-const BURN_RATE_WINDOW_DAYS = 7
-
 // getAllAPIKeys returns every api key, not just the first page. It reads page 1
 // to learn the total, then fetches the remaining pages concurrently. Keeping
 // the summary complete matters more than the request count here — the overview
@@ -92,6 +88,22 @@ async function getAllAPIKeys(): Promise<APIKey[]> {
     ),
   )
   return rest.reduce((acc, page) => acc.concat(page.list), first.list)
+}
+
+// toBudgetRow assembles a BudgetRow from an APIKey and its pre-computed daily
+// average micros. Shared by getBudgetRows (full-key walk) and getKeyBudgetRow
+// (single-key) so the column mapping lives in exactly one place.
+function toBudgetRow(key: APIKey, dailyAvgMicros: number): BudgetRow {
+  return {
+    id: key.id,
+    owner_label: key.owner_label,
+    key_prefix: key.key_prefix,
+    status: key.status,
+    display_status: key.display_status,
+    budget_limit_micros: key.budget_limit_micros,
+    budget_spent_micros: key.budget_spent_micros,
+    daily_avg_micros: dailyAvgMicros,
+  }
 }
 
 // getBudgetRows merges each api key's lifetime budget counters with its recent
@@ -122,14 +134,32 @@ export async function getBudgetRows(): Promise<BudgetRow[]> {
     if (row.api_key_id != null) recentSpend.set(row.api_key_id, row.cost_micros)
   }
 
-  return keys.map((k: APIKey) => ({
-    id: k.id,
-    owner_label: k.owner_label,
-    key_prefix: k.key_prefix,
-    status: k.status,
-    display_status: k.display_status,
-    budget_limit_micros: k.budget_limit_micros,
-    budget_spent_micros: k.budget_spent_micros,
-    daily_avg_micros: (recentSpend.get(k.id) ?? 0) / BURN_RATE_WINDOW_DAYS,
-  }))
+  return keys.map((k: APIKey) =>
+    toBudgetRow(k, (recentSpend.get(k.id) ?? 0) / BURN_RATE_WINDOW_DAYS),
+  )
+}
+
+// getKeyBudgetRow returns one api key's budget standing for the detail page:
+// lifetime limit/spent (from the key) merged with a fixed
+// BURN_RATE_WINDOW_DAYS burn rate (a scoped caller report), identical in
+// spirit to getBudgetRows but for a single key — no full-key walk. The filter
+// scopes the caller report to this key so the burn rate reflects only its own
+// recent spend.
+export async function getKeyBudgetRow(id: number): Promise<BudgetRow> {
+  const end = new Date()
+  const start = new Date(end)
+  start.setDate(start.getDate() - BURN_RATE_WINDOW_DAYS)
+  const burnFilter: AnalyticsFilter = {
+    start: start.toISOString(),
+    end: end.toISOString(),
+    api_key_id: id,
+  }
+
+  const [key, callerReport] = await Promise.all([
+    getAPIKey(id),
+    getAnalyticsReport('caller', 'day', burnFilter),
+  ])
+  const row = ((callerReport.rows as CallerReportRow[]) ?? []).find((r) => r.api_key_id === id)
+  const daily_avg_micros = (row?.cost_micros ?? 0) / BURN_RATE_WINDOW_DAYS
+  return toBudgetRow(key, daily_avg_micros)
 }

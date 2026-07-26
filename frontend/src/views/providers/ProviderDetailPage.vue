@@ -4,6 +4,9 @@
     <PageHeader :eyebrow="t('providers.eyebrow')" :title="provider.name" :description="provider.base_url">
       <template #actions>
         <n-button size="small" @click="showEditProvider = true">{{ t('providers.editProvider') }}</n-button>
+        <n-button quaternary @click="router.push(`/costs/providers/${provider.id}`)">
+          {{ t('costs.detail.viewCost') }}
+        </n-button>
         <n-button quaternary @click="onToggleProviderStatus">
           {{ provider.management_status === 1 ? t('providers.statusDisabled') : t('providers.statusEnabled') }}
         </n-button>
@@ -85,7 +88,7 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { NButton, NDropdown, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { ChevronDown, ChevronUp, MoreHorizontal, Plus, PlayCircle } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
@@ -104,6 +107,7 @@ import { useClientPagination } from '../../composables/useClientPagination'
 
 const { t } = useI18n()
 const route = useRoute()
+const router = useRouter()
 const dialog = useDialog()
 const message = useMessage()
 const store = useProvidersStore()

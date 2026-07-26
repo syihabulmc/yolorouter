@@ -5,6 +5,8 @@
 export const ACCOUNT_SESSION_INVALID = 10003
 export const ACCOUNT_LOGIN_LOCKED = 10005
 export const ACCOUNT_SETUP_ALREADY_DONE = 10007
+// Mirrors backend APIKeyNotFound (pkg/errcode).
+export const API_KEY_NOT_FOUND = 11001
 export const CUSTOM_SYSTEM_PROMPT_CONFLICT = 11012
 export const API_KEY_CONFLICT = 11013
 export const INPUT_COMPRESSION_CONFLICT = 11014

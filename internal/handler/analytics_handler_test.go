@@ -1303,6 +1303,195 @@ func TestGetCompressStatsCompressorHitsCountsRowsNotInvocations(t *testing.T) {
 	}
 }
 
+// === Filter pin (per-entity scope) =======================================
+
+// TestAnalyticsReportFilterPin asserts that pinning one dimension in the
+// shared analytics filter scopes EVERY aggregate (overview + time + model +
+// provider + caller) down to that entity. The per-entity cost detail pages
+// rely on this contract without any new backend code: parseAnalyticsFilter
+// builds one AnalyticsFilter, toRepoFilter hands the same filter to every
+// aggregation path, so a pin on api_key_id / model_name / provider_id must
+// shrink all five aggregates consistently. If any path stops respecting the
+// shared filter this test fails before the frontend can rely on the premise.
+func TestAnalyticsReportFilterPin(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+
+	// Seed two keys + two providers and capture the assigned IDs so the
+	// filter query strings use the real values (SQLite picks IDs; we don't
+	// hard-code 1/2). Two rows with disjoint (key, model, provider) triples
+	// and distinct cost so a pin that leaks the other entity is detectable.
+	key1 := seedAPIKey(t, db, "alice")
+	key2 := seedAPIKey(t, db, "bob")
+	prov1 := seedProvider(t, db, "openai-main")
+	prov2 := seedProvider(t, db, "anthropic-main")
+
+	now := time.Now().UTC()
+	seedRequestLog(t, db, "pin-a", now, func(r *model.RequestLog) {
+		r.APIKeyID = &key1
+		r.ModelName = "modelA"
+		r.ProviderID = &prov1
+		r.CostMicros = 1000
+		r.CostKnown = true
+	})
+	seedRequestLog(t, db, "pin-b", now, func(r *model.RequestLog) {
+		r.APIKeyID = &key2
+		r.ModelName = "modelB"
+		r.ProviderID = &prov2
+		r.CostMicros = 2000
+		r.CostKnown = true
+	})
+
+	// --- pin api_key_id=key1 → model report must contain modelA only ---
+	w, _ := doJSON(t, r, http.MethodGet,
+		"/api/admin/analytics/report?dimension=model&api_key_id="+strconv.FormatUint(uint64(key1), 10), nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var modelEnv struct {
+		Data struct {
+			Rows []struct {
+				ModelName string `json:"model_name"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &modelEnv); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(modelEnv.Data.Rows) != 1 || modelEnv.Data.Rows[0].ModelName != "modelA" {
+		t.Fatalf("pin api_key_id=key1 model rows = %+v, want only modelA", modelEnv.Data.Rows)
+	}
+
+	// --- pin model_name=modelB → caller report must contain key2 only ---
+	w, _ = doJSON(t, r, http.MethodGet,
+		"/api/admin/analytics/report?dimension=caller&model_name=modelB", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var callerEnv struct {
+		Data struct {
+			Rows []struct {
+				APIKeyID *uint `json:"api_key_id"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &callerEnv); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(callerEnv.Data.Rows) != 1 ||
+		callerEnv.Data.Rows[0].APIKeyID == nil ||
+		*callerEnv.Data.Rows[0].APIKeyID != key2 {
+		t.Fatalf("pin model_name=modelB caller rows = %+v, want only key2", callerEnv.Data.Rows)
+	}
+
+	// --- pin provider_id=prov2 → model report must contain modelB only ---
+	w, _ = doJSON(t, r, http.MethodGet,
+		"/api/admin/analytics/report?dimension=model&provider_id="+strconv.FormatUint(uint64(prov2), 10), nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var modelEnv2 struct {
+		Data struct {
+			Rows []struct {
+				ModelName string `json:"model_name"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &modelEnv2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(modelEnv2.Data.Rows) != 1 || modelEnv2.Data.Rows[0].ModelName != "modelB" {
+		t.Fatalf("pin provider_id=prov2 model rows = %+v, want only modelB", modelEnv2.Data.Rows)
+	}
+
+	// --- pin provider_id=prov2 → provider report must contain prov2 only ---
+	w, _ = doJSON(t, r, http.MethodGet,
+		"/api/admin/analytics/report?dimension=provider&provider_id="+strconv.FormatUint(uint64(prov2), 10), nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var provEnv struct {
+		Data struct {
+			Rows []struct {
+				ProviderID *uint `json:"provider_id"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &provEnv); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(provEnv.Data.Rows) != 1 ||
+		provEnv.Data.Rows[0].ProviderID == nil ||
+		*provEnv.Data.Rows[0].ProviderID != prov2 {
+		t.Fatalf("pin provider_id=prov2 provider rows = %+v, want only prov2", provEnv.Data.Rows)
+	}
+
+	// --- pin api_key_id=key1 → time report must total exactly 1 call ---
+	// Gap-fill may produce many day buckets, but the SUM of calls across all
+	// buckets must equal the count of matching rows (1) — that's the
+	// per-entity scope contract for the time dimension.
+	w, _ = doJSON(t, r, http.MethodGet,
+		"/api/admin/analytics/report?dimension=time&bucket=day&api_key_id="+strconv.FormatUint(uint64(key1), 10), nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var timeEnv struct {
+		Data struct {
+			Rows []struct {
+				Bucket string `json:"bucket"`
+				Calls  int64  `json:"calls"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &timeEnv); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var timeCalls int64
+	for _, row := range timeEnv.Data.Rows {
+		timeCalls += row.Calls
+	}
+	if timeCalls != 1 {
+		t.Fatalf("pin api_key_id=key1 time-dimension total calls = %d, want 1", timeCalls)
+	}
+
+	// --- pin model_name=modelA → overview cost must equal modelA's cost only ---
+	w, _ = doJSON(t, r, http.MethodGet,
+		"/api/admin/analytics/overview?model_name=modelA", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var ovEnv struct {
+		Data struct {
+			TotalCalls int64 `json:"total_calls"`
+			CostMicros int64 `json:"cost_micros"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &ovEnv); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if ovEnv.Data.TotalCalls != 1 || ovEnv.Data.CostMicros != 1000 {
+		t.Fatalf("pin model_name=modelA overview = %+v, want calls=1 cost=1000", ovEnv.Data)
+	}
+
+	// --- pin provider_id=prov2 → overview cost must equal modelB's cost only ---
+	w, _ = doJSON(t, r, http.MethodGet,
+		"/api/admin/analytics/overview?provider_id="+strconv.FormatUint(uint64(prov2), 10), nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var ovEnv2 struct {
+		Data struct {
+			TotalCalls int64 `json:"total_calls"`
+			CostMicros int64 `json:"cost_micros"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &ovEnv2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if ovEnv2.Data.TotalCalls != 1 || ovEnv2.Data.CostMicros != 2000 {
+		t.Fatalf("pin provider_id=prov2 overview = %+v, want calls=1 cost=2000", ovEnv2.Data)
+	}
+}
+
 // === Helpers =============================================================
 
 // approxEqual compares two floats with an absolute tolerance — fine for the

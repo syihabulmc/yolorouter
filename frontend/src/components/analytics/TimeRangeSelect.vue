@@ -81,6 +81,22 @@ function startOfTodayInZone(offsetMinutes: number | null): Date {
   return new Date(serverMidnightMs - offset * 60_000)
 }
 
+// calendarDateInZone returns the calendar {year, month, day} the given UTC
+// instant falls on in a timezone specified by its UTC offset (minutes east of
+// UTC); null offset falls back to the browser zone. midnightInstantInZone is
+// its inverse — the UTC instant of local midnight (00:00) on a calendar date
+// in the target zone. Together they move dates across the browser/server
+// timezone boundary without pulling a timezone library.
+function calendarDateInZone(ms: number, offsetMinutes: number | null): { y: number; m: number; d: number } {
+  const offset = offsetMinutes ?? -new Date().getTimezoneOffset()
+  const zoned = new Date(ms + offset * 60_000)
+  return { y: zoned.getUTCFullYear(), m: zoned.getUTCMonth(), d: zoned.getUTCDate() }
+}
+function midnightInstantInZone(y: number, m: number, d: number, offsetMinutes: number | null): number {
+  const offset = offsetMinutes ?? -new Date().getTimezoneOffset()
+  return Date.UTC(y, m, d, 0, 0, 0, 0) - offset * 60_000
+}
+
 const presetOptions = computed<SelectOption[]>(() => [
   { label: t('analytics.rangeToday'), value: 'today' },
   { label: t('analytics.rangeYesterday'), value: 'yesterday' },
@@ -93,7 +109,27 @@ const presetOptions = computed<SelectOption[]>(() => [
 // that's what NDatePicker daterange emits. We localize the boundaries to
 // the user's timezone via toISOString() at emit time so the server's UTC
 // storage gets compared correctly.
-const customRange = ref<[number, number] | null>(null)
+//
+// Seeded from modelValue when the component mounts already on the "custom"
+// preset (a detail page drilled from another analytics view carries its
+// window in the URL); otherwise the picker renders blank despite an active
+// custom range. modelValue carries SERVER-local-midnight instants; convert
+// each server calendar day to a browser-local-midnight timestamp so the
+// (browser-local) picker displays the same dates. modelValue.end is exclusive
+// (start of next day), so the picker's inclusive last-day value steps back one
+// server day before converting.
+function modelValueToCustomRange(v: TimeRange): [number, number] | null {
+  if (!v.start || !v.end) return null
+  const off = authStore.serverTimezoneOffset
+  const sd = calendarDateInZone(new Date(v.start).getTime(), off)
+  const startMs = midnightInstantInZone(sd.y, sd.m, sd.d, null)
+  const ed = calendarDateInZone(new Date(v.end).getTime() - 24 * 60 * 60 * 1000, off)
+  const endMs = midnightInstantInZone(ed.y, ed.m, ed.d, null)
+  return [startMs, endMs]
+}
+const customRange = ref<[number, number] | null>(
+  props.preset === 'custom' ? modelValueToCustomRange(props.modelValue) : null,
+)
 
 // resolvePreset returns the [start, end) window for a named preset, in the
 // user's local timezone. end is exclusive (the start of tomorrow / the day
@@ -145,13 +181,18 @@ function onCustomChange(v: [number, number] | null) {
     return
   }
   const [startMs, endMs] = v
-  // NDatePicker daterange emits [startMs, endMs] both at local midnight;
-  // make end exclusive by adding 1 day so the server's [start, end) matches
-  // the user's visible selection.
-  const start = new Date(startMs)
-  const end = new Date(endMs)
-  end.setDate(end.getDate() + 1)
-  emit('update:modelValue', { start: start.toISOString(), end: end.toISOString() })
+  // The picker emits browser-local-midnight timestamps for the calendar days
+  // the user selected. Resolve those days to SERVER-local midnights so custom
+  // ranges line up with the named presets (and the backend's server-timezone
+  // grouping) regardless of the browser zone. When browser and server share a
+  // zone the emitted instants are identical to a direct toISOString() of the
+  // picker timestamps — no behavior change for the common same-zone case.
+  const off = authStore.serverTimezoneOffset
+  const sd = calendarDateInZone(startMs, null)
+  const ed = calendarDateInZone(endMs, null)
+  const start = midnightInstantInZone(sd.y, sd.m, sd.d, off)
+  const end = midnightInstantInZone(ed.y, ed.m, ed.d, off) + 24 * 60 * 60 * 1000
+  emit('update:modelValue', { start: new Date(start).toISOString(), end: new Date(end).toISOString() })
 }
 
 // When the parent resets preset back to a named window (e.g. another tab's

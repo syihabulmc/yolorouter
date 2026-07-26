@@ -32,6 +32,13 @@ import { Wallet } from '@lucide/vue'
 import EmptyState from '../EmptyState.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
+import {
+  computeDaysToExhaust,
+  fillPercentOf,
+  formatDaysToExhaustLabel,
+  levelOf,
+  ratioOf,
+} from '../../utils/budget'
 import type { BudgetRow } from '../../api/costs'
 
 const props = defineProps<{
@@ -40,31 +47,6 @@ const props = defineProps<{
 }>()
 
 const { t } = useI18n()
-
-// WARN_RATIO / OVER_RATIO gate the row highlight: at/above 80% the key is
-// close enough to its cap to flag, at/above 100% it has overspent. Kept as
-// fractions of the limit so the same thresholds drive both the bar fill class
-// and the whole-row tint.
-const WARN_RATIO = 0.8
-const OVER_RATIO = 1
-
-// ratioOf returns spent/limit, or null when the key is uncapped (no limit to
-// measure consumption against).
-function ratioOf(r: BudgetRow): number | null {
-  if (r.budget_limit_micros == null || r.budget_limit_micros <= 0) return null
-  return r.budget_spent_micros / r.budget_limit_micros
-}
-
-// levelOf maps a consumption ratio to its severity tier — the single place the
-// WARN/OVER thresholds live, so the row tint, bar fill, and days-to-exhaust
-// label can't drift apart. Callers pass a non-null ratio (uncapped rows are
-// handled before this).
-type BudgetLevel = 'ok' | 'warn' | 'over'
-function levelOf(ratio: number): BudgetLevel {
-  if (ratio >= OVER_RATIO) return 'over'
-  if (ratio >= WARN_RATIO) return 'warn'
-  return 'ok'
-}
 
 // Capped keys sort by consumption descending (closest to the cap first, where
 // attention is needed); uncapped keys sink to the bottom since they have no
@@ -100,25 +82,27 @@ function renderConsumption(r: BudgetRow) {
       // track; the percentage label still shows the true >100% value.
       h('div', {
         class: `budget-bar__fill budget-bar__fill--${level}`,
-        style: { width: `${Math.min(pct, 100)}%` },
+        style: { width: `${fillPercentOf(ratio)}%` },
       }),
     ]),
     h('span', { class: 'budget-bar__pct' }, `${pct.toFixed(0)}%`),
   ])
 }
 
-// renderDaysToExhaust projects remaining budget ÷ recent daily spend into a
-// day count. No cap, no recent spend, or an already-overspent key each have no
-// meaningful runway, so they render as a dash or an explicit "over" label.
+// renderDaysToExhaust renders the structured DaysToExhaust result. The label
+// text comes from the shared formatDaysToExhaustLabel helper; this function
+// keeps the per-kind styling (over / muted / soon tint) that the table owns.
 function renderDaysToExhaust(r: BudgetRow) {
-  const ratio = ratioOf(r)
-  if (ratio == null) return h('span', { class: 'budget-muted' }, '—')
-  if (levelOf(ratio) === 'over') return h('span', { class: 'budget-days--over' }, t('costs.budget.overspent'))
-  if (r.daily_avg_micros <= 0) return h('span', { class: 'budget-muted' }, '—')
-  const remaining = (r.budget_limit_micros ?? 0) - r.budget_spent_micros
-  const days = remaining / r.daily_avg_micros
-  const label = days >= 1 ? String(Math.floor(days)) : '<1'
-  return h('span', { class: days <= 7 ? 'budget-days--soon' : '' }, t('costs.budget.daysValue', { n: label }))
+  const result = computeDaysToExhaust(r)
+  if (result.kind === 'overspent') {
+    return h('span', { class: 'budget-days--over' }, formatDaysToExhaustLabel(result, t))
+  }
+  if (result.kind === 'unestimable' || result.kind === 'uncapped') {
+    return h('span', { class: 'budget-muted' }, formatDaysToExhaustLabel(result, t))
+  }
+  // kind === 'days': the "soon" tint is keyed off the raw (unfloored)
+  // projection, so a value like 7.5 (label '7') does NOT tint.
+  return h('span', { class: result.soon ? 'budget-days--soon' : '' }, formatDaysToExhaustLabel(result, t))
 }
 
 const columns = computed<DataTableColumns<BudgetRow>>(() => [

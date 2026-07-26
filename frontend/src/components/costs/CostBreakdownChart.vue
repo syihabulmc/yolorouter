@@ -17,6 +17,7 @@
       :option="option"
       :update-options="{ notMerge: true }"
       autoresize
+      @click="onChartClick"
     />
   </div>
 </template>
@@ -35,6 +36,8 @@ const props = defineProps<{
   providerRows: ProviderReportRow[]
   modelRows: ModelReportRow[]
 }>()
+
+const emit = defineEmits<{ select: [payload: { providerId?: number; model?: string }] }>()
 
 const { t } = useI18n()
 
@@ -57,43 +60,56 @@ interface Slice {
   name: string
   value: number // yuan (major unit), for the chart
   micros: number // original, for the tooltip via the shared formatter
+  // Provider-tab identity (null = unrouted bucket); undefined on model tab.
+  providerId?: number | null
+  // Model-tab identity — the raw model_name ('' = unknown-model bucket);
+  // undefined on provider tab.
+  modelName?: string
+  // True for the merged "Other" wedge (no single entity behind it). Click
+  // routing and color key off this flag instead of comparing display labels,
+  // so a real entity whose name happens to match a localized fallback label
+  // ("Other", "unrouted", "unknown model") is still clickable.
+  synthetic?: boolean
 }
 
 const slices = computed<Slice[]>(() => {
-  const raw =
+  // Build Slice objects directly per tab — Slice already carries optional
+  // providerId / modelName / synthetic fields, so a single annotated const
+  // replaces the old intermediate raw[] + double-map.
+  const all: Slice[] =
     tab.value === 'provider'
       ? props.providerRows.map((r) => ({
           name: r.provider_name || t('costs.breakdown.unrouted'),
           micros: r.cost_micros,
+          value: fromMicros(r.cost_micros),
+          providerId: r.provider_id ?? null,
         }))
       : props.modelRows.map((r) => ({
           name: r.model_name || t('costs.breakdown.unknownModel'),
           micros: r.cost_micros,
+          value: fromMicros(r.cost_micros),
+          modelName: r.model_name,
         }))
   // Only positive-cost rows form the ring; zero-cost buckets carry no share.
-  const positive = raw.filter((r) => r.micros > 0).sort((a, b) => b.micros - a.micros)
+  const positive = all.filter((s) => s.micros > 0).sort((a, b) => b.micros - a.micros)
   const head = positive.slice(0, TOP_N)
   const tail = positive.slice(TOP_N)
-  const result: Slice[] = head.map((r) => ({
-    name: r.name,
-    micros: r.micros,
-    value: fromMicros(r.micros),
-  }))
   if (tail.length) {
-    const otherMicros = tail.reduce((sum, r) => sum + r.micros, 0)
-    result.push({
+    const otherMicros = tail.reduce((sum, s) => sum + s.micros, 0)
+    head.push({
       name: t('costs.breakdown.other'),
       micros: otherMicros,
       value: fromMicros(otherMicros),
+      synthetic: true,
     })
   }
-  return result
+  return head
 })
 
 const option = computed(() => {
   const data = slices.value
   const colors = data.map((s, i) =>
-    s.name === t('costs.breakdown.other') ? OTHER_COLOR : PALETTE[i % PALETTE.length],
+    s.synthetic ? OTHER_COLOR : PALETTE[i % PALETTE.length],
   )
   return {
     tooltip: {
@@ -125,6 +141,29 @@ const option = computed(() => {
     ],
   }
 })
+
+// onChartClick routes a slice click to a detail page via the select event.
+// Clickability is decided from the source identity captured at build time
+// (providerId / modelName) and the synthetic flag — NEVER by comparing the
+// display label — so a real entity whose name matches a localized fallback
+// ("Other", "unrouted", "unknown model") still drills down.
+function onChartClick(params: { dataIndex?: number; name?: string }) {
+  if (params.dataIndex == null) return
+  const slice = slices.value[params.dataIndex]
+  if (!slice) return
+
+  // The merged "Other" wedge has no single entity behind it.
+  if (slice.synthetic) return
+
+  if (tab.value === 'provider') {
+    // Unrouted buckets have a null provider_id; real providers carry theirs.
+    if (slice.providerId != null) emit('select', { providerId: slice.providerId })
+    return
+  }
+
+  // model tab — the unknown-model bucket has an empty modelName.
+  if (slice.modelName) emit('select', { model: slice.modelName })
+}
 </script>
 
 <style scoped>

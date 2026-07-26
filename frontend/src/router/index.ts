@@ -6,6 +6,9 @@ import DashboardPage from '../views/dashboard/DashboardPage.vue'
 import AnalyticsPage from '../views/analytics/AnalyticsPage.vue'
 import CostStatsPage from '../views/costs/CostStatsPage.vue'
 import CostOptimizationPage from '../views/costs/CostOptimizationPage.vue'
+import KeyCostDetailPage from '../views/costs/KeyCostDetailPage.vue'
+import ModelCostDetailPage from '../views/costs/ModelCostDetailPage.vue'
+import ProviderCostDetailPage from '../views/costs/ProviderCostDetailPage.vue'
 import RequestLogListPage from '../views/request-logs/RequestLogListPage.vue'
 import RequestLogDetailPage from '../views/request-logs/RequestLogDetailPage.vue'
 import ProviderListPage from '../views/providers/ProviderListPage.vue'
@@ -29,6 +32,13 @@ export const router = createRouter({
         { path: 'analytics', component: AnalyticsPage },
         { path: 'costs', component: CostStatsPage },
         { path: 'cost-optimization', component: CostOptimizationPage },
+        { path: 'costs/keys/:id(\\d+)', component: KeyCostDetailPage },
+        // Bare `costs/models` must come before the catch-all so the `?name=`
+        // dot-segment fallback still matches here instead of being swallowed
+        // by `:name(.*)`.
+        { path: 'costs/models', component: ModelCostDetailPage },
+        { path: 'costs/models/:name(.*)', component: ModelCostDetailPage },
+        { path: 'costs/providers/:id(\\d+)', component: ProviderCostDetailPage },
         { path: 'request-logs', component: RequestLogListPage },
         { path: 'request-logs/:requestId', component: RequestLogDetailPage },
         { path: 'providers', component: ProviderListPage },

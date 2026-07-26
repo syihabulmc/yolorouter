@@ -41,7 +41,13 @@
     <n-layout class="layout-main">
       <n-layout-content>
         <div class="layout-content">
-          <router-view />
+          <!-- Bind :key to the full path so Vue remounts the matched component
+               on every route change. Detail pages capture their path param
+               (e.g. `Number(route.params.id)`) once at setup; without this key
+               Vue Router reuses the component instance across same-route
+               different-param navigations (browser back/forward between two
+               detail URLs), so the captured id would go stale. -->
+          <router-view :key="$route.fullPath" />
         </div>
       </n-layout-content>
     </n-layout>

@@ -4,6 +4,9 @@
     <PageHeader :eyebrow="t('models.eyebrow')" :title="modelData.name" :description="`${t('models.runningStatusColumn')}: ${t(`models.running${runningStatusKey}`)}`">
       <template #actions>
         <n-button size="small" @click="showEditModel = true">{{ t('models.editModel') }}</n-button>
+        <n-button quaternary @click="router.push(modelCostDetailLocation(modelData.name))">
+          {{ t('costs.detail.viewCost') }}
+        </n-button>
         <n-button quaternary @click="onToggleModelStatus">
           {{ modelData.management_status === 1 ? t('models.statusDisabled') : t('models.statusEnabled') }}
         </n-button>
@@ -57,13 +60,14 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { NButton, NDropdown, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { ChevronDown, ChevronUp, MoreHorizontal, Plus } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import { toggleStatusWithConfirm } from '../../composables/useConfirmedStatusToggle'
 import { candidateTestPassed, candidateTestResultText, modelRunningStatusDisplay } from '../../utils/modelStatusDisplay'
+import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import type { Model, ModelCandidate } from '../../api/models'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
@@ -75,6 +79,7 @@ import { useSingleRowAction } from '../../composables/useSingleRowAction'
 
 const { t } = useI18n()
 const route = useRoute()
+const router = useRouter()
 const dialog = useDialog()
 const message = useMessage()
 const store = useModelsStore()

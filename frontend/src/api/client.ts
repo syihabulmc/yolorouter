@@ -44,6 +44,12 @@ export function displayMessage(err: unknown, t: (key: string) => string): string
   return err instanceof APIError ? err.message : t('common.networkError')
 }
 
+// errorCodeOf returns the business error code for an APIError, or undefined
+// for transport errors (NetworkError/RequestAbortedError) that carry no code.
+export function errorCodeOf(err: unknown): number | undefined {
+  return err instanceof APIError ? err.code : undefined
+}
+
 /** Thrown for network failures, timeouts, and responses that aren't a recognizable envelope. */
 export class NetworkError extends Error {}
 
