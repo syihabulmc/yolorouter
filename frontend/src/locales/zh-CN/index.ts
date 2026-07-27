@@ -452,11 +452,11 @@ export default {
     daysAgo: '{n} 天前',
     upstreamTitle: '上游状态',
     upstreamProviders: '可用供应商',
-    upstreamProviders_tip: 'management_status=Enabled 的供应商数量',
+    upstreamProviders_tip: '已启用且可提供服务的供应商数量',
     upstreamAbnormalKeys: '异常 Key',
     upstreamAbnormalKeys_tip: '已启用但未通过验证的 Provider Key 数（应服务却未验证通过的 Key）',
     upstreamUnavailableModels: '不可用模型',
-    upstreamUnavailableModels_tip: 'management_status 非 Enabled 的模型数量（已停用或未启用）',
+    upstreamUnavailableModels_tip: '当前无法提供服务的模型数量（已停用或尚未启用）',
   },
   failReason: {
     unknown: '未知错误',

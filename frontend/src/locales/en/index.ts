@@ -448,11 +448,11 @@ export default {
     daysAgo: '{n}d ago',
     upstreamTitle: 'Upstream Status',
     upstreamProviders: 'Available Providers',
-    upstreamProviders_tip: 'Providers with management_status=Enabled',
+    upstreamProviders_tip: 'Providers currently enabled and available to serve',
     upstreamAbnormalKeys: 'Abnormal Keys',
     upstreamAbnormalKeys_tip: 'Enabled Provider Keys that have not passed verification (keys that should serve traffic but are unverified)',
     upstreamUnavailableModels: 'Unavailable Models',
-    upstreamUnavailableModels_tip: 'Models with management_status != Enabled (disabled or not yet enabled)',
+    upstreamUnavailableModels_tip: 'Models currently unavailable to serve requests (disabled or not yet enabled)',
   },
   failReason: {
     unknown: 'Unknown error',
