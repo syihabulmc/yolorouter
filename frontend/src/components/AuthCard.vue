@@ -1,4 +1,4 @@
-<!-- Shared shell for the setup/login pages (frontend/src/views/auth/*.vue):
+<!-- Shared shell for the setup/login pages (../views/auth/*.vue):
      a split layout with a dark brand panel on the left (product identity)
      and the page's own form on the right. Neither page renders inside
      DefaultLayout (they're top-level routes, not its children — see
@@ -7,167 +7,163 @@
      both pages require one. Props (title/subtitle) + default slot keep the
      same API, so LoginPage/SetupPage need no changes. -->
 <template>
-  <div class="auth-shell">
-    <!-- Brand panel: dark surface carrying the product identity. This is a
-         deliberate two-tone split, not a theme flip — the interactive form
-         on the right stays in the app's light theme. -->
-    <aside class="auth-brand">
-      <div class="auth-brand-inner">
-        <div class="auth-brand-mark">
-          <img class="auth-brand-logo" :src="logo" alt="" />
-          <span class="auth-brand-word">yolorouter</span>
-        </div>
-        <div class="auth-brand-copy">
-          <!-- A slogan, not a section heading — a <p> avoids an h2 landing
-               before the form panel's own <h1> title. -->
-          <p class="auth-brand-headline">{{ t('auth.brandTagline') }}</p>
-          <p class="auth-brand-desc">{{ t('auth.brandDesc') }}</p>
-          <ul class="auth-brand-points">
-            <li>
-              <Network class="auth-brand-point-icon" :size="18" :stroke-width="1.75" />
-              <span>{{ t('auth.brandPoint1') }}</span>
-            </li>
-            <li>
-              <BarChart3 class="auth-brand-point-icon" :size="18" :stroke-width="1.75" />
-              <span>{{ t('auth.brandPoint2') }}</span>
-            </li>
-            <li>
-              <Server class="auth-brand-point-icon" :size="18" :stroke-width="1.75" />
-              <span>{{ t('auth.brandPoint3') }}</span>
-            </li>
-          </ul>
+  <div class="auth-page">
+    <div class="auth-hero-warp" :style="`background-image: url(${loginBg});`">
+      <div class="auth-hero" :style="`background-image: url(${loginBg});`">
+        <img class="auth-hero-logo" :src="logo2" alt="" width="380" />
+        <img class="auth-hero-logo-mark" :src="titleImage" alt="" width="225" />
+        <div>
+          <div class="auth-hero-title">{{ t("auth.brandTagline") }}</div>
+          <div class="auth-hero-subtitle">
+            {{ t("auth.brandDesc") }}
+          </div>
+          <div class="auth-hero-feature">
+            {{ t("auth.brandPoint1") }}
+          </div>
+          <div class="auth-hero-feature">
+            {{ t("auth.brandPoint2") }}
+          </div>
+          <div class="auth-hero-feature">
+            {{ t("auth.brandPoint3") }}
+          </div>
         </div>
       </div>
-    </aside>
-
-    <!-- Form panel: light surface hosting the actual login/setup form. -->
-    <main class="auth-form-panel">
-      <!-- Wrapper div (not a class on the component) so the absolute
-           positioning is robust regardless of what LocaleSwitcher renders
-           as its root element. -->
+    </div>
+    <div class="auth-main">
       <div class="auth-locale-select">
         <LocaleSwitcher />
       </div>
-      <div class="auth-form-inner">
-        <div class="auth-form-head">
-          <h1 class="auth-title">{{ title }}</h1>
-          <p class="auth-subtitle">{{ subtitle }}</p>
+      <div class="auth-card-wrap">
+        <div class="auth-card">
+          <div
+            class="auth-card-logo"
+            :style="`background-image: url(${banner});`"
+          >
+            <img :src="logo3" alt="" width="74" />
+            <img
+              :src="titleBlack"
+              alt=""
+              width="131"
+              style="margin-left: 16px"
+            />
+          </div>
+          <div class="auth-card-body">
+            <h1 class="auth-title">{{ title }}</h1>
+            <p class="auth-subtitle">{{ subtitle }}</p>
+            <p class="auth-subtitle-2">{{ t("auth.username") }}</p>
+            <slot />
+          </div>
         </div>
-        <slot />
       </div>
-    </main>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { useI18n } from 'vue-i18n'
-import { Network, BarChart3, Server } from '@lucide/vue'
-import LocaleSwitcher from './LocaleSwitcher.vue'
-import logo from '../assets/logo.svg'
+import { useI18n } from "vue-i18n";
+import LocaleSwitcher from "./LocaleSwitcher.vue";
+import logo2 from "../assets/logo-2.png";
+import logo3 from "../assets/logo-3.png";
+import banner from "../assets/banner.png";
+import loginBg from "../assets/login-bg.png";
+import titleImage from "../assets/title.png";
+import titleBlack from "../assets/title-black.png";
 
-defineProps<{ title: string; subtitle: string }>()
-
-const { t } = useI18n()
+defineProps<{ title: string; subtitle: string }>();
+const { t } = useI18n();
 </script>
 
 <style scoped>
-.auth-shell {
-  min-height: 100dvh;
-  display: grid;
-  grid-template-columns: 1.08fr 0.92fr;
-  background: var(--color-surface);
+.auth-page {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
 }
-
-/* ---- Brand panel ---- */
-.auth-brand {
-  position: relative;
-  overflow: hidden;
-  padding: 56px 56px 48px;
-  color: oklch(96% 0.01 270);
-  background:
-    radial-gradient(120% 120% at 12% 6%, oklch(64% 0.17 274 / 0.55) 0%, transparent 46%),
-    radial-gradient(120% 120% at 92% 94%, oklch(58% 0.19 292 / 0.42) 0%, transparent 52%),
-    linear-gradient(152deg, oklch(32% 0.1 278) 0%, oklch(20% 0.06 274) 100%);
+.auth-hero-warp {
+  background-repeat: no-repeat;
+  background-size: 100% auto;
+  background-position: top center;
+  background-color: #cfe2f4;
+  flex: 1;
 }
-
-/* Technical grid texture, faded from the top-left — reads as a dev-tool
-   surface rather than a random gradient blob. Decorative only. */
-.auth-brand::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(to right, oklch(100% 0 0 / 0.055) 1px, transparent 1px),
-    linear-gradient(to bottom, oklch(100% 0 0 / 0.055) 1px, transparent 1px);
-  background-size: 46px 46px;
-  -webkit-mask-image: radial-gradient(125% 95% at 18% 8%, #000 0%, transparent 72%);
-  mask-image: radial-gradient(125% 95% at 18% 8%, #000 0%, transparent 72%);
-}
-
-.auth-brand-inner {
-  position: relative;
-  z-index: 1;
+.auth-hero {
+  width: 100%;
   height: 100%;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  gap: var(--space-12);
-  max-width: 460px;
-}
-
-.auth-brand-mark {
-  display: inline-flex;
+  justify-content: center;
   align-items: center;
-  gap: var(--space-3);
+  background-repeat: no-repeat;
+  background-size: 100% auto;
+  background-position: bottom center;
+  color: #333;
 }
-
-.auth-brand-logo {
-  width: 30px;
-  height: auto;
-  /* The shared mark asset is brand-indigo; force it white for the dark panel. */
-  filter: brightness(0) invert(1);
-}
-
-.auth-brand-word {
-  font-size: var(--text-xl);
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  color: #fff;
-}
-
-.auth-brand-headline {
-  margin: 0;
-  font-size: clamp(1.75rem, 1.2rem + 1.6vw, 2.5rem);
-  font-weight: 700;
-  line-height: 1.16;
-  letter-spacing: -0.02em;
-  color: oklch(98% 0.008 270);
-}
-
-.auth-brand-desc {
-  margin: var(--space-4) 0 0;
-  max-width: 36ch;
-  font-size: var(--text-sm);
-  line-height: 1.65;
-  color: oklch(82% 0.03 272);
-}
-
-.auth-brand-points {
-  list-style: none;
-  margin: 28px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.auth-brand-points li {
+.auth-main {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  font-size: var(--text-sm);
-  color: oklch(88% 0.02 272);
+  padding: 80px;
+  background-color: #fff;
+}
+
+.auth-hero-logo {
+  margin-bottom: 10px;
+}
+.auth-hero-logo-mark {
+  margin-top: -100px;
+}
+.auth-hero-title {
+  font-size: 36px;
+  font-weight: bold;
+  margin-top: 20px;
+  margin-bottom: 5px;
+  color: #000;
+}
+.auth-hero-subtitle {
+  font-weight: bold;
+  margin-bottom: 15px;
+  font-size: 14px;
+}
+.auth-hero-feature {
+  position: relative;
+  padding-left: 8px;
+  color: #666;
+  margin-top: 4px;
+}
+
+.auth-hero-feature::after {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: 0;
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  background-color: #666;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.auth-card-logo {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-repeat: no-repeat;
+  background-size: 100% auto;
+  background-position: top center;
+  height: 140px;
+  margin-bottom: 45px;
+}
+
+.auth-card-wrap {
+  width: 590px;
+  background: #ffffff;
+  box-shadow: 0px 1px 9px 1px rgba(109, 109, 103, 0.19);
+  border-radius: 9px;
+  padding: 2px;
+  overflow: hidden;
+}
+
+.auth-card-body {
+  padding: 0 80px 80px;
 }
 
 .auth-brand-point-icon {
@@ -183,6 +179,11 @@ const { t } = useI18n()
   justify-content: center;
   padding: var(--space-10) var(--space-6);
   background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  padding: 0 40px 32px;
+  box-sizing: border-box;
 }
 
 .auth-locale-select {
@@ -193,7 +194,6 @@ const { t } = useI18n()
 
 .auth-form-inner {
   width: 100%;
-  max-width: 384px;
 }
 
 .auth-form-head {
@@ -206,39 +206,29 @@ const { t } = useI18n()
   font-weight: 800;
   line-height: 1.15;
   letter-spacing: -0.01em;
-  color: var(--color-text);
+  color: #333;
 }
 
 .auth-subtitle {
   margin: var(--space-2) 0 0;
-  color: var(--color-text-secondary);
-  font-size: var(--text-sm);
-  line-height: 1.6;
+  color: #666;
+  font-size: 12px;
 }
-
-/* Gentle entrance; collapses to static under reduced-motion. */
-@media (prefers-reduced-motion: no-preference) {
-  .auth-brand-inner,
-  .auth-form-inner {
-    animation: auth-rise var(--duration-normal, 240ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) both;
-  }
-  .auth-form-inner {
-    animation-delay: 60ms;
-  }
-  @keyframes auth-rise {
-    from {
-      opacity: 0;
-      transform: translateY(10px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
+.auth-subtitle-2 {
+  margin-top: 32px;
+  font-weight: bold;
+  font-size: 18px;
+  color: #102c44;
 }
 
 /* ---- Mobile: stack brand strip above the form ---- */
 @media (max-width: 860px) {
+  .auth-hero-warp {
+    display: none;
+  }
+  .auth-hero {
+    display: none;
+  }
   .auth-shell {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr;
@@ -264,5 +254,28 @@ const { t } = useI18n()
     padding: 4rem var(--space-5) var(--space-10);
     align-items: flex-start;
   }
+}
+</style>
+<style>
+.auth-page .n-form-item.n-form-item--medium-size.n-form-item--top-labelled {
+  --n-label-height: 0 !important;
+}
+
+.auth-page .n-input-wrapper {
+  background-color: #f9f9f9;
+  border: 0;
+}
+
+.auth-page .n-input__state-border,
+.auth-page .n-input__border {
+  display: none;
+}
+
+.auth-page .n-input-wrapper {
+  --n-height: 50px;
+}
+
+.auth-page .n-form-item-feedback-wrapper {
+  margin-bottom: 20px !important
 }
 </style>

@@ -2,10 +2,8 @@
   <AuthCard :title="t('auth.loginTitle')" :subtitle="t('auth.loginSubtitle')">
     <n-form require-mark-placement="left" ref="formRef" class="auth-form" :model="form" :rules="rules">
       <n-form-item path="username">
-        <template #label>
-          <HelpLabel :tip="t('auth.username_tip')">{{ t('auth.username') }}</HelpLabel>
-        </template>
         <n-input
+          :placeholder="t('auth.usernamePlaceholder')"
           v-model:value="form.username"
           size="large"
           :disabled="submitting || lockedSecondsLeft > 0"
@@ -13,10 +11,8 @@
         />
       </n-form-item>
       <n-form-item path="password">
-        <template #label>
-          <HelpLabel :tip="t('auth.password_tip')">{{ t('auth.password') }}</HelpLabel>
-        </template>
         <n-input
+          :placeholder="t('auth.passwordPlaceholder')"
           v-model:value="form.password"
           type="password"
           show-password-on="click"
@@ -33,6 +29,7 @@
         :loading="submitting"
         :disabled="lockedSecondsLeft > 0"
         @click="onSubmit"
+        style="height: 50px;font-size: 16px;"
       >
         {{ lockedSecondsLeft > 0 ? t('auth.lockedCountdown', { seconds: lockedSecondsLeft }) : t('auth.loginButton') }}
       </n-button>
@@ -158,7 +155,7 @@ async function onSubmit() {
 
 <style scoped>
 .auth-form {
-  margin-top: 24px;
+  margin-top: 12px;
 }
 
 .auth-error {
