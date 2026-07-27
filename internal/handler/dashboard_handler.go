@@ -28,7 +28,28 @@ func GetDashboard(svc *service.DashboardService) gin.HandlerFunc {
 		if v, ok := c.Get("timezone"); ok {
 			loc = v.(*time.Location)
 		}
-		data, err := svc.GetDashboard(loc)
+		// Optional start/end let the dashboard follow a user-selected time
+		// range instead of the default "today + 7-day trend".
+		var rangeStart, rangeEnd *time.Time
+		if !applyTimeQueryParam(c, "start", func(v time.Time) { rangeStart = &v }) {
+			return
+		}
+		if !applyTimeQueryParam(c, "end", func(v time.Time) { rangeEnd = &v }) {
+			return
+		}
+		// Require both-or-neither: a single bound is silently ignored by the
+		// service; reject explicitly so the caller knows.
+		if (rangeStart == nil) != (rangeEnd == nil) {
+			response.ParamError(c, "start and end must be provided together")
+			return
+		}
+		// Reject inverted or zero-length ranges — GetTrendRange would compute
+		// a negative day count.
+		if rangeStart != nil && rangeEnd != nil && !rangeStart.Before(*rangeEnd) {
+			response.ParamError(c, "start must be before end")
+			return
+		}
+		data, err := svc.GetDashboard(loc, rangeStart, rangeEnd)
 		if err != nil {
 			response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
 			return

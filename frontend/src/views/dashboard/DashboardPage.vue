@@ -1,14 +1,19 @@
 <!-- frontend/src/views/dashboard/DashboardPage.vue
-     Overview dashboard. Renders today's KPI cards, a 7-day trend
-     chart, top callers, recent failures, and upstream status — all from one
-     GET /api/admin/dashboard round trip.
+     Overview dashboard. Renders the KPI cards, trend chart, top callers,
+     recent failures, and upstream status for the selected time range — all
+     from one GET /api/admin/dashboard round trip.
 
      All sections share a single loading state because the dashboard envelope
-     is fetched atomically. A failure surfaces a single toast and leaves the
-     previous data on screen (the trend / cards just go blank on first load). -->
+     is fetched atomically. On a failed reload the prior range's data is
+     cleared (rather than left on screen under a new range label) so KPIs and
+     the selector never disagree. -->
 <template>
   <div class="dashboard-page">
-    <PageHeader :eyebrow="t('dashboard.eyebrow')" :title="t('dashboard.pageTitle')" :description="t('dashboard.pageDescription')" />
+    <PageHeader :eyebrow="t('dashboard.eyebrow')" :title="t('dashboard.pageTitle')" :description="t('dashboard.pageDescription')">
+      <template #actions>
+        <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPresetChange" />
+      </template>
+    </PageHeader>
 
     <!-- Setup guidance banner. Shown only before any real traffic has been
          recorded, and adapts to the current setup step so a fresh deployment
@@ -123,7 +128,7 @@
             <div class="failure-main">
               <span class="failure-status" :class="failureStatusClass(f.status_code)">{{ f.status_code }}</span>
               <span class="failure-model">{{ f.model_name || '—' }}</span>
-              <span class="failure-reason">{{ f.fail_reason || t('dashboard.noFailReason') }}</span>
+              <span class="failure-reason">{{ formatFailReason(f.fail_reason, t) }}</span>
             </div>
             <div class="failure-meta">
               <span>{{ formatRelativeTime(f.created_at) }}</span>
@@ -168,7 +173,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NButton, useMessage } from 'naive-ui'
@@ -177,11 +182,13 @@ import { Activity, AlertTriangle, Boxes, DollarSign, Hourglass, KeyRound, Server
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import EmptyState from '../../components/EmptyState.vue'
+import TimeRangeSelect, { type RangePreset, type TimeRange } from '../../components/analytics/TimeRangeSelect.vue'
 import TrendChart from '../../components/dashboard/TrendChart.vue'
 import { getDashboard, type DashboardData } from '../../api/analytics'
 import { displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
 import { formatNumber, formatRate } from '../../utils/format'
+import { formatFailReason } from '../../utils/failReason'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -189,6 +196,12 @@ const message = useMessage()
 
 const data = ref<DashboardData | null>(null)
 const loading = ref(true)
+
+const preset = ref<RangePreset>('last7d')
+const timeRange = ref<TimeRange>({ start: null, end: null })
+function onPresetChange(v: RangePreset) {
+  preset.value = v
+}
 
 // The dashboard skeleton (KPI cards, trend, upstream status) always renders so
 // a fresh deployment sees a real overview reading zero rather than a blank
@@ -209,13 +222,11 @@ interface SetupStep {
 const setupStep = computed<SetupStep | null>(() => {
   const d = data.value
   if (!d) return null
-  const hasTraffic =
-    d.today.calls > 0 ||
-    d.trend.some((p) => p.calls > 0) ||
-    d.top_callers.length > 0 ||
-    d.recent_failures.length > 0
-  if (hasTraffic) return null
   const s = d.setup
+  // Setup guidance is based on lifetime signals (providers, models, keys, and
+  // total lifetime requests) — NOT on range-filtered traffic. Otherwise
+  // selecting a quiet period on a fully-configured, active system would show
+  // "waiting for first request" even though traffic exists in other periods.
   if (s.providers === 0) {
     return { titleKey: 'dashboard.setupProviderTitle', descKey: 'dashboard.setupProviderDesc', icon: Server, ctaKey: 'dashboard.setupProviderCta', to: '/providers' }
   }
@@ -225,21 +236,56 @@ const setupStep = computed<SetupStep | null>(() => {
   if (s.api_keys === 0) {
     return { titleKey: 'dashboard.setupKeyTitle', descKey: 'dashboard.setupKeyDesc', icon: KeyRound, ctaKey: 'dashboard.setupKeyCta', to: '/api-keys' }
   }
-  return { titleKey: 'dashboard.setupWaitingTitle', descKey: 'dashboard.setupWaitingDesc', icon: Hourglass }
+  // All entities configured. Show "waiting for first request" only when there
+  // has genuinely never been any traffic — total_requests is a lifetime count
+  // independent of the selected range, so a quiet custom window on an active
+  // system no longer triggers this banner.
+  if (s.total_requests === 0) {
+    return { titleKey: 'dashboard.setupWaitingTitle', descKey: 'dashboard.setupWaitingDesc', icon: Hourglass }
+  }
+  return null
 })
 
+// Monotonic reload token: prevents a stale window's response from overwriting
+// a newer one (same pattern the cost-stats and detail pages use).
+let reloadSeq = 0
+
 async function reload() {
+  const mySeq = ++reloadSeq
   loading.value = true
   try {
-    data.value = await getDashboard()
+    const filter = timeRange.value.start && timeRange.value.end
+      ? { start: timeRange.value.start, end: timeRange.value.end }
+      : undefined
+    const result = await getDashboard(filter)
+    if (mySeq !== reloadSeq) return
+    data.value = result
   } catch (err) {
+    if (mySeq !== reloadSeq) return
+    // Clear the prior range's data so KPIs/trend never stay frozen on a
+    // different range than the selector claims — a transient toast is not
+    // enough to make stale financial totals honest.
+    data.value = null
     message.error(displayMessage(err, t))
   } finally {
-    loading.value = false
+    if (mySeq === reloadSeq) loading.value = false
   }
 }
 
-onMounted(() => {
+// TimeRangeSelect emits its resolved initial window synchronously on mount
+// via its own immediate watch, which sets timeRange and fires this watch —
+// performing the first load. Calling reload() from onMounted too would double
+// every request on first paint.
+watch(timeRange, (r) => {
+  // An incomplete range (one or both bounds null) only happens when the user
+  // clears the custom date picker. Reloading with no bounds would mix the
+  // backend's default windows (today KPI + 7-day trend) under a "custom"
+  // label, so reset to a concrete preset — TimeRangeSelect then re-emits a
+  // full window and this watch reloads with consistent bounds.
+  if (!r.start || !r.end) {
+    if (preset.value === 'custom') preset.value = 'last7d'
+    return
+  }
   void reload()
 })
 

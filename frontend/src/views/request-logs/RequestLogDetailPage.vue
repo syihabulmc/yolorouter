@@ -59,7 +59,7 @@
             {{ detail.status_code }}
           </NDescriptionsItem>
           <NDescriptionsItem v-if="detail.fail_reason" :label="t('requestLogs.fieldFailReason')" :span="2">
-            <span class="fail-reason-cell">{{ detail.fail_reason }}</span>
+            <span class="fail-reason-cell">{{ formatFailReason(detail.fail_reason, t) }}</span>
           </NDescriptionsItem>
         </NDescriptions>
       </section>
@@ -263,6 +263,7 @@ import EmptyState from '../../components/EmptyState.vue'
 import StatusClassTag from '../../components/request-logs/StatusClassTag.vue'
 import AttemptOutcomeTag from '../../components/request-logs/AttemptOutcomeTag.vue'
 import BodyViewer from '../../components/request-logs/BodyViewer.vue'
+import { formatFailReason } from '../../utils/failReason'
 
 const { t } = useI18n()
 const route = useRoute()

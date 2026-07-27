@@ -59,6 +59,7 @@ export interface SetupStatus {
   providers: number
   enabled_models: number
   api_keys: number
+  total_requests: number // lifetime request count — drives the waiting banner (range-independent)
 }
 
 export interface DashboardData {
@@ -70,8 +71,14 @@ export interface DashboardData {
   setup: SetupStatus
 }
 
-export function getDashboard(): Promise<DashboardData> {
-  return apiFetch('/api/admin/dashboard')
+export function getDashboard(filter?: { start: string; end: string }): Promise<DashboardData> {
+  const params = new URLSearchParams()
+  if (filter) {
+    params.set('start', filter.start)
+    params.set('end', filter.end)
+  }
+  const qs = params.toString()
+  return apiFetch(`/api/admin/dashboard${qs ? `?${qs}` : ''}`)
 }
 
 // === Analytics =====================================================

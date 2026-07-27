@@ -27,13 +27,10 @@ type TodayMetricsDTO struct {
 	UnknownCostCalls int64   `json:"unknown_cost_calls"`
 }
 
-// GetTodayMetrics returns calls / total known cost / success rate / unknown-
-// cost count for the calendar day containing now in loc ("today"
-// is by the system's current timezone). Delegates the bucketing math to
-// AggregateRequestLogMetrics so the dashboard's success-rate definition
-// stays identical to the analytics page's.
-func GetTodayMetrics(db *gorm.DB, loc *time.Location) (*TodayMetricsDTO, error) {
-	start, end := TodayBounds(loc)
+// GetRangeMetrics returns calls / total known cost / success rate / unknown-
+// cost count for an arbitrary [start, end) window. The dashboard uses it for
+// both the default "today" window (via TodayBounds) and user-selected ranges.
+func GetRangeMetrics(db *gorm.DB, start, end time.Time) (*TodayMetricsDTO, error) {
 	m, err := AggregateRequestLogMetrics(db, &RequestLogFilter{StartTime: &start, EndTime: &end})
 	if err != nil {
 		return nil, err
@@ -54,40 +51,69 @@ type TrendPoint struct {
 }
 
 // GetTrend returns per-day totals for the `days` calendar days ending today
-// (today inclusive, oldest first). Walks backwards via DayBoundsAt so each
-// day's [start, end) window is computed in loc and compared against the
-// UTC-stored created_at — one round trip per day, no dialect-specific
-// date-trunc needed. days<=0 snaps to 1.
-//
-// The returned slice is ordered oldest-first so the frontend can render it
-// left-to-right without re-sorting.
+// (today inclusive, oldest first). Delegates to GetTrendRange after computing
+// the [start, end) window from the day count.
 func GetTrend(db *gorm.DB, days int, loc *time.Location) ([]TrendPoint, error) {
 	if days < 1 {
 		days = 1
 	}
 	now := time.Now().In(loc)
-	points := make([]TrendPoint, 0, days)
-	for i := days - 1; i >= 0; i-- {
-		day := now.AddDate(0, 0, -i)
-		start, end := DayBoundsAt(loc, day)
-		var r struct {
-			Calls      int64
-			CostMicros int64
-		}
-		err := db.Model(&model.RequestLog{}).
-			Where("created_at >= ? AND created_at < ?", start, end).
-			Select("COUNT(*) AS calls, COALESCE(SUM(cost_micros), 0) AS cost_micros").
-			Scan(&r).Error
-		if err != nil {
-			return nil, err
-		}
-		points = append(points, TrendPoint{
-			Date:       day.Format("2006-01-02"),
-			Calls:      r.Calls,
-			CostMicros: r.CostMicros,
-		})
+	startDay := now.AddDate(0, 0, -(days - 1))
+	rangeStart := time.Date(startDay.Year(), startDay.Month(), startDay.Day(), 0, 0, 0, 0, loc).UTC()
+	rangeEnd := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, 1).UTC()
+	return GetTrendRange(db, rangeStart, rangeEnd, loc)
+}
+
+// GetTrendRange returns per-day totals for an arbitrary [rangeStart, rangeEnd)
+// window in a single GROUP BY query, then gap-fills missing days with zeros
+// so the frontend chart x-axis is continuous. Uses dayBucketExpr for
+// DST-aware day truncation on Postgres and fixed-offset on SQLite.
+func GetTrendRange(db *gorm.DB, rangeStart, rangeEnd time.Time, loc *time.Location) ([]TrendPoint, error) {
+	_, offsetSec := rangeStart.In(loc).Zone()
+	bucketExpr := dayBucketExpr(db, loc, offsetSec)
+
+	var raw []struct {
+		Day        string `gorm:"column:day"`
+		Calls      int64  `gorm:"column:calls"`
+		CostMicros int64  `gorm:"column:cost_micros"`
 	}
-	return points, nil
+	err := db.Model(&model.RequestLog{}).
+		Where("created_at >= ? AND created_at < ?", rangeStart, rangeEnd).
+		Select(bucketExpr + ` AS day,
+			COUNT(*) AS calls,
+			COALESCE(SUM(cost_micros), 0) AS cost_micros
+		`).
+		Group(bucketExpr).
+		Order("day ASC").
+		Scan(&raw).Error
+	if err != nil {
+		return nil, err
+	}
+
+	byDay := make(map[string]TrendPoint, len(raw))
+	for _, r := range raw {
+		byDay[r.Day] = TrendPoint{Date: r.Day, Calls: r.Calls, CostMicros: r.CostMicros}
+	}
+
+	// Gap-fill: walk [rangeStart, rangeEnd) one local day at a time so the
+	// chart's x-axis is continuous. Missing days (zero traffic) get zeros.
+	layout := "2006-01-02"
+	// Pre-allocate for the number of calendar days in the window.
+	capacity := int(rangeEnd.Sub(rangeStart)/(24*time.Hour)) + 1
+	result := make([]TrendPoint, 0, capacity)
+	startLocal := rangeStart.In(loc)
+	cursor := time.Date(startLocal.Year(), startLocal.Month(), startLocal.Day(), 0, 0, 0, 0, loc)
+	endLocal := rangeEnd.In(loc)
+	for cursor.Before(endLocal) {
+		label := cursor.Format(layout)
+		if point, ok := byDay[label]; ok {
+			result = append(result, point)
+		} else {
+			result = append(result, TrendPoint{Date: label})
+		}
+		cursor = cursor.AddDate(0, 0, 1)
+	}
+	return result, nil
 }
 
 // TopCaller is one row in the "top callers by cost" list.
@@ -183,6 +209,7 @@ type SetupStatusDTO struct {
 	Providers     int64 `json:"providers"`      // total provider rows, any status
 	EnabledModels int64 `json:"enabled_models"` // models with management_status=Enabled
 	APIKeys       int64 `json:"api_keys"`       // active (non-revoked) API keys
+	TotalRequests int64 `json:"total_requests"` // lifetime request rows — range-independent "has any traffic ever existed" signal for the waiting banner
 }
 
 // GetSetupStatus counts the onboarding-funnel entities:
@@ -194,6 +221,12 @@ type SetupStatusDTO struct {
 //     only meaningfully allowlist a model that is switched on
 //   - APIKeys: non-revoked keys — an existing key means the "create a key"
 //     step is complete even while waiting for the first request
+//   - TotalRequests: lifetime count of request_logs rows, intentionally NOT
+//     scoped to any time window. The dashboard's "waiting for first request"
+//     banner must reflect whether traffic has ever existed, not whether the
+//     currently selected range happens to be quiet — a range-filtered signal
+//     would falsely surface the banner on a fully active system whenever a
+//     quiet period is selected.
 func GetSetupStatus(db *gorm.DB) (SetupStatusDTO, error) {
 	var s SetupStatusDTO
 	if err := db.Model(&model.Provider{}).Count(&s.Providers).Error; err != nil {
@@ -207,6 +240,9 @@ func GetSetupStatus(db *gorm.DB) (SetupStatusDTO, error) {
 	if err := db.Model(&model.APIKey{}).
 		Where("status = ?", model.APIKeyStatusActive).
 		Count(&s.APIKeys).Error; err != nil {
+		return s, err
+	}
+	if err := db.Model(&model.RequestLog{}).Count(&s.TotalRequests).Error; err != nil {
 		return s, err
 	}
 	return s, nil

@@ -23,6 +23,11 @@ const (
 	DashboardTrendDays         = 7
 	DashboardTopCallersLimit   = 5
 	DashboardRecentFailuresLim = 5
+	// maxDashboardRangeDays caps a user-selected custom range so a year-spanning
+	// query doesn't produce a multi-thousand-row trend + gap-fill. Analytics
+	// has its own 90-day cap; the dashboard is more generous (a year) since it's
+	// the high-level overview.
+	maxDashboardRangeDays = 365
 )
 
 // DashboardService is the stateless composition layer over
@@ -68,31 +73,46 @@ type RecentFailureView struct {
 	CreatedAt  string  `json:"created_at"`
 }
 
-// GetDashboard returns the full dashboard envelope. Each section is a
-// separate repository call; if any one fails the whole call fails — the
-// dashboard can't meaningfully render with a missing section, and returning
-// a half-populated envelope would just hide the real error behind zeroes.
-//
-// loc is the client-supplied timezone used for day-bucket windowing so the
-// dashboard's "today" follows the admin's wall clock. nil falls back to the
-// server's local zone.
-func (s *DashboardService) GetDashboard(loc *time.Location) (*DashboardData, error) {
+// GetDashboard returns the dashboard envelope. When rangeStart/rangeEnd are
+// nil the dashboard defaults to "today" for the KPI cards + the fixed
+// DashboardTrendDays trend. When supplied, the KPI cards and trend cover the
+// selected [start, end) window instead. Top callers always follow the same
+// window. Recent failures, upstream status, and setup status are independent
+// of the time range (they reflect current state, not a historical window).
+// If any one section fails the whole call fails — the dashboard can't
+// meaningfully render with a missing section.
+func (s *DashboardService) GetDashboard(loc *time.Location, rangeStart, rangeEnd *time.Time) (*DashboardData, error) {
 	if loc == nil {
 		loc = time.Local
 	}
 
-	today, err := repository.GetTodayMetrics(s.db, loc)
+	// Resolve the KPI window once; top callers + metrics use it directly.
+	// The trend window differs in the default case (7-day trend vs today KPI).
+	var kpiStart, kpiEnd time.Time
+	var trend []repository.TrendPoint
+	var err error
+
+	if rangeStart != nil && rangeEnd != nil {
+		kpiStart, kpiEnd = *rangeStart, *rangeEnd
+		// Cap the range so a year-spanning custom selection doesn't produce
+		// a multi-thousand-row trend + gap-fill.
+		if kpiEnd.Sub(kpiStart) > time.Duration(maxDashboardRangeDays)*24*time.Hour {
+			kpiStart = kpiEnd.In(loc).AddDate(0, 0, -maxDashboardRangeDays)
+		}
+		trend, err = repository.GetTrendRange(s.db, kpiStart, kpiEnd, loc)
+	} else {
+		kpiStart, kpiEnd = repository.TodayBounds(loc)
+		trend, err = repository.GetTrend(s.db, DashboardTrendDays, loc)
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	trend, err := repository.GetTrend(s.db, DashboardTrendDays, loc)
+	metrics, err := repository.GetRangeMetrics(s.db, kpiStart, kpiEnd)
 	if err != nil {
 		return nil, err
 	}
-
-	start, end := repository.TodayBounds(loc)
-	topCallers, err := repository.GetTopCallers(s.db, start, end, DashboardTopCallersLimit)
+	topCallers, err := repository.GetTopCallers(s.db, kpiStart, kpiEnd, DashboardTopCallersLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +133,7 @@ func (s *DashboardService) GetDashboard(loc *time.Location) (*DashboardData, err
 	}
 
 	return &DashboardData{
-		Today:          *today,
+		Today:          *metrics,
 		Trend:          trend,
 		TopCallers:     topCallers,
 		RecentFailures: toRecentFailureViews(failures),

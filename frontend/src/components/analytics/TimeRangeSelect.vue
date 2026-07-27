@@ -106,7 +106,13 @@ function resolvePreset(p: RangePreset): TimeRange {
   }
 }
 
+// Tracks the preset the component itself emitted via onPresetChange, so the
+// props.preset watcher can skip the duplicate emit that would otherwise fire
+// when the parent round-trips the update:preset back into props.
+let selfEmittedPreset: RangePreset | null = null
+
 function onPresetChange(v: RangePreset) {
+  selfEmittedPreset = v
   emit('update:preset', v)
   if (v === 'custom') return
   emit('update:modelValue', resolvePreset(v))
@@ -125,9 +131,16 @@ function onCustomChange(v: [number, number] | null) {
 }
 
 // Re-derive the window when the parent resets preset to a named window.
+// Skips the self-emitted round-trip from onPresetChange to avoid a duplicate
+// reload (the parent updates preset → this watcher fires → emits again →
+// parent watch fires again → double request).
 watch(
   () => props.preset,
   (p) => {
+    if (p === selfEmittedPreset) {
+      selfEmittedPreset = null
+      return
+    }
     if (p !== 'custom') emit('update:modelValue', resolvePreset(p))
   },
   { immediate: true },

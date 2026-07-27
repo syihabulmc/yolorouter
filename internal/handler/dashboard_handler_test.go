@@ -249,11 +249,11 @@ func TestGetDashboardTrendIncludesTodayRowOnly(t *testing.T) {
 	now := time.Now().In(loc)
 
 	// Two rows today, nothing on prior days.
-	insertRequestLog(t, db, now.Add(-1*time.Hour), func(r *model.RequestLog) {
+	insertRequestLog(t, db, now.Add(-10*time.Minute), func(r *model.RequestLog) {
 		r.CostMicros = 150
 		r.CostKnown = true
 	})
-	insertRequestLog(t, db, now.Add(-30*time.Minute), func(r *model.RequestLog) {
+	insertRequestLog(t, db, now.Add(-5*time.Minute), func(r *model.RequestLog) {
 		r.CostMicros = 50
 		r.CostKnown = true
 	})

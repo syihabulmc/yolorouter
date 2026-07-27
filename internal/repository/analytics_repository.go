@@ -685,25 +685,14 @@ type CompressDailySeriesRow struct {
 	CompressedCalls int64  `json:"compressed_calls"`
 }
 
-// compressDayExpr returns a dialect-specific SQL expression that truncates
-// created_at to a local-day label "YYYY-MM-DD". created_at is stored in UTC,
-// so the expression shifts by the location's UTC offset before truncating.
-// offsetSec is derived from the server's configured time.Location, never from
-// user input, so the interpolated integer carries no injection risk.
-//
-// For Postgres, created_at is TIMESTAMPTZ. The AT TIME ZONE 'UTC' conversion
-// strips the timezone awareness BEFORE the interval arithmetic so the
-// resulting date is independent of the DB session's TimeZone setting —
-// without it, Postgres evaluates the arithmetic in the session timezone,
-// double-offsetting when the session differs from the application's loc.
-// compressDayExprDST builds a SQL day-truncation expression. On Postgres it
+// dayBucketExpr builds a SQL day-truncation expression. On Postgres it
 // uses AT TIME ZONE with the IANA zone name (DST-aware — each row is assigned
 // to the correct calendar day even across a DST transition). SQLite has no
 // native named-zone support, so it falls back to the fixed-offset approach
 // (a 1-hour misattribution on DST transition days, acceptable for a trend
 // chart). The zone name comes from time.LoadLocation and is validated against
 // the tz database — safe to interpolate (only [A-Za-z0-9_/-]).
-func compressDayExprDST(db *gorm.DB, loc *time.Location, offsetSec int) string {
+func dayBucketExpr(db *gorm.DB, loc *time.Location, offsetSec int) string {
 	zoneName := loc.String()
 	switch db.Dialector.Name() { //nolint:staticcheck // QF1008 false-positive
 	case "postgres":
@@ -745,7 +734,7 @@ func AggregateCompressDailySeries(ctx context.Context, db *gorm.DB, f *RequestLo
 	if db.Dialector.Name() == "postgres" { //nolint:staticcheck // QF1008 false-positive
 		// Postgres: AT TIME ZONE with the IANA zone name is fully DST-aware.
 		_, offsetSec := start.In(loc).Zone()
-		dayExpr := compressDayExprDST(db, loc, offsetSec)
+		dayExpr := dayBucketExpr(db, loc, offsetSec)
 		var raw []struct {
 			Day             string `gorm:"column:day"`
 			TokensSaved     int64  `gorm:"column:tokens_saved"`

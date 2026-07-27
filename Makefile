@@ -1,4 +1,4 @@
-.PHONY: build build-embed build-release build-windows frontend embed-frontend test test-release test-embed vet vet-embed dev migrate
+.PHONY: build build-embed build-release build-windows build-macos frontend embed-frontend test test-release test-embed vet vet-embed dev migrate
 
 # Release-build metadata injected via -ldflags into internal/version (the
 # package both the `--version` CLI flag and the system-info API read from).
@@ -25,6 +25,13 @@ build:
 # this only verifies compilation.
 build-windows:
 	GOOS=windows GOARCH=amd64 go build ./...
+
+# Cross-compile macOS binaries for both Intel and Apple Silicon, with the
+# real frontend embedded. Requires embed-frontend (npm build + copy to
+# web/dist/) first.
+build-macos: embed-frontend
+	GOOS=darwin GOARCH=amd64 go build -tags embed -o ./bin/yolorouter-darwin-amd64 ./cmd/yolorouter
+	GOOS=darwin GOARCH=arm64 go build -tags embed -o ./bin/yolorouter-darwin-arm64 ./cmd/yolorouter
 
 # Removes frontend/dist first so a misconfigured build (e.g. an outDir
 # typo in vite.config that leaves npm run build writing somewhere else
