@@ -56,12 +56,9 @@
           :placeholder="t('apiKeys.modelAllowlist')"
         />
       </n-form-item>
-      <n-form-item path="expires_at">
-        <template #label>
-          <HelpLabel :tip="t('apiKeys.expiresAt_tip')">{{ t('apiKeys.expiresAt') }}</HelpLabel>
-        </template>
-        <NDatePicker v-model:value="form.expires_at" type="datetime" clearable class="full-width" />
-      </n-form-item>
+      <div style="position: absolute;top: 17px;left: 254px;">
+        <NDatePicker v-model:value="form.expires_at" type="datetime" clearable class="full-width" :placeholder="t('apiKeys.selectExpiresAt')" />
+      </div>
 
       <div class="limit-section">
         <div class="limit-section__label">{{ t('apiKeys.limitsSection') }}</div>
@@ -99,13 +96,10 @@
         {{ t('apiKeys.plaintextWarning') }}
       </n-alert>
       <n-input :value="plaintext" readonly class="plaintext-field">
-        <template #after>
-          <n-button size="small" @click="onCopy">{{ copied ? t('apiKeys.copied') : t('apiKeys.copy') }}</n-button>
+        <template #suffix>
+          <n-button size="small" @click="onCopy" quaternary >{{ copied ? t('apiKeys.copied') : t('apiKeys.copy') }}</n-button>
         </template>
       </n-input>
-      <NCheckbox v-model:checked="saved" class="saved-confirm">
-        {{ t('apiKeys.savedConfirm') }}
-      </NCheckbox>
     </div>
 
     <template #footer>
@@ -229,17 +223,8 @@ async function onCopy() {
 
 // Closing the plaintext view without ticking "I have saved it" requires a
 // second confirmation — the full key is unrecoverable afterwards.
-function requestClose() {
-  if (step.value === 'plaintext' && !saved.value) {
-    dialog.warning({
-      title: t('apiKeys.unsavedConfirmTitle'),
-      content: t('apiKeys.unsavedConfirmContent'),
-      positiveText: t('apiKeys.confirmClose'),
-      negativeText: t('apiKeys.cancel'),
-      onPositiveClick: () => emit('update:show', false),
-    })
-    return
-  }
+async function requestClose() {
+  await onCopy()
   emit('update:show', false)
 }
 

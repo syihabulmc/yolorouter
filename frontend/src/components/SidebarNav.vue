@@ -27,6 +27,9 @@ export interface NavItem {
   // badge lights a small indicator dot (e.g. "new version available") at the
   // item's top-right. Optional; absent means no badge.
   badge?: boolean
+  // A short green "money-saving" chip pinned to the row's right edge (e.g.
+  // "省钱" / "Save"), marking the entry as a cost-related feature. Optional.
+  tag?: string
   // When true the entry is kept in the source list (route and code intact) but
   // never rendered in the sidebar — used to hide a menu item without deleting
   // its wiring.
@@ -111,6 +114,9 @@ const resolvedItems = computed(() =>
           <component :is="item.icon" :size="18" :stroke-width="1.8" />
         </span>
         <span v-if="!collapsed" class="sidebar-nav-item__label">{{ item.label }}</span>
+        <span style="position: relative;">
+          <span v-if="!collapsed && item.tag" class="sidebar-nav-item__save">{{ item.tag }}</span>
+        </span>
         <span v-if="item.badge" class="sidebar-nav-item__dot" :title="item.label" />
       </RouterLink>
     </template>
@@ -264,6 +270,28 @@ const resolvedItems = computed(() =>
   font-weight: 600;
   letter-spacing: 0.02em;
   line-height: 1.4;
+}
+
+/* "Save" chip: a small red superscript badge pinned to the top-right corner of
+   the label text (not the row edge), so it reads as an annotation on the menu
+   name itself. align-self:flex-start + the negative top margin lift it above
+   the label baseline into a superscript position. */
+.sidebar-nav-item__save {
+  position: absolute;
+  top: -16px;
+  left: -6px;
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 2px;
+  margin-left: 2px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background: var(--color-danger-subtle, rgba(208, 48, 80, 0.14));
+  color: var(--color-danger, #d03050);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.5;
 }
 
 /* The update-available indicator dot. .sidebar-nav-item is position:relative,

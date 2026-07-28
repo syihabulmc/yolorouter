@@ -27,36 +27,33 @@
         <NButton size="small" @click="loadCSP">{{ t('costOptimization.retry') }}</NButton>
       </div>
       <template v-else>
-        <NForm label-placement="top" :show-require-mark="false">
-          <NFormItem path="enabled">
-            <template #label>
-              <HelpLabel :tip="t('costOptimization.enabled_tip')">{{ t('costOptimization.enabled') }}</HelpLabel>
-            </template>
-            <NSwitch v-model:value="cspForm.enabled" />
-          </NFormItem>
+        <NForm label-placement="left" :show-require-mark="false">
           <NFormItem path="text">
             <template #label>
               <HelpLabel :tip="t('costOptimization.text_tip')">{{ t('costOptimization.text') }}</HelpLabel>
             </template>
-            <CustomPromptEditor
-              v-model:text="cspForm.text"
-              :rows="6"
-              :placeholder="t('costOptimization.textPlaceholder')"
-            />
+            <div style="display: flex;justify-content: end;width: 100%;">
+              <div>
+                <CustomPromptEditor
+                  style="margin-top: 6px;"
+                  v-model:text="cspForm.text"
+                  :rows="6"
+                  multiple
+                  :showInput="false"
+                  :placeholder="t('costOptimization.textPlaceholder')"
+                 />
+                </div>
+            </div>
+          
           </NFormItem>
+          <NFormItem path="enabled" style="margin-top: -20px;">
+            <template #label>
+              <HelpLabel :tip="t('costOptimization.enabled_tip')">{{ t('costOptimization.enabled') }}</HelpLabel>
+            </template>
+            <NSwitch v-model:value="cspForm.enabled" :disabled="!cspSetting" @change="saveCSP" style="margin-left: 490px;"/>
+          </NFormItem>
+
         </NForm>
-        <div class="setting-block__foot">
-          <span class="setting-block__version">v{{ cspForm.version }}</span>
-          <NButton
-            type="primary"
-            size="small"
-            :loading="cspSaving"
-            :disabled="!cspSetting"
-            @click="saveCSP"
-          >
-            {{ t('costOptimization.save') }}
-          </NButton>
-        </div>
       </template>
     </section>
 
@@ -74,34 +71,16 @@
         <NButton size="small" @click="loadIC">{{ t('costOptimization.retry') }}</NButton>
       </div>
       <template v-else>
-        <NForm label-placement="top" :show-require-mark="false">
+        <NForm label-placement="left" :show-require-mark="false">
           <NFormItem path="enabled">
             <template #label>
               <HelpLabel :tip="t('costOptimization.inputCompression.enabledTip')">{{ t('costOptimization.enabled') }}</HelpLabel>
             </template>
-            <NSwitch v-model:value="icForm.enabled" />
+            <NSwitch v-model:value="icForm.enabled" @change="saveIC" :disabled="!icSetting" style="margin-left: 490px;"/>
           </NFormItem>
         </NForm>
-        <div class="setting-block__foot">
-          <span class="setting-block__version">v{{ icForm.version }}</span>
-          <NButton
-            type="primary"
-            size="small"
-            :loading="icSaving"
-            :disabled="!icSetting"
-            @click="saveIC"
-          >
-            {{ t('costOptimization.save') }}
-          </NButton>
-        </div>
       </template>
     </section>
-
-    <template #footer>
-      <NSpace justify="end">
-        <NButton @click="emit('update:show', false)">{{ t('costOptimization.close') }}</NButton>
-      </NSpace>
-    </template>
   </NModal>
 </template>
 

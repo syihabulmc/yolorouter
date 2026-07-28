@@ -63,7 +63,7 @@
         <div class="metric__label">
           <HelpLabel :tip="t('costOptimization.metricCostSaved_tip')">{{ t('costOptimization.metricCostSaved') }}</HelpLabel>
         </div>
-        <div class="metric__value">¥{{ formatMicros(totals.cost_saved_micros) }}</div>
+        <div class="metric__value">¥{{ formatMicros(totals.cost_saved_micros,2) }}</div>
       </div>
       <div class="metric">
         <div class="metric__label">

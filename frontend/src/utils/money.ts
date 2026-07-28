@@ -16,8 +16,8 @@ import type { OverviewRow } from '../api/analytics'
 export const MICROS_PER_UNIT = 1_000_000
 
 /** Formats an integer-micro amount as a fixed 6-decimal display string. */
-export function formatMicros(micros: number): string {
-  return fromMicros(micros).toFixed(6)
+export function formatMicros(micros: number,precision = 6): string {
+  return fromMicros(micros).toFixed(precision)
 }
 
 /** Micros -> major-unit number (the inverse of toMicros), for prefilling a form field. */

@@ -6,7 +6,19 @@
      allocating a temporary array on every keystroke. -->
 <template>
   <div class="custom-prompt-editor">
-    <div class="custom-prompt-examples">
+    <div v-if="multiple" class="custom-prompt-examples">
+      <NButton
+        v-for="ex in customPromptExamples"
+        :key="ex.label"
+        size="tiny"
+        secondary
+        :type="customPromptExamplesActive.includes(ex.label) ? 'primary' : 'default'"
+        @click="multipleClick(ex.text)"
+      >
+        {{ ex.label }}
+      </NButton>
+    </div>
+    <div v-else class="custom-prompt-examples">
       <NButton
         v-for="ex in customPromptExamples"
         :key="ex.label"
@@ -18,6 +30,7 @@
       </NButton>
     </div>
     <NInput
+      v-if="showInput"
       :value="text"
       type="textarea"
       :rows="rows"
@@ -25,7 +38,7 @@
       :placeholder="placeholder"
       @update:value="onUpdateValue"
     />
-    <div class="custom-prompt-footer">
+    <div  v-if="showInput" class="custom-prompt-footer" >
       <span class="custom-prompt-count">{{ t('costOptimization.charCount', { remaining: remainingChars }) }}</span>
     </div>
   </div>
@@ -48,6 +61,8 @@ interface Props {
   // Auto-grow configuration (mutually exclusive with rows).
   autosize?: { minRows: number; maxRows?: number }
   placeholder?: string
+  showInput?: boolean
+  multiple?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -55,6 +70,8 @@ const props = withDefaults(defineProps<Props>(), {
   rows: undefined,
   autosize: undefined,
   placeholder: '',
+  showInput: true,
+  multiple: false,
 })
 
 const emit = defineEmits<{ (e: 'update:text', v: string): void }>()
@@ -78,6 +95,17 @@ const customPromptExamples = computed(() => [
   { label: t('costOptimization.exampleMinimalCodeLabel'), text: t('costOptimization.exampleMinimalCodeText') },
 ])
 
+const customPromptExamplesActive = computed(() => {
+  return customPromptExamples.value.filter(e => props.text.includes(e.text)).map(e => e.label)
+})
+
+function multipleClick(str:string) {
+  if (props.text.includes(str)) {
+    emit('update:text', props.text.replace(str,''))
+  } else {
+    emit('update:text', props.text + str)
+  }
+}
 function onUpdateValue(v: string) {
   // Enforce the cap by Unicode code point, not the textarea's native UTF-16
   // maxlength (which would block valid non-BMP input like emoji early: 2000

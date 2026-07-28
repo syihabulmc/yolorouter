@@ -24,7 +24,7 @@
         <div class="metric__label">
           <HelpLabel :tip="t('costs.overview.spend_tip')">{{ t('costs.overview.spend') }}</HelpLabel>
         </div>
-        <div class="metric__value">¥{{ formatMicros(stats?.overview.cost_micros ?? 0) }}</div>
+        <div class="metric__value">¥{{ formatMicros(stats?.overview.cost_micros ?? 0,2) }}</div>
         <div v-if="(stats?.overview.unknown_cost_calls ?? 0) > 0" class="metric__sub">
           {{ t('costs.overview.unknownCostSub', { n: stats?.overview.unknown_cost_calls ?? 0 }) }}
         </div>
@@ -35,14 +35,14 @@
           <HelpLabel :tip="t('costs.overview.cacheSaved_tip')">{{ t('costs.overview.cacheSaved') }}</HelpLabel>
         </div>
         <div class="metric__value" :class="{ 'metric__value--negative': netCacheSaved < 0 }">
-          ¥{{ formatMicros(netCacheSaved) }}
+          ¥{{ formatMicros(netCacheSaved,2) }}
         </div>
         <div class="metric__sub metric__sub--split">
           <span class="metric__chip metric__chip--up">
-            {{ t('costs.overview.cacheReadSaved') }} ¥{{ formatMicros(stats?.overview.cache_read_saved_micros ?? 0) }}
+            {{ t('costs.overview.cacheReadSaved') }} ¥{{ formatMicros(stats?.overview.cache_read_saved_micros ?? 0,2) }}
           </span>
           <span class="metric__chip metric__chip--down">
-            {{ t('costs.overview.cacheWriteExtra') }} ¥{{ formatMicros(stats?.overview.cache_write_extra_micros ?? 0) }}
+            {{ t('costs.overview.cacheWriteExtra') }} ¥{{ formatMicros(stats?.overview.cache_write_extra_micros ?? 0,2) }}
           </span>
         </div>
       </div>
@@ -51,7 +51,7 @@
         <div class="metric__label">
           <HelpLabel :tip="t('costs.overview.budgetTotal_tip')">{{ t('costs.overview.budgetTotal') }}</HelpLabel>
         </div>
-        <div class="metric__value">¥{{ formatMicros(budgetTotalMicros) }}</div>
+        <div class="metric__value">¥{{ formatMicros(budgetTotalMicros,2) }}</div>
         <div class="metric__sub">{{ t('costs.overview.cappedKeysSub', { n: cappedKeyCount }) }}</div>
       </div>
 
@@ -59,7 +59,7 @@
         <div class="metric__label">
           <HelpLabel :tip="t('costs.overview.budgetRemaining_tip')">{{ t('costs.overview.budgetRemaining') }}</HelpLabel>
         </div>
-        <div class="metric__value">¥{{ formatMicros(budgetRemainingMicros) }}</div>
+        <div class="metric__value">¥{{ formatMicros(budgetRemainingMicros,2) }}</div>
       </div>
     </div>
 
