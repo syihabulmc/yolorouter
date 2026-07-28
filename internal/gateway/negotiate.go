@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
@@ -40,6 +42,41 @@ func IngressProtocol(requestPath string) protocols.ProtocolID {
 	default:
 		return protocols.ProtocolOpenAI
 	}
+}
+
+// isModelsDiscoveryPath reports whether path is the OpenAI/Anthropic-shared
+// model discovery route (GET /v1/models or GET /v1/models/:model). These are
+// the only ingress routes that serve two wire protocols from one path, so
+// they are the only place protocol selection must look beyond the path.
+func isModelsDiscoveryPath(path string) bool {
+	return path == "/v1/models" || strings.HasPrefix(path, "/v1/models/")
+}
+
+// IngressProtocolForRequest is IngressProtocol with header awareness for the
+// model-discovery routes. IngressProtocol sees only the path and maps every
+// /v1/models request to ProtocolOpenAI, but the Anthropic SDK calls the same
+// route and identifies itself with the anthropic-version header. For those
+// routes only, a present anthropic-version header selects the Anthropic
+// (Claude) envelope. Every other path keeps its path-determined protocol, so
+// routes that already resolve correctly by path — /v1/messages (Claude),
+// /v1/chat/completions (OpenAI), the Gemini path — are unaffected.
+// HasAnthropicVersion is passed in rather than read from a *gin.Context so
+// this stays a pure function with no gin dependency, mirroring IngressProtocol.
+func IngressProtocolForRequest(path string, hasAnthropicVersion bool) protocols.ProtocolID {
+	p := IngressProtocol(path)
+	if p == protocols.ProtocolOpenAI && isModelsDiscoveryPath(path) && hasAnthropicVersion {
+		return protocols.ProtocolClaude
+	}
+	return p
+}
+
+// IngressProtocolForContext is the gin-aware entry point over
+// IngressProtocolForRequest: it reads the path and the anthropic-version
+// header from the request. Middleware (APIKeyAuth, WriteNamespacedError) and
+// the model-discovery handlers all go through here, so the protocol-detection
+// signals live in one place rather than inlined at each call site.
+func IngressProtocolForContext(c *gin.Context) protocols.ProtocolID {
+	return IngressProtocolForRequest(c.Request.URL.Path, c.GetHeader("anthropic-version") != "")
 }
 
 // IsChatEndpoint reports whether an ingress path carries a system-prompt

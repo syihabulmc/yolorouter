@@ -102,7 +102,7 @@ func WriteNamespacedError(c *gin.Context, path string, httpStatus int, adminCode
 		return
 	}
 	status, errType, message, openAICode := gatewayErrorFor(adminCode, httpStatus)
-	ingress := gateway.IngressProtocol(path)
+	ingress := gateway.IngressProtocolForContext(c)
 	if ingress == protocols.ProtocolClaude || ingress == protocols.ProtocolGemini {
 		requestID := c.GetString(RequestIDKey)
 		gateway.WriteIngressError(c, ingress, status, errType, message, requestID)

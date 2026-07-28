@@ -159,14 +159,22 @@ func seedAPIKey(t *testing.T, db *gorm.DB, rawKey string) *model.APIKey {
 // newAuthRouter builds a gin engine with RequestID + APIKeyAuth mounted on
 // path, its next handler responding 200 so a passing request is
 // distinguishable from a rejected one.
-func newAuthRouter(db *gorm.DB, path string) *gin.Engine {
+// newAuthRouterFor builds a gin engine with RequestID + APIKeyAuth mounted on
+// method+path, its next handler responding 200 so a passing request is
+// distinguishable from a rejected one. Shared by the POST (newAuthRouter)
+// and GET (newAuthRouterGET) variants.
+func newAuthRouterFor(db *gorm.DB, method, path string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(RequestID())
-	r.POST(path, APIKeyAuth(db), func(c *gin.Context) {
+	r.Handle(method, path, APIKeyAuth(db), func(c *gin.Context) {
 		c.Status(http.StatusOK)
 	})
 	return r
+}
+
+func newAuthRouter(db *gorm.DB, path string) *gin.Engine {
+	return newAuthRouterFor(db, http.MethodPost, path)
 }
 
 // TestAPIKeyAuth_XAPIKeyHeader confirms the Anthropic SDK's X-Api-Key header
@@ -292,6 +300,62 @@ func TestAPIKeyAuth_MissingKey_IngressAwareEnvelope(t *testing.T) {
 				}
 				if errObj["type"] != "authentication_error" {
 					t.Errorf("openai ingress: error.type = %v, want authentication_error", errObj["type"])
+				}
+			}
+		})
+	}
+}
+
+// newAuthRouterGET is newAuthRouter for GET routes — the /v1/models discovery
+// endpoints, which the POST-only newAuthRouter cannot mount.
+func newAuthRouterGET(db *gorm.DB, path string) *gin.Engine {
+	return newAuthRouterFor(db, http.MethodGet, path)
+}
+
+// TestAPIKeyAuth_ModelsDiscovery_HeaderAwareEnvelope confirms the auth-reject
+// envelope on /v1/models follows the caller's wire protocol, detected via the
+// anthropic-version header. IngressProtocol is path-based and maps every
+// /v1/models request to OpenAI, so without header awareness an Anthropic SDK
+// caller (which sends anthropic-version) would get an OpenAI-shaped 401
+// instead of the Claude envelope it expects. The OpenAI caller keeps the
+// OpenAI envelope.
+func TestAPIKeyAuth_ModelsDiscovery_HeaderAwareEnvelope(t *testing.T) {
+	cases := []struct {
+		name       string
+		anthropic  bool
+		wantClaude bool
+	}{
+		{"anthropic SDK sends anthropic-version", true, true},
+		{"openai client omits it", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.NewSQLiteDB(t)
+			r := newAuthRouterGET(db, "/v1/models")
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			if tc.anthropic {
+				req.Header.Set("anthropic-version", "2023-06-01")
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401; body=%s", w.Code, w.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("body did not unmarshal: %v (body=%s)", err, w.Body.String())
+			}
+			_, hasTopType := body["type"]
+			_, hasTopRequestID := body["request_id"]
+			if tc.wantClaude {
+				if !hasTopType || !hasTopRequestID {
+					t.Errorf("anthropic caller: body=%v, want top-level type + request_id", body)
+				}
+			} else {
+				if hasTopType || hasTopRequestID {
+					t.Errorf("openai caller: body=%v, want no top-level type/request_id", body)
 				}
 			}
 		})

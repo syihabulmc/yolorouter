@@ -35,6 +35,31 @@ func TestIngressProtocol_Messages(t *testing.T) {
 	}
 }
 
+func TestIngressProtocolForRequest(t *testing.T) {
+	cases := []struct {
+		name                string
+		path                string
+		hasAnthropicVersion bool
+		want                protocols.ProtocolID
+	}{
+		{"models list, anthropic caller", "/v1/models", true, protocols.ProtocolClaude},
+		{"models list, openai caller", "/v1/models", false, protocols.ProtocolOpenAI},
+		{"models retrieve, anthropic caller", "/v1/models/gpt-4o", true, protocols.ProtocolClaude},
+		{"models retrieve, openai caller", "/v1/models/gpt-4o", false, protocols.ProtocolOpenAI},
+		// Non-discovery paths ignore the header entirely.
+		{"chat completions ignores header", "/v1/chat/completions", true, protocols.ProtocolOpenAI},
+		{"messages stays claude by path", "/v1/messages", false, protocols.ProtocolClaude},
+		{"messages stays claude even with header", "/v1/messages", true, protocols.ProtocolClaude},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IngressProtocolForRequest(tc.path, tc.hasAnthropicVersion); got != tc.want {
+				t.Fatalf("IngressProtocolForRequest(%q, %v) = %v, want %v", tc.path, tc.hasAnthropicVersion, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIngressProtocol_GeminiGenerateContent(t *testing.T) {
 	got := IngressProtocol("/v1beta/models/gemini-2.0-flash:generateContent")
 	if got != protocols.ProtocolGemini {

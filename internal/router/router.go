@@ -342,6 +342,12 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))
 	v1.POST("/messages", gateway.PostChatCompletions(relaySvc))
 	v1.POST("/responses", gateway.PostChatCompletions(relaySvc))
+	// Model discovery: GET /v1/models and GET /v1/models/:model are
+	// read-only and bypass RelayService (no provider fan-out, no spend).
+	// They reuse the same APIKeyAuth + body-cap chain the relay POSTs above
+	// use, so a caller presents the same key as for a completion request.
+	v1.GET("/models", gateway.ListModels(db))
+	v1.GET("/models/:model", gateway.RetrieveModel(db))
 
 	v1beta := gatewayGroup(r, "/v1beta", bodiesDir, db)
 	// :modelaction captures the whole "{model}:{action}" path segment (a
