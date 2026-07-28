@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"go.uber.org/zap"
+
 	"github.com/yolorouter/yolorouter/internal/middleware"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/protocols/chat"
@@ -23,6 +26,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/protocols/gemini"
 	"github.com/yolorouter/yolorouter/internal/protocols/responses"
 	"github.com/yolorouter/yolorouter/internal/service/safehttp"
+	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
 // TestOutcome is one of the 9 test-result categories. Its
@@ -273,11 +277,41 @@ func (c *HTTPProviderClient) runTestRequest(
 	resp, err := c.httpClient.Do(req)
 	duration := time.Since(start).Milliseconds()
 	if err != nil {
-		return TestResult{Outcome: TestUnreachable, DurationMs: duration}, nil
+		detail := fmt.Sprintf("request failed after %dms: %v", duration, redactErr(err))
+		logger.Warn("provider test: request error", zap.String("url", redactURL(url)), zap.Int64("duration_ms", duration), zap.String("error", redactErr(err)))
+		return TestResult{Outcome: TestUnreachable, DurationMs: duration, Detail: detail}, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	return handle(resp, duration)
+}
+
+// redactURL returns a log-safe form of s: it drops userinfo (both username
+// and password — net/url's Redacted masks only the password, leaving
+// username-only userinfo exposed), the query string, and the fragment, since
+// provider base URLs occasionally embed credentials in any of these. A parse
+// failure passes through unchanged.
+func redactURL(s string) string {
+	u, err := url.Parse(s)
+	if err != nil {
+		return s
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+// redactErr returns a log-safe description of err: for *url.Error (returned
+// by http.Client.Do), it keeps the operation and inner error but drops the
+// embedded URL, which may carry credentials and is logged separately via
+// redactURL. Other errors pass through unchanged.
+func redactErr(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Sprintf("%s: %v", ue.Op, ue.Err)
+	}
+	return err.Error()
 }
 
 // readBoundedBody applies the same "don't trust an unbounded upstream body"
@@ -518,18 +552,35 @@ func (c *HTTPProviderClient) TestChatCompletion(ctx context.Context, proto proto
 type streamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"delta"`
 	} `json:"choices"`
 }
 
-// scanSSEStream reads a bounded number of bytes off r looking for at least
-// one structurally valid `data: {...}` chunk followed by a normal
-// `data: [DONE]` termination. Non-"data:" lines (blank lines, comments) are
-// skipped, not treated as failures. This is OpenAI's own SSE termination
-// convention (see TestStreamingCompletion for why it's not reused for other
-// protocols).
-func scanSSEStream(r io.Reader) (sawValidDelta, sawDone bool) {
+// hasContent reports whether the chunk carries any produced content — either
+// a regular content delta or a reasoning_content delta (OpenAI-compatible
+// reasoning models stream delta.reasoning_content, often with little or no
+// delta.content).
+func (c streamChunk) hasContent() bool {
+	if len(c.Choices) == 0 {
+		return false
+	}
+	d := c.Choices[0].Delta
+	return d.Content != "" || d.ReasoningContent != ""
+}
+
+// scanSSEStream reads a bounded number of bytes off r, reporting whether it
+// saw at least one produced content delta (sawValidDelta — content or
+// reasoning_content, not a bare role prelude) and whether the stream ended
+// cleanly (cleanTerminate — an explicit `data: [DONE]` marker, or a normal
+// EOF with no read error). A read error mid-stream (context timeout, TCP
+// reset) leaves cleanTerminate false, so a broken endpoint that emits one
+// delta then hangs/resets is not misclassified as streaming-capable.
+// Non-"data:" lines (blank lines, comments) are skipped. Many OpenAI-
+// compatible upstreams omit [DONE]; a clean EOF still counts as valid
+// termination, so those working streams pass.
+func scanSSEStream(r io.Reader) (sawValidDelta, cleanTerminate bool) {
 	scanner := bufio.NewScanner(io.LimitReader(r, providerClientMaxBodyBytes))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -538,18 +589,32 @@ func scanSSEStream(r io.Reader) (sawValidDelta, sawDone bool) {
 			continue // not an SSE data line
 		}
 		if data == "[DONE]" {
-			sawDone = true
-			break
+			return sawValidDelta, true
 		}
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
-		if len(chunk.Choices) > 0 {
+		if chunk.hasContent() {
 			sawValidDelta = true
+			// Keep scanning to observe how the stream terminates — a content
+			// delta alone is not enough; the upstream must also close cleanly.
 		}
 	}
-	return sawValidDelta, sawDone
+	if scanner.Err() != nil {
+		// A read error (context timeout mid-stream, TCP reset) is not a clean
+		// termination — a broken endpoint that emits a delta then hangs/reset
+		// must not be certified as streaming-capable.
+		return sawValidDelta, false
+	}
+	// scanner stopped at EOF with no read error. That could be a clean upstream
+	// close OR the LimitReader cap (the stream still had data). Read one byte
+	// past the cap to tell them apart — a byte means the stream exceeded the
+	// cap (not cleanly terminated; a max_tokens=1 probe should never reach
+	// 64 KiB), EOF means the upstream closed.
+	var b [1]byte
+	n, _ := io.ReadFull(r, b[:])
+	return sawValidDelta, n == 0
 }
 
 // streamingCompletionPayload mirrors chatCompletionPayload with stream
@@ -581,9 +646,10 @@ func streamingCompletionPayload(proto protocols.ProtocolID, model string) map[st
 		}
 	default: // openai
 		return map[string]interface{}{
-			"model":    model,
-			"stream":   true,
-			"messages": []map[string]string{{"role": "user", "content": "ping"}},
+			"model":      model,
+			"stream":     true,
+			"max_tokens": 1,
+			"messages":   []map[string]string{{"role": "user", "content": "ping"}},
 		}
 	}
 }
@@ -594,7 +660,7 @@ func (c *HTTPProviderClient) TestStreamingCompletion(ctx context.Context, proto 
 		if resp.StatusCode != http.StatusOK {
 			body, ok := readBoundedBody(resp)
 			if !ok {
-				return TestResult{Outcome: TestUpstreamError, DurationMs: duration}, nil
+				return TestResult{Outcome: TestUpstreamError, DurationMs: duration, Detail: fmt.Sprintf("HTTP %d (response body unreadable)", resp.StatusCode)}, nil
 			}
 			return classifyResponse(proto, resp, body, model, duration), nil
 		}
@@ -611,16 +677,29 @@ func (c *HTTPProviderClient) TestStreamingCompletion(ctx context.Context, proto 
 			// protocols.
 			body, ok := readBoundedBody(resp)
 			if !ok || len(body) == 0 {
-				return TestResult{Outcome: TestUpstreamError, DurationMs: duration}, nil
+				return TestResult{Outcome: TestUpstreamError, DurationMs: duration, Detail: "HTTP 200 with empty streaming body"}, nil
 			}
 			return TestResult{Outcome: TestSuccess, DurationMs: duration}, nil
 		}
 
-		sawValidDelta, sawDone := scanSSEStream(resp.Body)
-		if sawValidDelta && sawDone {
+		sawValidDelta, cleanTerminate := scanSSEStream(resp.Body)
+		// Success requires BOTH a produced content delta (content or
+		// reasoning_content — a bare role prelude is not enough) AND a clean
+		// termination (explicit `data: [DONE]` or a normal EOF). A delta
+		// followed by a hang/reset must not certify streaming — the endpoint
+		// would leave real clients hanging. Many OpenAI-compatible upstreams
+		// omit [DONE]; a clean EOF still counts as valid termination.
+		if sawValidDelta && cleanTerminate {
 			return TestResult{Outcome: TestSuccess, DurationMs: duration}, nil
 		}
-		return TestResult{Outcome: TestUpstreamError, DurationMs: duration}, nil
+		detail := fmt.Sprintf("openai stream incomplete (content_delta=%v, clean_terminate=%v, %dms)", sawValidDelta, cleanTerminate, duration)
+		logger.Warn("provider test: streaming validation failed",
+			zap.String("proto", string(proto)),
+			zap.String("base_url", redactURL(baseURL)),
+			zap.String("model", model),
+			zap.Int64("duration_ms", duration),
+			zap.String("detail", detail))
+		return TestResult{Outcome: TestUpstreamError, DurationMs: duration, Detail: detail}, nil
 	})
 }
 
