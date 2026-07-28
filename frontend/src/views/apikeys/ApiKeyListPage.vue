@@ -49,7 +49,7 @@
       </div>
     </div>
 
-    <EmptyState v-if="!store.loading && store.list.length === 0 && !store.total & !draftValueLength" :icon="KeyRound" :title="t('apiKeys.listEmpty')">
+    <EmptyState v-if="!store.loading && store.list.length === 0 && !store.total && !draftValueLength" :icon="KeyRound" :title="t('apiKeys.listEmpty')">
       <template #action>
         <n-button type="primary" @click="showCreate = true">{{ t('apiKeys.createButton') }}</n-button>
       </template>
@@ -85,7 +85,7 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NSpace, NTag, useDialog, useMessage,NDropdown, type DataTableColumns, type PaginationProps } from 'naive-ui'
+import { NButton, NTag, useDialog, useMessage,NDropdown, type DataTableColumns, type PaginationProps } from 'naive-ui'
 import { KeyRound, Plus, Search, MoreHorizontal } from '@lucide/vue'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { displayMessage } from '../../api/client'
@@ -338,7 +338,7 @@ function buildCCSwitchImportUrl(row: APIKey): string {
     app: 'claude',
     name: `YoloRouter${row.owner_label ? ` - ${row.owner_label}` : ''}`,
     endpoint: location.origin,
-    apiKey: row.key || row.key_prefix,
+    apiKey: row.key_prefix,
     homepage: location.origin,
   })
   return `ccswitch://v1/import?${params.toString()}`

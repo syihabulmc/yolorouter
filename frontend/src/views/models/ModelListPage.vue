@@ -283,7 +283,7 @@ const columns = computed<DataTableColumns<Model>>(() => [
 let ccsOpenTimer: ReturnType<typeof setTimeout> | null = null
 let ccsOpenCleanup: (() => void) | null = null
 
-function buildCCSwitchImportUrl(row: APIKey,): string {
+function buildCCSwitchImportUrl(row: Model): string {
   const params = new URLSearchParams({
     resource: 'provider',
     app: 'claude',

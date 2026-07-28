@@ -21,7 +21,7 @@
         <HelpLabel :tip="t('costOptimization.cspTitle_tip')">{{ t('costOptimization.cspTitle') }}</HelpLabel>
       </div>
       <p class="setting-block__desc">{{ t('costOptimization.cspDesc') }}</p>
-      <div v-if="cspLoad === 'loading'" class="setting-block__state"><NSpin /></div>
+      <div v-if="cspLoad === 'loading'" class="setting-block__state"></div>
       <div v-else-if="cspLoad === 'error'" class="setting-block__state setting-block__state--err">
         <span>{{ t('costOptimization.loadFailed') }}</span>
         <NButton size="small" @click="loadCSP">{{ t('costOptimization.retry') }}</NButton>
@@ -65,7 +65,7 @@
         </HelpLabel>
       </div>
       <p class="setting-block__desc">{{ t('costOptimization.inputCompression.desc') }}</p>
-      <div v-if="icLoad === 'loading'" class="setting-block__state"><NSpin /></div>
+      <div v-if="icLoad === 'loading'" class="setting-block__state"></div>
       <div v-else-if="icLoad === 'error'" class="setting-block__state setting-block__state--err">
         <span>{{ t('costOptimization.loadFailed') }}</span>
         <NButton size="small" @click="loadIC">{{ t('costOptimization.retry') }}</NButton>
@@ -87,7 +87,7 @@
 <script setup lang="ts">
 import { reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NModal, NForm, NFormItem, NSwitch, NButton, NSpace, NSpin, useMessage } from 'naive-ui'
+import { NModal, NForm, NFormItem, NSwitch, NButton, useMessage } from 'naive-ui'
 import HelpLabel from '../HelpLabel.vue'
 import CustomPromptEditor from '../CustomPromptEditor.vue'
 import { APIError, displayMessage } from '../../api/client'

@@ -43,7 +43,6 @@ import { APIError, displayMessage } from '../../api/client'
 import { ACCOUNT_SETUP_ALREADY_DONE } from '../../api/errcodes'
 import { passwordStrengthRule, confirmPasswordRule, usernameFormatRule } from '../../utils/authValidators'
 import AuthCard from '../../components/AuthCard.vue'
-import HelpLabel from '../../components/HelpLabel.vue'
 
 const { t } = useI18n()
 const router = useRouter()

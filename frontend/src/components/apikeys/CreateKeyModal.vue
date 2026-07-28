@@ -115,7 +115,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NCheckbox, NDatePicker, NRadio, NRadioGroup, useDialog, useMessage, type FormInst, type FormRules } from 'naive-ui'
+import { NDatePicker, NRadio, NRadioGroup, useMessage, type FormInst, type FormRules } from 'naive-ui'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
@@ -128,7 +128,6 @@ const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ (e: 'update:show', v: boolean): void; (e: 'created'): void }>()
 
 const { t } = useI18n()
-const dialog = useDialog()
 const message = useMessage()
 const store = useApiKeysStore()
 const modelsStore = useModelsStore()

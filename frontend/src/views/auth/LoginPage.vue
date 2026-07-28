@@ -48,7 +48,6 @@ import { ACCOUNT_LOGIN_LOCKED, ACCOUNT_SESSION_INVALID } from '../../api/errcode
 import { errcodeMessage } from '../../i18n'
 import type { LoginLockedData } from '../../api/auth'
 import AuthCard from '../../components/AuthCard.vue'
-import HelpLabel from '../../components/HelpLabel.vue'
 
 const { t } = useI18n()
 const router = useRouter()
