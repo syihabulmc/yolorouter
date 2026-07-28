@@ -85,8 +85,8 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NSpace, NTag, useDialog, useMessage, type DataTableColumns, type PaginationProps } from 'naive-ui'
-import { KeyRound, Plus, Search } from '@lucide/vue'
+import { NButton, NSpace, NTag, useDialog, useMessage,NDropdown, type DataTableColumns, type PaginationProps } from 'naive-ui'
+import { KeyRound, Plus, Search, MoreHorizontal } from '@lucide/vue'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { displayMessage } from '../../api/client'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
@@ -291,37 +291,105 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
     render: (row) => expiresCell(row),
   },
   {
-    // Actions column — no tooltip.
     title: t('common.actions'),
     key: 'actions',
-    width: 360,
-    render: (row) => {
-      const revoked = row.display_status === 'revoked'
-      return h(
-        NSpace,
-        { size: 'small' },
+    width: 60,
+    align: 'center',
+    render: (row) =>
+      h(
+        NDropdown,
         {
-          default: () => [
-            h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openEdit(row.id) }, { default: () => t('apiKeys.editLimits') }),
-            // Cost detail is always reachable — a revoked key still has
-            // historical spend worth reviewing.
+          trigger: 'click',
+          placement: 'bottom-end',
+          options: [
+            { label: t('apiKeys.editLimits'), key: 'edit' },
+            { label: t('costs.detail.viewCost'), key: 'look' },
+            { label: t('costOptimization.title'), key: 'optimize' },
+            { label: t('models.importToCCS'), key: 'importCCSImport' },
+            { type: 'divider', key: 'd' },
+            { label: t('apiKeys.revoke'), key: 'delete', props: { style: 'color: var(--color-danger)' } },
+          ],
+          onSelect: (key: string) => {
+            if (key === 'edit') openEdit(row.id)
+            else if (key === 'look') router.push(`/costs/keys/${row.id}`)
+            else if (key === 'optimize') openOptimize(row)
+            else if (key === 'delete') confirmRevoke(row)
+            else if (key === 'importCCSImport') importCCSImport(row)
+          },
+        },
+        {
+          default: () =>
             h(
               NButton,
-              { size: 'small', text: true, type: 'primary', onClick: () => router.push(`/costs/keys/${row.id}`) },
-              { default: () => t('costs.detail.viewCost') },
+              { size: 'small', quaternary: true, circle: true },
+              { icon: () => h(MoreHorizontal, { size: 16 }) },
             ),
-            revoked
-              ? null
-              : h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openOptimize(row) }, { default: () => t('costOptimization.title') }),
-            revoked
-              ? null
-              : h(NButton, { size: 'small', text: true, type: 'error', onClick: () => confirmRevoke(row) }, { default: () => t('apiKeys.revoke') }),
-          ],
         },
-      )
-    },
-  },
+      ),
+  }
 ])
+
+let ccsOpenTimer: ReturnType<typeof setTimeout> | null = null
+let ccsOpenCleanup: (() => void) | null = null
+
+function buildCCSwitchImportUrl(row: APIKey): string {
+  const params = new URLSearchParams({
+    resource: 'provider',
+    app: 'claude',
+    name: `YoloRouter${row.owner_label ? ` - ${row.owner_label}` : ''}`,
+    endpoint: location.origin,
+    apiKey: row.key || row.key_prefix,
+    homepage: location.origin,
+  })
+  return `ccswitch://v1/import?${params.toString()}`
+}
+
+function importCCSImport(row: APIKey) {
+  let maybeOpened = false
+
+  const cleanup = () => {
+    window.removeEventListener('blur', markOpened)
+    window.removeEventListener('pagehide', markOpened)
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }
+
+  const markOpened = () => {
+    maybeOpened = true
+    cleanup()
+  }
+
+  const handleVisibilityChange = () => {
+    if (document.hidden) markOpened()
+  }
+
+  if (ccsOpenTimer) {
+    clearTimeout(ccsOpenTimer)
+    ccsOpenTimer = null
+  }
+  if (ccsOpenCleanup) {
+    ccsOpenCleanup()
+    ccsOpenCleanup = null
+  }
+
+  window.addEventListener('blur', markOpened, { once: true })
+  window.addEventListener('pagehide', markOpened, { once: true })
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  ccsOpenCleanup = cleanup
+
+  message.info(t('models.apiKeyImportOpeningCCS'))
+  window.location.href = buildCCSwitchImportUrl(row)
+
+  ccsOpenTimer = setTimeout(() => {
+    cleanup()
+    ccsOpenTimer = null
+    ccsOpenCleanup = null
+    if (!maybeOpened && document.visibilityState === 'visible') {
+      message.error(t('models.apiKeyImportOpenFailed'))
+    } else {
+      message.success(t('models.apiKeyImportOpenSuccess'))
+    }
+  }, 5000)
+}
 </script>
 
 <style scoped>

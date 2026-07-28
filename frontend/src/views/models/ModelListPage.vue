@@ -252,6 +252,7 @@ const columns = computed<DataTableColumns<Model>>(() => [
   {
     title: t('common.actions'),
     key: 'actions',
+    align: 'center',
     width: 90,
     render: (row) =>
       h(
