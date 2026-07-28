@@ -203,6 +203,8 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 		CompressEstimatedCostSavedMicros: compressCostSavedMicros,
 		CompressSkipReason:               rc.CompressSkipReason,
 		CompressorsApplied:               compressorsApplied,
+		RequestPath:                      rc.IngressPath,
+		UpstreamURL:                      rc.UpstreamURL,
 		FailReason:                       failPtr,
 		Attempts:                         len(rc.Attempts),
 		DurationMs:                       durationMs,

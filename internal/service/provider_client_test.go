@@ -570,19 +570,6 @@ func TestTestStreamingCompletionRejectsRoleOnlyPrelude(t *testing.T) {
 	}
 }
 
-func TestRedactURLStripsUserInfoCredentials(t *testing.T) {
-	got := redactURL("https://user:secret@example.com/v1/chat/completions?token=abc")
-	if strings.Contains(got, "secret") || strings.Contains(got, "token") {
-		t.Fatalf("redactURL leaked credential/query: %q", got)
-	}
-	if strings.Contains(got, "user@") || strings.Contains(got, "user:") {
-		t.Fatalf("redactURL kept userinfo: %q", got)
-	}
-	if !strings.HasPrefix(got, "https://example.com/") {
-		t.Fatalf("redactURL lost scheme/host: %q", got)
-	}
-}
-
 func TestTestStreamingCompletionAcceptsReasoningDelta(t *testing.T) {
 	// Reasoning models stream delta.reasoning_content (often with little or no
 	// delta.content); that must count as produced content so a working

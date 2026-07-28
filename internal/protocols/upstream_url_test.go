@@ -7,6 +7,36 @@ import (
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
+func TestRedactURLStripsUserInfoCredentials(t *testing.T) {
+	got := protocols.RedactURL("https://user:secret@example.com/v1/chat/completions?token=abc")
+	if strings.Contains(got, "secret") || strings.Contains(got, "token") {
+		t.Fatalf("RedactURL leaked credential/query: %q", got)
+	}
+	if strings.Contains(got, "user@") || strings.Contains(got, "user:") {
+		t.Fatalf("RedactURL kept userinfo: %q", got)
+	}
+	if !strings.HasPrefix(got, "https://example.com/") {
+		t.Fatalf("RedactURL lost scheme/host: %q", got)
+	}
+}
+
+func TestRedactURLPreservesNonSecretQuery(t *testing.T) {
+	// Gemini streaming dispatches with alt=sse (a protocol selector, not a
+	// credential) alongside a credential-bearing query param. The logged URL
+	// must keep alt=sse so it matches what was actually dispatched, while
+	// dropping the credential and userinfo.
+	got := protocols.RedactURL("https://user:secret@host.example/v1beta/models/m:streamGenerateContent?alt=sse&key=topsecret")
+	if !strings.Contains(got, "alt=sse") {
+		t.Fatalf("RedactURL dropped non-secret alt=sse: %q", got)
+	}
+	if strings.Contains(got, "secret") || strings.Contains(got, "topsecret") || strings.Contains(got, "user@") {
+		t.Fatalf("RedactURL leaked credentials: %q", got)
+	}
+	if !strings.HasPrefix(got, "https://host.example/") {
+		t.Fatalf("RedactURL lost scheme/host: %q", got)
+	}
+}
+
 func TestJoinUpstreamURL(t *testing.T) {
 	cases := []struct {
 		name       string

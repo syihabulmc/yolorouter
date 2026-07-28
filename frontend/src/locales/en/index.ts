@@ -830,6 +830,8 @@ export default {
     fieldCacheWriteTokens: 'Cache Write Tokens',
     fieldCacheReadTokens: 'Cache Read Tokens',
     fieldCost: 'Final Cost',
+    fieldRequestEndpoint: 'Request Endpoint',
+    fieldUpstreamEndpoint: 'Upstream Endpoint',
 
     // Attempts table columns. Each row is one candidate try, in
     // the order the gateway relay loop actually executed.
@@ -847,6 +849,8 @@ export default {
     attempt_statusCode_tip: 'HTTP status code returned by the upstream',
     attempt_failReason: 'Failure Reason',
     attempt_failReason_tip: 'Reason recorded when this attempt failed; empty on success',
+    attempt_upstreamEndpoint: 'Upstream Endpoint',
+    attempt_upstreamEndpoint_tip: 'Full URL this attempt dispatched to; empty when the attempt failed before any request was sent',
 
     // Attempt outcome tags — colour group mirrors the relay loop's switch
     // decision, not the raw HTTP status: green = success, amber = key-

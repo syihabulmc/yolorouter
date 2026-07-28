@@ -278,28 +278,12 @@ func (c *HTTPProviderClient) runTestRequest(
 	duration := time.Since(start).Milliseconds()
 	if err != nil {
 		detail := fmt.Sprintf("request failed after %dms: %v", duration, redactErr(err))
-		logger.Warn("provider test: request error", zap.String("url", redactURL(url)), zap.Int64("duration_ms", duration), zap.String("error", redactErr(err)))
+		logger.Warn("provider test: request error", zap.String("url", protocols.RedactURL(url)), zap.Int64("duration_ms", duration), zap.String("error", redactErr(err)))
 		return TestResult{Outcome: TestUnreachable, DurationMs: duration, Detail: detail}, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	return handle(resp, duration)
-}
-
-// redactURL returns a log-safe form of s: it drops userinfo (both username
-// and password — net/url's Redacted masks only the password, leaving
-// username-only userinfo exposed), the query string, and the fragment, since
-// provider base URLs occasionally embed credentials in any of these. A parse
-// failure passes through unchanged.
-func redactURL(s string) string {
-	u, err := url.Parse(s)
-	if err != nil {
-		return s
-	}
-	u.User = nil
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
 }
 
 // redactErr returns a log-safe description of err: for *url.Error (returned
@@ -695,7 +679,7 @@ func (c *HTTPProviderClient) TestStreamingCompletion(ctx context.Context, proto 
 		detail := fmt.Sprintf("openai stream incomplete (content_delta=%v, clean_terminate=%v, %dms)", sawValidDelta, cleanTerminate, duration)
 		logger.Warn("provider test: streaming validation failed",
 			zap.String("proto", string(proto)),
-			zap.String("base_url", redactURL(baseURL)),
+			zap.String("base_url", protocols.RedactURL(baseURL)),
 			zap.String("model", model),
 			zap.Int64("duration_ms", duration),
 			zap.String("detail", detail))

@@ -35,6 +35,14 @@ type RelayContext struct {
 	// ProtocolOpenAI for non-generateContent actions, so the path alone
 	// distinguishes countTokens / embedContent from real chat.
 	IngressPath string
+	// UpstreamURL is the full URL the gateway dispatched to for the current
+	// candidate's attempt. Reset to "" at the start of each candidate in
+	// relayCandidates so a build-failed candidate never inherits the previous
+	// candidate's URL; set in attemptOne right before the request is sent.
+	// makeAttempt stamps each AttemptRecord with it, and finalize copies it to
+	// the request_logs.upstream_url column under the same "last attempt wins"
+	// rule as UpstreamRequestBody.
+	UpstreamURL string
 	// IsChatEndpoint is computed once in Handle from IngressPath. Both the
 	// compression gate and the CSP injection gate read this bool instead of
 	// recomputing IsChatEndpoint(path) independently.
@@ -174,6 +182,10 @@ type AttemptRecord struct {
 	StatusCode        int    `json:"status_code"`
 	Outcome           string `json:"outcome"`
 	FailReason        string `json:"fail_reason"`
+	// UpstreamURL is the full URL this attempt dispatched to. Empty for
+	// attempts that failed before any request was sent (provider missing,
+	// negotiate / build / decrypt failures) — they never reached an upstream.
+	UpstreamURL string `json:"upstream_url"`
 }
 
 // Attempt outcomes — drive both the log's fail_reason text and the relay

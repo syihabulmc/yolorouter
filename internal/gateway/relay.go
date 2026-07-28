@@ -490,16 +490,19 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 		// load-keys failed, no enabled key, rewrite failed) doesn't leave a
 		// stale provider from a previous iteration on rc — which finalize
 		// would otherwise record as the "final hit provider" of an all-failed
-		// request.
+		// request. rc.UpstreamURL is reset the same way so a candidate that
+		// fails before sending (negotiate / build) never inherits the previous
+		// candidate's URL in its AttemptRecord or the upstream_url column.
 		rc.Provider = nil
+		rc.UpstreamURL = ""
 
 		provider := cand.Provider
 		if provider == nil {
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, nil, nil, 0, AttemptBadStatus, "provider missing (preload)"))
+			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, nil, nil, 0, AttemptBadStatus, "provider missing (preload)"))
 			continue
 		}
 		if provider.ManagementStatus != model.ProviderStatusEnabled {
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "provider disabled"))
+			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "provider disabled"))
 			continue
 		}
 		rc.Provider = provider
@@ -507,7 +510,7 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 		keys, err := repository.ListProviderKeysByProvider(s.db, provider.ID)
 		if err != nil {
 			logger.Error("gateway: list provider keys", zap.String("request_id", rc.RequestID), zap.Error(err))
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "load keys failed"))
+			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "load keys failed"))
 			continue
 		}
 		enabled, anyEnabledKey := filterEnabledKeys(keys)
@@ -516,7 +519,7 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 			if anyEnabledKey {
 				reason = "no verified key"
 			}
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, nil, 0, AttemptBadStatus, reason))
+			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, reason))
 			continue
 		}
 
@@ -527,7 +530,7 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 		// processDispatchResponseNonStream do the IR decode/encode).
 		egress, err := Negotiate(ingress, provider)
 		if err != nil {
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "negotiate egress: "+err.Error()))
+			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "negotiate egress: "+err.Error()))
 			continue // mapping failure -> skip candidate
 		}
 
@@ -538,7 +541,7 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 		// rebuilding them.
 		outBody, url, err := s.buildUpstreamBody(rc, ingress, egress)
 		if err != nil {
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "build request: "+err.Error()))
+			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "build request: "+err.Error()))
 			continue // build failure -> skip candidate, nothing sent yet
 		}
 
@@ -576,14 +579,14 @@ func (s *RelayService) tryKeys(c *gin.Context, rc *RelayContext, cand *model.Mod
 		// to an unapproved destination. Skip and rotate to the next key,
 		// matching the destination-matched select in provider_repository.go.
 		if pk.AuthorizedDestinationVersion != provider.DestinationVersion {
-			rc.Attempts = append(rc.Attempts, makeAttempt(*cand, provider, &pk, 0, AttemptAuthFailed, "destination version mismatch"))
+			rc.Attempts = append(rc.Attempts, rc.makeAttempt(*cand, provider, &pk, 0, AttemptAuthFailed, "destination version mismatch"))
 			continue
 		}
 		plaintext, derr := crypto.Decrypt(s.masterKey, pk.EncryptedKey)
 		if derr != nil {
 			logger.Warn("gateway: decrypt provider key failed",
 				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.RequestID), zap.Error(derr))
-			rc.Attempts = append(rc.Attempts, makeAttempt(*cand, provider, &pk, 0, AttemptBadStatus, "decrypt failed"))
+			rc.Attempts = append(rc.Attempts, rc.makeAttempt(*cand, provider, &pk, 0, AttemptBadStatus, "decrypt failed"))
 			continue
 		}
 		switch s.attemptOne(c, rc, *cand, provider, pk, plaintext, egress, outBody, url, start) {
@@ -625,6 +628,11 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 	// last write wins, matching the "successful attempt, else the last
 	// attempt" rule.
 	rc.UpstreamRequestBody = outBody
+	// Record the dispatched URL for the log row and each AttemptRecord.
+	// Redacted (userinfo/query/fragment stripped) so a base URL that embeds
+	// credentials never reaches the audit log or UI; the raw url is used
+	// only for the actual HTTP request below.
+	rc.UpstreamURL = protocols.RedactURL(url)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(outBody))
 	if err != nil {
@@ -633,7 +641,7 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 		// over. Every key on this candidate would fail identically (url is
 		// candidate-invariant), so the first key attempt already exhausts
 		// this candidate via tryKeys' immediate return on attemptNextCandidate.
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, 0, AttemptBadStatus, "build request: "+err.Error()))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptBadStatus, "build request: "+err.Error()))
 		return attemptNextCandidate
 	}
 	codecsFor(egress.Protocol).RequestEncoder.SetupRequest(req, plaintext)
@@ -646,11 +654,11 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 		// is candidate-level, not a disconnect) so the log labels the right
 		// failure class. Any other transport failure is candidate-level.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, 0, AttemptConnError, "client disconnected"))
+			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, "client disconnected"))
 			s.finalize(rc, 499, "client_disconnected", start) // nginx-style 499
 			return attemptTerminal
 		}
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, 0, AttemptConnError, err.Error()))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, err.Error()))
 		return attemptNextCandidate
 	}
 
@@ -679,7 +687,7 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 
 	class := classifyUpstreamStatus(statusCode)
 	note := fmt.Sprintf("upstream %d", statusCode)
-	rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, statusCode, class.Outcome, note))
+	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, statusCode, class.Outcome, note))
 	switch class.Category {
 	case statusRotateKey:
 		// A 401 means the credential itself was rejected —
@@ -792,15 +800,21 @@ func filterEnabledKeys(keys []model.ProviderKey) (out []model.ProviderKey, anyEn
 // makeAttempt builds one AttemptRecord. provider and key are nil-able: nil
 // provider marks a candidate whose provider was missing/disabled; nil key
 // marks a candidate-level failure before any key was tried (load failed, no
-// enabled key, rewrite failed). One constructor replaces the former
-// makeAttempt/makeAttemptWithKey pair.
-func makeAttempt(cand model.ModelCandidate, provider *model.Provider, key *model.ProviderKey, status int, outcome, failReason string) AttemptRecord {
+// enabled key, rewrite failed).
+//
+// It is a RelayContext method so it can stamp the attempt with rc.UpstreamURL
+// — the URL the gateway dispatched to for this attempt — without every caller
+// threading the URL through. rc.UpstreamURL is reset per candidate in
+// relayCandidates and set in attemptOne, so it reflects the current attempt:
+// empty for attempts that failed before any request was sent.
+func (rc *RelayContext) makeAttempt(cand model.ModelCandidate, provider *model.Provider, key *model.ProviderKey, status int, outcome, failReason string) AttemptRecord {
 	rec := AttemptRecord{
 		CandidateID:       cand.ID,
 		ProviderModelName: cand.ProviderModelName,
 		StatusCode:        status,
 		Outcome:           outcome,
 		FailReason:        failReason,
+		UpstreamURL:       rc.UpstreamURL,
 	}
 	if provider != nil {
 		rec.ProviderID = provider.ID

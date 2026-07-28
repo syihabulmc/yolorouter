@@ -58,6 +58,12 @@
           <NDescriptionsItem :label="t('requestLogs.fieldStatusCode')">
             {{ detail.status_code }}
           </NDescriptionsItem>
+          <NDescriptionsItem :label="t('requestLogs.fieldRequestEndpoint')" :span="2">
+            <span class="mono-cell">{{ detail.request_path || '—' }}</span>
+          </NDescriptionsItem>
+          <NDescriptionsItem :label="t('requestLogs.fieldUpstreamEndpoint')" :span="2">
+            <span class="mono-cell">{{ detail.upstream_url || '—' }}</span>
+          </NDescriptionsItem>
           <NDescriptionsItem v-if="detail.fail_reason" :label="t('requestLogs.fieldFailReason')" :span="2">
             <span class="fail-reason-cell">{{ formatFailReason(detail.fail_reason, t) }}</span>
           </NDescriptionsItem>
@@ -461,6 +467,12 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
     key: 'fail_reason',
     minWidth: 200,
     render: (row) => row.fail_reason || '—',
+  },
+  {
+    title: columnTitle(t('requestLogs.attempt_upstreamEndpoint'), t('requestLogs.attempt_upstreamEndpoint_tip')),
+    key: 'upstream_url',
+    minWidth: 240,
+    render: (row) => h('span', { class: 'mono-cell' }, row.upstream_url || '—'),
   },
 ])
 </script>

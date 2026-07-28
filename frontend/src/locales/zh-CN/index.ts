@@ -834,6 +834,8 @@ export default {
     fieldCacheWriteTokens: '缓存写入 Token',
     fieldCacheReadTokens: '缓存读取 Token',
     fieldCost: '最终成本',
+    fieldRequestEndpoint: '请求 Endpoint',
+    fieldUpstreamEndpoint: '上游 Endpoint',
 
     // Attempts table columns. Each row is one candidate try, in
     // the order the gateway relay loop actually executed.
@@ -851,6 +853,8 @@ export default {
     attempt_statusCode_tip: '上游返回的 HTTP 状态码',
     attempt_failReason: '失败原因',
     attempt_failReason_tip: '该次尝试失败时记录的具体原因，成功时为空',
+    attempt_upstreamEndpoint: '上游 Endpoint',
+    attempt_upstreamEndpoint_tip: '该次尝试实际转发的完整地址；请求未发出就失败时为空',
 
     // Attempt outcome tags — colour group mirrors the relay loop's switch
     // decision, not the raw HTTP status: green = success, amber = key rotation

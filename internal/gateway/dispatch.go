@@ -259,7 +259,7 @@ func (s *RelayService) processDispatchResponseStream(
 	removeEmptyStreamBodyFile(c, rc)
 
 	if err == nil {
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
 		s.finalize(rc, http.StatusOK, "", start)
 		return attemptSuccess
 	}
@@ -269,7 +269,7 @@ func (s *RelayService) processDispatchResponseStream(
 		// event + close, same as dispatchPassthroughStream's mid-stream
 		// branch.
 		writeStreamErrorEvent(c, rc)
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
 		s.finalize(rc, http.StatusOK, "stream_partial: "+err.Error(), start)
 		return attemptSuccess
 	}
@@ -278,7 +278,7 @@ func (s *RelayService) processDispatchResponseStream(
 	// fired), so nothing has been committed yet and this candidate can
 	// still fail over to the next one — mirrors
 	// dispatchPassthroughStream's pre-first-byte failover branch.
-	rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
+	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
 	return attemptNextCandidate
 }
 
@@ -323,7 +323,7 @@ func (s *RelayService) processDispatchResponseNonStream(
 	encoder := modelOverrideResponseEncoder{inner: codecsFor(ingress).ResponseEncoder, model: rc.OriginalModel}
 	usage, err := protocols.IRNonStreamRelay(c, resp, decoder, encoder, rc, nil)
 	if err != nil {
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "ir decode: "+err.Error()))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "ir decode: "+err.Error()))
 		// IRNonStreamRelay's documented contract is to write nothing to the
 		// client when the 2xx upstream body fails IR decode, so — like the
 		// buildDispatchRequest error above — this candidate can still fail
@@ -340,7 +340,7 @@ func (s *RelayService) processDispatchResponseNonStream(
 	}
 
 	rc.Usage = irUsageToUsage(usage)
-	rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
+	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
 	s.finalize(rc, resp.StatusCode, "", start)
 	return attemptSuccess
 }
@@ -465,20 +465,20 @@ func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayCon
 		// is gone), not a candidate failure — recognize it to avoid a
 		// wasted failover attempt and to log 499, not bad_status.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
+			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
 			s.finalize(rc, 499, "client_disconnected", start)
 			return attemptTerminal
 		}
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "read body: "+err.Error()))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "read body: "+err.Error()))
 		return attemptNextCandidate
 	}
 	if int64(len(body)) > maxNonStreamResponseBytes {
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "response too large"))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "response too large"))
 		return attemptNextCandidate
 	}
 	rewritten, usage, err := passthroughRewriteNonStreamResponse(egressProtocol, body, rc.OriginalModel)
 	if err != nil {
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "rewrite: "+err.Error()))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "rewrite: "+err.Error()))
 		return attemptNextCandidate
 	}
 	// Raw upstream (pre-rewrite, provider model name) vs.
@@ -488,7 +488,7 @@ func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayCon
 	rc.UpstreamResponseBody = body
 	rc.ResponseBody = rewritten
 	rc.Usage = usage
-	rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
+	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
 	c.Header("Content-Type", "application/json")
 	c.Writer.WriteHeader(resp.StatusCode)
 	_, _ = c.Writer.Write(rewritten)
@@ -544,12 +544,12 @@ func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContex
 	// early client-disconnect).
 	removeEmptyStreamBodyFile(c, rc)
 	if err == nil {
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
 		s.finalize(rc, http.StatusOK, "", start)
 		return attemptSuccess
 	}
 	if errors.Is(err, errClientDisconnected) {
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
 		s.finalize(rc, 499, "client_disconnected", start)
 		return attemptSuccess // already streamed partial content, terminal
 	}
@@ -560,7 +560,7 @@ func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContex
 		// EOF gracefully. Injecting an error event would break a possibly-
 		// complete completion (some upstreams stably omit [DONE]). Only
 		// mark the log row partial so the missing terminator is traceable.
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream ended without [DONE]"))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream ended without [DONE]"))
 		s.finalize(rc, http.StatusOK, "stream_no_done", start)
 		return attemptSuccess
 	}
@@ -568,12 +568,12 @@ func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContex
 		// Mid-stream failure after the first byte — can't switch,
 		// can't change HTTP status; emit one inline SSE error event + close.
 		writeStreamErrorEvent(c, rc)
-		rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
 		s.finalize(rc, http.StatusOK, "stream_partial: "+err.Error(), start)
 		return attemptSuccess
 	}
 	// Pre-first-byte failure: nothing written yet, can still failover.
-	rc.Attempts = append(rc.Attempts, makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
+	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
 	return attemptNextCandidate
 }
 
