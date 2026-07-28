@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -160,9 +161,27 @@ func runServe(ctx context.Context, args []string) error {
 	// own cancellable context at that point and register with taskWG here.
 	var taskWG sync.WaitGroup
 
+	// Bind the listener up front rather than letting ListenAndServe do it
+	// inside the goroutine: ln.Addr().String() yields the actually-bound
+	// address (e.g. [::]:8080) for the startup log, and a bind failure —
+	// typically a port already in use — surfaces synchronously here instead
+	// of arriving asynchronously through serveErrCh after the rest of
+	// startup has already run.
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	// url is a clickable localhost link for quick local access; addr is the
+	// raw bound socket (e.g. [::]:8070) showing which interface the kernel
+	// actually bound — useful when diagnosing dual-stack or remote access,
+	// since ":port" binds every interface, not just loopback.
+	logger.Info("http server listening",
+		zap.String("url", fmt.Sprintf("http://localhost:%d", app.Config.Server.Port)),
+		zap.String("addr", ln.Addr().String()))
+
 	serveErrCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			serveErrCh <- err
 		}
 	}()
