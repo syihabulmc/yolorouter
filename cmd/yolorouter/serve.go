@@ -174,10 +174,18 @@ func runServe(ctx context.Context, args []string) error {
 	// url is a clickable localhost link for quick local access; addr is the
 	// raw bound socket (e.g. [::]:8070) showing which interface the kernel
 	// actually bound — useful when diagnosing dual-stack or remote access,
-	// since ":port" binds every interface, not just loopback.
-	logger.Info("http server listening",
+	// since ":port" binds every interface, not just loopback. lan (when
+	// present) is a clickable URL using the host's primary LAN IPv4 so
+	// other devices on the same network can reach the server; it is
+	// omitted when no usable IPv4 can be determined.
+	fields := []zap.Field{
 		zap.String("url", fmt.Sprintf("http://localhost:%d", app.Config.Server.Port)),
-		zap.String("addr", ln.Addr().String()))
+		zap.String("addr", ln.Addr().String()),
+	}
+	if lan := lanListenURL(app.Config.Server.Port); lan != "" {
+		fields = append(fields, zap.String("lan", lan))
+	}
+	logger.Info("http server listening", fields...)
 
 	serveErrCh := make(chan error, 1)
 	go func() {
@@ -295,4 +303,34 @@ func gracefulShutdown(srv *http.Server, taskWG *sync.WaitGroup, sigCh <-chan os.
 	// shutdownErr as the CLI command's overall result.
 	logger.Info("shutdown complete")
 	return nil
+}
+
+// lanListenURL returns an http URL rooted at the host's primary LAN IPv4
+// (e.g. "http://192.168.1.5:8080") so other devices on the same network
+// can reach the server. It returns "" when no usable IPv4 is found, in
+// which case the caller omits the field rather than logging a misleading
+// address.
+//
+// The address is obtained by probing the default-route egress interface:
+// opening a UDP "connection" to a public address sends no packets — the
+// kernel only resolves the route and reports the source IP it would use.
+// The default route points at the real network adapter (Wi-Fi/Ethernet),
+// so virtual bridges such as Docker/VM interfaces are naturally skipped
+// because they are never the default egress. If there is no default route
+// (offline host, no gateway), the probe fails and "" is returned.
+func lanListenURL(port int) string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = conn.Close() }()
+	a, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return ""
+	}
+	v4 := a.IP.To4()
+	if v4 == nil {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%d", v4.String(), port)
 }
