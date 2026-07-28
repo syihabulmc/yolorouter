@@ -114,9 +114,9 @@ const resolvedItems = computed(() =>
           <component :is="item.icon" :size="18" :stroke-width="1.8" />
         </span>
         <span v-if="!collapsed" class="sidebar-nav-item__label">{{ item.label }}</span>
-        <span style="position: relative;">
-          <span v-if="!collapsed && item.tag" class="sidebar-nav-item__save">{{ item.tag }}</span>
-        </span>
+        <div style="position: relative;">
+          <div v-if="!collapsed && item.tag" class="sidebar-nav-item__save">{{ item.tag }}</div>
+        </div>
         <span v-if="item.badge" class="sidebar-nav-item__dot" :title="item.label" />
       </RouterLink>
     </template>
@@ -280,8 +280,6 @@ const resolvedItems = computed(() =>
   position: absolute;
   top: -16px;
   left: -6px;
-  flex-shrink: 0;
-  align-self: flex-start;
   margin-top: 2px;
   margin-left: 2px;
   padding: 0 5px;
@@ -292,6 +290,7 @@ const resolvedItems = computed(() =>
   font-weight: 600;
   letter-spacing: 0.02em;
   line-height: 1.5;
+  white-space: nowrap;
 }
 
 /* The update-available indicator dot. .sidebar-nav-item is position:relative,

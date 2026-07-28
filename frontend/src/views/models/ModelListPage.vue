@@ -82,7 +82,7 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { NButton, NSwitch, NTag, useDialog, useMessage,NDropdown, type DataTableColumns } from 'naive-ui'
 import { Boxes, Plus, Search } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
@@ -259,14 +259,91 @@ const columns = computed<DataTableColumns<Model>>(() => [
         { onClick: (e: MouseEvent) => e.stopPropagation() },
         [
           h(
-            NButton,
-            { size: 'small', quaternary: true, onClick: () => openEditModel(row) },
-            { default: () => t('models.editModel') },
+            NDropdown,
+            {
+              trigger: 'click',
+              placement: 'bottom-end',
+              options: [
+                { label: t('models.editModel'), key: 'edit' },
+                { label: t('models.importToCCS'), key: 'importCCSImport' },
+              ],
+              onSelect: (key: string) => {
+                if (key === 'edit') openEditModel(row)
+                else if (key === 'importCCSImport') importCCSImport(row)
+              },
+            },
+            { default: () => h(NButton, { size: 'small', quaternary: true }, { default: () => '⋯' }) },
           ),
         ],
       ),
   },
 ])
+
+let ccsOpenTimer: ReturnType<typeof setTimeout> | null = null
+let ccsOpenCleanup: (() => void) | null = null
+
+function buildCCSwitchImportUrl(row: APIKey,): string {
+  const params = new URLSearchParams({
+    resource: 'provider',
+    app: 'claude',
+    name: `YoloRouter${row.name ? ` - ${row.name}` : ''}`,
+    endpoint: location.origin,
+    apiKey: 'sk-',
+    homepage: location.origin,
+    model: row.name, 
+  })
+  return `ccswitch://v1/import?${params.toString()}`
+}
+
+
+
+function importCCSImport(row: Model) {
+  let maybeOpened = false
+
+  const cleanup = () => {
+    window.removeEventListener('blur', markOpened)
+    window.removeEventListener('pagehide', markOpened)
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }
+
+  const markOpened = () => {
+    maybeOpened = true
+    cleanup()
+  }
+
+  const handleVisibilityChange = () => {
+    if (document.hidden) markOpened()
+  }
+
+  if (ccsOpenTimer) {
+    clearTimeout(ccsOpenTimer)
+    ccsOpenTimer = null
+  }
+  if (ccsOpenCleanup) {
+    ccsOpenCleanup()
+    ccsOpenCleanup = null
+  }
+
+  window.addEventListener('blur', markOpened, { once: true })
+  window.addEventListener('pagehide', markOpened, { once: true })
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  ccsOpenCleanup = cleanup
+
+  message.info(t('models.apiKeyImportOpeningCCS'))
+  window.location.href = buildCCSwitchImportUrl(row)
+
+  ccsOpenTimer = setTimeout(() => {
+    cleanup()
+    ccsOpenTimer = null
+    ccsOpenCleanup = null
+    if (!maybeOpened && document.visibilityState === 'visible') {
+      message.error(t('models.apiKeyImportOpenFailed'))
+    } else {
+      message.success(t('models.apiKeyImportOpenSuccess'))
+    }
+  }, 5000)
+}
+
 </script>
 
 <style scoped>
