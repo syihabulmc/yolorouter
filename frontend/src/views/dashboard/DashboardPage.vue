@@ -56,7 +56,7 @@
 
       <div class="kpi">
         <div class="kpi__icon kpi__icon--success">
-          <DollarSign :size="18" />
+          <Coins :size="18" />
         </div>
         <div class="kpi__body">
           <div class="kpi__label">
@@ -251,7 +251,7 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Boxes,
-  DollarSign,
+  Coins,
   HardDriveDownload,
   HardDriveUpload,
   Hourglass,

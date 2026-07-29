@@ -8,8 +8,9 @@
      same API, so LoginPage/SetupPage need no changes. -->
 <template>
   <div class="auth-page">
-    <div class="auth-hero-warp" :style="`background-image: url(${loginBg});`">
-      <div class="auth-hero" :style="`background-image: url(${loginBg});`">
+    <div class="auth-hero-warp">
+      <img :src="loginBg" alt="" class="auth-hero-placeholder">
+      <div class="auth-hero">
         <img class="auth-hero-logo" :src="logo2" alt="" width="380" />
         <img class="auth-hero-logo-mark" :src="titleImage" alt="" width="225" />
         <div>
@@ -78,15 +79,22 @@ const { t } = useI18n();
   display: flex;
   width: 100vw;
   height: 100vh;
+  background-color: #fff;
 }
 .auth-hero-warp {
-  background-repeat: no-repeat;
-  background-size: 100% auto;
-  background-position: top center;
-  background-color: #cfe2f4;
+  position: relative;
   flex: 1;
 }
+.auth-hero-placeholder {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 .auth-hero {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
   height: 100%;
   display: flex;
@@ -193,8 +201,20 @@ const { t } = useI18n();
   color: #102c44;
 }
 
+@media (max-width: 1300px) {
+  .auth-hero-title {
+    font-size: 18px;
+  }
+  .auth-hero-subtitle,.auth-hero-feature {
+    font-size: 12px;
+  }
+  .auth-main {
+    padding: 20px;
+  }
+}
+
 /* ---- Mobile: hide the brand panel and let the form card fill the width ---- */
-@media (max-width: 860px) {
+@media (max-width: 1000px) {
   .auth-page {
     flex-direction: column;
     width: 100%;
