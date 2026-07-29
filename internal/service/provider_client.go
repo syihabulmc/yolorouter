@@ -125,7 +125,9 @@ const (
 	// GatewayConfig.TLSHandshakeTimeout, which governs only the relay path.
 	providerClientTLSHandshakeTimeout = 10 * time.Second
 	// providerClientConcurrency caps simultaneous in-flight real provider
-	// test calls across the whole process — chosen
+	// test calls per HTTPProviderClient — each one allocates its own semaphore,
+	// so the provider-key and model-candidate services get a pool each rather
+	// than sharing one. Chosen
 	// generously enough for a single admin clicking several test buttons in
 	// quick succession or one batch test, without letting an unbounded
 	// number of outbound sockets accumulate.

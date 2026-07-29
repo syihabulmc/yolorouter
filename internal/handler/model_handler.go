@@ -26,12 +26,6 @@ type setModelStatusRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
-type testMappingRequest struct {
-	ProviderID        uint   `json:"provider_id" binding:"required"`
-	ProviderModelName string `json:"provider_model_name" binding:"max=200"`
-	TestType          string `json:"test_type" binding:"required,oneof=basic streaming function_calling"`
-}
-
 type createCandidateRequest struct {
 	ProviderID        uint     `json:"provider_id" binding:"required"`
 	ProviderModelName string   `json:"provider_model_name" binding:"max=200"`
@@ -50,14 +44,14 @@ type updateCandidateRequest struct {
 	CacheWritePrice   *float64 `json:"cache_write_price" binding:"omitempty,min=0"`
 	CacheReadPrice    *float64 `json:"cache_read_price" binding:"omitempty,min=0"`
 	MaxOutput         int      `json:"max_output" binding:"min=0"`
+	// A pointer so an omitted field stays distinguishable from a request to
+	// disable. As a plain int, any client PATCHing only prices would send the
+	// zero value and silently take the candidate out of routing.
+	ManagementStatus *int `json:"management_status" binding:"omitempty,oneof=1 2"`
 }
 
 type candidateReorderRequest struct {
 	Direction string `json:"direction" binding:"required,oneof=up down"`
-}
-
-type candidateTestRequest struct {
-	TestType string `json:"test_type" binding:"required,oneof=basic streaming function_calling"`
 }
 
 // parseModelAndCandidateIDs parses both the ":id" and ":candidateId" path
@@ -195,25 +189,6 @@ func PatchModelStatus(svc *service.ModelService) gin.HandlerFunc {
 	}
 }
 
-func PostModelCandidateTestMapping(svc *service.ModelService) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		modelID, ok := parseUintParam(c, "id")
-		if !ok {
-			return
-		}
-		var req testMappingRequest
-		if !bindJSON(c, &req) {
-			return
-		}
-		result, err := svc.TestCandidateMappingPreview(c.Request.Context(), modelID, req.ProviderID, req.ProviderModelName, req.TestType)
-		if err != nil {
-			writeModelServiceError(c, err)
-			return
-		}
-		response.Success(c, gin.H{"outcome": int(result.Outcome), "duration_ms": result.DurationMs})
-	}
-}
-
 func PostModelCandidate(svc *service.ModelService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		modelID, ok := parseUintParam(c, "id")
@@ -248,15 +223,16 @@ func PatchModelCandidate(svc *service.ModelService) gin.HandlerFunc {
 		if !bindJSON(c, &req) {
 			return
 		}
-		view, err := svc.UpdateModelCandidate(candidateID, service.UpdateCandidateInput{
+		result, err := svc.UpdateModelCandidate(c.Request.Context(), candidateID, service.UpdateCandidateInput{
 			ProviderModelName: req.ProviderModelName, InputPrice: req.InputPrice, OutputPrice: req.OutputPrice,
 			CacheWritePrice: req.CacheWritePrice, CacheReadPrice: req.CacheReadPrice, MaxOutput: req.MaxOutput,
+			ManagementStatus: req.ManagementStatus,
 		}, timeNow())
 		if err != nil {
 			writeModelServiceError(c, err)
 			return
 		}
-		response.Success(c, view)
+		response.Success(c, result)
 	}
 }
 
@@ -296,22 +272,49 @@ func PatchModelCandidateStatus(svc *service.ModelService) gin.HandlerFunc {
 	}
 }
 
+// PostModelCandidateTest re-probes a stored candidate. It takes no test_type:
+// one retest covers the basic mapping and both capabilities, so an operator
+// never has to pick which probe to run.
 func PostModelCandidateTest(svc *service.ModelService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		_, candidateID, ok := parseModelAndCandidateIDs(c)
 		if !ok {
 			return
 		}
-		var req candidateTestRequest
-		if !bindJSON(c, &req) {
-			return
-		}
-		view, err := svc.TestModelCandidate(c.Request.Context(), candidateID, req.TestType, timeNow())
+		view, err := svc.RetestModelCandidate(c.Request.Context(), candidateID, timeNow())
 		if err != nil {
 			writeModelServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
+	}
+}
+
+// PostModelCandidateTestAndCreate probes a mapping and stores it only if the
+// result allows what the caller asked for, so the admin UI can report the
+// verdicts without a manual test step and without leaving a broken mapping
+// behind when enablement was requested but the mapping does not work.
+func PostModelCandidateTestAndCreate(svc *service.ModelService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		modelID, ok := parseUintParam(c, "id")
+		if !ok {
+			return
+		}
+		var req createCandidateRequest
+		if !bindJSON(c, &req) {
+			return
+		}
+		result, err := svc.TestAndCreateCandidate(c.Request.Context(), modelID, service.CreateCandidateInput{
+			ProviderID: req.ProviderID, ProviderModelName: req.ProviderModelName,
+			InputPrice: req.InputPrice, OutputPrice: req.OutputPrice,
+			CacheWritePrice: req.CacheWritePrice, CacheReadPrice: req.CacheReadPrice,
+			MaxOutput: req.MaxOutput, ManagementStatus: req.ManagementStatus,
+		}, timeNow())
+		if err != nil {
+			writeModelServiceError(c, err)
+			return
+		}
+		response.Success(c, result)
 	}
 }
 

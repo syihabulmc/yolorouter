@@ -101,11 +101,15 @@ func UpdateModelCandidate(db *gorm.DB, id uint, providerModelName string, inputP
 		// The mapping test and capability probes validated the OLD
 		// provider_model_name; a new name makes them stale, so clear them —
 		// the candidate must be re-tested before it can route or be enabled
-		// again. A map-based Updates writes these zero values (a struct-based
-		// one would skip them).
+		// again. A map-based Updates writes these values (a struct-based one
+		// would skip them).
+		//
+		// Capabilities clear to NULL ("not confirmed"), not false: nothing about
+		// the old name's confirmation carries over to a new one, and false would
+		// assert a decisive "not supported" that no probe established.
 		updates["verification_status"] = model.ModelVerificationStatusUntested
-		updates["supports_streaming"] = false
-		updates["supports_function_calling"] = false
+		updates["supports_streaming"] = nil
+		updates["supports_function_calling"] = nil
 	}
 	return db.Model(&model.ModelCandidate{}).Where("id = ?", id).Updates(updates).Error
 }
@@ -115,10 +119,9 @@ func SetModelCandidateManagementStatus(db *gorm.DB, id uint, status int, now tim
 		Updates(map[string]interface{}{"management_status": status, "updated_at": now}).Error
 }
 
-// SetModelCandidateManagementStatusIfVerified CAS-guards enabling a
-// candidate on verification_status still reading Passed — closes the
-// check-then-act window between the service layer's gate
-// check and an unconditional write (same fix, same reasoning applied here).
+// SetModelCandidateManagementStatusIfVerified CAS-guards enabling a candidate on
+// verification_status still reading Passed — closing the check-then-act window
+// between the service layer's gate check and the write.
 func SetModelCandidateManagementStatusIfVerified(db *gorm.DB, id uint, status int, now time.Time) (bool, error) {
 	result := db.Model(&model.ModelCandidate{}).
 		Where("id = ? AND verification_status = ?", id, model.ModelVerificationStatusPassed).
@@ -129,32 +132,83 @@ func SetModelCandidateManagementStatusIfVerified(db *gorm.DB, id uint, status in
 	return result.RowsAffected > 0, nil
 }
 
-func CommitModelCandidateBasicTestResult(db *gorm.DB, id uint, verificationStatus int, lastTestResult *int, durationMs int64, now time.Time) error {
-	return db.Model(&model.ModelCandidate{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"verification_status":   verificationStatus,
-		"last_test_result":      lastTestResult,
-		"last_test_duration_ms": durationMs,
-		"last_tested_at":        now,
-		"updated_at":            now,
-	}).Error
+// EnableModelCandidateAfterProbe enables a candidate only if it is still the row
+// that was probed. Verification must read Passed, provider_model_name must still
+// be the name the probe actually tested, and management_status must still hold the
+// value observed before the probe started.
+//
+// All three matter because a probe takes seconds of upstream round trips, during
+// which the row can move underneath it. Without the name guard an earlier probe
+// could mark a later, different mapping as verified and enable it — routing a
+// target nobody tested. Without the management-status guard an operator who
+// disabled the candidate mid-probe would find it silently re-enabled, since
+// verification_status alone says nothing about their intent.
+//
+// applied is false when any guard misses, which callers must treat as "the row
+// moved on, discard this result" rather than as an error.
+func EnableModelCandidateAfterProbe(db *gorm.DB, id uint, probedModelName string, expectedManagementStatus, status int, now time.Time) (bool, error) {
+	result := db.Model(&model.ModelCandidate{}).
+		Where("id = ? AND verification_status = ? AND provider_model_name = ? AND management_status = ?",
+			id, model.ModelVerificationStatusPassed, probedModelName, expectedManagementStatus).
+		Updates(map[string]interface{}{"management_status": status, "updated_at": now})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }
 
-// CommitModelCandidateCapabilityTestResult writes the result of a
-// streaming or function-calling test — these never touch
-// verification_status: they're independent capability
-// flags, not a re-run of the basic-text gate.
-func CommitModelCandidateCapabilityTestResult(db *gorm.DB, id uint, capability string, passed bool, lastTestResult *int, durationMs int64, now time.Time) error {
-	column := "supports_streaming"
-	if capability == "function_calling" {
-		column = "supports_function_calling"
-	}
-	return db.Model(&model.ModelCandidate{}).Where("id = ?", id).Updates(map[string]interface{}{
-		column:                  passed,
-		"last_test_result":      lastTestResult,
-		"last_test_duration_ms": durationMs,
+// CandidateProbeCommit is what to persist after a full probe run (basic plus
+// the two capability probes), written in one UPDATE so last_test_result and
+// last_tested_at describe the run as a whole. Committing the three probes
+// through separate calls would leave those shared columns holding whichever
+// probe happened to finish last.
+// Every verdict field is nil-means-leave-alone. A probe that did not run, or ran
+// and came back inconclusive, is no evidence at all, and writing it would throw
+// away a verdict that was previously earned. For verification_status that is not
+// cosmetic — the gateway drops a candidate whose status is not Passed from ALL
+// routing. Callers classify; this struct only carries what they decided is worth
+// persisting.
+type CandidateProbeCommit struct {
+	VerificationStatus      *int
+	SupportsStreaming       *bool
+	SupportsFunctionCalling *bool
+	LastTestResult          *int
+	DurationMs              int64
+}
+
+// CommitModelCandidateProbeResults persists a whole probe run, but only if the
+// candidate still points at probedModelName — the mapping the probe actually
+// tested.
+//
+// The guard is what keeps a slow probe from landing on a configuration it never
+// examined: probing takes seconds of upstream round trips, so a concurrent edit
+// can retarget the row in the meantime, and an id-only write would then stamp the
+// new target with the old target's verdict. applied is false in that case, which
+// callers must treat as "discard this result" rather than as an error — the edit
+// that moved the row runs its own probe.
+func CommitModelCandidateProbeResults(db *gorm.DB, id uint, probedModelName string, c CandidateProbeCommit, now time.Time) (bool, error) {
+	updates := map[string]interface{}{
+		"last_test_result":      c.LastTestResult,
+		"last_test_duration_ms": c.DurationMs,
 		"last_tested_at":        now,
 		"updated_at":            now,
-	}).Error
+	}
+	if c.VerificationStatus != nil {
+		updates["verification_status"] = *c.VerificationStatus
+	}
+	if c.SupportsStreaming != nil {
+		updates["supports_streaming"] = *c.SupportsStreaming
+	}
+	if c.SupportsFunctionCalling != nil {
+		updates["supports_function_calling"] = *c.SupportsFunctionCalling
+	}
+	result := db.Model(&model.ModelCandidate{}).
+		Where("id = ? AND provider_model_name = ?", id, probedModelName).
+		Updates(updates)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }
 
 // SwapModelCandidateSortOrder atomically swaps sort_order between

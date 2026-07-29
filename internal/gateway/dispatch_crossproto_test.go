@@ -463,7 +463,7 @@ func TestCrossProtocolStreamPreFirstEventFailover(t *testing.T) {
 		if err := db.Create(&model.ModelCandidate{
 			ModelID: m.ID, ProviderID: p.ID, ProviderModelName: "claude-3-5-sonnet-20241022",
 			InputPrice: 1.0, OutputPrice: 2.0, MaxOutput: 4096,
-			SupportsStreaming: true, SupportsFunctionCalling: true,
+			SupportsStreaming: boolPtr(true), SupportsFunctionCalling: boolPtr(true),
 			ManagementStatus:   model.ModelCandidateStatusEnabled,
 			SortOrder:          i + 1,
 			VerificationStatus: model.ModelVerificationStatusPassed,

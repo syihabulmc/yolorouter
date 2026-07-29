@@ -15,11 +15,11 @@ const (
 	ModelCandidateStatusDisabled = 2
 )
 
-// ModelVerificationStatus* answers "has this candidate's basic-text mapping
-// ever been confirmed" — streaming/function-calling are separate bool flags
-// on ModelCandidate, not folded into this (a candidate can
-// pass basic-text and never have run a streaming test at all, which is not
-// the same thing as having failed one).
+// ModelVerificationStatus* answers "has this candidate's basic-text mapping ever
+// been confirmed". Unlike the capability flags on ModelCandidate, which are
+// informational, this one gates routing: the gateway will not send traffic to a
+// candidate that is not Passed. Streaming / function-calling stay separate
+// because passing basic text says nothing about whether either was ever probed.
 const (
 	ModelVerificationStatusUntested = 0
 	ModelVerificationStatusPassed   = 1
@@ -46,17 +46,26 @@ func (Model) TableName() string { return "models" }
 // ModelCandidate is one provider's offering of a Model — the external name
 // resolves to this candidate's ProviderModelName when routed.
 type ModelCandidate struct {
-	ID                      uint       `gorm:"column:id;primaryKey" json:"id"`
-	ModelID                 uint       `gorm:"column:model_id" json:"model_id"`
-	ProviderID              uint       `gorm:"column:provider_id" json:"provider_id"`
-	ProviderModelName       string     `gorm:"column:provider_model_name" json:"provider_model_name"`
-	InputPrice              float64    `gorm:"column:input_price" json:"input_price"`
-	OutputPrice             float64    `gorm:"column:output_price" json:"output_price"`
-	CacheWritePrice         *float64   `gorm:"column:cache_write_price" json:"cache_write_price"`
-	CacheReadPrice          *float64   `gorm:"column:cache_read_price" json:"cache_read_price"`
-	MaxOutput               int        `gorm:"column:max_output" json:"max_output"`
-	SupportsStreaming       bool       `gorm:"column:supports_streaming" json:"supports_streaming"`
-	SupportsFunctionCalling bool       `gorm:"column:supports_function_calling" json:"supports_function_calling"`
+	ID                uint     `gorm:"column:id;primaryKey" json:"id"`
+	ModelID           uint     `gorm:"column:model_id" json:"model_id"`
+	ProviderID        uint     `gorm:"column:provider_id" json:"provider_id"`
+	ProviderModelName string   `gorm:"column:provider_model_name" json:"provider_model_name"`
+	InputPrice        float64  `gorm:"column:input_price" json:"input_price"`
+	OutputPrice       float64  `gorm:"column:output_price" json:"output_price"`
+	CacheWritePrice   *float64 `gorm:"column:cache_write_price" json:"cache_write_price"`
+	CacheReadPrice    *float64 `gorm:"column:cache_read_price" json:"cache_read_price"`
+	MaxOutput         int      `gorm:"column:max_output" json:"max_output"`
+	// SupportsStreaming / SupportsFunctionCalling record whether the last probe
+	// CONFIRMED the capability: true when it did, nil when it did not. They are
+	// informational — the admin UI shows them and routing ignores them entirely
+	// (see filterCandidates), so an unconfirmed capability costs a missing tick
+	// and nothing else.
+	//
+	// Nullable rather than a plain bool so "never probed / could not confirm" is
+	// distinguishable from a false. Nothing writes false today; the column can
+	// still hold one written by an older build.
+	SupportsStreaming       *bool      `gorm:"column:supports_streaming" json:"supports_streaming"`
+	SupportsFunctionCalling *bool      `gorm:"column:supports_function_calling" json:"supports_function_calling"`
 	ManagementStatus        int        `gorm:"column:management_status" json:"management_status"`
 	SortOrder               int        `gorm:"column:sort_order" json:"sort_order"`
 	VerificationStatus      int        `gorm:"column:verification_status" json:"verification_status"`

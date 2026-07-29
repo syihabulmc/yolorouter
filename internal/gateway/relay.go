@@ -482,12 +482,10 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 		s.finalize(rc, http.StatusInternalServerError, "db_candidates: "+err.Error(), start)
 		return
 	}
-	routable, anyEnabled, anyVerified := filterCandidates(allCandidates, meta.Stream, meta.HasTools)
+	routable, anyEnabled := filterCandidates(allCandidates)
 	if len(routable) == 0 {
 		reason := "no_enabled_candidate"
-		if anyVerified {
-			reason = "no_capability_candidate"
-		} else if anyEnabled {
+		if anyEnabled {
 			reason = "no_verified_candidate"
 		}
 		WriteIngressError(c, ingress, http.StatusServiceUnavailable, errTypeUnavailable, "model is not available", rc.RequestID)
@@ -880,43 +878,42 @@ func (s *RelayService) allCandidatesFailed(c *gin.Context, rc *RelayContext, sta
 	s.finalize(rc, status, "all_candidates_failed", start)
 }
 
-// filterCandidates returns the subset of candidates eligible for this
-// request: enabled, and supporting the stream / function-calling capability
-// the caller asked for. anyEnabled is reported in the
-// same pass so the caller can distinguish "no candidate at all" from "no
-// candidate matched the capability" without walking the slice twice. Order
-// is preserved (sort_order was applied by the repository) so failover still
-// walks the chain in the admin's configured order.
-// filterCandidates returns routable candidates plus two diagnostic flags so
-// the caller can pick the right "why empty" reason: anyEnabled = at least one
-// management-enabled candidate (distinguishes "all disabled" from anything
-// else); anyVerified = at least one enabled AND verification-passed
-// (distinguishes "enabled but unverified/failed" from "capability mismatch").
-func filterCandidates(all []model.ModelCandidate, isStream, hasTools bool) (routable []model.ModelCandidate, anyEnabled, anyVerified bool) {
+// filterCandidates returns the subset of candidates eligible for this request:
+// management-enabled and verification-passed. Order is preserved (sort_order was
+// applied by the repository) so failover still walks the chain in the admin's
+// configured order.
+//
+// It deliberately does NOT consult the streaming / function-calling capability
+// flags. Those are recorded for the admin UI only. Filtering on them looks
+// appealing but cannot be made to pay off here: a request this gate rejects
+// produces "model is not available" with no attempt at all, while a capability
+// the upstream genuinely lacks is reported as a 4xx, which attemptOne classifies
+// as terminal — so excluding a candidate cannot be recovered by failover either
+// way. Meanwhile a probe that merely failed to confirm a capability would take a
+// working candidate out of rotation. Letting the upstream be the authority costs
+// one failed request in the rare genuine case and removes a whole class of
+// self-inflicted outages.
+//
+// anyEnabled is reported in the same pass so the caller can tell "all disabled"
+// apart from "enabled but unverified" without walking the slice twice.
+func filterCandidates(all []model.ModelCandidate) (routable []model.ModelCandidate, anyEnabled bool) {
 	for _, c := range all {
 		if c.ManagementStatus != model.ModelCandidateStatusEnabled {
 			continue
 		}
 		anyEnabled = true
-		// An enabled-but-verification-failed candidate is NOT routable:
-		// TestModelCandidate flips verification_status to failed while
-		// leaving management status enabled, and ModelService's own
-		// routability check (model_service.go) already rejects these —
-		// the gateway must match that gate or it routes a known-broken
-		// mapping.
+		// An enabled-but-unverified candidate is NOT routable. The two states can
+		// coexist — a candidate is stored before its first probe, and a probe can
+		// reset verification without touching enablement — and ModelService's own
+		// routability check (isCandidateRoutable) already rejects these, so the
+		// gateway must match that gate or it routes a mapping known to be
+		// unverified.
 		if c.VerificationStatus != model.ModelVerificationStatusPassed {
-			continue
-		}
-		anyVerified = true
-		if isStream && !c.SupportsStreaming {
-			continue
-		}
-		if hasTools && !c.SupportsFunctionCalling {
 			continue
 		}
 		routable = append(routable, c)
 	}
-	return routable, anyEnabled, anyVerified
+	return routable, anyEnabled
 }
 
 // filterEnabledKeys returns keys that are both management-enabled AND

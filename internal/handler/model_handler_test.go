@@ -39,8 +39,8 @@ func newModelTestRouterWithClient(t *testing.T, client service.ProviderClient) (
 	admin.GET("/models/:id", GetModel(svc))
 	admin.PATCH("/models/:id", PatchModel(svc))
 	admin.PATCH("/models/:id/status", PatchModelStatus(svc))
-	admin.POST("/models/:id/candidates/test-mapping", PostModelCandidateTestMapping(svc))
 	admin.POST("/models/:id/candidates", PostModelCandidate(svc))
+	admin.POST("/models/:id/candidates/test-and-create", PostModelCandidateTestAndCreate(svc))
 	admin.PATCH("/models/:id/candidates/:candidateId", PatchModelCandidate(svc))
 	admin.PATCH("/models/:id/candidates/:candidateId/order", PatchModelCandidateOrder(svc))
 	admin.PATCH("/models/:id/candidates/:candidateId/status", PatchModelCandidateStatus(svc))
@@ -265,51 +265,6 @@ func createProviderAndKeyForModelTest(t *testing.T, r *gin.Engine) uint {
 	return view.ID
 }
 
-func TestPostModelCandidateTestMappingReturnsOutcome(t *testing.T) {
-	providerRouter, db := newProviderTestRouter(t)
-	providerID := createProviderAndKeyForModelTest(t, providerRouter)
-
-	svc := service.NewModelService(db, testHandlerMasterKey(), &alwaysSuccessClient{})
-	r := gin.New()
-	admin := r.Group("/api/admin")
-	admin.POST("/models", PostModel(svc))
-	admin.POST("/models/:id/candidates/test-mapping", PostModelCandidateTestMapping(svc))
-	id := createModelForTest(t, r, "smart")
-
-	w, env := doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/admin/models/%d/candidates/test-mapping", id), map[string]interface{}{
-		"provider_id": providerID, "provider_model_name": "gpt-4o", "test_type": "basic",
-	}, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
-	}
-	var body struct {
-		Outcome    int   `json:"outcome"`
-		DurationMs int64 `json:"duration_ms"`
-	}
-	if err := json.Unmarshal(env.Data, &body); err != nil {
-		t.Fatalf("unmarshal test-mapping response: %v", err)
-	}
-	if body.Outcome != 0 {
-		t.Fatalf("expected outcome=0 (success), got %d", body.Outcome)
-	}
-}
-
-func TestPostModelCandidateTestMappingReturns400ForBadRequest(t *testing.T) {
-	r, _ := newModelTestRouter(t)
-	id := createModelForTest(t, r, "smart")
-	w, _ := doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/admin/models/%d/candidates/test-mapping", id), map[string]interface{}{
-		"test_type": "bogus",
-	}, nil)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
-	}
-}
-
-// newModelTestRouterSharingProviderDB builds a model-endpoints-only router
-// against an existing DB that already has provider fixtures — used so
-// candidate tests can create a real provider via the provider handlers and
-// then exercise candidates against it via the model handlers, both against
-// the same database.
 func newModelTestRouterSharingProviderDB(t *testing.T, db *gorm.DB, client service.ProviderClient) *gin.Engine {
 	t.Helper()
 	svc := service.NewModelService(db, testHandlerMasterKey(), client)
@@ -317,8 +272,8 @@ func newModelTestRouterSharingProviderDB(t *testing.T, db *gorm.DB, client servi
 	admin := r.Group("/api/admin")
 	admin.POST("/models", PostModel(svc))
 	admin.GET("/models/:id", GetModel(svc))
-	admin.POST("/models/:id/candidates/test-mapping", PostModelCandidateTestMapping(svc))
 	admin.POST("/models/:id/candidates", PostModelCandidate(svc))
+	admin.POST("/models/:id/candidates/test-and-create", PostModelCandidateTestAndCreate(svc))
 	admin.PATCH("/models/:id/candidates/:candidateId", PatchModelCandidate(svc))
 	admin.PATCH("/models/:id/candidates/:candidateId/order", PatchModelCandidateOrder(svc))
 	admin.PATCH("/models/:id/candidates/:candidateId/status", PatchModelCandidateStatus(svc))
@@ -418,7 +373,61 @@ func TestPatchModelCandidateStatusReturns400WhenUnverified(t *testing.T) {
 	}
 }
 
-func TestPostModelCandidateTestRunsBasicTest(t *testing.T) {
+// The endpoint the admin UI saves through: it probes, reports all three
+// verdicts, and stores the candidate in one round trip.
+func TestPostModelCandidateTestAndCreateReportsProbesAndCreates(t *testing.T) {
+	providerRouter, db := newProviderTestRouter(t)
+	providerID := createProviderAndKeyForModelTest(t, providerRouter)
+	r := newModelTestRouterSharingProviderDB(t, db, &alwaysSuccessClient{})
+	id := createModelForTest(t, r, "smart")
+
+	w, env := doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/admin/models/%d/candidates/test-and-create", id), map[string]interface{}{
+		"provider_id": providerID, "provider_model_name": "gpt-4o", "input_price": 1, "output_price": 2,
+		"management_status": 1,
+	}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Created bool `json:"created"`
+		Report  struct {
+			Basic           struct{ Ran, Supported bool } `json:"basic"`
+			Streaming       struct{ Ran, Supported bool } `json:"streaming"`
+			FunctionCalling struct{ Ran, Supported bool } `json:"function_calling"`
+		} `json:"report"`
+		Candidate *candidateResponse `json:"candidate"`
+	}
+	if err := json.Unmarshal(env.Data, &body); err != nil {
+		t.Fatalf("unmarshal test-and-create response: %v", err)
+	}
+	if !body.Created || body.Candidate == nil {
+		t.Fatalf("expected the candidate to be created, got %+v", body)
+	}
+	if body.Candidate.ManagementStatus != 1 {
+		t.Fatalf("expected the candidate to be enabled, got %d", body.Candidate.ManagementStatus)
+	}
+	for name, probe := range map[string]struct{ Ran, Supported bool }{
+		"basic": body.Report.Basic, "streaming": body.Report.Streaming, "function_calling": body.Report.FunctionCalling,
+	} {
+		if !probe.Ran || !probe.Supported {
+			t.Fatalf("expected the %s probe to run and pass, got %+v", name, probe)
+		}
+	}
+}
+
+func TestPostModelCandidateTestAndCreateReturns400ForBadModelID(t *testing.T) {
+	r, _ := newModelTestRouter(t)
+	w, _ := doJSON(t, r, http.MethodPost, "/api/admin/models/abc/candidates/test-and-create", map[string]interface{}{
+		"provider_id": 1, "provider_model_name": "gpt-4o",
+	}, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+// Retest takes no request body at all — one run covers the basic mapping and
+// both capabilities, so there is no test type for a caller to choose.
+func TestPostModelCandidateTestRetestsWithoutABody(t *testing.T) {
 	providerRouter, db := newProviderTestRouter(t)
 	providerID := createProviderAndKeyForModelTest(t, providerRouter)
 	r := newModelTestRouterSharingProviderDB(t, db, &alwaysSuccessClient{})
@@ -431,18 +440,28 @@ func TestPostModelCandidateTestRunsBasicTest(t *testing.T) {
 		t.Fatalf("unmarshal candidate response: %v", err)
 	}
 
-	w, env2 := doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/admin/models/%d/candidates/%d/test", id, c.ID), map[string]interface{}{"test_type": "basic"}, nil)
+	w, env2 := doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/admin/models/%d/candidates/%d/test", id, c.ID), nil, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
 	}
 	var updated struct {
-		VerificationStatus int `json:"verification_status"`
+		VerificationStatus      int   `json:"verification_status"`
+		SupportsStreaming       *bool `json:"supports_streaming"`
+		SupportsFunctionCalling *bool `json:"supports_function_calling"`
 	}
 	if err := json.Unmarshal(env2.Data, &updated); err != nil {
 		t.Fatalf("unmarshal test response: %v", err)
 	}
 	if updated.VerificationStatus != 1 {
 		t.Fatalf("expected verification_status=1 (passed), got %d", updated.VerificationStatus)
+	}
+	// The capability probes ran as part of the same retest, which is what stops
+	// the capability columns from sitting empty until someone probes them by hand.
+	if updated.SupportsStreaming == nil || !*updated.SupportsStreaming {
+		t.Fatalf("expected supports_streaming=true, got %v", updated.SupportsStreaming)
+	}
+	if updated.SupportsFunctionCalling == nil || !*updated.SupportsFunctionCalling {
+		t.Fatalf("expected supports_function_calling=true, got %v", updated.SupportsFunctionCalling)
 	}
 }
 
@@ -511,33 +530,6 @@ func TestPatchModelStatusReturns400ForBadID(t *testing.T) {
 	w, _ := doJSON(t, r, http.MethodPatch, "/api/admin/models/abc/status", map[string]interface{}{"enabled": true}, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestPostModelCandidateTestMappingReturns400ForBadID(t *testing.T) {
-	r, _ := newModelTestRouter(t)
-	w, _ := doJSON(t, r, http.MethodPost, "/api/admin/models/abc/candidates/test-mapping", map[string]interface{}{
-		"provider_id": 1, "provider_model_name": "gpt-4o", "test_type": "basic",
-	}, nil)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestPostModelCandidateTestMappingReturns400ForUntestableProvider(t *testing.T) {
-	providerRouter, db := newProviderTestRouter(t)
-	providerID, _ := createProviderForTest(t, providerRouter, "provider-a")
-	r := newModelTestRouterSharingProviderDB(t, db, &alwaysSuccessClient{})
-	id := createModelForTest(t, r, "smart")
-
-	w, env := doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/admin/models/%d/candidates/test-mapping", id), map[string]interface{}{
-		"provider_id": providerID, "provider_model_name": "gpt-4o", "test_type": "basic",
-	}, nil)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
-	}
-	if env.Code != errcode.ProviderNoTestableModel {
-		t.Fatalf("expected code %d, got %d", errcode.ProviderNoTestableModel, env.Code)
 	}
 }
 
@@ -655,12 +647,12 @@ func TestPostModelCandidateTestReturns400ForBadCandidateID(t *testing.T) {
 	}
 }
 
-func TestPostModelCandidateTestReturns400ForBadBody(t *testing.T) {
+func TestPostModelCandidateTestReturnsErrorForUnknownCandidate(t *testing.T) {
 	r, _ := newModelTestRouter(t)
 	id := createModelForTest(t, r, "smart")
-	w, _ := doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/admin/models/%d/candidates/1/test", id), map[string]interface{}{"test_type": "bogus"}, nil)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	w, _ := doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/admin/models/%d/candidates/1/test", id), nil, nil)
+	if w.Code == http.StatusOK {
+		t.Fatalf("expected an error for a candidate that does not exist, got 200: %s", w.Body.String())
 	}
 }
 

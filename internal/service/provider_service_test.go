@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -91,6 +92,10 @@ func TestComputeRunningStatusUnavailableWhenGoodKeyNeedsReentry(t *testing.T) {
 // exercising verifyKeyAllDestinations against more than one destination;
 // falls back to result/err for any (proto, baseURL) not present in the map.
 type fakeProviderClient struct {
+	// mu guards the mutable bookkeeping below. The candidate probe pipeline runs
+	// the streaming and function-calling probes concurrently, so two of these
+	// methods can be in flight at once.
+	mu         sync.Mutex
 	result     TestResult
 	err        error
 	calls      int
@@ -98,9 +103,49 @@ type fakeProviderClient struct {
 	lastProto  protocols.ProtocolID
 	sideEffect func()
 	perTarget  map[string]fakeTargetResponse
+	// perTestType canned responses keyed by "basic" / "streaming" /
+	// "function_calling", for tests that need the three probes to disagree.
+	// Falls back to result/err when a probe has no entry.
+	perTestType map[string]fakeTargetResponse
+	// callsByTestType counts invocations per probe kind, letting a test assert
+	// that a probe was skipped rather than merely that it failed.
+	callsByTestType map[string]int
 	// models is returned verbatim by ListModels; result.Outcome/Detail drive
 	// its outcome, so a test can canned both a catalogue and a failure shape.
 	models []string
+}
+
+// record does the bookkeeping every probe method shares and returns the canned
+// response for that probe kind.
+func (f *fakeProviderClient) record(testType string, proto protocols.ProtocolID, baseURL, model string) (TestResult, error) {
+	f.mu.Lock()
+	f.calls++
+	f.lastModel = model
+	f.lastProto = proto
+	if f.callsByTestType == nil {
+		f.callsByTestType = map[string]int{}
+	}
+	f.callsByTestType[testType]++
+	sideEffect := f.sideEffect
+	resp, ok := f.perTestType[testType]
+	f.mu.Unlock()
+
+	// Invoked outside the lock: side effects reach into the database, and a
+	// probe holding this mutex while doing so would serialize the concurrent
+	// capability probes the pipeline deliberately overlaps.
+	if sideEffect != nil {
+		sideEffect()
+	}
+	if ok {
+		return resp.result, resp.err
+	}
+	return f.responseFor(proto, baseURL)
+}
+
+func (f *fakeProviderClient) callCountFor(testType string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.callsByTestType[testType]
 }
 
 func (f *fakeProviderClient) ListModels(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey string) (ListModelsResult, error) {
@@ -126,33 +171,15 @@ func (f *fakeProviderClient) responseFor(proto protocols.ProtocolID, baseURL str
 }
 
 func (f *fakeProviderClient) TestChatCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
-	f.calls++
-	f.lastModel = model
-	f.lastProto = proto
-	if f.sideEffect != nil {
-		f.sideEffect()
-	}
-	return f.responseFor(proto, baseURL)
+	return f.record("basic", proto, baseURL, model)
 }
 
 func (f *fakeProviderClient) TestStreamingCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
-	f.calls++
-	f.lastModel = model
-	f.lastProto = proto
-	if f.sideEffect != nil {
-		f.sideEffect()
-	}
-	return f.result, f.err
+	return f.record("streaming", proto, baseURL, model)
 }
 
 func (f *fakeProviderClient) TestFunctionCalling(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
-	f.calls++
-	f.lastModel = model
-	f.lastProto = proto
-	if f.sideEffect != nil {
-		f.sideEffect()
-	}
-	return f.result, f.err
+	return f.record("function_calling", proto, baseURL, model)
 }
 
 func testMasterKey() []byte {

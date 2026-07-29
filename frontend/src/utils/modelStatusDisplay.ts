@@ -2,17 +2,17 @@ import { testOutcomeI18nKey } from './testOutcomeDisplay'
 
 export type RunningStatusTagType = 'default' | 'success' | 'warning' | 'error'
 
-// Whether a candidate passed a given capability test — 'basic' reads its
-// verification_status, streaming/function_calling their capability flags.
-// Shared by ModelDetailPage.vue and CandidateEditModal.vue so the per-type
-// pass rule lives in one place.
-export function candidateTestPassed(
-  testType: 'basic' | 'streaming' | 'function_calling',
-  c: { verification_status: number; supports_streaming: boolean; supports_function_calling: boolean },
-): boolean {
-  if (testType === 'basic') return c.verification_status === 1
-  if (testType === 'streaming') return c.supports_streaming
-  return c.supports_function_calling
+// A capability flag records whether the last probe CONFIRMED the capability. It
+// is informational: routing ignores it entirely, so an unconfirmed capability is
+// not a reason to avoid the candidate — the remedy, if the operator cares, is to
+// retest. 'unsupported' exists only because the column can still hold a false
+// written by an older build; nothing writes one now.
+export type CapabilityState = 'confirmed' | 'unsupported' | 'unconfirmed'
+
+export function capabilityState(flag: boolean | null | undefined): CapabilityState {
+  if (flag === true) return 'confirmed'
+  if (flag === false) return 'unsupported'
+  return 'unconfirmed'
 }
 
 // Localized result text for a candidate test: "passed", or "failed: <reason>"

@@ -394,8 +394,9 @@ func isUniqueViolation(err error) bool {
 }
 
 // isSortOrderUniqueViolation narrows isUniqueViolation to specifically the
-// UNIQUE(provider_id, sort_order) constraint (as opposed to
-// UNIQUE(provider_id, label)) on provider_keys. Both SQLite and Postgres
+// sort_order constraint, as opposed to the other UNIQUE on the same table —
+// UNIQUE(provider_id, label) on provider_keys, UNIQUE(model_id, provider_id) on
+// model_candidates, which both layers need to report differently. Both SQLite and Postgres
 // name unnamed multi-column UNIQUE constraint violations after their
 // columns — SQLite: "UNIQUE constraint failed: provider_keys.provider_id,
 // provider_keys.sort_order"; Postgres: constraint

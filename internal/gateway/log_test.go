@@ -247,7 +247,7 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 	// persisted by finalize — so an unpersisted in-memory candidate is enough.
 	cand := &model.ModelCandidate{
 		InputPrice: 2.0, OutputPrice: 4.0, MaxOutput: 128,
-		SupportsStreaming: true, ManagementStatus: model.ModelCandidateStatusEnabled,
+		SupportsStreaming: boolPtr(true), ManagementStatus: model.ModelCandidateStatusEnabled,
 		VerificationStatus: model.ModelVerificationStatusPassed,
 	}
 	rc := &RelayContext{
