@@ -72,10 +72,10 @@ func TestIRUsageToUsage(t *testing.T) {
 			want: nil,
 		},
 		{
-			// CacheIncludedInPrompt: true means PromptTokens already carries
-			// the cache-read count (OpenAI/gemini/responses semantics), so no
-			// normalization is applied and every field maps through as-is.
-			name: "full mapping",
+			// Every field, including CacheIncludedInPrompt, maps through
+			// verbatim. netPromptTokens (log.go) — not this conversion —
+			// derives the net input from PromptTokens and the flag.
+			name: "full mapping preserves fields and flag",
 			in: &protocols.IRUsage{
 				PromptTokens:          100,
 				CompletionTokens:      50,
@@ -85,11 +85,12 @@ func TestIRUsageToUsage(t *testing.T) {
 				CacheIncludedInPrompt: true,
 			},
 			want: &Usage{
-				PromptTokens:     100,
-				CompletionTokens: 50,
-				TotalTokens:      150,
-				CacheWriteTokens: 10,
-				CacheReadTokens:  20,
+				PromptTokens:          100,
+				CompletionTokens:      50,
+				TotalTokens:           150,
+				CacheWriteTokens:      10,
+				CacheReadTokens:       20,
+				CacheIncludedInPrompt: true,
 			},
 		},
 		{
@@ -107,27 +108,29 @@ func TestIRUsageToUsage(t *testing.T) {
 		// true (chat/gemini/responses, which already include it) must be
 		// passed through unchanged.
 		{
-			name: "cache not included in prompt (claude semantics) adds cache-read back in",
+			name: "claude semantics (flag false) passes prompt through as net input",
 			in: &protocols.IRUsage{
 				PromptTokens:          100,
 				CacheReadTokens:       30,
 				CacheIncludedInPrompt: false,
 			},
 			want: &Usage{
-				PromptTokens:    130,
-				CacheReadTokens: 30,
+				PromptTokens:          100,
+				CacheReadTokens:       30,
+				CacheIncludedInPrompt: false,
 			},
 		},
 		{
-			name: "cache already included in prompt (openai/gemini/responses semantics) is unchanged",
+			name: "openai/gemini/responses semantics (flag true) passes prompt and flag through",
 			in: &protocols.IRUsage{
 				PromptTokens:          100,
 				CacheReadTokens:       30,
 				CacheIncludedInPrompt: true,
 			},
 			want: &Usage{
-				PromptTokens:    100,
-				CacheReadTokens: 30,
+				PromptTokens:          100,
+				CacheReadTokens:       30,
+				CacheIncludedInPrompt: true,
 			},
 		},
 	}

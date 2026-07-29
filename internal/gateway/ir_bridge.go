@@ -84,17 +84,15 @@ func (rc *RelayContext) clearResponseBodies() {
 // field, is mapped through. The emptiness check runs against the ORIGINAL
 // fields, before the cache normalization below.
 //
-// gateway.computeCost (log.go) subtracts CacheReadTokens from PromptTokens
-// to avoid double-billing cached input, which assumes OpenAI semantics where
-// prompt_tokens already INCLUDES cache-read tokens. The Claude decoder does
-// not follow that convention: Anthropic's input_tokens excludes
-// cache_read_input_tokens, so IRUsage.PromptTokens is already the
-// non-cached count and IRUsage.CacheIncludedInPrompt stays false. Passing
-// that through unchanged would make computeCost double-subtract cache-read
-// tokens and undercharge the tenant. Normalize to OpenAI semantics here:
-// when the source protocol didn't include cache-read in PromptTokens, add
-// it back in so computeCost's subtraction is correct regardless of origin
-// protocol.
+// PromptTokens and the CacheIncludedInPrompt flag are passed through verbatim:
+// each protocol's decoder reports PromptTokens in its own convention (OpenAI/
+// Gemini/Responses include cache-read, so they set the flag true; Anthropic's
+// input_tokens is already net, so the flag stays false). netPromptTokens
+// (log.go) reads that flag to derive the net input for both billing and the
+// persisted request_logs.input_tokens, so the conversion here must NOT
+// pre-normalize by folding cache back into PromptTokens — doing so would make
+// the persisted input count include cache tokens (gross), diverging from the
+// net convention every downstream aggregate expects.
 func irUsageToUsage(u *protocols.IRUsage) *Usage {
 	if u == nil {
 		return nil
@@ -102,15 +100,12 @@ func irUsageToUsage(u *protocols.IRUsage) *Usage {
 	if u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0 {
 		return nil
 	}
-	promptTokens := u.PromptTokens
-	if !u.CacheIncludedInPrompt {
-		promptTokens += u.CacheReadTokens
-	}
 	return &Usage{
-		PromptTokens:     promptTokens,
-		CompletionTokens: u.CompletionTokens,
-		TotalTokens:      u.TotalTokens,
-		CacheWriteTokens: u.CacheWriteTokens,
-		CacheReadTokens:  u.CacheReadTokens,
+		PromptTokens:          u.PromptTokens,
+		CompletionTokens:      u.CompletionTokens,
+		TotalTokens:           u.TotalTokens,
+		CacheWriteTokens:      u.CacheWriteTokens,
+		CacheReadTokens:       u.CacheReadTokens,
+		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
 	}
 }

@@ -235,6 +235,11 @@ func (w *wireUsage) toUsage() *Usage {
 	u := &Usage{
 		PromptTokens:     *w.PromptTokens,
 		CompletionTokens: *w.CompletionTokens,
+		// This wire shape requires top-level prompt_tokens/completion_tokens —
+		// the OpenAI-compatible convention where prompt_tokens already counts
+		// cache-read tokens. Mark it so netPromptTokens (log.go) subtracts the
+		// cached portion to derive the net input for billing and the log row.
+		CacheIncludedInPrompt: true,
 	}
 	if w.TotalTokens != nil {
 		u.TotalTokens = *w.TotalTokens

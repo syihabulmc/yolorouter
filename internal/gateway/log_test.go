@@ -492,3 +492,65 @@ func TestJoinCompressors(t *testing.T) {
 		})
 	}
 }
+
+func TestNetPromptTokens(t *testing.T) {
+	cases := []struct {
+		name  string
+		usage *Usage
+		want  int
+	}{
+		{"nil usage", nil, 0},
+		{
+			// Anthropic: input_tokens is already net; flag false -> unchanged.
+			"claude net input passes through",
+			&Usage{PromptTokens: 237, CacheReadTokens: 17152, CacheIncludedInPrompt: false},
+			237,
+		},
+		{
+			// OpenAI: prompt_tokens includes cache; flag true -> subtract cache.
+			"openai gross input has cache subtracted",
+			&Usage{PromptTokens: 17389, CacheReadTokens: 17152, CacheIncludedInPrompt: true},
+			237, // 17389 - 17152
+		},
+		{
+			// OpenAI with both cache read and write folded into prompt.
+			"openai subtracts read and write",
+			&Usage{PromptTokens: 1000, CacheReadTokens: 600, CacheWriteTokens: 300, CacheIncludedInPrompt: true},
+			100, // 1000 - 600 - 300
+		},
+		{
+			// Defensive: upstream reporting cache > prompt floors at 0.
+			"cache exceeding prompt floors at zero",
+			&Usage{PromptTokens: 100, CacheReadTokens: 500, CacheIncludedInPrompt: true},
+			0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := netPromptTokens(tc.usage); got != tc.want {
+				t.Errorf("netPromptTokens(%+v) = %d, want %d", tc.usage, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestComputeCostUsesNetInputAcrossProtocols(t *testing.T) {
+	// A converting upstream (Anthropic ingress) reports net input=237 with
+	// cache_read=17152 (flag false); an OpenAI upstream reports the same
+	// request as gross prompt=17389 with cache_read=17152 (flag true). Both
+	// must bill identically: 237 net @ input price + 17152 @ cache_read price.
+	readPrice := 0.02
+	cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0, CacheReadPrice: &readPrice}
+
+	anthropic := &Usage{PromptTokens: 237, CompletionTokens: 10, CacheReadTokens: 17152, CacheIncludedInPrompt: false}
+	openai := &Usage{PromptTokens: 17389, CompletionTokens: 10, CacheReadTokens: 17152, CacheIncludedInPrompt: true}
+
+	// 237×1.0 + 17152×0.02 + 10×2.0 = 237 + 343.04 + 20 = 600.04 -> 600 micros.
+	const wantMicros = 600
+	if c := computeCost(cand, anthropic, 0); c.CostMicros != wantMicros {
+		t.Errorf("anthropic cost = %d micros, want %d", c.CostMicros, wantMicros)
+	}
+	if c := computeCost(cand, openai, 0); c.CostMicros != wantMicros {
+		t.Errorf("openai cost = %d micros, want %d", c.CostMicros, wantMicros)
+	}
+}

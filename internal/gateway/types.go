@@ -232,4 +232,12 @@ type Usage struct {
 	// computeCost. Zero when the upstream didn't report them.
 	CacheWriteTokens int `json:"cache_write_tokens"`
 	CacheReadTokens  int `json:"cache_read_tokens"`
+	// CacheIncludedInPrompt marks whether PromptTokens already counts the
+	// cache-read (and cache-write) tokens. OpenAI-shaped upstreams report
+	// prompt_tokens INCLUSIVE of cache (true); Anthropic's input_tokens is the
+	// net non-cached count (false). netPromptTokens (log.go) uses this flag to
+	// derive the billable/logged net input consistently across protocols, so
+	// the value persisted to request_logs.input_tokens is always the net count
+	// regardless of origin protocol. Not serialized — internal accounting only.
+	CacheIncludedInPrompt bool `json:"-"`
 }
