@@ -513,10 +513,26 @@ func TestNetPromptTokens(t *testing.T) {
 			237, // 17389 - 17152
 		},
 		{
-			// OpenAI with both cache read and write folded into prompt.
-			"openai subtracts read and write",
+			// Cache WRITE sits outside the prompt total under every protocol, so
+			// it is never subtracted — only the read portion is. Deducting it
+			// here would understate the input line of the bill.
+			"cache write is not subtracted",
 			&Usage{PromptTokens: 1000, CacheReadTokens: 600, CacheWriteTokens: 300, CacheIncludedInPrompt: true},
-			100, // 1000 - 600 - 300
+			400, // 1000 - 600; the 300 written tokens were never in prompt_tokens
+		},
+		{
+			// Anthropic reports a net input_tokens alongside a cache write, so
+			// neither count is subtracted.
+			"claude net input with cache write passes through",
+			&Usage{PromptTokens: 237, CacheWriteTokens: 4096, CacheIncludedInPrompt: false},
+			237,
+		},
+		{
+			// DeepSeek splits prompt_tokens into hit + miss; the hit half decodes
+			// as cache read, leaving the miss half as net input.
+			"deepseek hit subtracted leaving miss",
+			&Usage{PromptTokens: 1000, CacheReadTokens: 600, CacheIncludedInPrompt: true},
+			400, // the prompt_cache_miss_tokens half
 		},
 		{
 			// Defensive: upstream reporting cache > prompt floors at 0.
@@ -531,6 +547,90 @@ func TestNetPromptTokens(t *testing.T) {
 				t.Errorf("netPromptTokens(%+v) = %d, want %d", tc.usage, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestComputeCostRejectsIncoherentUsage: token counts come off the wire from
+// third-party upstreams, so a buggy or hostile provider can report negatives or
+// a cache read larger than the prompt it was read from. Both must be treated as
+// unknown usage — Known=false keeps the cost off the bill and, because finalize
+// gates budget accumulation on Known, off the API key's budget too.
+func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
+	readPrice := 0.02
+	cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0, CacheReadPrice: &readPrice}
+
+	cases := []struct {
+		name  string
+		usage *Usage
+	}{
+		{
+			// Would have billed 500 cache reads on a 100-token prompt.
+			"cache read exceeds inclusive prompt",
+			&Usage{PromptTokens: 100, CompletionTokens: 10, CacheReadTokens: 500, CacheIncludedInPrompt: true},
+		},
+		{
+			// A negative cache count inflates net input AND produces a negative
+			// cache line item, so the total can come out below zero.
+			"negative cache read",
+			&Usage{PromptTokens: 100, CompletionTokens: 10, CacheReadTokens: -1000, CacheIncludedInPrompt: true},
+		},
+		{"negative prompt", &Usage{PromptTokens: -5, CompletionTokens: 10}},
+		{"negative completion", &Usage{PromptTokens: 100, CompletionTokens: -10}},
+		{"negative cache write", &Usage{PromptTokens: 100, CompletionTokens: 10, CacheWriteTokens: -1}},
+		{"negative total", &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: -1}},
+		{
+			// An inflated completion count is otherwise indistinguishable from a
+			// long generation; the upstream's own total is what contradicts it.
+			"parts exceed stated total",
+			&Usage{PromptTokens: 100, CompletionTokens: 1_000_000, TotalTokens: 110},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeCost(cand, tc.usage, 0)
+			if got.Known {
+				t.Errorf("Known = true, want false for incoherent usage %+v", tc.usage)
+			}
+			if got.CostMicros != 0 {
+				t.Errorf("CostMicros = %d, want 0", got.CostMicros)
+			}
+		})
+	}
+
+	// A cache read equal to the whole prompt is legitimate (a fully cached
+	// prompt) and must still bill.
+	full := &Usage{PromptTokens: 100, CompletionTokens: 10, CacheReadTokens: 100, CacheIncludedInPrompt: true}
+	if got := computeCost(cand, full, 0); !got.Known {
+		t.Error("a fully-cached prompt must remain billable")
+	}
+	// Anthropic reports an independent net input, so a cache read larger than
+	// it is normal rather than incoherent.
+	netInput := &Usage{PromptTokens: 237, CompletionTokens: 10, CacheReadTokens: 17152, CacheIncludedInPrompt: false}
+	if got := computeCost(cand, netInput, 0); !got.Known {
+		t.Error("cache read may exceed a net (non-inclusive) input")
+	}
+	// An upstream that omits total_tokens leaves it at 0; the bound only
+	// applies when a total was actually stated.
+	noTotal := &Usage{PromptTokens: 100, CompletionTokens: 10}
+	if got := computeCost(cand, noTotal, 0); !got.Known {
+		t.Error("a missing total must not make usage incoherent")
+	}
+	// Exactly-equal parts and total is the normal OpenAI shape.
+	exact := &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110}
+	if got := computeCost(cand, exact, 0); !got.Known {
+		t.Error("prompt+completion == total is the normal case")
+	}
+}
+
+// TestComputeCostGuardsMicrosOverflow: float64→int64 conversion is undefined
+// out of range, so an absurd unit price against a huge-but-coherent token count
+// must yield unknown rather than an arbitrary budget charge.
+func TestComputeCostGuardsMicrosOverflow(t *testing.T) {
+	cand := &model.ModelCandidate{InputPrice: 1e12, OutputPrice: 1e12}
+	usage := &Usage{PromptTokens: 1_000_000_000, CompletionTokens: 1_000_000_000, TotalTokens: 2_000_000_000}
+	got := computeCost(cand, usage, 0)
+	if got.Known {
+		t.Errorf("Known = true, want false when micros overflows int64 (got %d)", got.CostMicros)
 	}
 }
 

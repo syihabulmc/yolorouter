@@ -30,8 +30,12 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 			PromptTokensDetails *struct {
 				CachedTokens int `json:"cached_tokens"`
 			} `json:"prompt_tokens_details,omitempty"`
-			PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
-			PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+			// DeepSeek splits prompt_tokens into hit + miss. Only the hit half is
+			// read: it is the cache-read count. The miss half is the non-cached
+			// remainder, which netPromptTokens already derives as
+			// prompt_tokens - cache_read; it is NOT a cache write (DeepSeek's
+			// cache is implicit and has no separate write line).
+			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens,omitempty"`
 		} `json:"usage,omitempty"`
 	}
 
@@ -74,9 +78,6 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 		if resp.Usage.PromptCacheHitTokens > 0 {
 			// DeepSeek uses prompt_cache_hit_tokens instead of prompt_tokens_details.cached_tokens
 			irResp.Usage.CacheReadTokens = resp.Usage.PromptCacheHitTokens
-		}
-		if resp.Usage.PromptCacheMissTokens > 0 {
-			irResp.Usage.CacheWriteTokens = resp.Usage.PromptCacheMissTokens
 		}
 	}
 
@@ -159,8 +160,12 @@ func (d *StreamDecoder) parseChunk(raw json.RawMessage) []protocols.IRStreamDelt
 			PromptTokensDetails *struct {
 				CachedTokens int `json:"cached_tokens"`
 			} `json:"prompt_tokens_details,omitempty"`
-			PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
-			PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+			// DeepSeek splits prompt_tokens into hit + miss. Only the hit half is
+			// read: it is the cache-read count. The miss half is the non-cached
+			// remainder, which netPromptTokens already derives as
+			// prompt_tokens - cache_read; it is NOT a cache write (DeepSeek's
+			// cache is implicit and has no separate write line).
+			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens,omitempty"`
 		} `json:"usage,omitempty"`
 	}
 
@@ -238,9 +243,6 @@ func (d *StreamDecoder) parseChunk(raw json.RawMessage) []protocols.IRStreamDelt
 		if chunk.Usage.PromptCacheHitTokens > 0 {
 			// DeepSeek uses prompt_cache_hit_tokens instead of prompt_tokens_details.cached_tokens
 			usage.CacheReadTokens = chunk.Usage.PromptCacheHitTokens
-		}
-		if chunk.Usage.PromptCacheMissTokens > 0 {
-			usage.CacheWriteTokens = chunk.Usage.PromptCacheMissTokens
 		}
 		deltas = append(deltas, protocols.DeltaUsage{Usage: usage})
 	}

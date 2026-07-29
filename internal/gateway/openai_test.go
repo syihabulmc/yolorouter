@@ -133,6 +133,54 @@ func TestExtractUsageEmptyObjectIsNil(t *testing.T) {
 	}
 }
 
+// TestExtractUsageCacheReadDialects: the three wire spellings of the cache-READ
+// count all land in CacheReadTokens, so netPromptTokens derives the same net
+// input regardless of which upstream answered. DeepSeek is the one that used to
+// fall through unparsed, leaving its cache reads billed at the full input price.
+func TestExtractUsageCacheReadDialects(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"openai prompt_tokens_details", `{"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":600}}}`},
+		{"anthropic cache_read_input_tokens", `{"usage":{"prompt_tokens":1000,"completion_tokens":10,"cache_read_input_tokens":600}}`},
+		{"deepseek prompt_cache_hit_tokens", `{"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_cache_hit_tokens":600,"prompt_cache_miss_tokens":400}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := extractUsage([]byte(tc.body))
+			if u == nil {
+				t.Fatal("expected usage, got nil")
+			}
+			if u.CacheReadTokens != 600 {
+				t.Errorf("CacheReadTokens = %d, want 600", u.CacheReadTokens)
+			}
+			// The non-cached remainder is what gets billed at the input price
+			// and persisted to request_logs.input_tokens.
+			if got := netPromptTokens(u); got != 400 {
+				t.Errorf("netPromptTokens = %d, want 400", got)
+			}
+		})
+	}
+}
+
+// TestExtractUsageCacheWriteNotDeductedFromPrompt: an upstream that reports an
+// OpenAI-shaped prompt_tokens alongside Anthropic's cache_creation_input_tokens
+// must not have the written tokens deducted — the prompt total never counted
+// them, so subtracting would understate both the bill and the logged input.
+func TestExtractUsageCacheWriteNotDeductedFromPrompt(t *testing.T) {
+	u := extractUsage([]byte(`{"usage":{"prompt_tokens":1000,"completion_tokens":10,"cache_creation_input_tokens":500}}`))
+	if u == nil {
+		t.Fatal("expected usage, got nil")
+	}
+	if u.CacheWriteTokens != 500 {
+		t.Fatalf("CacheWriteTokens = %d, want 500", u.CacheWriteTokens)
+	}
+	if got := netPromptTokens(u); got != 1000 {
+		t.Errorf("netPromptTokens = %d, want 1000 (cache write is outside the prompt total)", got)
+	}
+}
+
 // TestEnsureStreamUsageInjection: for a stream request where the
 // caller did NOT set stream_options.include_usage, the gateway injects it
 // upstream so final usage arrives for cost accounting. Non-stream and

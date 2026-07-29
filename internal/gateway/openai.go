@@ -222,6 +222,11 @@ type wireUsage struct {
 	// Anthropic-style aliases (absent on OpenAI upstreams).
 	CacheCreationInputTokens *int `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     *int `json:"cache_read_input_tokens,omitempty"`
+	// DeepSeek reports its cache-READ count as prompt_cache_hit_tokens rather
+	// than nesting it under prompt_tokens_details. Its companion
+	// prompt_cache_miss_tokens is the non-cached remainder, which
+	// netPromptTokens already derives, so only the hit half is decoded.
+	PromptCacheHitTokens *int `json:"prompt_cache_hit_tokens,omitempty"`
 }
 
 type promptTokensDetails struct {
@@ -247,11 +252,15 @@ func (w *wireUsage) toUsage() *Usage {
 		u.TotalTokens = u.PromptTokens + u.CompletionTokens
 	}
 	// Cache READ: OpenAI reports it under prompt_tokens_details.cached_tokens;
-	// Anthropic reports it directly as cache_read_input_tokens.
-	if w.PromptTokensDetails != nil && w.PromptTokensDetails.CachedTokens != nil {
+	// Anthropic reports it directly as cache_read_input_tokens; DeepSeek as
+	// prompt_cache_hit_tokens.
+	switch {
+	case w.PromptTokensDetails != nil && w.PromptTokensDetails.CachedTokens != nil:
 		u.CacheReadTokens = *w.PromptTokensDetails.CachedTokens
-	} else if w.CacheReadInputTokens != nil {
+	case w.CacheReadInputTokens != nil:
 		u.CacheReadTokens = *w.CacheReadInputTokens
+	case w.PromptCacheHitTokens != nil:
+		u.CacheReadTokens = *w.PromptCacheHitTokens
 	}
 	// Cache WRITE: only Anthropic exposes this (cache_creation_input_tokens).
 	if w.CacheCreationInputTokens != nil {
