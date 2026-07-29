@@ -56,7 +56,7 @@
 
       <div class="kpi">
         <div class="kpi__icon kpi__icon--success">
-          <DollarSign :size="18" />
+          <Coins :size="18" />
         </div>
         <div class="kpi__body">
           <div class="kpi__label">
@@ -188,7 +188,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NButton, useMessage } from 'naive-ui'
 import type { Component } from 'vue'
-import { Activity, AlertTriangle, Boxes, DollarSign, Hourglass, KeyRound, Server, TrendingUp } from '@lucide/vue'
+import { Activity, AlertTriangle, Boxes, Coins, Hourglass, KeyRound, Server, TrendingUp } from '@lucide/vue'
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import EmptyState from '../../components/EmptyState.vue'
