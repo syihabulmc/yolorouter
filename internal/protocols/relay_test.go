@@ -564,6 +564,20 @@ func TestIsBenignPostDoneReadErr_Whitelist(t *testing.T) {
 		{io.ErrUnexpectedEOF, true},
 		{errors.New("http2: response body closed"), true},                              // non-standard HTTP/2 stream close by some upstreams
 		{fmt.Errorf("read body: %w", errors.New("http2: response body closed")), true}, // must still match when wrapped
+		// gateway.ErrIdleTimeout ("idle timeout between chunks"): some 2xx
+		// upstreams send [DONE] + final usage and then just hold the
+		// connection open instead of closing it — the idle-read timeout that
+		// eventually fires on an otherwise fully-delivered stream is benign,
+		// not a genuine interruption. Matched by string (see the doc comment
+		// on IsBenignPostDoneReadErr) since this package cannot import
+		// internal/gateway.
+		{errors.New("idle timeout between chunks"), true},
+		// gateway.ErrFirstByteTimeout ("first byte timeout") is deliberately
+		// NOT exempted: by the time sawDone=true has been observed, the
+		// first byte has necessarily already arrived, so a first-byte
+		// timeout can never legitimately fire post-DONE — if it somehow did,
+		// it must not be silently swallowed as success.
+		{errors.New("first byte timeout"), false},
 		{io.EOF, false}, // a normal EOF should not take this exemption path (handled earlier via errors.Is(rawReadErr, io.EOF))
 		{nil, false},    // defensive: nil must never be treated as benign
 		{errors.New("upstream returned 502"), false}, // a genuine upstream error is never exempted

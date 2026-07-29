@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/yolorouter/yolorouter/internal/service/safehttp"
 )
@@ -20,14 +21,31 @@ type UpstreamClient struct {
 // network path — including the allowPrivate relaxation, so a self-hosted
 // LAN/localhost provider that tests green also relays (config.SecurityConfig.
 // AllowPrivateUpstreams).
-func NewUpstreamClient(allowPrivate bool) *UpstreamClient {
+//
+// headerTimeout bounds the wait for the response headers (the reasoning-model
+// "thinking" phase before the first byte) and is applied to the transport so
+// it stays independent of the per-attempt context that later bounds the body.
+// A zero headerTimeout disables the header-phase bound (kept explicit rather
+// than silently defaulting, so the caller stays in control of the value).
+//
+// connectTimeout bounds each TCP dial to the upstream and is forwarded to the
+// SSRF-safe transport's net.Dialer; it tracks config.GatewayConfig.
+// ConnectTimeout so the admin-tuned value, not a hard-coded constant, governs
+// the gateway path.
+//
+// tlsHandshake bounds the TLS handshake after the TCP connect and is forwarded
+// to transport.TLSHandshakeTimeout; it tracks config.GatewayConfig.
+// TLSHandshakeTimeout so the admin-tuned value governs the gateway path.
+func NewUpstreamClient(allowPrivate bool, headerTimeout, connectTimeout, tlsHandshake time.Duration) *UpstreamClient {
+	transport := safehttp.NewTransport(allowPrivate, connectTimeout, tlsHandshake)
+	transport.ResponseHeaderTimeout = headerTimeout
 	return &UpstreamClient{
 		httpClient: &http.Client{
-			Transport: safehttp.NewTransport(allowPrivate),
+			Transport: transport,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
-			Timeout: 0, // see upstreamDialTimeout comment + relay loop's per-call ctx
+			Timeout: 0, // per-attempt context in the relay loop bounds each call
 		},
 	}
 }

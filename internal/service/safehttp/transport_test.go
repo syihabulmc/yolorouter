@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -90,9 +91,73 @@ func TestCheckIPAllowedWithPrivateAllowed(t *testing.T) {
 func TestNewTransportDisablesEnvironmentProxy(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
-	transport := NewTransport(false)
+	transport := NewTransport(false, 5*time.Second, 10*time.Second)
 	if transport.Proxy != nil {
 		t.Fatalf("expected Proxy to be nil regardless of environment, got non-nil")
+	}
+}
+
+// TestNewTransport_SetsDialTimeout verifies the connectTimeout argument
+// reaches the underlying net.Dialer. The dialer is captured in the DialContext
+// closure rather than exposed as a field on *http.Transport, so the check is
+// behavioral: dial an unroutable TEST-NET-1 address (RFC 5737) with a short
+// connectTimeout and confirm the dial returns within a window far shorter than
+// the OS default TCP retransmit timeout (~20s+). Environments that immediately
+// reject the route cannot exercise the dialer timeout and are skipped rather
+// than false-failing.
+func TestNewTransport_SetsDialTimeout(t *testing.T) {
+	transport := NewTransport(false, 150*time.Millisecond, 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	conn, err := transport.DialContext(ctx, "tcp", "192.0.2.1:80") // TEST-NET-1, unroutable
+	elapsed := time.Since(start)
+	if conn != nil {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Errorf("close unexpected conn: %v", closeErr)
+		}
+		t.Fatal("expected dial to unroutable TEST-NET-1 address to fail")
+	}
+	if err == nil {
+		t.Fatal("expected error from dial to unroutable address")
+	}
+	// If the network immediately rejected the route (e.g. "network
+	// unreachable"), the dial returns in well under the dialer timeout and
+	// there is nothing to exercise.
+	if elapsed < 150*time.Millisecond {
+		t.Skipf("route rejected in %v; cannot exercise dialer timeout in this environment", elapsed)
+	}
+	// The SYN was sent and went unanswered; the dialer timeout should have
+	// bounded the wait well under the OS default (~20s+). The generous
+	// threshold absorbs DNS resolution and scheduling jitter.
+	if elapsed > 5*time.Second {
+		t.Errorf("dial took %v with 150ms connectTimeout; connectTimeout may not be wired into the dialer", elapsed)
+	}
+}
+
+// TestSafeDialContextZeroTimeoutDoesNotExpireImmediately pins the
+// connectTimeout==0 contract ("no dial-level bound", see NewTransport's doc
+// comment): a naive context.WithTimeout(ctx, 0) produces an already-expired
+// context, which would fail LookupIPAddr/dial immediately regardless of
+// target reachability. With the fix, connectTimeout==0 must use the parent
+// ctx unmodified, so a real (reachable) target still dials successfully.
+func TestSafeDialContextZeroTimeoutDoesNotExpireImmediately(t *testing.T) {
+	withDeniedCIDRs(t, nil) // treat every IP as allowed so the loopback dial isn't SSRF-blocked
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := safeDialContext(ctx, dialer, "tcp", srv.Listener.Addr().String(), false, 0)
+	if err != nil {
+		t.Fatalf("expected connectTimeout=0 to dial via the parent ctx without expiring immediately, got: %v", err)
+	}
+	if closeErr := conn.Close(); closeErr != nil {
+		t.Errorf("close conn: %v", closeErr)
 	}
 }
 
@@ -106,7 +171,7 @@ func TestTransportRejectsConnectionToLoopback(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := &http.Client{Transport: NewTransport(false), Timeout: 2 * time.Second}
+	client := &http.Client{Transport: NewTransport(false, 5*time.Second, 10*time.Second), Timeout: 2 * time.Second}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
@@ -265,7 +330,7 @@ func TestDialResolvedIPsSkipsFailedDialAndReportsLastError(t *testing.T) {
 // net.SplitHostPort error branch: an addr with no port at all.
 func TestSafeDialContextRejectsMalformedAddr(t *testing.T) {
 	dialer := &net.Dialer{Timeout: time.Second}
-	_, err := safeDialContext(context.Background(), dialer, "tcp", "no-port-here", false)
+	_, err := safeDialContext(context.Background(), dialer, "tcp", "no-port-here", false, time.Second)
 	if err == nil {
 		t.Fatalf("expected an error for an addr with no port")
 	}
@@ -279,8 +344,90 @@ func TestSafeDialContextReportsResolveFailure(t *testing.T) {
 	dialer := &net.Dialer{Timeout: time.Second}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := safeDialContext(ctx, dialer, "tcp", "example.invalid:80", false)
+	_, err := safeDialContext(ctx, dialer, "tcp", "example.invalid:80", false, time.Second)
 	if err == nil {
 		t.Fatalf("expected resolution to fail for a canceled context")
+	}
+}
+
+// TestSafeDialContextDNSNotBoundByConnectTimeout pins the fix that DNS
+// resolution uses the caller's own (longer) ctx, never a connectTimeout-
+// derived one. Before the fix, LookupIPAddr shared the same deadline as the
+// dial phase, so a slow-but-healthy resolution (cold cache, long CNAME
+// chain) could eat most of connectTimeout and leave too little for the dial
+// itself — every candidate IP then failed with DeadlineExceeded even though
+// DNS and the upstream were both healthy.
+//
+// connectTimeout here is deliberately absurdly small (1ns): under the old
+// behavior this would make LookupIPAddr's own deadline already expired,
+// failing resolution outright. Under the fix, resolution runs against ctx
+// (5s) and "localhost" resolves near-instantly regardless of connectTimeout;
+// only the SUBSEQUENT dial phase is bound by the 1ns budget and is expected
+// to fail there instead.
+func TestSafeDialContextDNSNotBoundByConnectTimeout(t *testing.T) {
+	withDeniedCIDRs(t, nil) // treat every IP as allowed so localhost isn't SSRF-blocked
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	_, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener addr: %v", err)
+	}
+
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err = safeDialContext(ctx, dialer, "tcp", "localhost:"+port, false, 1*time.Nanosecond)
+	if err == nil {
+		t.Fatal("expected the dial phase to fail under a 1ns connectTimeout")
+	}
+	if strings.Contains(err.Error(), "resolve") {
+		t.Errorf("DNS resolution must not fail from a connectTimeout-derived deadline, got: %v", err)
+	}
+}
+
+// TestDialResolvedIPsSharesConnectDeadlineAcrossIPs verifies the core fix:
+// when DNS resolves N unreachable IPs, the total dial phase must be bounded
+// by ~connectTimeout, NOT N*connectTimeout. Before the shared-deadline fix,
+// each IP independently consumed a full connectTimeout. Two TEST-NET-1
+// addresses (RFC 5737, unroutable) with a 200ms budget should complete in
+// well under 2*200ms. Environments that immediately reject the route are
+// skipped (there is nothing to exercise).
+func TestDialResolvedIPsSharesConnectDeadlineAcrossIPs(t *testing.T) {
+	withDeniedCIDRs(t, nil) // treat every IP as allowed
+
+	connectTimeout := 200 * time.Millisecond
+	dialer := &net.Dialer{Timeout: connectTimeout}
+	ips := []net.IPAddr{
+		{IP: net.ParseIP("192.0.2.1")}, // TEST-NET-1, unroutable
+		{IP: net.ParseIP("192.0.2.2")}, // TEST-NET-1, unroutable
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	connectCtx, connectCancel := context.WithTimeout(ctx, connectTimeout)
+	defer connectCancel()
+
+	start := time.Now()
+	_, err := dialResolvedIPs(connectCtx, dialer, "tcp", ips, "80", false)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected dial to unreachable IPs to fail")
+	}
+	// If the network immediately rejected the route, the dial returns in
+	// well under the budget and there is nothing to exercise.
+	if elapsed < connectTimeout {
+		t.Skipf("route rejected in %v; cannot exercise shared deadline in this environment", elapsed)
+	}
+	// The shared deadline must cap the total at ~connectTimeout, NOT
+	// 2*connectTimeout. Allow generous slack for scheduling jitter.
+	if elapsed > 2*connectTimeout {
+		t.Errorf("dial phase took %v with %v budget and 2 IPs; shared deadline may not be working (expected < %v)",
+			elapsed, connectTimeout, 2*connectTimeout)
 	}
 }

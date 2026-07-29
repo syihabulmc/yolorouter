@@ -67,6 +67,9 @@ export interface AttemptRecord {
   status_code: number
   outcome: string
   fail_reason: string
+  // Full URL this attempt dispatched to. Empty when the attempt failed before
+  // any request was sent (provider missing, negotiate/build/decrypt failure).
+  upstream_url: string
 }
 
 // Mirrors service.RequestLogDetail's body fields.
@@ -76,6 +79,12 @@ export interface AttemptRecord {
 // lives on disk instead — see has_stream_body / stream_body_path below).
 export interface RequestLogDetail extends RequestLogRow {
   attempts_detail: AttemptRecord[]
+  // request_path is the caller's ingress path (e.g. /v1/chat/completions);
+  // upstream_url is the full URL the gateway dispatched to for the final
+  // attempt (e.g. https://api.openai.com/v1/chat/completions). Both are ''
+  // when not recorded (pre-migration row or a request rejected pre-relay).
+  request_path: string
+  upstream_url: string
   // request_headers is the caller's headers as a JSON object string, with
   // sensitive headers masked server-side. Empty = not captured.
   request_headers: string

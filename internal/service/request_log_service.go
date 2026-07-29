@@ -99,6 +99,8 @@ type RequestLogDetail struct {
 	APIKeyID             *uint                   `json:"api_key_id"`
 	OwnerLabel           string                  `json:"owner_label"`
 	ModelName            string                  `json:"model_name"`
+	RequestPath          string                  `json:"request_path"`
+	UpstreamURL          string                  `json:"upstream_url"`
 	ProviderID           *uint                   `json:"provider_id"`
 	ProviderName         string                  `json:"provider_name"`
 	IsStream             bool                    `json:"is_stream"`
@@ -254,6 +256,8 @@ func (s *RequestLogService) GetRequestLogDetail(requestID string) (*RequestLogDe
 		APIKeyID:         row.APIKeyID,
 		OwnerLabel:       lookupName(row.APIKeyID, ownerLabels),
 		ModelName:        row.ModelName,
+		RequestPath:      row.RequestPath,
+		UpstreamURL:      row.UpstreamURL,
 		ProviderID:       row.ProviderID,
 		ProviderName:     lookupName(row.ProviderID, providerNames),
 		IsStream:         row.IsStream,

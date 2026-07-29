@@ -80,9 +80,10 @@ func TestGetCurrentVersionOnFreshSQLiteDB(t *testing.T) {
 	// 00012_provider_protocol_endpoints.sql + 00013_request_logs_cache_savings.sql +
 	// 00014_api_keys_allow_all_models.sql +
 	// 00015_system_settings_and_custom_system_prompt.sql +
-	// 00016_input_compression.sql).
-	if version != 16 {
-		t.Fatalf("expected version 16 after all migrations, got %d", version)
+	// 00016_input_compression.sql +
+	// 00017_request_endpoints.sql).
+	if version != 17 {
+		t.Fatalf("expected version 17 after all migrations, got %d", version)
 	}
 }
 

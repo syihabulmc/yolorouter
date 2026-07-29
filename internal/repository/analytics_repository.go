@@ -409,8 +409,12 @@ type CompressTotals struct {
 }
 
 // AggregateCompressTotals returns the platform-wide totals for the filter.
-// total_estimated_tokens sums input_tokens of the same filtered rows so the
-// caller can display tokens_saved as a percentage of total input volume.
+// total_estimated_tokens is the total input volume compression acts on, used
+// as the denominator for tokens_saved as a percentage. input_tokens stores the
+// NET (non-cached) count, but compression processes the full prompt including
+// its cached portion, so cache read/write tokens are added back here — without
+// them a cache-heavy request would understate the denominator and inflate the
+// compression rate (a fully-cached prompt could report ~100%).
 func AggregateCompressTotals(ctx context.Context, db *gorm.DB, f *RequestLogFilter) (*CompressTotals, error) {
 	var row CompressTotals
 	err := f.applyFilter(db.WithContext(ctx)).Select(`
@@ -418,7 +422,7 @@ func AggregateCompressTotals(ctx context.Context, db *gorm.DB, f *RequestLogFilt
 		SUM(CASE WHEN compressors_applied != '' THEN 1 ELSE 0 END) AS compressed_calls,
 		COALESCE(SUM(compress_estimated_tokens_saved), 0) AS tokens_saved,
 		COALESCE(SUM(compress_estimated_cost_saved_micros), 0) AS cost_saved_micros,
-		COALESCE(SUM(input_tokens), 0) AS total_estimated_tokens
+		COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_tokens), 0) AS total_estimated_tokens
 	`[1:]).Scan(&row).Error
 	if err != nil {
 		return nil, err

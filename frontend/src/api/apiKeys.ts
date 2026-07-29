@@ -62,7 +62,7 @@ export interface CreateAPIKeyInput {
   budget_limit_micros?: number
   // CSP fields default to inherit (override=false) when omitted — the create
   // form no longer collects them; they're configured post-creation via the
-  // dedicated KeyCustomPromptModal.
+  // dedicated optimization modal.
   custom_system_prompt_enabled_override?: boolean
   custom_system_prompt_enabled?: boolean
   custom_system_prompt?: string
@@ -79,7 +79,7 @@ export interface CreateAPIKeyResult {
 // remark: undefined = unchanged. expected_updated_at: when set, the backend
 // qualifies the UPDATE with `AND updated_at = ?` and returns 11013 (409) if
 // another writer committed first — the optimistic-lock CAS token captured by
-// KeyCustomPromptModal's authoritative GET on open. Omitted by legacy callers
+// the optimization modal's authoritative GET on open. Omitted by legacy callers
 // (EditKeyModal/CreateKeyModal) to keep their non-CAS behavior.
 export interface UpdateAPIKeyInput {
   owner_label?: string

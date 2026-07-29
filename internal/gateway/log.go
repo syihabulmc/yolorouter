@@ -62,23 +62,44 @@ type costBreakdown struct {
 // rate so the saving is reported on the same basis as the billed cost. It is
 // forced to 0 whenever usage/pricing is unknown, matching CostKnown=false.
 // Candidate prices are CNY per million tokens.
+// netPromptTokens returns the billable/loggable net input token count: the
+// prompt tokens with the cached portion removed. When the source protocol
+// already reports prompt tokens inclusive of cache (OpenAI/Gemini/Responses,
+// CacheIncludedInPrompt=true), the cache-read and cache-write counts are
+// subtracted; when it reports a net input already (Anthropic input_tokens,
+// flag false), PromptTokens is returned unchanged. Floored at 0 so an
+// upstream reporting cache > prompt can't produce a negative. This is the
+// single source of truth for "net input" — both computeCost and the
+// request_logs.input_tokens value go through it, so billing and the persisted
+// count stay consistent across protocols.
+func netPromptTokens(usage *Usage) int {
+	if usage == nil {
+		return 0
+	}
+	n := usage.PromptTokens
+	if usage.CacheIncludedInPrompt {
+		n -= usage.CacheReadTokens + usage.CacheWriteTokens
+	}
+	if n < 0 {
+		return 0 // defensive: a malformed upstream count can't produce negative input/cost
+	}
+	return n
+}
+
 func computeCost(cand *model.ModelCandidate, usage *Usage, compressTokensSaved int) costBreakdown {
 	if usage == nil || cand == nil {
 		return costBreakdown{}
 	}
-	// cost = (prompt − cache_read) × input_price
+	// cost = net_input × input_price
 	//      + cache_read × cache_read_price
 	//      + cache_write × cache_write_price
 	//      + completion × output_price
-	// cache_read tokens are a subset of prompt_tokens (OpenAI), so subtract
-	// them from the input line to avoid double-counting. Candidate prices
-	// are CNY per million tokens.
+	// net_input is the non-cached input (netPromptTokens): cache tokens are
+	// billed on their own lines below, so they must not also be charged at the
+	// input price. Candidate prices are CNY per million tokens.
 	cacheRead := usage.CacheReadTokens
 	cacheWrite := usage.CacheWriteTokens
-	nonCacheInput := usage.PromptTokens - cacheRead
-	if nonCacheInput < 0 {
-		nonCacheInput = 0 // defensive: upstream reporting cache_read > prompt
-	}
+	nonCacheInput := netPromptTokens(usage)
 	// Candidate without a configured cache price bills cache tokens at the
 	// input price (when a candidate has no cache price configured, its cache tokens are billed at the input unit price).
 	cacheReadPrice := cand.InputPrice
@@ -161,7 +182,11 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 	apiKeyID := rc.APIKeyID
 	var inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens int
 	if rc.Usage != nil {
-		inputTokens = rc.Usage.PromptTokens
+		// Persist the NET input (cache excluded) so request_logs.input_tokens
+		// and every SUM(input_tokens) aggregate share one convention across
+		// protocols — cache tokens live in their own columns. Same source of
+		// truth as billing (computeCost also goes through netPromptTokens).
+		inputTokens = netPromptTokens(rc.Usage)
 		outputTokens = rc.Usage.CompletionTokens
 		cacheWriteTokens = rc.Usage.CacheWriteTokens
 		cacheReadTokens = rc.Usage.CacheReadTokens
@@ -203,6 +228,8 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 		CompressEstimatedCostSavedMicros: compressCostSavedMicros,
 		CompressSkipReason:               rc.CompressSkipReason,
 		CompressorsApplied:               compressorsApplied,
+		RequestPath:                      rc.IngressPath,
+		UpstreamURL:                      rc.UpstreamURL,
 		FailReason:                       failPtr,
 		Attempts:                         len(rc.Attempts),
 		DurationMs:                       durationMs,

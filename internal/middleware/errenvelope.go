@@ -29,9 +29,8 @@ func WriteAdminError(c *gin.Context, httpStatus int, code int) {
 }
 
 // WriteAdminErrorWithData is WriteAdminError plus a Data payload —
-// pkg/response has no error-with-data helper of its own (it's kept a
-// verbatim copy of the reference project's package, so the fix belongs
-// here instead of there). AccountLoginLocked's
+// pkg/response has no error-with-data helper of its own, so the caller
+// builds the envelope directly here. AccountLoginLocked's
 // `locked_until` field is the first caller; any future admin error that
 // also needs to carry structured data (e.g. a 429's retry_after) should
 // go through this one place rather than hand-rolling another
@@ -102,7 +101,7 @@ func WriteNamespacedError(c *gin.Context, path string, httpStatus int, adminCode
 		return
 	}
 	status, errType, message, openAICode := gatewayErrorFor(adminCode, httpStatus)
-	ingress := gateway.IngressProtocol(path)
+	ingress := gateway.IngressProtocolForContext(c)
 	if ingress == protocols.ProtocolClaude || ingress == protocols.ProtocolGemini {
 		requestID := c.GetString(RequestIDKey)
 		gateway.WriteIngressError(c, ingress, status, errType, message, requestID)

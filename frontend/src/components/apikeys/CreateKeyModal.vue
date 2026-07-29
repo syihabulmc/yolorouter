@@ -1,9 +1,8 @@
 <!-- frontend/src/components/apikeys/CreateKeyModal.vue
      Two-step modal: form -> one-time plaintext reveal. The plaintext is the
      only chance to see the full key; closing without
-     ticking "I have saved it" requires a second confirmation. Per-key
-     custom-system-prompt is configured post-creation via
-     KeyCustomPromptModal.vue. -->
+     custom-system-prompt and compression are configured post-creation via the
+     optimization modal. -->
 <template>
   <n-modal
     :show="show"
@@ -56,12 +55,9 @@
           :placeholder="t('apiKeys.modelAllowlist')"
         />
       </n-form-item>
-      <n-form-item path="expires_at">
-        <template #label>
-          <HelpLabel :tip="t('apiKeys.expiresAt_tip')">{{ t('apiKeys.expiresAt') }}</HelpLabel>
-        </template>
-        <NDatePicker v-model:value="form.expires_at" type="datetime" clearable class="full-width" />
-      </n-form-item>
+      <div style="position: absolute;top: 17px;left: 254px;">
+        <NDatePicker v-model:value="form.expires_at" type="datetime" clearable class="full-width" :placeholder="t('apiKeys.selectExpiresAt')" />
+      </div>
 
       <div class="limit-section">
         <div class="limit-section__label">{{ t('apiKeys.limitsSection') }}</div>
@@ -99,20 +95,17 @@
         {{ t('apiKeys.plaintextWarning') }}
       </n-alert>
       <n-input :value="plaintext" readonly class="plaintext-field">
-        <template #after>
-          <n-button size="small" @click="onCopy">{{ copied ? t('apiKeys.copied') : t('apiKeys.copy') }}</n-button>
+        <template #suffix>
+          <n-button size="small" @click="onCopy" quaternary >{{ copied ? t('apiKeys.copied') : t('apiKeys.copy') }}</n-button>
         </template>
       </n-input>
-      <NCheckbox v-model:checked="saved" class="saved-confirm">
-        {{ t('apiKeys.savedConfirm') }}
-      </NCheckbox>
     </div>
 
     <template #footer>
       <n-space justify="end">
         <n-button v-if="step === 'form'" @click="emit('update:show', false)">{{ t('apiKeys.cancel') }}</n-button>
         <n-button v-if="step === 'form'" type="primary" :loading="submitting" @click="onGenerate">{{ t('apiKeys.generateButton') }}</n-button>
-        <n-button v-else type="primary" @click="requestClose">{{ t('apiKeys.confirmClose') }}</n-button>
+        <n-button v-else type="primary" @click="copyAndClose">{{ t('apiKeys.confirmClose') }}</n-button>
       </n-space>
     </template>
   </n-modal>
@@ -121,7 +114,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NCheckbox, NDatePicker, NRadio, NRadioGroup, useDialog, useMessage, type FormInst, type FormRules } from 'naive-ui'
+import { NDatePicker, NRadio, NRadioGroup, useDialog, useMessage, type FormInst, type FormRules } from 'naive-ui'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
@@ -143,7 +136,6 @@ const formRef = ref<FormInst | null>(null)
 const submitting = ref(false)
 const step = ref<'form' | 'plaintext'>('form')
 const plaintext = ref('')
-const saved = ref(false)
 const copied = ref(false)
 
 function initialForm() {
@@ -215,26 +207,40 @@ async function onGenerate() {
   }
 }
 
-async function onCopy() {
+// Returns whether the clipboard write succeeded so callers that close on copy
+// can keep the modal open when it fails (e.g. permission denied, or a
+// non-secure HTTP context where navigator.clipboard is undefined) — otherwise
+// the one-time key would be lost with no way to retrieve it.
+async function onCopy(): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(plaintext.value)
     copied.value = true
     setTimeout(() => {
       copied.value = false
     }, 2000)
+    return true
   } catch {
     message.error(t('apiKeys.copyFailed'))
+    return false
   }
 }
 
-// Closing the plaintext view without ticking "I have saved it" requires a
-// second confirmation — the full key is unrecoverable afterwards.
+// The plaintext step's primary button is labelled "Copy and close": copy the
+// one-time key to the clipboard, then close. Copying is itself the save, so
+// actually succeeded, so a failed copy leaves the key on screen to retry.
+async function copyAndClose() {
+  if (await onCopy()) emit('update:show', false)
+}
+
+// Dismissing via the card's X (or Esc, though disabled here) without ticking
+// unrecoverable afterwards. This path never copies, so its confirm button is
+// "close anyway", not the "copy and close" of the primary button.
 function requestClose() {
-  if (step.value === 'plaintext' && !saved.value) {
+  if (step.value === 'plaintext') {
     dialog.warning({
       title: t('apiKeys.unsavedConfirmTitle'),
       content: t('apiKeys.unsavedConfirmContent'),
-      positiveText: t('apiKeys.confirmClose'),
+      positiveText: t('apiKeys.closeAnyway'),
       negativeText: t('apiKeys.cancel'),
       onPositiveClick: () => emit('update:show', false),
     })
@@ -255,7 +261,6 @@ function onUpdateShow(v: boolean) {
 function reset() {
   step.value = 'form'
   Object.assign(form, initialForm())
-  saved.value = false
   copied.value = false
   plaintext.value = ''
 }
@@ -297,9 +302,5 @@ function reset() {
 
 .plaintext-warning {
   margin-bottom: var(--space-1);
-}
-
-.saved-confirm {
-  margin-top: var(--space-1);
 }
 </style>

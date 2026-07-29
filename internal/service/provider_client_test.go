@@ -496,7 +496,7 @@ func TestTestStreamingCompletionAcceptsValidSSEStream(t *testing.T) {
 	}
 }
 
-func TestTestStreamingCompletionRejectsStreamMissingDoneMarker(t *testing.T) {
+func TestTestStreamingCompletionAcceptsStreamWithoutDoneMarker(t *testing.T) {
 	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -508,8 +508,107 @@ func TestTestStreamingCompletionRejectsStreamMissingDoneMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TestStreamingCompletion failed: %v", err)
 	}
+	// A content delta proves the stream works; many OpenAI-compatible upstreams
+	// (Claude-via-OpenAI bridges, aggregators) omit the [DONE] marker, closing
+	// the connection after the last chunk instead.
+	if result.Outcome != TestSuccess {
+		t.Fatalf("expected TestSuccess for a stream with content but no [DONE] marker, got %v (detail %q)", result.Outcome, result.Detail)
+	}
+}
+
+func TestTestStreamingCompletionRejectsStreamWithNoContentDelta(t *testing.T) {
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n") // terminal marker but no content delta
+	})
+	defer srv.Close()
+
+	result, err := c.TestStreamingCompletion(context.Background(), protocols.ProtocolOpenAI, srv.URL, "sk-test", "gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("TestStreamingCompletion failed: %v", err)
+	}
 	if result.Outcome != TestUpstreamError {
-		t.Fatalf("expected TestUpstreamError for a stream with no [DONE] marker, got %v", result.Outcome)
+		t.Fatalf("expected TestUpstreamError for a stream with no content delta, got %v", result.Outcome)
+	}
+	if result.Detail == "" {
+		t.Fatalf("expected non-empty Detail, got %q", result.Detail)
+	}
+}
+
+func TestStreamingCompletionPayloadOpenAILimitsTokens(t *testing.T) {
+	// The OpenAI streaming probe must cap max_tokens (like the basic probe and
+	// the Claude branch) so a large model doesn't generate a full reply just
+	// to verify streaming works — keeping the test sub-second.
+	p := streamingCompletionPayload(protocols.ProtocolOpenAI, "gpt-4o-mini")
+	if p["max_tokens"] != 1 {
+		t.Fatalf("openai streaming payload max_tokens = %v, want 1", p["max_tokens"])
+	}
+	if p["stream"] != true {
+		t.Fatalf("openai streaming payload stream = %v, want true", p["stream"])
+	}
+}
+
+func TestTestStreamingCompletionRejectsRoleOnlyPrelude(t *testing.T) {
+	// OpenAI streams open with a role-only delta (a choice carrying role but
+	// empty content); that prelude alone must not certify streaming — a
+	// broken upstream sending only the prelude then disconnecting should fail.
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+	defer srv.Close()
+
+	result, err := c.TestStreamingCompletion(context.Background(), protocols.ProtocolOpenAI, srv.URL, "sk-test", "gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("TestStreamingCompletion failed: %v", err)
+	}
+	if result.Outcome != TestUpstreamError {
+		t.Fatalf("expected TestUpstreamError for a role-only prelude with no content, got %v (detail %q)", result.Outcome, result.Detail)
+	}
+}
+
+func TestTestStreamingCompletionAcceptsReasoningDelta(t *testing.T) {
+	// Reasoning models stream delta.reasoning_content (often with little or no
+	// delta.content); that must count as produced content so a working
+	// candidate's streaming capability is not cleared.
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+	defer srv.Close()
+
+	result, err := c.TestStreamingCompletion(context.Background(), protocols.ProtocolOpenAI, srv.URL, "sk-test", "gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("TestStreamingCompletion failed: %v", err)
+	}
+	if result.Outcome != TestSuccess {
+		t.Fatalf("expected TestSuccess for a reasoning-content stream, got %v (detail %q)", result.Outcome, result.Detail)
+	}
+}
+
+func TestTestStreamingCompletionRejectsStreamHittingBodyCap(t *testing.T) {
+	// A stream exceeding the 64 KiB body cap without terminating must not be
+	// certified as streaming-capable — the cap was hit, not a clean close.
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		// Emit well past the 64 KiB cap with no [DONE] / no clean close.
+		_, _ = fmt.Fprint(w, strings.Repeat("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n", 4000))
+	})
+	defer srv.Close()
+
+	result, err := c.TestStreamingCompletion(context.Background(), protocols.ProtocolOpenAI, srv.URL, "sk-test", "gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("TestStreamingCompletion failed: %v", err)
+	}
+	if result.Outcome != TestUpstreamError {
+		t.Fatalf("expected TestUpstreamError for a stream hitting the body cap, got %v (detail %q)", result.Outcome, result.Detail)
 	}
 }
 

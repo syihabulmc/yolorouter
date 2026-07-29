@@ -183,3 +183,42 @@ func TestAggregateCompressDailySeriesDSTBoundary(t *testing.T) {
 		}
 	}
 }
+
+// TestAggregateCompressTotalsIncludesCacheInVolume: input_tokens stores the
+// net (non-cached) count, but the compression-rate denominator must reflect
+// the full prompt volume compression acts on, so total_estimated_tokens has to
+// add the cache columns back. Without that, a cache-heavy request understates
+// the denominator and inflates the compression rate.
+func TestAggregateCompressTotalsIncludesCacheInVolume(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	at := time.Date(2026, 7, 20, 6, 0, 0, 0, time.UTC)
+	row := &model.RequestLog{
+		RequestID:                    "cache1",
+		ModelName:                    "test-model",
+		StatusCode:                   200,
+		InputTokens:                  200,   // net, non-cached
+		OutputTokens:                 50,    //
+		CacheReadTokens:              1000,  // cached portion, not in InputTokens
+		CacheWriteTokens:             300,   //
+		CostKnown:                    true,  //
+		CompressorsApplied:           "log", //
+		CompressEstimatedTokensSaved: 100,
+		CreatedAt:                    at,
+	}
+	if err := db.Create(row).Error; err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	start := time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC)
+	f := &RequestLogFilter{StartTime: &start, EndTime: &end}
+
+	totals, err := AggregateCompressTotals(context.Background(), db, f)
+	if err != nil {
+		t.Fatalf("AggregateCompressTotals: %v", err)
+	}
+	// Full input volume = net input + cache read + cache write = 200+1000+300.
+	if totals.TotalEstimatedTokens != 1500 {
+		t.Errorf("total_estimated_tokens = %d, want 1500 (net input + cache read + cache write)", totals.TotalEstimatedTokens)
+	}
+}

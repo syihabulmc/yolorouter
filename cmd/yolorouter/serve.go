@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/router"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
@@ -103,7 +105,7 @@ func runServe(ctx context.Context, args []string) error {
 		return fmt.Errorf("create bodies dir: %w", err)
 	}
 
-	r, err := router.New(app.DB, masterKey, bodiesDir, app.Config.Update, app.Config.Security.AllowPrivateUpstreams)
+	r, err := router.New(app.DB, masterKey, bodiesDir, app.Config.Update, app.Config.Security.AllowPrivateUpstreams, app.Config.Gateway)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -151,7 +153,28 @@ func runServe(ctx context.Context, args []string) error {
 		ReadTimeout:    30 * time.Second,
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
-		WriteTimeout:   0,
+		// WriteTimeout is non-zero so non-streaming endpoints are protected
+		// against slow-read clients (a slow client could otherwise hold a
+		// handler and its concurrency slot open indefinitely). Streaming
+		// relay loops call protocols.ApplyStreamWriteDeadline before each
+		// Write/Flush batch to slide the deadline forward, bounding a slow
+		// client without clearing the server WriteTimeout entirely; the
+		// request-level context timeout (gateway.RequestTimeout) remains as
+		// the streaming backstop.
+		// The value is RequestTimeout + a slack so a non-streaming handler
+		// always has room to write its response even if the upstream consumed
+		// the full request budget, and so a streaming request has coverage
+		// during the pre-first-write gap (e.g. a long TTFT). The slack is
+		// derived from protocols.StreamWriteWindow() — not a separate
+		// hard-coded literal — because it MUST stay >= that window: once a
+		// stream starts writing, ApplyStreamWriteDeadline slides this
+		// server-level WriteTimeout forward on every chunk, but the very
+		// first slide only happens after the pre-first-write gap this slack
+		// covers — a slack shorter than the write window would let the
+		// global WriteTimeout fire before the first slide lands. Deriving
+		// from the same source keeps the invariant true even if
+		// streamWriteWindow's value ever changes.
+		WriteTimeout: app.Config.Gateway.RequestTimeout + protocols.StreamWriteWindow(),
 	}
 
 	// Empty task supervisor. No real periodic task exists yet, so there is
@@ -160,9 +183,35 @@ func runServe(ctx context.Context, args []string) error {
 	// own cancellable context at that point and register with taskWG here.
 	var taskWG sync.WaitGroup
 
+	// Bind the listener up front rather than letting ListenAndServe do it
+	// inside the goroutine: ln.Addr().String() yields the actually-bound
+	// address (e.g. [::]:8080) for the startup log, and a bind failure —
+	// typically a port already in use — surfaces synchronously here instead
+	// of arriving asynchronously through serveErrCh after the rest of
+	// startup has already run.
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	// url is a clickable localhost link for quick local access; addr is the
+	// raw bound socket (e.g. [::]:8070) showing which interface the kernel
+	// actually bound — useful when diagnosing dual-stack or remote access,
+	// since ":port" binds every interface, not just loopback. lan (when
+	// present) is a clickable URL using the host's primary LAN IPv4 so
+	// other devices on the same network can reach the server; it is
+	// omitted when no usable IPv4 can be determined.
+	fields := []zap.Field{
+		zap.String("url", fmt.Sprintf("http://localhost:%d", app.Config.Server.Port)),
+		zap.String("addr", ln.Addr().String()),
+	}
+	if lan := lanListenURL(app.Config.Server.Port); lan != "" {
+		fields = append(fields, zap.String("lan", lan))
+	}
+	logger.Info("http server listening", fields...)
+
 	serveErrCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			serveErrCh <- err
 		}
 	}()
@@ -276,4 +325,34 @@ func gracefulShutdown(srv *http.Server, taskWG *sync.WaitGroup, sigCh <-chan os.
 	// shutdownErr as the CLI command's overall result.
 	logger.Info("shutdown complete")
 	return nil
+}
+
+// lanListenURL returns an http URL rooted at the host's primary LAN IPv4
+// (e.g. "http://192.168.1.5:8080") so other devices on the same network
+// can reach the server. It returns "" when no usable IPv4 is found, in
+// which case the caller omits the field rather than logging a misleading
+// address.
+//
+// The address is obtained by probing the default-route egress interface:
+// opening a UDP "connection" to a public address sends no packets — the
+// kernel only resolves the route and reports the source IP it would use.
+// The default route points at the real network adapter (Wi-Fi/Ethernet),
+// so virtual bridges such as Docker/VM interfaces are naturally skipped
+// because they are never the default egress. If there is no default route
+// (offline host, no gateway), the probe fails and "" is returned.
+func lanListenURL(port int) string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = conn.Close() }()
+	a, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return ""
+	}
+	v4 := a.IP.To4()
+	if v4 == nil {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%d", v4.String(), port)
 }

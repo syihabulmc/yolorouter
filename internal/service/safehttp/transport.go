@@ -111,12 +111,22 @@ func matchCIDR(normalized, original net.IP, cidrs []*net.IPNet) error {
 // reserved, unspecified) stay blocked, and the resolve-once, no-proxy, and dial-first-
 // allowed-IP behavior is unchanged. See config.SecurityConfig.
 // AllowPrivateUpstreams for the security caveat.
-func NewTransport(allowPrivate bool) *http.Transport {
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
+//
+// connectTimeout bounds each TCP dial and is forwarded to the underlying
+// net.Dialer. A zero value means no dial-level bound (the caller, not this
+// package, owns the timeout policy).
+//
+// tlsHandshake bounds the TLS handshake after the TCP connect completes and
+// is forwarded to transport.TLSHandshakeTimeout. A zero value means no
+// handshake-level bound (kept explicit rather than silently defaulting, so
+// the caller stays in control of the value).
+func NewTransport(allowPrivate bool, connectTimeout, tlsHandshake time.Duration) *http.Transport {
+	dialer := &net.Dialer{Timeout: connectTimeout}
 	return &http.Transport{
-		Proxy: nil, // never honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY
+		Proxy:               nil, // never honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY
+		TLSHandshakeTimeout: tlsHandshake,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return safeDialContext(ctx, dialer, network, addr, allowPrivate)
+			return safeDialContext(ctx, dialer, network, addr, allowPrivate, connectTimeout)
 		},
 	}
 }
@@ -126,16 +136,47 @@ func NewTransport(allowPrivate bool) *http.Transport {
 // original hostname is never re-resolved for the actual connection (a
 // second, independent resolution would reopen a
 // DNS-rebinding window between "checked" and "connected").
-func safeDialContext(ctx context.Context, dialer *net.Dialer, network, addr string, allowPrivate bool) (net.Conn, error) {
+//
+// DNS resolution uses ctx (the caller's own, longer-lived budget) directly,
+// NOT connectTimeout. connectTimeout is a dial-phase-only bound: it is
+// enforced as a SHARED deadline across the multi-IP DIAL phase alone (see
+// dialResolvedIPs), applied AFTER resolution has already completed. Sharing
+// connectTimeout across resolution too (a prior version of this function did)
+// let a slow-but-healthy resolution — a cold cache or a long CNAME chain,
+// commonly a few seconds — eat into the dial budget: with a 5s
+// connectTimeout, a 4s resolution left only ~1s for the dial itself, so
+// every candidate IP failed with DeadlineExceeded and the caller saw a bogus
+// failover/502 despite DNS and the upstream both being healthy. Without this
+// dial timeout, each IP would independently consume a full connectTimeout
+// (via dialer.Timeout), so N unreachable IPs would take N*connectTimeout
+// instead of connectTimeout. The shared context deadline is the
+// authoritative dial budget; dialer.Timeout is kept as a per-dial safety net
+// but the context deadline always wins — once it expires, remaining IPs fail
+// immediately with ctx.Err().
+//
+// A zero connectTimeout means "no dial-level bound" (see NewTransport's doc
+// comment) and must NOT reach context.WithTimeout: WithTimeout(ctx, 0)
+// produces an already-expired context, which would fail every dial
+// immediately instead of disabling the bound. In that case the parent ctx is
+// used directly, unmodified, for the dial phase too.
+func safeDialContext(ctx context.Context, dialer *net.Dialer, network, addr string, allowPrivate bool, connectTimeout time.Duration) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, fmt.Errorf("split host/port: %w", err)
 	}
+	// Resolution is bounded only by the caller's own ctx (the per-attempt
+	// budget), never by connectTimeout — see the doc comment above.
 	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %q: %w", host, err)
 	}
-	return dialResolvedIPs(ctx, dialer, network, ips, port, allowPrivate)
+	connectCtx := ctx
+	if connectTimeout > 0 {
+		var cancel context.CancelFunc
+		connectCtx, cancel = context.WithTimeout(ctx, connectTimeout)
+		defer cancel()
+	}
+	return dialResolvedIPs(connectCtx, dialer, network, ips, port, allowPrivate)
 }
 
 // dialResolvedIPs tries each resolved IP in order, skipping any that fails

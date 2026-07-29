@@ -29,6 +29,7 @@ export default {
     modelPricing: '模型价格',
     comingSoon: '即将上线',
     soonBadge: '即将',
+    saveBadge: '省钱',
   },
   auth: {
     setupTitle: '创建首个管理员',
@@ -43,6 +44,9 @@ export default {
     username: '管理员账号',
     password: '密码',
     confirmPassword: '确认密码',
+    usernamePlaceholder: '请输入管理员账号',
+    passwordPlaceholder: '请输入密码',
+    confirmPasswordPlaceholder: '请再次输入密码',
     username_tip: '用于登录后台的管理员账号，3-32 个字符，只能包含字母、数字、短横线和下划线',
     password_tip: '至少 10 位，且同时包含字母和数字，最多 72 字节',
     confirmPassword_tip: '再次输入上面的密码，两次输入必须一致',
@@ -199,6 +203,12 @@ export default {
     editProtocolReverifyWarning: '修改 base URL 或协议会使该供应商的 Key 需要重新验证后才能路由',
     saveSuccess: '已保存',
   },
+  ccswitch: {
+    importAction: '导入到CCS',
+    openFailed: 'CC-Switch 未安装或协议处理程序未注册。请先安装 CC-Switch 或手动复制 API 密钥。',
+    opening: '正在打开 CC Switch...',
+    openSuccess: 'CC-Switch 导入成功，请填写正确的 API Key',
+  },
   models: {
     eyebrow: '模型配置',
     pageTitle: '模型管理',
@@ -275,9 +285,10 @@ export default {
     supportsFunctionCalling: '函数调用',
     supportsFunctionCalling_tip: '该候选是否支持函数调用（function calling），用于路由时按客户端能力匹配',
     testMapping: '测试映射',
-    testMapping_tip: '用上方供应商与模型配置，向上游发送一次真实请求，验证该映射是否可用。「基础文本」测试通过后才能「保存并启用」，测试结果不会自动保存。',
-    testBasic: '基础文本',
-    testBasic_tip: '发送一次普通对话请求，验证基础文本能力；通过后方可启用该候选。',
+    testMapping_tip: '用上方供应商与模型配置，向上游发送一次真实请求，验证该映射是否可用。「测试连接」测试通过后才能「保存并启用」，测试结果不会自动保存。',
+    basicText: '基础文字',
+    testBasic: '测试连接',
+    testBasic_tip: '发送一次普通对话请求，测试连接能力；通过后方可启用该候选。',
     testStreaming: '流式输出',
     testStreaming_tip: '发送一次流式（SSE）请求，验证流式输出是否正常。',
     testFunctionCalling: '函数调用',
@@ -303,7 +314,7 @@ export default {
   },
   apiKeys: {
     eyebrow: '调用凭证',
-    pageTitle: 'API Key 管理',
+    pageTitle: '令牌管理',
     pageDescription: '创建和管理 Yolorouter 调用凭证，配置使用人、模型白名单与限额。',
     searchPlaceholder: '按 Key 前缀或备注搜索',
     filterOwner: '使用人',
@@ -330,7 +341,7 @@ export default {
     statusRevoked: '已吊销',
     noExpiry: '永不过期',
     unlimited: '不限',
-    editLimits: '编辑限额',
+    editLimits: '配置',
     revoke: '吊销',
     createTitle: '新建 API Key',
     editTitle: '编辑 API Key',
@@ -354,6 +365,7 @@ export default {
     budgetLimit: '累计预算上限（元）',
     budgetLimit_tip: '该 Key 累计费用上限，单位人民币元，达到后拒绝新请求，留空表示不限',
     expiresAt: '过期时间',
+    selectExpiresAt: '选择过期时间',
     expiresAt_tip: '该 Key 的过期时间，必须晚于当前时间，留空表示永不过期',
     limitHint: '留空表示不限',
     clearByZeroHint: '清空表示不限',
@@ -370,7 +382,8 @@ export default {
     savedConfirm: '我已保存',
     unsavedConfirmTitle: '尚未确认已保存',
     unsavedConfirmContent: '关闭后完整 Key 将无法找回，确定要关闭吗？',
-    confirmClose: '确定关闭',
+    confirmClose: '复制并关闭',
+    closeAnyway: '仍然关闭',
     createSuccess: 'API Key 已创建',
     saveSuccess: '已保存',
     revokeSuccess: '已吊销',
@@ -417,6 +430,7 @@ export default {
     setupKeyDesc: '创建一个 API Key、勾选可用模型并接入你的应用，即可开始发起请求。',
     setupKeyCta: '创建 API Key',
     setupWaitingTitle: '等待首批请求',
+    requestAddress: '请求地址：',
     setupWaitingDesc: '配置已就绪，接入应用发起第一批请求后，这里会显示概览数据。',
     callsCard: '调用数',
     callsCard_tip: '所选时间范围内的请求总数，含成功、失败、取消',
@@ -834,6 +848,8 @@ export default {
     fieldCacheWriteTokens: '缓存写入 Token',
     fieldCacheReadTokens: '缓存读取 Token',
     fieldCost: '最终成本',
+    fieldRequestEndpoint: '请求 Endpoint',
+    fieldUpstreamEndpoint: '上游 Endpoint',
 
     // Attempts table columns. Each row is one candidate try, in
     // the order the gateway relay loop actually executed.
@@ -851,6 +867,8 @@ export default {
     attempt_statusCode_tip: '上游返回的 HTTP 状态码',
     attempt_failReason: '失败原因',
     attempt_failReason_tip: '该次尝试失败时记录的具体原因，成功时为空',
+    attempt_upstreamEndpoint: '上游 Endpoint',
+    attempt_upstreamEndpoint_tip: '该次尝试实际转发的完整地址；请求未发出就失败时为空',
 
     // Attempt outcome tags — colour group mirrors the relay loop's switch
     // decision, not the raw HTTP status: green = success, amber = key rotation

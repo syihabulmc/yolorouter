@@ -14,8 +14,8 @@ import (
 
 // Recovery recovers from any panic in a later handler, logs it (including
 // the call stack at the point of the panic, via debug.Stack() — pkg/logger
-// is a verbatim copy of the reference project's implementation and doesn't
-// enable zap.AddStacktrace, so without capturing it explicitly here, the
+// is a thin wrapper around zap and doesn't enable zap.AddStacktrace, so
+// without capturing it explicitly here, the
 // log would only ever show the panic value itself, not where it happened),
 // and — if the response hasn't already been written — writes the unified
 // 500 error envelope instead of letting gin's default recovery close the

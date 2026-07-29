@@ -1,22 +1,8 @@
-<!-- frontend/src/components/apikeys/KeyCustomPromptModal.vue
-     Dedicated modal for a single key's custom-system-prompt override. The
-     three-way radio (inherit / on / off) bridges to the two boolean columns
-     the API stores: override=false means inherit the global setting; override
-     true + enabled true means inject the key's own prompt; override true +
-     enabled false means store text but never inject it. Saving PATCHes only
-     the three CSP fields — limits/owner/scope are edited via EditKeyModal.
-
-     Optimistic-lock contract: the modal performs an authoritative GET on
-     open (the list row's CSP values may be stale by the time the admin opens
-     this), captures updated_at as the CAS token, and sends it back as
-     expected_updated_at on save. A 409 (errcode 11013) means another writer
-     committed first — we surface that and re-GET instead of letting two
-     sessions fight over the same key. -->
 <template>
   <n-modal
     :show="show"
     preset="card"
-    :title="t('apiKeys.cspSection')"
+    :title="t('costOptimization.title')"
     style="max-width: 520px"
     :mask-closable="false"
     :close-on-esc="false"
@@ -33,27 +19,43 @@
     >
       <n-form-item>
         <template #label>
-          <HelpLabel :tip="t('apiKeys.cspOverride_tip')">{{ t('apiKeys.cspOverride') }}</HelpLabel>
+          <HelpLabel :tip="t('apiKeys.cspOverride_tip')">{{ t('apiKeys.cspAction') }}</HelpLabel>
         </template>
-        <n-radio-group :value="cspMode" @update:value="onCspModeChange">
-          <n-radio value="inherit">{{ t('apiKeys.cspOverrideInherit') }}</n-radio>
-          <n-radio value="on">{{ t('apiKeys.cspModeOn') }}</n-radio>
-          <n-radio value="off">{{ t('apiKeys.cspModeOff') }}</n-radio>
-        </n-radio-group>
+        <div>
+          <n-radio-group :value="cspMode" @update:value="onCspModeChange">
+            <n-radio value="inherit">{{ t('apiKeys.cspOverrideInherit') }}</n-radio>
+            <n-radio value="on">{{ t('apiKeys.cspModeOn') }}</n-radio>
+            <n-radio value="off">{{ t('apiKeys.cspModeOff') }}</n-radio>
+          </n-radio-group>
+          <p v-if="cspMode !== 'on'" class="mode-hint">{{ cspMode === 'inherit' ? t('apiKeys.cspInheritHint') : t('apiKeys.cspOffHint') }}</p>
+        </div>
       </n-form-item>
-
       <n-form-item v-if="cspMode === 'on'" path="custom_system_prompt">
         <template #label>
-          <HelpLabel :tip="t('apiKeys.cspText_tip')">{{ t('apiKeys.cspText') }}</HelpLabel>
+          <HelpLabel :tip="t('costOptimization.cspTitle_tip')">{{ t('apiKeys.cspText') }}</HelpLabel>
         </template>
         <CustomPromptEditor
           v-model:text="form.custom_system_prompt"
           :autosize="{ minRows: 4 }"
+          :show-input="false"
+          :multiple="true"
           :placeholder="t('apiKeys.cspTextPlaceholder')"
         />
       </n-form-item>
+      <n-form-item >
+        <template #label>
+          <HelpLabel :tip="t('apiKeys.compressOverride_tip')">{{ t('apiKeys.compressAction') }}</HelpLabel>
+        </template>
+        <div>        
+          <n-radio-group :value="compressMode" @update:value="onCompressModeChange">
+            <n-radio value="inherit">{{ t('apiKeys.compressOverrideInherit') }}</n-radio>
+            <n-radio value="on">{{ t('apiKeys.compressModeOn') }}</n-radio>
+            <n-radio value="off">{{ t('apiKeys.compressModeOff') }}</n-radio>
+          </n-radio-group>
+          <p class="mode-hint">{{ compressHint }}</p>
+        </div>
+      </n-form-item>
 
-      <p v-else class="mode-hint">{{ cspMode === 'inherit' ? t('apiKeys.cspInheritHint') : t('apiKeys.cspOffHint') }}</p>
     </n-form>
 
     <template #footer>
@@ -71,7 +73,7 @@ import { useI18n } from 'vue-i18n'
 import { NRadio, NRadioGroup, useMessage, type FormInst, type FormRules } from 'naive-ui'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { displayMessage, APIError } from '../../api/client'
-import { getAPIKey } from '../../api/apiKeys'
+import { getAPIKey, type APIKey } from '../../api/apiKeys'
 import { API_KEY_CONFLICT } from '../../api/errcodes'
 import { customSystemPromptRule } from '../../utils/apiKeyValidators'
 import HelpLabel from '../HelpLabel.vue'
@@ -103,6 +105,8 @@ const form = reactive({
   custom_system_prompt_enabled_override: false,
   custom_system_prompt_enabled: false,
   custom_system_prompt: '',
+  compress_enabled_override: false,
+  compress_enabled: false,
 })
 
 const rules = computed<FormRules>(() => ({
@@ -131,27 +135,47 @@ function onCspModeChange(mode: CspMode) {
   }
 }
 
+// compressMode is the independent counterpart of cspMode: input compression
+// and the custom system prompt are two separate per-key overrides, so this
+// modal edits each with its own three-way radio rather than deriving one from
+// the other.
+type CompressMode = 'inherit' | 'on' | 'off'
+const compressMode = computed<CompressMode>(() => {
+  if (!form.compress_enabled_override) return 'inherit'
+  return form.compress_enabled ? 'on' : 'off'
+})
+const compressHint = computed(() => {
+  if (compressMode.value === 'inherit') return t('apiKeys.compressInheritHint')
+  if (compressMode.value === 'on') return t('apiKeys.compressOnHint')
+  return t('apiKeys.compressOffHint')
+})
+function onCompressModeChange(mode: CompressMode) {
+  if (mode === 'inherit') {
+    form.compress_enabled_override = false
+  } else {
+    form.compress_enabled_override = true
+    form.compress_enabled = mode === 'on'
+  }
+}
+
 // fill adopts the authoritative GET response into the form and captures the
 // CAS token. A failed GET keeps loading=true off and surfaces the error; the
 // modal stays non-editable so a network blip can't trick the admin into
 // saving empty defaults over the real row.
-function fill(override: boolean, enabled: boolean, text: string, updatedAt: string) {
-  form.custom_system_prompt_enabled_override = override
-  form.custom_system_prompt_enabled = enabled
-  form.custom_system_prompt = text
-  expectedUpdatedAt.value = updatedAt
+function fill(key: APIKey) {
+  form.custom_system_prompt_enabled_override = key.custom_system_prompt_enabled_override
+  form.custom_system_prompt_enabled = key.custom_system_prompt_enabled
+  form.custom_system_prompt = key.custom_system_prompt
+  form.compress_enabled_override = key.compress_enabled_override
+  form.compress_enabled = key.compress_enabled
+  expectedUpdatedAt.value = key.updated_at
 }
 
 async function load() {
   loading.value = true
   try {
     const key = await getAPIKey(props.apiKeyId)
-    fill(
-      key.custom_system_prompt_enabled_override,
-      key.custom_system_prompt_enabled,
-      key.custom_system_prompt,
-      key.updated_at,
-    )
+    fill(key)
   } catch (err) {
     message.error(displayMessage(err, t))
     emit('update:show', false)
@@ -173,14 +197,18 @@ async function onSave() {
   }
   saving.value = true
   try {
+
     await store.update(props.apiKeyId, {
       custom_system_prompt_enabled_override: form.custom_system_prompt_enabled_override,
       custom_system_prompt_enabled: form.custom_system_prompt_enabled,
       custom_system_prompt: form.custom_system_prompt,
+      compress_enabled_override: form.compress_enabled_override,
+      compress_enabled: form.compress_enabled,
       // expected_updated_at ties this save to the GET we opened with — a 409
       // means the row moved underneath us and we must re-read before saving.
       expected_updated_at: expectedUpdatedAt.value ?? undefined,
     })
+
     emit('saved')
   } catch (err) {
     if (err instanceof APIError && err.code === API_KEY_CONFLICT) {
@@ -200,13 +228,14 @@ async function onSave() {
 
 <style scoped>
 .mode-hint {
-  margin: 0;
+  margin: 10px 0 0;
   padding: var(--space-2) var(--space-3);
   font-size: var(--text-sm);
   color: var(--color-text-muted);
   background: var(--color-bg-elevated, var(--color-bg));
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
+  width: 470px;
 }
 
 .loading-row {

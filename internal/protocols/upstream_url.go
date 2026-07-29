@@ -118,3 +118,52 @@ func JoinUpstreamURL(base, egressPath string, proto ProtocolID) string {
 	}
 	return base + egressPath
 }
+
+// RedactURL returns a log/audit-safe form of s: it drops userinfo (both
+// username and password — net/url's Redacted masks only the password,
+// leaving username-only userinfo exposed) and the fragment entirely, and
+// reduces the query string to an allowlist of known non-secret parameters
+// (nonSecretQueryParams — e.g. Gemini's alt=sse, which only selects the SSE
+// response format). Credential-bearing parameters under any other name are
+// dropped: redacting by allowlist (default-drop) is safe because an unknown
+// parameter is never silently preserved, so a provider that embeds a token
+// under an unfamiliar name still gets scrubbed. A parse failure passes
+// through unchanged. Use it on any URL before persisting it to a log/audit
+// row or surfacing it in the UI; keep the raw URL only for the actual HTTP
+// request.
+func RedactURL(s string) string {
+	u, err := url.Parse(s)
+	if err != nil {
+		return s
+	}
+	u.User = nil
+	u.Fragment = ""
+	u.RawQuery = redactQuery(u.RawQuery)
+	return u.String()
+}
+
+// nonSecretQueryParams is the allowlist of upstream query parameters that
+// carry routing/protocol semantics rather than credentials. Gemini's alt=sse
+// selects the SSE response shape for streamGenerateContent; dropping it would
+// make the logged URL diverge from the one actually dispatched. Every
+// parameter not in this set is stripped by redactQuery.
+var nonSecretQueryParams = map[string]bool{
+	"alt": true,
+}
+
+// redactQuery keeps only nonSecretQueryParams from rawQuery and re-encodes
+// them, dropping everything else (the default-drop safe path). A malformed
+// query is dropped entirely rather than partially preserved.
+func redactQuery(rawQuery string) string {
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return ""
+	}
+	kept := url.Values{}
+	for key, vs := range values {
+		if nonSecretQueryParams[key] {
+			kept[key] = vs
+		}
+	}
+	return kept.Encode()
+}

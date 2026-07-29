@@ -39,3 +39,21 @@ update:
   # compiled-in default (injected via ldflags at release time). Forks can
   # override it here.
   github_repo: ""
+# Gateway (upstream relay) timeouts. All seven default to the values shown
+# below when the block is absent, so an existing config without a `gateway:`
+# section upgrades automatically. All seven must be > 0. Required ordering
+# (only the pairs that reflect a real same-attempt nesting relationship):
+# header_timeout <= attempt_timeout, first_byte_timeout <= attempt_timeout,
+# and attempt_timeout < request_timeout. connect_timeout and
+# body_idle_timeout bound independent phases (TCP dial, and the inter-chunk
+# gap once the body is already streaming) and are not ordered against each
+# other or against header_timeout — set each to whatever your network and
+# upstreams actually need.
+gateway:
+  connect_timeout: 5s       # TCP dial timeout
+  header_timeout: 600s      # request sent -> response header (TLS handshake is separate; controlled by tls_handshake_timeout)
+  first_byte_timeout: 600s  # response header -> first body chunk (reasoning "thinking" phase; transport.ResponseHeaderTimeout cannot cover this gap)
+  body_idle_timeout: 60s    # max gap between two response chunks (nginx proxy_read_timeout style)
+  attempt_timeout: 20m      # hard wall for a single upstream attempt (one key on one candidate)
+  request_timeout: 30m      # total budget spanning all failover candidates
+  tls_handshake_timeout: 10s # TLS handshake (transport.TLSHandshakeTimeout)

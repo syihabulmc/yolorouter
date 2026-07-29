@@ -76,9 +76,12 @@ var maxStreamBodyFileBytes int64 = 1 << 30 // 1 GiB
 // the [DONE] terminator flag. It returns the exact bytes written to the
 // client (post model-rewrite, post usage-strip) so the caller can append
 // the same caller-facing bytes to the stream capture file — never the raw
-// pre-rewrite upstream line.
-func forwardStreamLine(c *gin.Context, rc *RelayContext, line []byte, usage **Usage, doneSeen *bool) []byte {
-	wroteData, u, done, sent := writeStreamLine(c.Writer, line, rc.OriginalModel, rc.WantsStreamUsage)
+// pre-rewrite upstream line — and any Write error so the caller can stop the
+// pump and classify the failure instead of silently dropping it (a swallowed
+// downstream Write error left the sliding write-deadline protection
+// unenforced on the production passthrough streaming path).
+func forwardStreamLine(c *gin.Context, rc *RelayContext, line []byte, usage **Usage, doneSeen *bool) ([]byte, error) {
+	wroteData, u, done, sent, writeErr := writeStreamLine(c.Writer, line, rc.OriginalModel, rc.WantsStreamUsage)
 	if wroteData {
 		rc.MarkFirstByteSent()
 	}
@@ -88,7 +91,7 @@ func forwardStreamLine(c *gin.Context, rc *RelayContext, line []byte, usage **Us
 	if done {
 		*doneSeen = true
 	}
-	return sent
+	return sent, writeErr
 }
 
 func writeSSEHeader(c *gin.Context) {
@@ -114,36 +117,40 @@ func isDataLine(line []byte) bool {
 // the line was a data line (counts toward the first-byte decision), the
 // usage extracted from this chunk (the final usage chunk carries
 // prompt/completion tokens), done=true if the line was the [DONE]
-// terminator, and sent = the exact bytes written to w (caller-facing,
+// terminator, sent = the exact bytes written to w (caller-facing,
 // post-rewrite/post-usage-strip) — the stream body capture appends
-// this, never the raw pre-rewrite input line.
-func writeStreamLine(w io.Writer, line []byte, externalModel string, keepUsage bool) (wroteData bool, usage *Usage, done bool, sent []byte) {
+// this, never the raw pre-rewrite input line — and writeErr, the error (if
+// any) from the underlying Write. Every branch below still returns wroteData
+// unconditionally (matching the pre-error-propagation behavior of this
+// function): whether a data line's write actually landed on the wire is
+// captured in writeErr, not in wroteData.
+func writeStreamLine(w io.Writer, line []byte, externalModel string, keepUsage bool) (wroteData bool, usage *Usage, done bool, sent []byte, writeErr error) {
 	trimmed := bytes.TrimRight(line, "\r\n")
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
 		// Non-data line (blank separator, event:/id:/retry: headers) —
 		// forward verbatim so the SSE framing stays intact.
-		_, _ = w.Write(line)
-		return false, nil, false, line
+		_, err := w.Write(line)
+		return false, nil, false, line, err
 	}
 	// SSE allows "data:" or "data: " — the optional single space after the
 	// colon is framing, not part of the value.
 	payload := bytes.TrimSpace(trimmed[len("data:"):])
 	if len(payload) == 0 {
-		_, _ = w.Write(line)
-		return true, nil, false, line
+		_, err := w.Write(line)
+		return true, nil, false, line, err
 	}
 	if string(payload) == "[DONE]" {
 		out := []byte("data: [DONE]\n")
-		_, _ = w.Write(out)
-		return true, nil, true, out
+		_, err := w.Write(out)
+		return true, nil, true, out, err
 	}
 	rewritten, u := rewriteStreamChunk(payload, externalModel, keepUsage)
 	out := make([]byte, 0, len(rewritten)+len("data: ")+1)
 	out = append(out, "data: "...)
 	out = append(out, rewritten...)
 	out = append(out, '\n')
-	_, _ = w.Write(out)
-	return true, u, false, out
+	_, err := w.Write(out)
+	return true, u, false, out, err
 }
 
 // rewriteStreamChunk rewrites the model field in one SSE data payload. If
@@ -244,17 +251,33 @@ func usageFromRawMap(m map[string]json.RawMessage) *Usage {
 // appended to it, or the persisted "sent stream chunks" capture would end
 // one frame short of what the real client actually received. The caller
 // closes the file once this function returns.
-func writeStreamErrorEvent(c *gin.Context, rc *RelayContext) {
+// This applies the sliding streamWriteWindow deadline BEFORE the first write
+// (mirroring normal chunk forwarding in the stream pumps) so that a
+// BodyIdleTimeout larger than streamWriteWindow cannot leave the write
+// deadline already expired by the time the terminal error frame is written.
+// Returns the first Write error encountered so callers can react (e.g. skip
+// a subsequent [DONE]); callers that have already committed to finalization
+// may simply discard it.
+func writeStreamErrorEvent(c *gin.Context, rc *RelayContext) error {
+	// Slide the per-write deadline before writing the terminal error frame,
+	// exactly as normal chunk forwarding does. Without this, when
+	// BodyIdleTimeout > streamWriteWindow, the last healthy chunk may have
+	// set a deadline that already expired by the time the upstream breaks
+	// and this function writes the error frame — the client would see a
+	// bare EOF with no protocol error / [DONE], while the capture file
+	// (which appended unconditionally in the old code) recorded bytes that
+	// were never delivered.
+	_ = protocols.ApplyStreamWriteDeadline(c)
 	msg := streamErrorMessage(rc.RequestID)
 	switch rc.Ingress {
 	case protocols.ProtocolClaude:
-		writeClaudeStreamErrorEvent(c, rc, msg)
+		return writeClaudeStreamErrorEvent(c, rc, msg)
 	case protocols.ProtocolGemini:
-		writeGeminiStreamErrorEvent(c, rc, msg)
+		return writeGeminiStreamErrorEvent(c, rc, msg)
 	case protocols.ProtocolResponses:
-		writeResponsesStreamErrorEvent(c, rc, msg)
+		return writeResponsesStreamErrorEvent(c, rc, msg)
 	default:
-		writeOpenAIStreamErrorEvent(c, rc, msg)
+		return writeOpenAIStreamErrorEvent(c, rc, msg)
 	}
 }
 
@@ -269,23 +292,54 @@ func streamErrorMessage(requestID string) string {
 // caller-facing bytes to rc's stream capture file, keeping the two writes
 // (live response, audit capture) from drifting apart at any call site that
 // needs both.
-func writeAndCaptureSSE(c *gin.Context, rc *RelayContext, b []byte) {
-	_, _ = c.Writer.Write(b)
+//
+// The capture file append runs ONLY after a successful Write AND a
+// successful Flush — net/http may buffer a small Write and return nil
+// without having pushed bytes onto the socket; the real delivery error
+// surfaces only on Flush. flushAndCheckError unwraps through gin's
+// responseWriter (which implements http.Flusher and would shadow the
+// underlying writer's FlushError method) to call FlushError on the
+// innermost writer. If either Write or Flush fails, the bytes are NOT
+// appended to the capture file (the client never received them) and the
+// error is returned so the caller can short-circuit subsequent frames.
+func writeAndCaptureSSE(c *gin.Context, rc *RelayContext, b []byte) error {
+	if _, err := c.Writer.Write(b); err != nil {
+		return err
+	}
+	if err := flushAndCheckError(c); err != nil {
+		return err
+	}
 	appendStreamBodyLine(rc, b)
+	return nil
+}
+
+// flushAndCheckError flushes the response writer and returns any deferred
+// write error. Thin wrapper around protocols.FlushAndCheckError: the
+// canonical unwrap-and-flush implementation lives in internal/protocols
+// (this package already depends on it, and protocols cannot depend back on
+// this package), so the IR streaming relay loops and this package's
+// same-protocol passthrough stream pumps share one implementation instead of
+// drifting apart.
+func flushAndCheckError(c *gin.Context) error {
+	return protocols.FlushAndCheckError(c)
 }
 
 // writeOpenAIStreamErrorEvent writes the OpenAI-shaped mid-stream error: an
-// inline `data: {"error":...}` frame followed by `data: [DONE]`.
-func writeOpenAIStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
+// inline `data: {"error":...}` frame followed by `data: [DONE]`. Returns the
+// first Write error so the caller knows whether the terminal frame landed.
+func writeOpenAIStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) error {
 	evt := fmt.Sprintf(`data: {"error":{"message":%q,"type":"upstream_error"}}`+"\n\n", msg)
-	writeAndCaptureSSE(c, rc, []byte(evt))
+	if err := writeAndCaptureSSE(c, rc, []byte(evt)); err != nil {
+		return err
+	}
 	// Terminate the stream so OpenAI SDK clients that block on [DONE] to
 	// finalize their completion unblock promptly instead of hanging until
-	// their own read timeout.
-	writeAndCaptureSSE(c, rc, []byte("data: [DONE]\n\n"))
-	if flusher, ok := c.Writer.(http.Flusher); ok {
-		flusher.Flush()
+	// their own read timeout. Skip once the error frame itself failed —
+	// the client is already gone.
+	if err := writeAndCaptureSSE(c, rc, []byte("data: [DONE]\n\n")); err != nil {
+		return err
 	}
+	return nil
 }
 
 // writeClaudeStreamErrorEvent writes the Anthropic-shaped mid-stream error:
@@ -293,15 +347,15 @@ func writeOpenAIStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
 // envelope. Claude has no [DONE] terminator convention — the Anthropic SDK
 // treats the connection close right after this event as the end of the
 // stream, so nothing further is written.
-func writeClaudeStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
+func writeClaudeStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) error {
 	evt := protocols.SSEEvent{
 		Event: "error",
 		Data:  fmt.Sprintf(`{"type":"error","error":{"type":"api_error","message":%q}}`, msg),
 	}
-	writeAndCaptureSSE(c, rc, []byte(evt.String()))
-	if flusher, ok := c.Writer.(http.Flusher); ok {
-		flusher.Flush()
+	if err := writeAndCaptureSSE(c, rc, []byte(evt.String())); err != nil {
+		return err
 	}
+	return nil
 }
 
 // writeGeminiStreamErrorEvent writes the Gemini-shaped mid-stream error: a
@@ -313,14 +367,14 @@ func writeClaudeStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
 // out with the first upstream chunk), so there is no meaningful per-request
 // status left to report — 500/INTERNAL is the same "opaque upstream failure"
 // choice writeClaudeStreamErrorEvent makes with its fixed api_error type.
-func writeGeminiStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
+func writeGeminiStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) error {
 	const midStreamStatus = http.StatusInternalServerError
 	evt := fmt.Sprintf(`data: {"error":{"code":%d,"message":%q,"status":%q}}`+"\n\n",
 		midStreamStatus, msg, geminiErrorStatus(midStreamStatus))
-	writeAndCaptureSSE(c, rc, []byte(evt))
-	if flusher, ok := c.Writer.(http.Flusher); ok {
-		flusher.Flush()
+	if err := writeAndCaptureSSE(c, rc, []byte(evt)); err != nil {
+		return err
 	}
+	return nil
 }
 
 // writeResponsesStreamErrorEvent writes the Responses-shaped mid-stream
@@ -330,12 +384,37 @@ func writeGeminiStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
 // Responses SSE stream is framed as typed response.* events, never OpenAI
 // Chat's [DONE] sentinel (see this function's doc comment on
 // writeStreamErrorEvent).
-func writeResponsesStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) {
+func writeResponsesStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) error {
 	evt := fmt.Sprintf(`data: {"type":"error","message":%q,"code":null,"param":null}`+"\n\n", msg)
-	writeAndCaptureSSE(c, rc, []byte(evt))
-	if flusher, ok := c.Writer.(http.Flusher); ok {
-		flusher.Flush()
+	if err := writeAndCaptureSSE(c, rc, []byte(evt)); err != nil {
+		return err
 	}
+	return nil
+}
+
+// isClientWriteError reports whether err represents a downstream (client-side)
+// write failure rather than an upstream server fault. The streaming relay
+// loops (IRStreamRelay / IRStreamRelayJSONLines) and the same-protocol
+// passthrough pumps wrap every downstream Write/Flush error with
+// protocols.ErrClientWrite; this classifier matches ONLY that sentinel, so a
+// slow or gone client is not misclassified as AttemptServerError.
+//
+// Only the dedicated sentinel is used for classification — neither a broad
+// net.Error.Timeout() check nor the bare syscalls (EPIPE / ECONNRESET /
+// io.ErrClosedPipe) are matched here. Both are ambiguous on the READ side:
+// an upstream RST while reading the response body surfaces through the exact
+// same syscalls, and context.DeadlineExceeded (upstream attempt timeout)
+// also satisfies net.Error.Timeout(). Only a write-site error explicitly
+// wrapped in ErrClientWrite is unambiguous.
+//
+// The error reaches here wrapped (e.g. "stream write failed: ErrClientWrite:
+// write to client: <root>") via fmt.Errorf("...: %w", ...) chains; errors.As
+// / errors.Is unwrap through all layers.
+func isClientWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, protocols.ErrClientWrite)
 }
 
 // openStreamBodyFile opens (create+append) the per-request stream capture

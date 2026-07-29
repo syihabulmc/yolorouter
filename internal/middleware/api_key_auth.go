@@ -40,7 +40,7 @@ import (
 // native error shape, NOT pkg/response.
 func APIKeyAuth(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ingress := gateway.IngressProtocol(c.Request.URL.Path)
+		ingress := gateway.IngressProtocolForContext(c)
 		requestID := c.GetString(RequestIDKey)
 
 		raw, conflict := resolveAPIKey(c, ingress)

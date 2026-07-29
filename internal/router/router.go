@@ -113,7 +113,7 @@ func validateEmbeddedFrontend(distFS fs.FS) error {
 // allowPrivateUpstreams (config.SecurityConfig.AllowPrivateUpstreams) is
 // forwarded to the provider-test and gateway-relay clients' SSRF transport,
 // letting a self-hosted operator reach a LAN/localhost model server.
-func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool) (*gin.Engine, error) {
+func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig) (*gin.Engine, error) {
 	// fs.Sub never actually errors here, in either build variant: it only
 	// validates that "dist" is a syntactically-valid path string, not that
 	// it exists in web.DistFS (confirmed against io/fs's Sub implementation
@@ -123,10 +123,10 @@ func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg conf
 	// fs.Stat call at each call site below, which correctly reports
 	// "not found" for every path against an empty embedded FS.
 	distFS, _ := fs.Sub(web.DistFS, "dist")
-	return newWithDistFS(distFS, db, providerMasterKey, bodiesDir, updateCfg, allowPrivateUpstreams)
+	return newWithDistFS(distFS, db, providerMasterKey, bodiesDir, updateCfg, allowPrivateUpstreams, gatewayCfg)
 }
 
-func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool) (*gin.Engine, error) {
+func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig) (*gin.Engine, error) {
 	if err := validateEmbeddedFrontend(distFS); err != nil {
 		return nil, err
 	}
@@ -336,12 +336,18 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// gateway.PostChatCompletions/RelayService.Handle dispatch by request
 	// path (gateway.IngressProtocol) to pick the caller's actual wire
 	// protocol.
-	relaySvc := gateway.NewRelayService(db, providerMasterKey, allowPrivateUpstreams, settingsSvc)
+	relaySvc := gateway.NewRelayService(db, providerMasterKey, allowPrivateUpstreams, settingsSvc, gatewayCfg)
 
 	v1 := gatewayGroup(r, "/v1", bodiesDir, db)
 	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))
 	v1.POST("/messages", gateway.PostChatCompletions(relaySvc))
 	v1.POST("/responses", gateway.PostChatCompletions(relaySvc))
+	// Model discovery: GET /v1/models and GET /v1/models/:model are
+	// read-only and bypass RelayService (no provider fan-out, no spend).
+	// They reuse the same APIKeyAuth + body-cap chain the relay POSTs above
+	// use, so a caller presents the same key as for a completion request.
+	v1.GET("/models", gateway.ListModels(db))
+	v1.GET("/models/:model", gateway.RetrieveModel(db))
 
 	v1beta := gatewayGroup(r, "/v1beta", bodiesDir, db)
 	// :modelaction captures the whole "{model}:{action}" path segment (a

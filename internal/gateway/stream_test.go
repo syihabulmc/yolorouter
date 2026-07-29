@@ -126,7 +126,10 @@ func TestUsageFromRawMap(t *testing.T) {
 
 func TestWriteStreamLineDataChunk(t *testing.T) {
 	var buf bytes.Buffer
-	wrote, usage, done, _ := writeStreamLine(&buf, []byte(`data: {"model":"p","choices":[]}`+"\n"), "ext", true)
+	wrote, usage, done, _, writeErr := writeStreamLine(&buf, []byte(`data: {"model":"p","choices":[]}`+"\n"), "ext", true)
+	if writeErr != nil {
+		t.Fatalf("unexpected write error: %v", writeErr)
+	}
 	if !wrote {
 		t.Error("expected wroteData=true for a data line")
 	}
@@ -143,7 +146,10 @@ func TestWriteStreamLineDataChunk(t *testing.T) {
 
 func TestWriteStreamLineDone(t *testing.T) {
 	var buf bytes.Buffer
-	wrote, _, done, _ := writeStreamLine(&buf, []byte("data: [DONE]\n"), "ext", true)
+	wrote, _, done, _, writeErr := writeStreamLine(&buf, []byte("data: [DONE]\n"), "ext", true)
+	if writeErr != nil {
+		t.Fatalf("unexpected write error: %v", writeErr)
+	}
 	if !wrote {
 		t.Error("[DONE] should count as a data line")
 	}
@@ -157,7 +163,10 @@ func TestWriteStreamLineDone(t *testing.T) {
 
 func TestWriteStreamLineNonDataPassthrough(t *testing.T) {
 	var buf bytes.Buffer
-	wrote, _, done, _ := writeStreamLine(&buf, []byte(": keepalive\n"), "ext", true)
+	wrote, _, done, _, writeErr := writeStreamLine(&buf, []byte(": keepalive\n"), "ext", true)
+	if writeErr != nil {
+		t.Fatalf("unexpected write error: %v", writeErr)
+	}
 	if wrote {
 		t.Error("non-data line should not count as data")
 	}
@@ -419,7 +428,7 @@ func TestWriteStreamErrorEventOpenAIIngress(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	rc := &RelayContext{RequestID: "req-openai-mid", Ingress: protocols.ProtocolOpenAI}
 
-	writeStreamErrorEvent(c, rc)
+	_ = writeStreamErrorEvent(c, rc)
 
 	body := rec.Body.String()
 	if !strings.Contains(body, `"type":"upstream_error"`) {
@@ -447,7 +456,7 @@ func TestWriteStreamErrorEventClaudeIngress(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	rc := &RelayContext{RequestID: "req-claude-mid", Ingress: protocols.ProtocolClaude}
 
-	writeStreamErrorEvent(c, rc)
+	_ = writeStreamErrorEvent(c, rc)
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: error") {
@@ -492,7 +501,7 @@ func TestWriteStreamErrorEventCapturesToStreamFile(t *testing.T) {
 			openStreamBodyFile(c, rc)
 			defer closeStreamBodyFile(rc)
 
-			writeStreamErrorEvent(c, rc)
+			_ = writeStreamErrorEvent(c, rc)
 
 			captured, err := os.ReadFile(filepath.Join(dir, rc.RequestID+".stream"))
 			if err != nil {

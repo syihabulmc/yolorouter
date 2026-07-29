@@ -107,8 +107,8 @@ type CreateAPIKeyResult struct {
 
 // UpdateAPIKeyInput is a sparse PATCH: pointer fields are nil = leave
 // unchanged. For the numeric limits, a non-nil 0 is a sentinel meaning "clear
-// this limit" (no cap) — same convention as the reference project, so a PATCH
-// touching only one field can't silently wipe the others. ModelIDs is nil =
+// this limit" (no cap), so a PATCH touching only one field can't
+// silently wipe the others. ModelIDs is nil =
 // leave whitelist unchanged; a non-nil slice replaces it (empty slice clears
 // it). ExpiresAt has no clear-sentinel (no clean zero-value wire
 // representation) — to remove an expiry, revoke and create a new key.

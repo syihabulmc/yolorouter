@@ -270,8 +270,8 @@ func TestGetAPIKeyNotFound(t *testing.T) {
 }
 
 // A PATCH that touches only one field must leave the other limits intact —
-// the reference project switched away from full-overwrite PATCH for exactly
-// this reason (a one-field PATCH silently wiped the others).
+// a full-overwrite PATCH would silently wipe every other limit on a
+// one-field update.
 func TestUpdateAPIKeySparsePatchLeavesOtherLimits(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")

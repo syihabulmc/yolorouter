@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+
+	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
 // maxStreamBufSize caps how much upstream data a stream relay buffer retains,
@@ -32,6 +35,15 @@ const maxStreamBufSize = 2 * 1024 * 1024
 // response.go:314, gemini:383, responses:159), so this only fires for a
 // truly incomplete stream.
 var errStreamTruncated = errors.New("upstream stream ended before completion")
+
+// ErrClientWrite is the sentinel wrapped around every downstream (client-side)
+// Write/Flush failure inside the IR streaming relay loops. It exists so the
+// gateway can distinguish a genuine downstream write fault (slow client,
+// disconnect) from an upstream read timeout (context.DeadlineExceeded also
+// satisfies net.Error.Timeout(), so a broad net.Error check would
+// misclassify upstream timeouts as client-side). Callers use errors.Is to
+// detect it.
+var ErrClientWrite = errors.New("downstream client write failure")
 
 // maxIRResponseBytes caps a single non-stream cross-protocol upstream
 // response body read by IRNonStreamRelay. A buggy or hostile provider can
@@ -83,7 +95,7 @@ func hasMeaningfulUsage(u IRUsage) bool {
 // function — these same error codes indicate a genuine upstream interruption
 // when DONE was never seen.
 //
-// Covers three cases observed in production:
+// Covers four cases observed in production:
 //  1. context.Canceled — the client closes the connection before EOF,
 //     canceling the request context; the HTTP transport returns ctx.Err()
 //     from Read before it would otherwise have returned io.EOF.
@@ -96,10 +108,24 @@ func hasMeaningfulUsage(u IRUsage) bool {
 //     dropping the connection outright), which causes the Go HTTP/2
 //     transport to return this error on the next Read; the error is an
 //     unexported net/http internal var, so it can only be matched by string.
+//  4. gateway.ErrIdleTimeout — some 2xx upstreams send [DONE] plus the final
+//     usage frame and then hold the connection open (no EOF, no RST) instead
+//     of closing it. The gateway wraps resp.Body in an idle-read timeout for
+//     exactly this case; once that idle budget elapses on an otherwise
+//     fully-delivered stream, the timeout is a benign trailing artifact of
+//     the upstream's own keep-alive behavior, not a genuine interruption —
+//     without this case, a successfully completed stream would still get an
+//     extra inline error frame written to it and be misrecorded as
+//     stream_partial, penalizing a provider that actually delivered
+//     everything. gateway.ErrFirstByteTimeout is deliberately NOT included:
+//     by the time DONE has been observed the first byte has necessarily
+//     already arrived, so a first-byte timeout can never fire post-DONE.
 //
 // Exported so the relay layer's same-protocol passthrough path can reuse it,
 // keeping the read-error allowlist consistent across all three streaming
-// helpers.
+// helpers. Matched by string (not errors.Is) because gateway.ErrIdleTimeout
+// lives in internal/gateway, which imports this package — importing it back
+// here would create a cycle.
 func IsBenignPostDoneReadErr(err error) bool {
 	if err == nil {
 		return false
@@ -109,7 +135,13 @@ func IsBenignPostDoneReadErr(err error) bool {
 	}
 	// "http2: response body closed" is an unexported net/http internal error,
 	// so it cannot be matched with errors.Is.
-	return strings.Contains(err.Error(), "http2: response body closed")
+	if strings.Contains(err.Error(), "http2: response body closed") {
+		return true
+	}
+	// gateway.ErrIdleTimeout.Error() == "idle timeout between chunks" — see
+	// case 4 above. Matched by string, not errors.Is/import, to avoid an
+	// import cycle back into internal/gateway.
+	return strings.Contains(err.Error(), "idle timeout between chunks")
 }
 
 // UpstreamBuffer is a minimal interface for recording upstream response data.
@@ -141,30 +173,137 @@ type UpstreamBuffer interface {
 	AppendResponse(data []byte)
 }
 
-// ClearWriteDeadline resets the current request's write deadline to zero
-// (time.Time{}), lifting the global http.Server.WriteTimeout limit for
-// **this streaming request** only. Non-streaming endpoints remain protected
-// by the global WriteTimeout (non-streaming handlers never call this
-// function).
+// streamWriteWindow is the per-write sliding deadline for streaming relay
+// loops. Each batch of Write/Flush calls sets a write deadline of now +
+// streamWriteWindow, so a slow-reading client that stalls a Write is cut
+// within this window rather than holding the handler (and its concurrency
+// slot) open beyond the request timeout. A healthy stream that actively
+// writes resets the deadline on every chunk, keeping the connection alive
+// indefinitely (up to the request-level context timeout).
 //
-// Known trade-off: once cleared, a slow-reading client has no write-idle
-// ceiling and can in theory hold the connection open indefinitely, until the
-// relay's overall context timeout kicks in as a backstop (default 600s for
-// streaming, 180s for non-streaming). A complete fix — sliding idle timeout,
-// Write error propagation, and failure settlement — would require touching
-// every Write/Flush call across all four streaming helpers, which is
-// billing-pipeline-level work and is left for a future iteration.
+// cmd/yolorouter/serve.go's http.Server.WriteTimeout carries a slack on top
+// of gateway.RequestTimeout, derived directly from StreamWriteWindow() (not a
+// separate hard-coded literal) so it can never drift below this value: that
+// slack is what covers a stream's pre-first-write gap before
+// ApplyStreamWriteDeadline gets a chance to slide the deadline forward for
+// the first time.
 //
-// In unit tests, *httptest.ResponseRecorder does not support
-// SetWriteDeadline and returns ErrNotSupported; the production path
-// (*http.response) always supports it. Requires Go 1.20+. **Callers must log
-// a warning that includes the request ID** — silently swallowing this error
-// would let the streaming WriteTimeout protection degrade into a no-op,
-// making a recurrence of the same hard-cancel-after-N-seconds issue
-// invisible.
-func ClearWriteDeadline(c *gin.Context) error {
+// A package var so tests can shrink it to keep the suite sub-second.
+var streamWriteWindow = 60 * time.Second
+
+// streamWriteDeadlineWarnedKey is the gin.Context key used to ensure
+// ApplyStreamWriteDeadline's failure warning is logged at most once per
+// request. A writer that does not support SetWriteDeadline (or a middleware
+// wrapper that forgot to implement Unwrap) fails identically on every
+// subsequent chunk of a stream — without this guard, one unsupported writer
+// would flood the log with one warning per chunk for the entire lifetime of
+// the stream.
+const streamWriteDeadlineWarnedKey = "protocols_stream_write_deadline_warned"
+
+// ApplyStreamWriteDeadline sets a sliding write deadline of now +
+// streamWriteWindow on the response writer. Streaming relay loops call this
+// before each Write/Flush batch so a slow-reading client is bounded by
+// streamWriteWindow. On a writer that does not support SetWriteDeadline
+// (e.g. httptest.ResponseRecorder), the error is non-nil but benign in
+// production (*http.response always supports it) — the caller still gets the
+// error back so tests can assert on it.
+//
+// The first failure for a given request is also logged as a warning carrying
+// the request ID: now that the global http.Server.WriteTimeout is left in
+// place for streaming requests (this sliding deadline is what keeps a slow
+// client from being cut early), a persistently unsupported writer silently
+// disables that protection — an operationally meaningful regression (e.g. a
+// response-writer wrapper that forgot to implement Unwrap) that must not
+// degrade invisibly. Only the first failure per request is logged to avoid
+// flooding the log for the rest of the stream.
+func ApplyStreamWriteDeadline(c *gin.Context) error {
 	rc := http.NewResponseController(c.Writer)
-	return rc.SetWriteDeadline(time.Time{})
+	err := rc.SetWriteDeadline(time.Now().Add(streamWriteWindow))
+	if err != nil && !c.GetBool(streamWriteDeadlineWarnedKey) {
+		c.Set(streamWriteDeadlineWarnedKey, true)
+		logger.Warn("protocols: apply stream write deadline failed",
+			zap.String("request_id", c.GetString("request_id")), zap.Error(err))
+	}
+	return err
+}
+
+// StreamWriteWindow returns the current streamWriteWindow value. Exported
+// for tests that need to shrink it to keep the suite sub-second.
+func StreamWriteWindow() time.Duration { return streamWriteWindow }
+
+// SetStreamWriteWindow sets streamWriteWindow for the duration of a test.
+// The caller is responsible for restoring the original value via t.Cleanup.
+func SetStreamWriteWindow(d time.Duration) { streamWriteWindow = d }
+
+// flusherWithError is the internal interface that net/http's *http.response
+// (production) implements to return a flush error. gin's responseWriter
+// implements http.Flusher but NOT this method, so it would shadow it from
+// http.NewResponseController — hence the manual unwrap in FlushAndCheckError
+// below.
+type flusherWithError interface {
+	FlushError() error
+}
+
+// responseWriterUnwrapper is satisfied by gin's responseWriter (and any
+// middleware wrapper that follows the standard Unwrap convention).
+type responseWriterUnwrapper interface {
+	Unwrap() http.ResponseWriter
+}
+
+// flushErrorWarnedKey is the gin.Context key used to ensure
+// FlushAndCheckError's "writer does not support FlushError" warning is
+// logged at most once per request — mirrors streamWriteDeadlineWarnedKey's
+// rationale (see ApplyStreamWriteDeadline): a writer/middleware wrapper that
+// never reaches FlushError fails identically on every subsequent chunk of a
+// stream, so without this guard one such writer would flood the log with one
+// warning per chunk for the stream's whole lifetime.
+const flushErrorWarnedKey = "protocols_flush_error_warned"
+
+// FlushAndCheckError flushes the response writer and returns any deferred
+// write error. It walks the Unwrap chain past gin's responseWriter (which
+// implements http.Flusher and thus stops http.NewResponseController from
+// discovering the inner FlushError method) to reach the innermost writer. If
+// that writer implements FlushError() error, it is called and its error
+// returned.
+//
+// When no FlushError is found in the chain, this falls back to the plain
+// Flusher (Flush(), no error). In production that fallback is never
+// exercised — gin's responseWriter always unwraps to *http.response, which
+// implements FlushError — but a future middleware wrapper that forgets to
+// implement Unwrap would silently degrade to this no-error fallback,
+// disabling the flush-error-based slow/dead-client detection with zero
+// operational signal. So, mirroring ApplyStreamWriteDeadline's identical
+// guard, the first such fallback per request is logged as a warning (only
+// once, not per chunk, via flushErrorWarnedKey).
+//
+// Exported so both the IR streaming relay loops (this package) and the
+// same-protocol passthrough stream pumps (internal/gateway) share one
+// implementation instead of drifting apart — internal/gateway cannot import
+// this package's caller (it already depends on protocols), so the canonical
+// implementation lives here.
+func FlushAndCheckError(c *gin.Context) error {
+	w := c.Writer
+	var inner http.ResponseWriter = w
+	for {
+		if fe, ok := inner.(flusherWithError); ok {
+			return fe.FlushError()
+		}
+		if u, ok := inner.(responseWriterUnwrapper); ok {
+			inner = u.Unwrap()
+			continue
+		}
+		break
+	}
+	// No FlushError in the chain — fall back to the standard Flusher.
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	if !c.GetBool(flushErrorWarnedKey) {
+		c.Set(flushErrorWarnedKey, true)
+		logger.Warn("protocols: flush writer does not support FlushError, falling back to Flush() (flush-error slow-client detection disabled for this request)",
+			zap.String("request_id", c.GetString("request_id")))
+	}
+	return nil
 }
 
 // WatchClientClose starts a watcher that immediately closes the upstream
@@ -249,10 +388,9 @@ func IRStreamRelay(
 ) (*IRUsage, error) {
 	defer func() { _ = resp.Body.Close() }()
 	defer WatchClientClose(c, resp.Body)()
-	// Note: ClearWriteDeadline is called by the caller (the relay layer),
-	// which has logger context and can log a warning with the request ID on
-	// failure, avoiding a silent error swallow that would degrade the
-	// streaming WriteTimeout protection.
+	// The relay loop uses ApplyStreamWriteDeadline to slide the write
+	// deadline forward on each Write/Flush batch, bounding a slow-reading
+	// client without clearing the server WriteTimeout entirely.
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -265,10 +403,17 @@ func IRStreamRelay(
 	// SSE headers set, so emit() must be the only place that touches the
 	// writer before headerWritten flips true.
 	headerWritten := false
-	emit := func(events []SSEEvent) {
+	emit := func(events []SSEEvent) error {
 		if len(events) == 0 {
-			return
+			return nil
 		}
+		// Slide the write deadline before each write batch so a slow-reading
+		// client is cut within streamWriteWindow instead of blocking the
+		// handler beyond the request timeout. Ignore SetWriteDeadline errors:
+		// on writers that do not support it (e.g. httptest.ResponseRecorder
+		// in unit tests) writes still work, just without deadline protection.
+		// In production (*http.response) the call always succeeds.
+		_ = ApplyStreamWriteDeadline(c)
 		if !headerWritten {
 			c.Header("Content-Type", "text/event-stream")
 			c.Header("Cache-Control", "no-cache")
@@ -281,18 +426,33 @@ func IRStreamRelay(
 				onFirstChunk = nil
 			}
 		}
+		// Bytes are captured to buf only after BOTH the Write and the Flush
+		// below succeed — net/http may buffer a small Write and return nil
+		// without having pushed bytes onto the socket, and the real delivery
+		// error only surfaces on Flush (see FlushAndCheckError). Capturing
+		// before that point (the previous behavior) could record bytes the
+		// client never actually received.
+		var written [][]byte
 		for _, event := range events {
 			s := event.String()
-			_, _ = fmt.Fprint(c.Writer, s)
+			if _, err := fmt.Fprint(c.Writer, s); err != nil {
+				return fmt.Errorf("%w: write to client: %w", ErrClientWrite, err)
+			}
 			if buf != nil {
-				// Caller-facing (post-IR-encode) bytes actually written to the
-				// client — the ONLY capture point that keeps the per-request
-				// stream audit file byte-for-byte identical to what the client
-				// received (see AppendResponse's doc comment).
-				buf.AppendResponse([]byte(s))
+				written = append(written, []byte(s))
 			}
 		}
-		c.Writer.Flush()
+		if err := FlushAndCheckError(c); err != nil {
+			return fmt.Errorf("%w: flush to client: %w", ErrClientWrite, err)
+		}
+		for _, s := range written {
+			// Caller-facing (post-IR-encode) bytes actually written to the
+			// client — the ONLY capture point that keeps the per-request
+			// stream audit file byte-for-byte identical to what the client
+			// received (see AppendResponse's doc comment).
+			buf.AppendResponse(s)
+		}
+		return nil
 	}
 
 	for scanner.Scan() {
@@ -308,7 +468,10 @@ func IRStreamRelay(
 		}
 
 		sig.Accumulate(deltas)
-		emit(encoder.EncodeDeltas(deltas))
+		if werr := emit(encoder.EncodeDeltas(deltas)); werr != nil {
+			u := encoder.Usage()
+			return &u, fmt.Errorf("stream write failed: %w", werr)
+		}
 	}
 
 	// The decoder buffer must be flushed before checking scanner.Err: if the
@@ -324,7 +487,10 @@ func IRStreamRelay(
 	deltas, finishErr := decoder.Finish()
 	sig.Accumulate(deltas)
 	if len(deltas) > 0 {
-		emit(encoder.EncodeDeltas(deltas))
+		if werr := emit(encoder.EncodeDeltas(deltas)); werr != nil {
+			u := encoder.Usage()
+			return &u, fmt.Errorf("stream write failed: %w", werr)
+		}
 	}
 
 	var scanErr error
@@ -364,7 +530,10 @@ func IRStreamRelay(
 	// either — see errStreamTruncated's doc comment.
 	terminalErr := finishErr
 	if finishErr == nil && sig.SawDone {
-		emit(encoder.EncodeDone())
+		if werr := emit(encoder.EncodeDone()); werr != nil {
+			u := encoder.Usage()
+			return &u, fmt.Errorf("stream write failed: %w", werr)
+		}
 		// Only notify the collection point when the stream ended normally
 		// (no finishErr); a failed stream leaves finish_reason unset.
 		if onFinish != nil {
@@ -431,7 +600,17 @@ func IRNonStreamRelay(
 		}
 		CopyUpstreamHeaders(c, resp.Header)
 		c.Writer.WriteHeader(resp.StatusCode)
-		_, _ = c.Writer.Write(body)
+		if _, werr := c.Writer.Write(body); werr != nil {
+			return nil, fmt.Errorf("%w: write error body to client: %w", ErrClientWrite, werr)
+		}
+		// A small error body can land entirely inside net/http's internal
+		// buffer: Write returns nil without the bytes actually reaching the
+		// socket, and the real delivery error only surfaces on Flush.
+		// Without this check a client that disconnects right after a
+		// buffered Write is still recorded as having received the error body.
+		if ferr := FlushAndCheckError(c); ferr != nil {
+			return nil, fmt.Errorf("%w: flush error body to client: %w", ErrClientWrite, ferr)
+		}
 		return nil, nil
 	}
 
@@ -463,7 +642,30 @@ func IRNonStreamRelay(
 	c.Header("Content-Type", "application/json")
 	CopyUpstreamHeaders(c, resp.Header)
 	c.Writer.WriteHeader(resp.StatusCode)
-	_, _ = c.Writer.Write(encoded)
+	// The body was already fully decoded against the upstream response
+	// (irResp.Usage reflects real upstream consumption), so partial usage is
+	// still returned for correct billing below even if the write/flush that
+	// follows fails — only the delivery outcome is a failure.
+	var partialUsage *IRUsage
+	if irResp != nil {
+		partialUsage = &irResp.Usage
+	}
+	if _, werr := c.Writer.Write(encoded); werr != nil {
+		// The error is wrapped in ErrClientWrite so the caller (which also
+		// reaches this same return slot via decErr above) can tell a
+		// downstream write failure apart from an IR decode failure and
+		// classify it as a client write timeout instead of a 2xx success.
+		return partialUsage, fmt.Errorf("%w: write response to client: %w", ErrClientWrite, werr)
+	}
+	// A non-streaming JSON body is often small enough to land entirely
+	// inside net/http's internal buffer: Write returns nil without the
+	// bytes actually reaching the socket, and the real delivery error only
+	// surfaces on Flush. Without this check, a client that disconnects
+	// right after a buffered Write is still recorded as a delivered 2xx —
+	// the classification this whole function exists to get right.
+	if ferr := FlushAndCheckError(c); ferr != nil {
+		return partialUsage, fmt.Errorf("%w: flush response to client: %w", ErrClientWrite, ferr)
+	}
 
 	if irResp != nil {
 		// Non-streaming success path: extract the finish_reason signal from
@@ -508,10 +710,9 @@ func IRStreamRelayJSONLines(
 ) (*IRUsage, error) {
 	defer func() { _ = resp.Body.Close() }()
 	defer WatchClientClose(c, resp.Body)()
-	// Note: ClearWriteDeadline is called by the caller (the relay layer),
-	// which has logger context and can log a warning with the request ID on
-	// failure, avoiding a silent error swallow that would degrade the
-	// streaming WriteTimeout protection.
+	// The relay loop uses ApplyStreamWriteDeadline to slide the write
+	// deadline forward on each Write/Flush batch, bounding a slow-reading
+	// client without clearing the server WriteTimeout entirely.
 
 	buf2 := make([]byte, 4096)
 	var lineBuf []byte
@@ -524,10 +725,14 @@ func IRStreamRelayJSONLines(
 	// point (an unconditional Flush() before any Write/WriteHeader call
 	// would implicitly commit a bare 200 with none of the SSE headers set).
 	headerWritten := false
-	emit := func(events []SSEEvent) {
+	emit := func(events []SSEEvent) error {
 		if len(events) == 0 {
-			return
+			return nil
 		}
+		// Slide the write deadline before each write batch — see
+		// IRStreamRelay's emit() for the full rationale. Ignore
+		// SetWriteDeadline errors on unsupported writers (unit tests).
+		_ = ApplyStreamWriteDeadline(c)
 		if !headerWritten {
 			c.Header("Content-Type", "text/event-stream")
 			c.Header("Cache-Control", "no-cache")
@@ -540,18 +745,30 @@ func IRStreamRelayJSONLines(
 				onFirstChunk = nil
 			}
 		}
+		// See IRStreamRelay's emit() for the full rationale: capture only
+		// after both Write and Flush succeed, since a buffered Write can
+		// return nil before the real delivery error surfaces on Flush.
+		var written [][]byte
 		for _, event := range events {
 			b := []byte(event.String())
-			_, _ = c.Writer.Write(b)
+			if _, err := c.Writer.Write(b); err != nil {
+				return fmt.Errorf("%w: write to client: %w", ErrClientWrite, err)
+			}
 			if buf != nil {
-				// See IRStreamRelay's emit() for the full rationale: this is
-				// the only capture point that keeps the per-request stream
-				// audit file byte-for-byte identical to what the client
-				// received.
-				buf.AppendResponse(b)
+				written = append(written, b)
 			}
 		}
-		c.Writer.Flush()
+		if err := FlushAndCheckError(c); err != nil {
+			return fmt.Errorf("%w: flush to client: %w", ErrClientWrite, err)
+		}
+		for _, b := range written {
+			// See IRStreamRelay's emit() for the full rationale: this is
+			// the only capture point that keeps the per-request stream
+			// audit file byte-for-byte identical to what the client
+			// received.
+			buf.AppendResponse(b)
+		}
+		return nil
 	}
 
 	for {
@@ -576,7 +793,21 @@ func IRStreamRelayJSONLines(
 				}
 
 				sig.Accumulate(deltas)
-				emit(encoder.EncodeDeltas(deltas))
+				if werr := emit(encoder.EncodeDeltas(deltas)); werr != nil {
+					// Return immediately — do NOT fall through to the
+					// leftover-lineBuf / decoder.Finish blocks below.
+					// Those blocks assume a still-writable client: on a
+					// dead connection they would emit() again onto a
+					// broken writer and feed the still-unconsumed
+					// lineBuf tail (which may itself contain an embedded
+					// '\n', i.e. more than one line) to DecodeChunk as if
+					// it were a single line, corrupting decoder state for
+					// no benefit since nothing more can reach the client
+					// anyway. Mirrors IRStreamRelay's identical emit-failure
+					// handling in its own scan loop.
+					usage := encoder.Usage()
+					return &usage, fmt.Errorf("stream write failed: %w", werr)
+				}
 			}
 			// The loop above drains every complete line out of lineBuf;
 			// whatever remains is an incomplete tail still waiting for a
@@ -603,7 +834,10 @@ func IRStreamRelayJSONLines(
 		}
 		deltas, _ := decoder.DecodeChunk(string(lineBuf) + "\n")
 		sig.Accumulate(deltas)
-		emit(encoder.EncodeDeltas(deltas))
+		if werr := emit(encoder.EncodeDeltas(deltas)); werr != nil {
+			usage := encoder.Usage()
+			return &usage, fmt.Errorf("stream write failed: %w", werr)
+		}
 	}
 
 	// Finish is called before judging the read error: the decoder may still
@@ -611,7 +845,10 @@ func IRStreamRelayJSONLines(
 	deltas, finishErr := decoder.Finish()
 	sig.Accumulate(deltas)
 	if len(deltas) > 0 {
-		emit(encoder.EncodeDeltas(deltas))
+		if werr := emit(encoder.EncodeDeltas(deltas)); werr != nil {
+			usage := encoder.Usage()
+			return &usage, fmt.Errorf("stream write failed: %w", werr)
+		}
 	}
 
 	// EOF is a normal end. When the client closes the connection only after
@@ -640,7 +877,10 @@ func IRStreamRelayJSONLines(
 	var terminalErr error
 	switch {
 	case readErr == nil && finishErr == nil && sig.SawDone:
-		emit(encoder.EncodeDone())
+		if werr := emit(encoder.EncodeDone()); werr != nil {
+			usage := encoder.Usage()
+			return &usage, fmt.Errorf("stream write failed: %w", werr)
+		}
 		// Only notify the collection point when the stream ended normally
 		// (no finishErr / readErr); a failed stream leaves finish_reason
 		// unset.

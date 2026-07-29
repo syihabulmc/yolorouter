@@ -11,9 +11,11 @@
 package gateway
 
 import (
+	"context"
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
@@ -35,6 +37,14 @@ type RelayContext struct {
 	// ProtocolOpenAI for non-generateContent actions, so the path alone
 	// distinguishes countTokens / embedContent from real chat.
 	IngressPath string
+	// UpstreamURL is the full URL the gateway dispatched to for the current
+	// candidate's attempt. Reset to "" at the start of each candidate in
+	// relayCandidates so a build-failed candidate never inherits the previous
+	// candidate's URL; set in attemptOne right before the request is sent.
+	// makeAttempt stamps each AttemptRecord with it, and finalize copies it to
+	// the request_logs.upstream_url column under the same "last attempt wins"
+	// rule as UpstreamRequestBody.
+	UpstreamURL string
 	// IsChatEndpoint is computed once in Handle from IngressPath. Both the
 	// compression gate and the CSP injection gate read this bool instead of
 	// recomputing IsChatEndpoint(path) independently.
@@ -66,6 +76,21 @@ type RelayContext struct {
 	// forwards it when the caller asked).
 	WantsStreamUsage bool
 	APIKeyID         uint
+
+	// RequestDeadline is the absolute cutoff for the whole request across all
+	// failover candidates (the request_timeout budget). Set once at Handle
+	// entry as now + gateway.RequestTimeout; each upstream attempt reads it
+	// to derive its own per-attempt cap as min(attempt_timeout,
+	// time.Until(RequestDeadline)) so a request near its total budget can't
+	// start a fresh full-length attempt. Zero before Handle assigns it.
+	RequestDeadline time.Time
+
+	// RequestCtx is the context carrying RequestDeadline, set once at Handle
+	// entry. Candidate queries (model/candidate/key GORM reads) and each
+	// per-attempt context derive from this, so a stalled DB cannot overrun
+	// the total request budget. Without this, the GORM calls used s.db with
+	// no deadline and a stuck query could block past RequestDeadline.
+	RequestCtx context.Context
 
 	// Current-attempt target (overwritten on each candidate switch).
 	Candidate *model.ModelCandidate
@@ -174,6 +199,10 @@ type AttemptRecord struct {
 	StatusCode        int    `json:"status_code"`
 	Outcome           string `json:"outcome"`
 	FailReason        string `json:"fail_reason"`
+	// UpstreamURL is the full URL this attempt dispatched to. Empty for
+	// attempts that failed before any request was sent (provider missing,
+	// negotiate / build / decrypt failures) — they never reached an upstream.
+	UpstreamURL string `json:"upstream_url"`
 }
 
 // Attempt outcomes — drive both the log's fail_reason text and the relay
@@ -203,4 +232,12 @@ type Usage struct {
 	// computeCost. Zero when the upstream didn't report them.
 	CacheWriteTokens int `json:"cache_write_tokens"`
 	CacheReadTokens  int `json:"cache_read_tokens"`
+	// CacheIncludedInPrompt marks whether PromptTokens already counts the
+	// cache-read (and cache-write) tokens. OpenAI-shaped upstreams report
+	// prompt_tokens INCLUSIVE of cache (true); Anthropic's input_tokens is the
+	// net non-cached count (false). netPromptTokens (log.go) uses this flag to
+	// derive the billable/logged net input consistently across protocols, so
+	// the value persisted to request_logs.input_tokens is always the net count
+	// regardless of origin protocol. Not serialized — internal accounting only.
+	CacheIncludedInPrompt bool `json:"-"`
 }

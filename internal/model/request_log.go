@@ -38,15 +38,23 @@ type RequestLog struct {
 	// ran, otherwise a short stable code explaining why it was bypassed
 	// (e.g. 'too_small', 'unsupported_mime'); CompressorsApplied is a
 	// comma-joined list of compressor names that actually fired.
-	CompressEstimatedTokensSaved     int       `gorm:"column:compress_estimated_tokens_saved" json:"compress_estimated_tokens_saved"`
-	CompressEstimatedCostSavedMicros int64     `gorm:"column:compress_estimated_cost_saved_micros" json:"compress_estimated_cost_saved_micros"`
-	CompressSkipReason               string    `gorm:"column:compress_skip_reason" json:"compress_skip_reason"`
-	CompressorsApplied               string    `gorm:"column:compressors_applied" json:"compressors_applied"`
-	FailReason                       *string   `gorm:"column:fail_reason" json:"fail_reason"`
-	Attempts                         int       `gorm:"column:attempts" json:"attempts"`
-	AttemptsDetail                   *string   `gorm:"column:attempts_detail" json:"attempts_detail"`
-	DurationMs                       int64     `gorm:"column:duration_ms" json:"duration_ms"`
-	CreatedAt                        time.Time `gorm:"column:created_at" json:"created_at"`
+	CompressEstimatedTokensSaved     int    `gorm:"column:compress_estimated_tokens_saved" json:"compress_estimated_tokens_saved"`
+	CompressEstimatedCostSavedMicros int64  `gorm:"column:compress_estimated_cost_saved_micros" json:"compress_estimated_cost_saved_micros"`
+	CompressSkipReason               string `gorm:"column:compress_skip_reason" json:"compress_skip_reason"`
+	CompressorsApplied               string `gorm:"column:compressors_applied" json:"compressors_applied"`
+	// RequestPath is the caller's request path (e.g. /v1/chat/completions),
+	// captured at Handle entry from the ingress URL. UpstreamURL is the full
+	// URL the gateway dispatched to for the final attempt (e.g.
+	// https://api.openai.com/v1/chat/completions). Both are empty when no
+	// upstream request was sent (pre-relay rejection) and for rows predating
+	// this column — the detail UI renders the placeholder for empty values.
+	RequestPath    string    `gorm:"column:request_path" json:"request_path"`
+	UpstreamURL    string    `gorm:"column:upstream_url" json:"upstream_url"`
+	FailReason     *string   `gorm:"column:fail_reason" json:"fail_reason"`
+	Attempts       int       `gorm:"column:attempts" json:"attempts"`
+	AttemptsDetail *string   `gorm:"column:attempts_detail" json:"attempts_detail"`
+	DurationMs     int64     `gorm:"column:duration_ms" json:"duration_ms"`
+	CreatedAt      time.Time `gorm:"column:created_at" json:"created_at"`
 }
 
 func (RequestLog) TableName() string { return "request_logs" }

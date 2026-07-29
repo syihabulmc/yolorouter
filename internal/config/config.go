@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,10 +24,37 @@ type Config struct {
 	Log      LogConfig      `yaml:"log"`
 	Security SecurityConfig `yaml:"security"`
 	Update   UpdateConfig   `yaml:"update"`
+	Gateway  GatewayConfig  `yaml:"gateway"`
 }
 
 type ServerConfig struct {
 	Port int `yaml:"port"`
+}
+
+// GatewayConfig holds gateway (upstream relay) timeouts. All fields default
+// to the idle-keepalive values when the `gateway` block is absent, so an
+// upgrade without config changes picks up the new model automatically.
+//
+// Not every relay timeout is admin-tunable: the short first-byte/total
+// budgets used while reading a non-2xx upstream error body
+// (errorBodyFirstByteTimeout / errorBodyTotalBudget in
+// internal/gateway/idle_reader.go) are deliberately fixed at 10s rather than
+// exposed here. They exist purely to keep a stuck error body from stalling
+// candidate failover and bound a diagnostic read, not to shape steady-state
+// traffic, so there is no deployment-specific value worth tuning.
+type GatewayConfig struct {
+	ConnectTimeout time.Duration `yaml:"connect_timeout"`
+	HeaderTimeout  time.Duration `yaml:"header_timeout"`
+	// FirstByteTimeout bounds the wait from response header received to the
+	// first body chunk. Reasoning models often flush a 200 header and then
+	// silently think for minutes before emitting the first token; transport
+	// ResponseHeaderTimeout cannot cover this gap because it stops ticking
+	// as soon as the header arrives. Defaults to 600s (matches HeaderTimeout).
+	FirstByteTimeout    time.Duration `yaml:"first_byte_timeout"`
+	BodyIdleTimeout     time.Duration `yaml:"body_idle_timeout"`
+	AttemptTimeout      time.Duration `yaml:"attempt_timeout"`
+	RequestTimeout      time.Duration `yaml:"request_timeout"`
+	TLSHandshakeTimeout time.Duration `yaml:"tls_handshake_timeout"`
 }
 
 type DatabaseConfig struct {
@@ -95,7 +123,48 @@ func defaults() *Config {
 		// entirely (auto-generated, legacy) keeps updates ON — only an
 		// explicit `enabled: false` disables them.
 		Update: UpdateConfig{Enabled: true},
+		// Gateway defaults mirror every other top-level section (Server,
+		// Database, …) so generateDefaultConfig writes the real idle-keepalive
+		// values to disk instead of five zero-value 0s that diverge from the
+		// actual runtime behaviour and from configs/config.example.yaml.
+		Gateway: DefaultGatewayConfig(),
 	}
+}
+
+// applyGatewayDefaults fills zero-value gateway timeouts with the idle-
+// keepalive defaults so an absent `gateway` block upgrades automatically.
+func applyGatewayDefaults(g *GatewayConfig) {
+	if g.ConnectTimeout == 0 {
+		g.ConnectTimeout = 5 * time.Second
+	}
+	if g.HeaderTimeout == 0 {
+		g.HeaderTimeout = 600 * time.Second
+	}
+	if g.FirstByteTimeout == 0 {
+		g.FirstByteTimeout = 600 * time.Second
+	}
+	if g.BodyIdleTimeout == 0 {
+		g.BodyIdleTimeout = 60 * time.Second
+	}
+	if g.AttemptTimeout == 0 {
+		g.AttemptTimeout = 20 * time.Minute
+	}
+	if g.RequestTimeout == 0 {
+		g.RequestTimeout = 30 * time.Minute
+	}
+	if g.TLSHandshakeTimeout == 0 {
+		g.TLSHandshakeTimeout = 10 * time.Second
+	}
+}
+
+// DefaultGatewayConfig returns a GatewayConfig with the idle-keepalive defaults
+// applied. Callers that need a value-shaped view of the production defaults
+// (including tests in other packages, which cannot reach the unexported
+// applyGatewayDefaults) use this instead of duplicating the literals.
+func DefaultGatewayConfig() GatewayConfig {
+	var g GatewayConfig
+	applyGatewayDefaults(&g)
+	return g
 }
 
 // Load resolves the config path (explicitPath wins if non-empty, otherwise
@@ -313,6 +382,13 @@ func loadStrict(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config file %s: %w", path, err)
 	}
 
+	// Note: applyGatewayDefaults is NOT called here. defaults() already
+	// seeds every gateway field with the idle-keepalive values, and the
+	// yaml decoder only overwrites fields the user actually set — omitted
+	// fields keep their default. An explicit `0s` in the file overrides
+	// the default to zero, which validateGatewayTimeouts rejects (> 0
+	// required), so a typo surfaces as a load error instead of being
+	// silently papered over with the default.
 	if err := validate(cfg); err != nil {
 		return nil, fmt.Errorf("invalid config file %s: %w", path, err)
 	}
@@ -368,6 +444,48 @@ func validate(cfg *Config) error {
 	}
 	if err := validateGitHubRepo(cfg.Update.GitHubRepo); err != nil {
 		return fmt.Errorf("update.github_repo: %w", err)
+	}
+	if err := validateGatewayTimeouts(&cfg.Gateway); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateGatewayTimeouts enforces two kinds of rules:
+//
+//  1. Every field must be strictly positive — a zero/negative value would
+//     make a timer fire immediately or disable a dial timeout outright.
+//
+//  2. Only the ordering constraints that reflect a REAL nesting relationship
+//     between phases of the same attempt:
+//     - header_timeout <= attempt_timeout and first_byte_timeout <=
+//     attempt_timeout: both are post-connect, pre-body-completion budgets
+//     that occur WITHIN a single attempt, so neither can legitimately
+//     exceed the attempt's own total budget.
+//     - attempt_timeout < request_timeout: a single attempt must leave room
+//     for at least the possibility of failover within the total request
+//     budget.
+//
+// ConnectTimeout (TCP dial) and BodyIdleTimeout (inter-chunk gap once the
+// body is already streaming) are deliberately NOT ordered against each
+// other or against HeaderTimeout: they bound independent, non-overlapping
+// phases of the same attempt (dial, then headers, then body), so a
+// dial-timeout/idle-timeout/header-timeout combination like
+// connect_timeout=30s (slow network) + body_idle_timeout=10s (tight
+// steady-state gap) is a perfectly valid deployment choice, not a
+// misconfiguration — a prior version of this function rejected it.
+func validateGatewayTimeouts(g *GatewayConfig) error {
+	if g.ConnectTimeout <= 0 || g.HeaderTimeout <= 0 || g.FirstByteTimeout <= 0 || g.BodyIdleTimeout <= 0 || g.AttemptTimeout <= 0 || g.RequestTimeout <= 0 || g.TLSHandshakeTimeout <= 0 {
+		return fmt.Errorf("gateway: all timeouts must be > 0")
+	}
+	if g.HeaderTimeout > g.AttemptTimeout {
+		return fmt.Errorf("gateway: header_timeout (%v) must be <= attempt_timeout (%v)", g.HeaderTimeout, g.AttemptTimeout)
+	}
+	if g.FirstByteTimeout > g.AttemptTimeout {
+		return fmt.Errorf("gateway: first_byte_timeout (%v) must be <= attempt_timeout (%v)", g.FirstByteTimeout, g.AttemptTimeout)
+	}
+	if g.AttemptTimeout >= g.RequestTimeout {
+		return fmt.Errorf("gateway: attempt_timeout (%v) must be < request_timeout (%v)", g.AttemptTimeout, g.RequestTimeout)
 	}
 	return nil
 }
