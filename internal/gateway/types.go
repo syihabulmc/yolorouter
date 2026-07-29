@@ -11,9 +11,11 @@
 package gateway
 
 import (
+	"context"
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
@@ -74,6 +76,21 @@ type RelayContext struct {
 	// forwards it when the caller asked).
 	WantsStreamUsage bool
 	APIKeyID         uint
+
+	// RequestDeadline is the absolute cutoff for the whole request across all
+	// failover candidates (the request_timeout budget). Set once at Handle
+	// entry as now + gateway.RequestTimeout; each upstream attempt reads it
+	// to derive its own per-attempt cap as min(attempt_timeout,
+	// time.Until(RequestDeadline)) so a request near its total budget can't
+	// start a fresh full-length attempt. Zero before Handle assigns it.
+	RequestDeadline time.Time
+
+	// RequestCtx is the context carrying RequestDeadline, set once at Handle
+	// entry. Candidate queries (model/candidate/key GORM reads) and each
+	// per-attempt context derive from this, so a stalled DB cannot overrun
+	// the total request budget. Without this, the GORM calls used s.db with
+	// no deadline and a stuck query could block past RequestDeadline.
+	RequestCtx context.Context
 
 	// Current-attempt target (overwritten on each candidate switch).
 	Candidate *model.ModelCandidate

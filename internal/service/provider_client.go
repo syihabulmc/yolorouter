@@ -111,6 +111,19 @@ type ProviderClient interface {
 const (
 	providerClientTimeout      = 15 * time.Second
 	providerClientMaxBodyBytes = 64 * 1024
+	// providerClientConnectTimeout bounds each TCP dial during a provider
+	// connection test. Provider connection tests are an admin-only path with
+	// their own timeout model (providerClientTimeout caps the whole call at
+	// 15s; there is no streaming relay and no failover budget), so the dial
+	// bound belongs to this layer rather than being threaded through
+	// GatewayConfig.ConnectTimeout (which governs only the gateway relay path).
+	providerClientConnectTimeout = 5 * time.Second
+	// providerClientTLSHandshakeTimeout bounds the TLS handshake during a
+	// provider connection test. Like providerClientConnectTimeout it belongs to
+	// this admin-only layer (providerClientTimeout caps the whole call at 15s;
+	// no streaming relay, no failover budget) rather than being threaded from
+	// GatewayConfig.TLSHandshakeTimeout, which governs only the relay path.
+	providerClientTLSHandshakeTimeout = 10 * time.Second
 	// providerClientConcurrency caps simultaneous in-flight real provider
 	// test calls across the whole process — chosen
 	// generously enough for a single admin clicking several test buttons in
@@ -130,11 +143,16 @@ type HTTPProviderClient struct {
 // NewHTTPProviderClient builds the connection-test client. allowPrivate is
 // forwarded to safehttp.NewTransport so a self-hosted operator testing a
 // LAN/localhost model server can opt out of the SSRF IP-range denial (see
-// config.SecurityConfig.AllowPrivateUpstreams).
+// config.SecurityConfig.AllowPrivateUpstreams). The dial bound is
+// providerClientConnectTimeout (not GatewayConfig.ConnectTimeout) because
+// connection tests are an admin-only path with their own timeout model
+// (providerClientTimeout=15s overall cap, no streaming relay, no failover
+// budget), so the dial bound stays at this layer instead of being threaded
+// from the gateway config.
 func NewHTTPProviderClient(allowPrivate bool) *HTTPProviderClient {
 	return &HTTPProviderClient{
 		httpClient: &http.Client{
-			Transport: safehttp.NewTransport(allowPrivate),
+			Transport: safehttp.NewTransport(allowPrivate, providerClientConnectTimeout, providerClientTLSHandshakeTimeout),
 			// Never follow redirects. Without this,
 			// Go's default http.Client follows up to 10 redirect hops and
 			// may carry the credential header (the decrypted upstream

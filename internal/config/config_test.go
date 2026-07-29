@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadGeneratesDefaultConfigWhenMissing(t *testing.T) {
@@ -160,9 +163,9 @@ func TestLoadRejectsInvalidDriver(t *testing.T) {
 }
 
 // TestLoadRejectsInvalidLogLevel guards the log.level whitelist: pkg/logger
-// (copied verbatim from the reference project) silently falls back to info
-// on an unparseable level string instead of erroring, so config validation
-// is the only place a typo like "debu" gets caught.
+// silently falls back to info on an unparseable level string instead of
+// erroring, so config validation is the only place a typo like "debu" gets
+// caught.
 func TestLoadRejectsInvalidLogLevel(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -440,5 +443,241 @@ func TestLoadAcceptsEmptyGitHubRepo(t *testing.T) {
 	}
 	if _, err := Load(path); err != nil {
 		t.Fatalf("expected empty github_repo to be accepted, got error: %v", err)
+	}
+}
+
+// TestGatewayTimeoutsDefaults drives a config with NO `gateway:` block through
+// Load: the strict decoder leaves every gateway field at its zero value, and
+// applyGatewayDefaults must then fill the idle-keepalive defaults so an upgrade
+// without config changes picks up the new timeout model automatically. Reuses
+// the chdir-into-empty-tmpdir pattern from TestLoadGeneratesDefaultConfigWhenMissing.
+func TestGatewayTimeoutsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	}()
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Gateway.ConnectTimeout != 5*time.Second {
+		t.Errorf("ConnectTimeout default = %v, want 5s", cfg.Gateway.ConnectTimeout)
+	}
+	if cfg.Gateway.HeaderTimeout != 600*time.Second {
+		t.Errorf("HeaderTimeout default = %v, want 600s", cfg.Gateway.HeaderTimeout)
+	}
+	if cfg.Gateway.FirstByteTimeout != 600*time.Second {
+		t.Errorf("FirstByteTimeout default = %v, want 600s", cfg.Gateway.FirstByteTimeout)
+	}
+	if cfg.Gateway.BodyIdleTimeout != 60*time.Second {
+		t.Errorf("BodyIdleTimeout default = %v, want 60s", cfg.Gateway.BodyIdleTimeout)
+	}
+	if cfg.Gateway.AttemptTimeout != 20*time.Minute {
+		t.Errorf("AttemptTimeout default = %v, want 20m", cfg.Gateway.AttemptTimeout)
+	}
+	if cfg.Gateway.RequestTimeout != 30*time.Minute {
+		t.Errorf("RequestTimeout default = %v, want 30m", cfg.Gateway.RequestTimeout)
+	}
+	if cfg.Gateway.TLSHandshakeTimeout != 10*time.Second {
+		t.Errorf("TLSHandshakeTimeout default = %v, want 10s", cfg.Gateway.TLSHandshakeTimeout)
+	}
+}
+
+// TestGenerateDefaultConfigWritesRealGatewayTimeouts pins the requirement that
+// generateDefaultConfig must write the real idle-keepalive gateway defaults
+// (5s/600s/60s/20m/30m + 10s TLS) to disk, not five 0s. Previously defaults()
+// omitted the Gateway block entirely, so the first-run file landed on disk
+// with zero values that diverged from both the actual runtime behaviour and
+// configs/config.example.yaml.
+func TestGenerateDefaultConfigWritesRealGatewayTimeouts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	// Drive the exact write path: defaults() → marshal → atomicWriteConfig.
+	// generateDefaultConfig also creates directories and re-reads, which is
+	// covered by TestLoadGeneratesDefaultConfigWhenMissing; here the focus is
+	// the ON-DISK content.
+	cfg := defaults()
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal defaults: %v", err)
+	}
+
+	var roundTrip Config
+	if err := yaml.Unmarshal(data, &roundTrip); err != nil {
+		t.Fatalf("unmarshal marshalled defaults: %v", err)
+	}
+
+	want := DefaultGatewayConfig()
+	if roundTrip.Gateway != want {
+		t.Errorf("generated gateway block = %+v, want %+v (real defaults, not 0s)", roundTrip.Gateway, want)
+	}
+
+	// Also assert the literal values so a future change to DefaultGatewayConfig
+	// that accidentally zeroes a field is caught here too.
+	if roundTrip.Gateway.ConnectTimeout != 5*time.Second {
+		t.Errorf("ConnectTimeout in generated file = %v, want 5s", roundTrip.Gateway.ConnectTimeout)
+	}
+	if roundTrip.Gateway.TLSHandshakeTimeout != 10*time.Second {
+		t.Errorf("TLSHandshakeTimeout in generated file = %v, want 10s", roundTrip.Gateway.TLSHandshakeTimeout)
+	}
+
+	// Belt-and-suspenders: write the file and re-load it through the real
+	// Load path, confirming the gateway values survive the full round trip.
+	// Fill a valid provider_master_key so validate() accepts the file.
+	cfg.Security.ProviderMasterKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	data, err = yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("re-marshal defaults with key: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load generated file: %v", err)
+	}
+	if loaded.Gateway != want {
+		t.Errorf("loaded gateway = %+v, want %+v", loaded.Gateway, want)
+	}
+}
+
+// TestGatewayTimeoutsValidation drives every layering-invariant violation
+// through validateGatewayTimeouts individually. Every field must be strictly
+// positive (a zero/negative would make a timer fire immediately or disable a
+// dial timeout). The only ordering constraints enforced are the ones that
+// reflect a real same-attempt nesting relationship: header_timeout <=
+// attempt_timeout, first_byte_timeout <= attempt_timeout, and attempt_timeout
+// < request_timeout. connect_timeout and body_idle_timeout bound independent
+// phases (dial, and inter-chunk body gaps) and are deliberately NOT ordered
+// against each other or against header_timeout — a connect_timeout larger
+// than body_idle_timeout (e.g. a slow network with a tight steady-state gap)
+// is a valid deployment choice, not a misconfiguration. The "header ==
+// attempt (equal allowed)" case pins that the `<=` rule accepts equality — a
+// future refactor flipping it to strict `<` would flip that case to wantErr.
+func TestGatewayTimeoutsValidation(t *testing.T) {
+	valid := GatewayConfig{
+		ConnectTimeout:      5 * time.Second,
+		HeaderTimeout:       600 * time.Second,
+		FirstByteTimeout:    600 * time.Second,
+		BodyIdleTimeout:     60 * time.Second,
+		AttemptTimeout:      20 * time.Minute,
+		RequestTimeout:      30 * time.Minute,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*GatewayConfig)
+		wantErr bool
+	}{
+		{"valid defaults", nil, false},
+		{"zero connect", func(g *GatewayConfig) { g.ConnectTimeout = 0 }, true},
+		{"zero tls_handshake", func(g *GatewayConfig) { g.TLSHandshakeTimeout = 0 }, true},
+		{"zero first_byte", func(g *GatewayConfig) { g.FirstByteTimeout = 0 }, true},
+		// connect_timeout and body_idle_timeout bound independent phases —
+		// a large dial budget with a tight inter-chunk idle budget (or vice
+		// versa) must be accepted, not rejected.
+		{"connect > body_idle (independent phases, must be accepted)", func(g *GatewayConfig) { g.ConnectTimeout = 60 * time.Second }, false},
+		{"body_idle > header (independent phases, must be accepted)", func(g *GatewayConfig) { g.HeaderTimeout = 60 * time.Second }, false},
+		{"header > attempt", func(g *GatewayConfig) { g.HeaderTimeout = 25 * time.Minute }, true},
+		{"header == attempt (equal allowed)", func(g *GatewayConfig) { g.HeaderTimeout = 20 * time.Minute }, false},
+		{"first_byte > attempt", func(g *GatewayConfig) { g.FirstByteTimeout = 25 * time.Minute }, true},
+		{"first_byte == attempt (equal allowed)", func(g *GatewayConfig) { g.FirstByteTimeout = 20 * time.Minute }, false},
+		{"attempt >= request", func(g *GatewayConfig) { g.AttemptTimeout = 30 * time.Minute }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := valid
+			if tc.mutate != nil {
+				tc.mutate(&g)
+			}
+			err := validateGatewayTimeouts(&g)
+			if tc.wantErr && err == nil {
+				t.Errorf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("expected nil, got %v", err)
+			}
+		})
+	}
+}
+
+// TestLoadGatewayRejectsExplicitZeroTimeout pins the behavior that explicit
+// zero timeouts are rejected by validateGatewayTimeouts: with
+// applyGatewayDefaults no longer running inside loadStrict, an explicit
+// `0s` in the file is no longer silently papered over with the default — it
+// reaches validateGatewayTimeouts as 0 and fails the `> 0` check. The user
+// gets an error pointing at the bad field instead of a config that quietly
+// runs with the default while looking like it honors the override.
+func TestLoadGatewayRejectsExplicitZeroTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "server:\n  port: 8080\n" +
+		"database:\n  driver: sqlite\n  sqlite_path: ./data/x.db\n" +
+		"security:\n  provider_master_key: \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n" +
+		"gateway:\n  request_timeout: 0s\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatalf("expected error for gateway.request_timeout: 0s; applyGatewayDefaults must NOT silently default-load it")
+	}
+}
+
+// TestLoadGatewayPartialBlockKeepsDefaultsForOmittedFields pins the behaviour
+// loadStrict relies on: defaults() seeds every gateway field, the yaml
+// decoder only overwrites fields the user set, so a partial `gateway:` block
+// ends up with explicit values where the user wrote them and default values
+// where they didn't — no applyGatewayDefaults pass needed.
+func TestLoadGatewayPartialBlockKeepsDefaultsForOmittedFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// Set only request_timeout; every other gateway field is omitted and
+	// must come back as the built-in default.
+	content := "server:\n  port: 8080\n" +
+		"database:\n  driver: sqlite\n  sqlite_path: ./data/x.db\n" +
+		"security:\n  provider_master_key: \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n" +
+		"gateway:\n  request_timeout: 45m\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// The one explicit field round-trips.
+	if cfg.Gateway.RequestTimeout != 45*time.Minute {
+		t.Errorf("RequestTimeout = %v, want 45m (explicit value)", cfg.Gateway.RequestTimeout)
+	}
+	// Omitted fields keep their defaults().
+	want := DefaultGatewayConfig()
+	if cfg.Gateway.ConnectTimeout != want.ConnectTimeout {
+		t.Errorf("ConnectTimeout = %v, want default %v", cfg.Gateway.ConnectTimeout, want.ConnectTimeout)
+	}
+	if cfg.Gateway.HeaderTimeout != want.HeaderTimeout {
+		t.Errorf("HeaderTimeout = %v, want default %v", cfg.Gateway.HeaderTimeout, want.HeaderTimeout)
+	}
+	if cfg.Gateway.FirstByteTimeout != want.FirstByteTimeout {
+		t.Errorf("FirstByteTimeout = %v, want default %v", cfg.Gateway.FirstByteTimeout, want.FirstByteTimeout)
+	}
+	if cfg.Gateway.BodyIdleTimeout != want.BodyIdleTimeout {
+		t.Errorf("BodyIdleTimeout = %v, want default %v", cfg.Gateway.BodyIdleTimeout, want.BodyIdleTimeout)
+	}
+	if cfg.Gateway.AttemptTimeout != want.AttemptTimeout {
+		t.Errorf("AttemptTimeout = %v, want default %v", cfg.Gateway.AttemptTimeout, want.AttemptTimeout)
+	}
+	if cfg.Gateway.TLSHandshakeTimeout != want.TLSHandshakeTimeout {
+		t.Errorf("TLSHandshakeTimeout = %v, want default %v", cfg.Gateway.TLSHandshakeTimeout, want.TLSHandshakeTimeout)
 	}
 }

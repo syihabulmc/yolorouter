@@ -265,13 +265,9 @@ func (s *RelayService) processDispatchResponseStream(
 	}
 	if rc.FirstByteSent {
 		// Mid-stream failure after the response headers/first bytes went out
-		// — can't switch, can't change HTTP status; emit one inline SSE error
-		// event + close, same as dispatchPassthroughStream's mid-stream
-		// branch.
-		writeStreamErrorEvent(c, rc)
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
-		s.finalize(rc, http.StatusOK, "stream_partial: "+err.Error(), start)
-		return attemptSuccess
+		// — can't switch, can't change HTTP status; same handling as
+		// dispatchPassthroughStream's mid-stream branch.
+		return s.finalizeClientWriteOrPartial(c, rc, err, cand, provider, pk, resp, start)
 	}
 	// Pre-first-byte failure: the IR relay returned before ever writing
 	// headers to the client (onFirstChunk/rc.MarkFirstByteSent never
@@ -280,6 +276,77 @@ func (s *RelayService) processDispatchResponseStream(
 	// dispatchPassthroughStream's pre-first-byte failover branch.
 	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
 	return attemptNextCandidate
+}
+
+// finalizeClientWrite records a downstream Write/Flush failure (already
+// classified by the caller — either via isClientWriteError or a direct
+// client-disconnect check) as attempt outcome AttemptConnError and settles
+// the request as 499 client_write_timeout. Shared by every call site that has
+// already committed a response to the client (status/headers on the wire)
+// and therefore cannot fail over: finalizeClientWriteOrPartial (mid-stream,
+// both the IR and passthrough stream paths), processDispatchResponseNonStream
+// (cross-protocol non-stream), and dispatchPassthroughNonStream (same-
+// protocol non-stream, both its Write and Flush failure branches).
+func (s *RelayService) finalizeClientWrite(rc *RelayContext, err error, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, statusCode int, start time.Time) attemptResult {
+	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, statusCode, AttemptConnError, "client write timeout: "+err.Error()))
+	s.finalize(rc, 499, "client_write_timeout", start)
+	return attemptSuccess
+}
+
+// finalizeClientWriteOrPartial handles a mid-stream failure that occurs after
+// the first byte has already been sent to the client: the response is
+// already committed, so the attempt can neither switch candidates nor change
+// the HTTP status. It classifies err in priority order:
+//
+//  1. A downstream Write/Flush error (isClientWriteError — the dedicated
+//     ErrClientWrite sentinel, wrapped at the exact write site that failed)
+//     — a slow client, or the connection dying on THIS side while
+//     forwarding. Checked FIRST because it is the most specific, unambiguous
+//     signal available: it comes from the write call itself, not a
+//     side-effect. This also has to run before case 2 below because a write
+//     deadline expiring can itself cause c.Request.Context() to observe
+//     Canceled shortly after (net/http's CloseNotify-activated background
+//     reader — started by WatchClientClose — treats any error on the
+//     connection, including one caused by the write side going bad, as a
+//     signal to cancel the request context) — checking the disconnect
+//     condition first would then misreport a genuine slow-client write
+//     timeout as "client disconnected" depending on scheduling.
+//  2. The caller's OWN connection was canceled (isClientDisconnected, or err
+//     itself is context.Canceled) and case 1 didn't already match — a
+//     genuine caller disconnect, not an upstream fault. No inline error
+//     frame is attempted (the connection is dead) and this settles as 499
+//     client_disconnected. This case only arises on the IR cross-protocol
+//     path: passthrough's own stream pumps already turn a caller disconnect
+//     into errClientDisconnected/499 before ever reaching here (see
+//     dispatchPassthroughStream), and their pre-write ctx.Done() checks mean
+//     a mid-stream error from THIS caller's own disconnect never surfaces as
+//     anything else. Without this check, the IR path's context.Canceled
+//     (surfaced as a plain "upstream stream read error: context canceled"
+//     from the scanner, not wrapped in ErrClientWrite or
+//     errClientDisconnected) fell through to the generic server-failure
+//     branch below: an inline error frame was written to an already-dead
+//     connection and the row was misrecorded as stream_partial (blaming the
+//     provider for the caller's own hangup).
+//  3. Any other error is a genuine mid-stream server failure, recorded after
+//     emitting one inline SSE error event.
+//
+// Shared by processDispatchResponseStream (IR path) and
+// dispatchPassthroughStream (passthrough path) — with case 2 now covering
+// the caller-disconnect gap that used to make the two paths diverge, their
+// mid-stream handling really is otherwise identical.
+func (s *RelayService) finalizeClientWriteOrPartial(c *gin.Context, rc *RelayContext, err error, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+	if isClientWriteError(err) {
+		return s.finalizeClientWrite(rc, err, cand, provider, pk, resp.StatusCode, start)
+	}
+	if isClientDisconnected(c) || errors.Is(err, context.Canceled) {
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
+		s.finalize(rc, 499, "client_disconnected", start)
+		return attemptSuccess
+	}
+	_ = writeStreamErrorEvent(c, rc)
+	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
+	s.finalize(rc, http.StatusOK, "stream_partial: "+err.Error(), start)
+	return attemptSuccess
 }
 
 // processDispatchResponseNonStream routes a 2xx non-stream upstream response
@@ -323,6 +390,20 @@ func (s *RelayService) processDispatchResponseNonStream(
 	encoder := modelOverrideResponseEncoder{inner: codecsFor(ingress).ResponseEncoder, model: rc.OriginalModel}
 	usage, err := protocols.IRNonStreamRelay(c, resp, decoder, encoder, rc, nil)
 	if err != nil {
+		if isClientWriteError(err) {
+			// The response was already fully decoded and (partially) written
+			// to the client — status + headers are committed, so this
+			// candidate cannot fail over. Bytes never (fully) reached the
+			// caller, so this must NOT settle as a delivered 2xx success:
+			// record it as a client write failure (499), mirroring the
+			// streaming mid-write handling (finalizeClientWriteOrPartial).
+			// Usage is still preserved for billing — IRNonStreamRelay
+			// returns it even on a write/flush failure, since the upstream
+			// itself was already fully consumed regardless of delivery
+			// outcome.
+			rc.Usage = irUsageToUsage(usage)
+			return s.finalizeClientWrite(rc, err, cand, provider, pk, resp.StatusCode, start)
+		}
 		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "ir decode: "+err.Error()))
 		// IRNonStreamRelay's documented contract is to write nothing to the
 		// client when the 2xx upstream body fails IR decode, so — like the
@@ -481,17 +562,39 @@ func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayCon
 		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "rewrite: "+err.Error()))
 		return attemptNextCandidate
 	}
-	// Raw upstream (pre-rewrite, provider model name) vs.
-	// caller-facing (post-rewrite, external model name) — these two differ
-	// only in the model field, but both must be recorded. Stored
-	// verbatim (v0.1 does not scrub body content).
+	// Raw upstream (pre-rewrite, provider model name) is recorded regardless
+	// of whether the write to the client below succeeds — it's what the
+	// gateway actually consumed from upstream, useful for debugging even
+	// when delivery fails. rc.ResponseBody (the caller-facing body) is only
+	// set once the write below actually succeeds — see the write-failure
+	// branch's comment for why.
 	rc.UpstreamResponseBody = body
-	rc.ResponseBody = rewritten
 	rc.Usage = usage
-	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
 	c.Header("Content-Type", "application/json")
 	c.Writer.WriteHeader(resp.StatusCode)
-	_, _ = c.Writer.Write(rewritten)
+	if _, werr := c.Writer.Write(rewritten); werr != nil {
+		// Status + headers are already committed, so this candidate cannot
+		// fail over. The client never (fully) received these bytes — leave
+		// rc.ResponseBody unset (cleared by rc.clearResponseBodies() above)
+		// so the audit never records an undelivered response as "sent", and
+		// settle this as a client write failure (499), not a delivered 2xx
+		// success — mirrors the streaming mid-write handling
+		// (finalizeClientWriteOrPartial). Usage is still preserved above for
+		// billing: the upstream was already fully consumed regardless of
+		// delivery outcome.
+		return s.finalizeClientWrite(rc, werr, cand, provider, pk, resp.StatusCode, start)
+	}
+	// A few KB of non-stream JSON can land entirely inside net/http's
+	// internal buffer: Write returns nil without the bytes actually
+	// reaching the socket, and the real delivery error only surfaces on
+	// Flush. Without this check a client that disconnects right after a
+	// buffered Write is still recorded as a delivered 2xx — the same class
+	// of bug the streaming write path already guards against.
+	if ferr := flushAndCheckError(c); ferr != nil {
+		return s.finalizeClientWrite(rc, ferr, cand, provider, pk, resp.StatusCode, start)
+	}
+	rc.ResponseBody = rewritten
+	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
 	s.finalize(rc, resp.StatusCode, "", start)
 	return attemptSuccess
 }
@@ -565,12 +668,10 @@ func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContex
 		return attemptSuccess
 	}
 	if rc.FirstByteSent {
-		// Mid-stream failure after the first byte — can't switch,
-		// can't change HTTP status; emit one inline SSE error event + close.
-		writeStreamErrorEvent(c, rc)
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
-		s.finalize(rc, http.StatusOK, "stream_partial: "+err.Error(), start)
-		return attemptSuccess
+		// Mid-stream failure after the first byte — can't switch, can't
+		// change HTTP status; same handling as
+		// processDispatchResponseStream's mid-stream branch.
+		return s.finalizeClientWriteOrPartial(c, rc, err, cand, provider, pk, resp, start)
 	}
 	// Pre-first-byte failure: nothing written yet, can still failover.
 	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
@@ -622,7 +723,6 @@ func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *RelayCon
 	// going to write for this attempt.
 	openStreamBodyFile(c, rc)
 
-	flusher, _ := c.Writer.(http.Flusher)
 	headerWritten := false
 	doneSeen := false // tracks whether upstream emitted the `data: [DONE]` terminator
 	var usage *Usage
@@ -656,29 +756,54 @@ func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *RelayCon
 		line := append(scanner.Bytes(), '\n')
 		switch {
 		case headerWritten:
-			// Flush to the client BEFORE the capture-file append for
-			// efficiency: the append does a redact pass (regexes +
-			// a conditional JSON decode/marshal) plus a disk write, neither
-			// of which the caller should wait on before seeing bytes it
-			// already received — capture is best-effort persistence, not
-			// part of the client-visible streaming path.
-			sent := forwardStreamLine(c, rc, line, &usage, &doneSeen)
-			if flusher != nil {
-				flusher.Flush()
+			// Slide the per-write deadline before each forwarded line so
+			// a slow-reading client is bounded by streamWriteWindow.
+			_ = protocols.ApplyStreamWriteDeadline(c)
+			// A downstream Write/Flush error here (deadline exceeded, broken
+			// pipe) must be wrapped in protocols.ErrClientWrite and returned
+			// immediately: this is the production streaming path (every
+			// provider is openai today, so egress.Passthrough is always
+			// true — see dispatchPassthroughStream's doc comment), so a
+			// swallowed error here is what previously let a slow client hold
+			// its concurrency slot past the sliding write-deadline
+			// protection entirely. isClientWriteError (dispatch.go) only
+			// recognizes the sentinel, not net.Error.Timeout(), because
+			// context.DeadlineExceeded from the upstream attempt also
+			// satisfies that interface.
+			sent, werr := forwardStreamLine(c, rc, line, &usage, &doneSeen)
+			if werr != nil {
+				return usage, fmt.Errorf("%w: passthrough write to client: %w", protocols.ErrClientWrite, werr)
+			}
+			if ferr := flushAndCheckError(c); ferr != nil {
+				return usage, fmt.Errorf("%w: passthrough flush to client: %w", protocols.ErrClientWrite, ferr)
 			}
 			appendStreamBodyLine(rc, sent)
 		case isDataLine(line):
 			// First data frame — commit the SSE headers, flush any buffered
 			// preamble in order, then forward the data line.
+			_ = protocols.ApplyStreamWriteDeadline(c)
 			writeSSEHeader(c)
+			// The 200 status + SSE headers are committed the moment
+			// writeSSEHeader returns — mark first-byte-sent now, before the
+			// preamble/data write below, so a write failure in either one is
+			// classified as a mid-stream failure (no failover, inline error
+			// frame skipped in favor of 499) rather than a pre-first-byte one:
+			// the caller already has a 200 on the wire regardless of whether
+			// these particular bytes land.
+			rc.MarkFirstByteSent()
 			hadPreamble := len(preamble) > 0
 			if hadPreamble {
-				_, _ = c.Writer.Write(preamble)
+				if _, err := c.Writer.Write(preamble); err != nil {
+					return usage, fmt.Errorf("%w: passthrough write preamble to client: %w", protocols.ErrClientWrite, err)
+				}
 			}
 			headerWritten = true
-			sent := forwardStreamLine(c, rc, line, &usage, &doneSeen)
-			if flusher != nil {
-				flusher.Flush()
+			sent, werr := forwardStreamLine(c, rc, line, &usage, &doneSeen)
+			if werr != nil {
+				return usage, fmt.Errorf("%w: passthrough write to client: %w", protocols.ErrClientWrite, werr)
+			}
+			if ferr := flushAndCheckError(c); ferr != nil {
+				return usage, fmt.Errorf("%w: passthrough flush to client: %w", protocols.ErrClientWrite, ferr)
 			}
 			if hadPreamble {
 				// The preamble bytes were just sent to the caller — capture
@@ -974,7 +1099,6 @@ func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *R
 	// passthroughStreamToClient's *usage return.
 	currentUsage := func() *Usage { return irUsageToUsage(&accUsage) }
 
-	flusher, _ := c.Writer.(http.Flusher)
 	headerWritten := false
 	var preamble []byte
 	// claudeModelRewritten latches true once the (single, per-stream)
@@ -1006,25 +1130,44 @@ func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *R
 
 		switch {
 		case headerWritten:
-			_, _ = c.Writer.Write(line)
-			if flusher != nil {
-				flusher.Flush()
+			// Slide the per-write deadline so a slow-reading client is
+			// bounded by streamWriteWindow. A Write/Flush error is wrapped in
+			// protocols.ErrClientWrite and returned immediately — see
+			// passthroughStreamToClient's identical headerWritten branch for
+			// the full rationale (this is the production streaming path for
+			// every non-OpenAI passthrough egress).
+			_ = protocols.ApplyStreamWriteDeadline(c)
+			if _, err := c.Writer.Write(line); err != nil {
+				return currentUsage(), fmt.Errorf("%w: passthrough write to client: %w", protocols.ErrClientWrite, err)
+			}
+			if ferr := flushAndCheckError(c); ferr != nil {
+				return currentUsage(), fmt.Errorf("%w: passthrough flush to client: %w", protocols.ErrClientWrite, ferr)
 			}
 			appendStreamBodyLine(rc, line)
 		case isDataLine(line):
 			// First data frame — commit the SSE headers, flush any buffered
 			// preamble in order, then forward the data line. Mirrors
 			// passthroughStreamToClient's identical first-data-frame handling.
+			_ = protocols.ApplyStreamWriteDeadline(c)
 			writeSSEHeader(c)
+			// The 200 status + SSE headers are committed the moment
+			// writeSSEHeader returns — mark first-byte-sent now, before the
+			// preamble/data write below, so a write failure in either one is
+			// classified as mid-stream (no failover) rather than
+			// pre-first-byte, mirroring passthroughStreamToClient.
+			rc.MarkFirstByteSent()
 			hadPreamble := len(preamble) > 0
 			if hadPreamble {
-				_, _ = c.Writer.Write(preamble)
+				if _, err := c.Writer.Write(preamble); err != nil {
+					return currentUsage(), fmt.Errorf("%w: passthrough write preamble to client: %w", protocols.ErrClientWrite, err)
+				}
 			}
 			headerWritten = true
-			rc.MarkFirstByteSent()
-			_, _ = c.Writer.Write(line)
-			if flusher != nil {
-				flusher.Flush()
+			if _, err := c.Writer.Write(line); err != nil {
+				return currentUsage(), fmt.Errorf("%w: passthrough write to client: %w", protocols.ErrClientWrite, err)
+			}
+			if ferr := flushAndCheckError(c); ferr != nil {
+				return currentUsage(), fmt.Errorf("%w: passthrough flush to client: %w", protocols.ErrClientWrite, ferr)
 			}
 			if hadPreamble {
 				appendStreamBodyLine(rc, preamble)

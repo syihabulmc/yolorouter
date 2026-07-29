@@ -162,7 +162,7 @@ func TestSetupRejectsPasswordWithoutDigit(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for digit-less password, got %d, body: %s", w.Code, w.Body.String())
 	}
-	// Guards the round-2 leak (raw Gin/validator text exposing the
+	// Guards the earlier leak (raw Gin/validator text exposing the
 	// internal request struct name) staying fixed: a plain status
 	// assertion alone can't catch a regression that only changes the
 	// message body.

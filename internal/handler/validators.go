@@ -125,7 +125,7 @@ func cleanBindValidationError(msg string) string {
 // e.g. "username") and err.Type (the Go type it expected, e.g. "string")
 // — deliberately never err.Struct or err.Error(), both of which embed
 // the Go struct's own name and would leak it exactly like the
-// round-2-fixed validator-tag path used to.
+// validator-tag bind-failure path used to.
 func cleanUnmarshalTypeError(err *json.UnmarshalTypeError) string {
 	return err.Field + ": expected " + err.Type.String()
 }

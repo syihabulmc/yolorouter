@@ -128,12 +128,12 @@ func TestClaudeEncodeRequest_Thinking(t *testing.T) {
 // TestClaudeEncodeRequest_ThinkingBudgetClampedUnderMaxTokens is a regression
 // test: Anthropic requires max_tokens > thinking.budget_tokens, but max_tokens
 // defaults to 4096 while a requested budget can be much larger (up to 80000
-// for effort=high), and OptimizeBody (which the reference project uses to
-// reconcile this) is not wired into dispatch in this version. The encoder
-// enforces the invariant the same way the reference optimizer does: clamp the
-// thinking budget to max_tokens-1 (floor 1024), leaving the caller's max_tokens
-// cap untouched. Covers: no caller max_tokens (4096 default), a budget below
-// the 1024 floor, and explicit caller caps at/below the budget.
+// for effort=high), and OptimizeBody (which would otherwise reconcile this)
+// is not wired into dispatch in this version. The encoder enforces the
+// invariant directly: clamp the thinking budget to max_tokens-1 (floor 1024),
+// leaving the caller's max_tokens cap untouched. Covers: no caller max_tokens
+// (4096 default), a budget below the 1024 floor, and explicit caller caps
+// at/below the budget.
 func TestClaudeEncodeRequest_ThinkingBudgetClampedUnderMaxTokens(t *testing.T) {
 	cases := []struct {
 		name         string

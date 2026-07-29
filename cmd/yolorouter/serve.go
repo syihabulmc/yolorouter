@@ -14,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/router"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
@@ -104,7 +105,7 @@ func runServe(ctx context.Context, args []string) error {
 		return fmt.Errorf("create bodies dir: %w", err)
 	}
 
-	r, err := router.New(app.DB, masterKey, bodiesDir, app.Config.Update, app.Config.Security.AllowPrivateUpstreams)
+	r, err := router.New(app.DB, masterKey, bodiesDir, app.Config.Update, app.Config.Security.AllowPrivateUpstreams, app.Config.Gateway)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
@@ -152,7 +153,28 @@ func runServe(ctx context.Context, args []string) error {
 		ReadTimeout:    30 * time.Second,
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
-		WriteTimeout:   0,
+		// WriteTimeout is non-zero so non-streaming endpoints are protected
+		// against slow-read clients (a slow client could otherwise hold a
+		// handler and its concurrency slot open indefinitely). Streaming
+		// relay loops call protocols.ApplyStreamWriteDeadline before each
+		// Write/Flush batch to slide the deadline forward, bounding a slow
+		// client without clearing the server WriteTimeout entirely; the
+		// request-level context timeout (gateway.RequestTimeout) remains as
+		// the streaming backstop.
+		// The value is RequestTimeout + a slack so a non-streaming handler
+		// always has room to write its response even if the upstream consumed
+		// the full request budget, and so a streaming request has coverage
+		// during the pre-first-write gap (e.g. a long TTFT). The slack is
+		// derived from protocols.StreamWriteWindow() — not a separate
+		// hard-coded literal — because it MUST stay >= that window: once a
+		// stream starts writing, ApplyStreamWriteDeadline slides this
+		// server-level WriteTimeout forward on every chunk, but the very
+		// first slide only happens after the pre-first-write gap this slack
+		// covers — a slack shorter than the write window would let the
+		// global WriteTimeout fire before the first slide lands. Deriving
+		// from the same source keeps the invariant true even if
+		// streamWriteWindow's value ever changes.
+		WriteTimeout: app.Config.Gateway.RequestTimeout + protocols.StreamWriteWindow(),
 	}
 
 	// Empty task supervisor. No real periodic task exists yet, so there is

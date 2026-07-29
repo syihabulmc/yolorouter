@@ -14,19 +14,13 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/compress"
+	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/logger"
 )
-
-// upstreamRequestTimeout caps a single upstream attempt's full duration
-// (connect + headers + body read). Applied via context.WithTimeout on the
-// per-attempt request context. A streaming response longer than this is cut
-// — v0.1's documented limit; a per-stage timeout split (dial/header vs body)
-// is deferred. Named for what it actually bounds, not "dial only".
-const upstreamRequestTimeout = 120 * time.Second
 
 // maxNonStreamResponseBytes caps a single non-stream upstream response body.
 // A buggy or hostile provider can return an arbitrarily large body; without
@@ -112,6 +106,11 @@ type RelayService struct {
 	// the system settings service is registered); Handle nil-checks before
 	// reading it, so a nil provider simply means no global prompt is applied.
 	settingsProvider SettingsProvider
+	// gateway carries the resolved gateway timeouts (connect/header/body-idle/
+	// attempt/request) from config.GatewayConfig. The per-attempt timeout
+	// orchestration (attemptOne, RequestDeadline) reads the individual fields
+	// off this struct instead of re-deriving them per call.
+	gateway config.GatewayConfig
 }
 
 // NewRelayService wires the gateway with the already-decoded AES master key
@@ -120,13 +119,18 @@ type RelayService struct {
 // SecurityConfig.AllowPrivateUpstreams) so LAN/localhost providers relay.
 // sp is the read-only custom system prompt provider; nil is valid and
 // disables global prompt injection (per-key overrides still apply).
-func NewRelayService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp SettingsProvider) *RelayService {
+// gatewayCfg is the resolved config.GatewayConfig; its ConnectTimeout seeds
+// the upstream transport's TCP dial bound and its HeaderTimeout seeds the
+// ResponseHeaderTimeout, while the remaining fields are read by the
+// per-attempt timeout orchestration.
+func NewRelayService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp SettingsProvider, gatewayCfg config.GatewayConfig) *RelayService {
 	return &RelayService{
 		db:               db,
 		masterKey:        masterKey,
-		client:           NewUpstreamClient(allowPrivate),
+		client:           NewUpstreamClient(allowPrivate, gatewayCfg.HeaderTimeout, gatewayCfg.ConnectTimeout, gatewayCfg.TLSHandshakeTimeout),
 		limiter:          NewLimiter(),
 		settingsProvider: sp,
+		gateway:          gatewayCfg,
 	}
 }
 
@@ -142,6 +146,20 @@ func requestIDFor(c *gin.Context) string {
 	return generateRequestID()
 }
 
+// isClientDisconnected reports whether the CALLER's own connection was
+// canceled, as opposed to a derived context (e.g. rc.RequestCtx, which also
+// expires when the request-level budget in RequestDeadline runs out).
+// Checking c.Request.Context().Err() directly — rather than inspecting the
+// error a failing DB call returns — is what makes this distinction
+// possible: c.Request.Context() only ever becomes Canceled when the client
+// itself hangs up, never when a context derived from it (with its own
+// shorter deadline) simply times out on its own schedule. Mirrors the
+// disconnect check already used around the body read and the upstream send
+// (Handle, attemptOne) in this package.
+func isClientDisconnected(c *gin.Context) bool {
+	return errors.Is(c.Request.Context().Err(), context.Canceled)
+}
+
 // Handle is POST /v1/chat/completions. apiKey is the already-authenticated
 // caller key (middleware.APIKeyAuth resolved and validated it). The handler
 // runs the full pipeline: pre-checks → model lookup → allowlist →
@@ -153,6 +171,20 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 		RequestID: requestIDFor(c),
 		APIKeyID:  apiKey.ID,
 	}
+	// Stamp the per-request total-budget deadline up front, before any
+	// attempt logic, so every exit path (including early rejections below)
+	// carries a consistent RequestDeadline. Each upstream attempt
+	// derives its own cap as min(attempt_timeout, time.Until(RequestDeadline)).
+	rc.RequestDeadline = time.Now().Add(s.gateway.RequestTimeout)
+	// Derive a context carrying the total-budget deadline so candidate
+	// queries (model/candidate/key GORM reads) and each per-attempt context
+	// are all bounded by RequestDeadline. Without this, the GORM calls used
+	// s.db with no deadline and a stuck query could block past the request
+	// cap. The per-attempt ctx in attemptOne derives from this, so
+	// RequestCtx deadline => attempt ctx deadline too.
+	requestCtx, requestCancel := context.WithDeadline(c.Request.Context(), rc.RequestDeadline)
+	defer requestCancel()
+	rc.RequestCtx = requestCtx
 	// The ingress protocol is a property of the request path, computed once
 	// up front so every error write in this function (and the pre-candidate
 	// validation below) uses the wire envelope the caller actually expects
@@ -300,6 +332,15 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	rc.IsStream = meta.Stream
 	rc.WantsStreamUsage = meta.WantsStreamUsage
 
+	// Streaming relay loops (IRStreamRelay / IRStreamRelayJSONLines /
+	// passthrough pumps) call ApplyStreamWriteDeadline before each
+	// Write/Flush batch to slide the write deadline forward. This bounds a
+	// slow-reading client without clearing the server WriteTimeout entirely.
+	// The server WriteTimeout (RequestTimeout + 60s) covers the pre-first-
+	// write gap (e.g. a long TTFT on a reasoning model); once the first
+	// write lands, the sliding per-write deadline takes over. Non-streaming
+	// endpoints keep the server WriteTimeout as a slow-read DoS guard.
+
 	// Resolve the two-level custom system prompt: a per-key override wins
 	// outright (short-circuit so a stalled settings read can't block an
 	// override key); otherwise fall through to the global cached value.
@@ -342,8 +383,15 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 
 	// Step 4: model exists and is enabled. A model disabled by an admin
 	// must not route even if its candidates are still enabled.
-	m, err := repository.FindModelByName(s.db, meta.Model)
+	m, err := repository.FindModelByName(s.db.WithContext(requestCtx), meta.Model)
 	if err != nil {
+		if isClientDisconnected(c) {
+			// The client hung up while this query was in flight — a
+			// context.Canceled from the DB driver here is a disconnect, not
+			// a server-side DB fault; nothing to write back to a gone caller.
+			s.finalize(rc, 499, "client_disconnected", start)
+			return
+		}
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			WriteIngressError(c, ingress, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.RequestID)
 			s.finalize(rc, http.StatusNotFound, "model_not_found", start)
@@ -363,8 +411,12 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// Step 5: allowlist. A key flagged allow_all_models skips the per-model
 	// check and may call any enabled model.
 	if !apiKey.AllowAllModels {
-		allowed, err := repository.HasAPIKeyModelAccess(s.db, apiKey.ID, m.ID)
+		allowed, err := repository.HasAPIKeyModelAccess(s.db.WithContext(requestCtx), apiKey.ID, m.ID)
 		if err != nil {
+			if isClientDisconnected(c) {
+				s.finalize(rc, 499, "client_disconnected", start)
+				return
+			}
 			logger.Error("gateway: allowlist", zap.String("request_id", rc.RequestID), zap.Error(err))
 			WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
 			s.finalize(rc, http.StatusInternalServerError, "db_allowlist: "+err.Error(), start)
@@ -419,8 +471,12 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	}
 
 	// Step 7: candidates filtered by requested capability.
-	allCandidates, err := repository.ListModelCandidatesByModelID(s.db, m.ID)
+	allCandidates, err := repository.ListModelCandidatesByModelID(s.db.WithContext(requestCtx), m.ID)
 	if err != nil {
+		if isClientDisconnected(c) {
+			s.finalize(rc, 499, "client_disconnected", start)
+			return
+		}
 		logger.Error("gateway: list candidates", zap.String("request_id", rc.RequestID), zap.Error(err))
 		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
 		s.finalize(rc, http.StatusInternalServerError, "db_candidates: "+err.Error(), start)
@@ -484,6 +540,16 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 	ingress := rc.Ingress
 	for i := range candidates {
 		cand := candidates[i]
+		// Per-request total-budget gate: RequestDeadline is the hard cap that
+		// spans every candidate and key rotation. Checking it only at the
+		// first attempt left later candidates reachable after the budget had
+		// already elapsed, burning wall-clock on a chain that could never
+		// succeed. Stop walking as soon as the budget is gone and fall
+		// through to allCandidatesFailed so the caller sees the same 502
+		// without the extra latency.
+		if !rc.RequestDeadline.IsZero() && time.Until(rc.RequestDeadline) <= 0 {
+			break
+		}
 		rc.Candidate = &cand
 		// Reset per iteration: rc.Provider is set only when this candidate's
 		// provider is usable, so a `continue` path (provider missing/disabled,
@@ -507,8 +573,17 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 		}
 		rc.Provider = provider
 
-		keys, err := repository.ListProviderKeysByProvider(s.db, provider.ID)
+		keys, err := repository.ListProviderKeysByProvider(s.db.WithContext(rc.RequestCtx), provider.ID)
 		if err != nil {
+			if isClientDisconnected(c) {
+				// The client is gone — stop walking the candidate chain
+				// entirely rather than burning the remaining candidates
+				// only to land on allCandidatesFailed's 502; record 499
+				// instead, mirroring attemptOne's disconnect handling.
+				rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptConnError, "client disconnected"))
+				s.finalize(rc, 499, "client_disconnected", start)
+				return
+			}
 			logger.Error("gateway: list provider keys", zap.String("request_id", rc.RequestID), zap.Error(err))
 			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "load keys failed"))
 			continue
@@ -620,7 +695,22 @@ const (
 // are key-level (rotate); 2xx is success; other 4xx is terminal (caller's
 // problem).
 func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time) attemptResult {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), upstreamRequestTimeout)
+	// Per-attempt deadline = min(attempt_timeout, remaining request budget).
+	// The request-level budget (RequestDeadline, set at Handle entry) spans
+	// all failover candidates; each attempt gets at most its own attempt_timeout,
+	// capped by whatever budget remains so a long chain of slow candidates
+	// cannot overrun the request cap.
+	remaining := time.Until(rc.RequestDeadline)
+	if remaining <= 0 {
+		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, "request budget exhausted"))
+		return attemptNextCandidate
+	}
+	attemptBudget := min(s.gateway.AttemptTimeout, remaining)
+	// Derive from rc.RequestCtx (carries RequestDeadline) rather than
+	// c.Request.Context() directly, so the request-level deadline
+	// propagates: when RequestCtx expires, the attempt ctx expires too,
+	// cutting the upstream request even mid-stream.
+	ctx, cancel := context.WithTimeout(rc.RequestCtx, attemptBudget)
 	defer cancel()
 
 	// Record the rewritten (provider_model_name) request
@@ -662,6 +752,48 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 		return attemptNextCandidate
 	}
 
+	// Wrap the body with two-phase idle enforcement:
+	//   - firstByteTimeout (open -> first chunk): covers the reasoning-model
+	//     "flush 200 header then think for minutes" gap that
+	//     transport.ResponseHeaderTimeout cannot reach.
+	//   - idle (inter-chunk): nginx proxy_read_timeout — a steady reasoning
+	//     stream resets the timer on every chunk and stays alive indefinitely,
+	//     while a stalled stream is cut.
+	// This single wrap point covers the stream relay, the non-stream ReadAll,
+	// and the upstream error-body read below — all of which consume resp.Body.
+	// The per-attempt ctx carries both the attempt budget and the caller's
+	// disconnect, either of which cuts the stream with ctx.Err().
+	//
+	// Non-2xx error bodies get a short firstByte budget: a stalled retryable
+	// 503/429 failover would otherwise burn the full 600s default before
+	// ErrFirstByteTimeout surfaces; error bodies are small, so 10s is ample
+	// for a healthy upstream while bounding a stuck one.
+	if resp.Body != nil {
+		// firstByteBudgetFor picks the short errorBodyFirstByteTimeout for
+		// any non-2xx status and the full configured firstByteTimeout for
+		// 2xx (reasoning models may silently think for minutes before the
+		// first token).
+		firstByte := firstByteBudgetFor(resp.StatusCode, s.gateway.FirstByteTimeout)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// 2xx: a steady stream should stay alive indefinitely (up to
+			// the request-level deadline), so idle uses the configured
+			// BodyIdleTimeout rather than the short error-body budget.
+			resp.Body = NewIdleReadCloser(resp.Body, firstByte, s.gateway.BodyIdleTimeout, ctx)
+		} else {
+			// Non-2xx error body: use a short total read budget so a
+			// slow-trickle upstream cannot burn the full attempt_timeout.
+			// The idle timeout is also tightened to the same short budget
+			// so inter-byte gaps longer than that cut the read short,
+			// preventing the "one byte every <idle gap" trickle attack.
+			errBodyCtx, errBodyCancel := context.WithTimeout(ctx, errorBodyTotalBudget)
+			resp.Body = NewIdleReadCloser(resp.Body, firstByte, firstByte, errBodyCtx)
+			// Re-wrap cancel so the deferred cancel below frees it. The
+			// original ctx cancel is deferred at the top of attemptOne;
+			// errBodyCancel is a nested timeout that must also be released.
+			defer errBodyCancel()
+		}
+	}
+
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		// 2xx — dispatch directly instead of through a one-line trampoline.
 		ingress := rc.Ingress
@@ -672,6 +804,32 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 	}
 
 	statusCode := resp.StatusCode
+	class := classifyUpstreamStatus(statusCode)
+	note := fmt.Sprintf("upstream %d", statusCode)
+
+	// For 401, persist the key verification failure BEFORE reading the
+	// error body. The CAS uses a context deliberately detached from the
+	// attempt/request context so that a client disconnect or attempt-deadline
+	// expiry arriving between the 401 response headers and this DB write
+	// cannot cancel the UPDATE — a cancelled CAS would leave a dead key
+	// marked as valid, causing every subsequent request to burn a full
+	// upstream timeout on it. WithoutCancel decouples from request
+	// cancellation; the 5s budget bounds a stuck DB so it cannot hang the
+	// goroutine indefinitely. The CAS's own version guard
+	// (expectedDestinationVersion) already protects against concurrent
+	// edits, so the detached context is safe.
+	if statusCode == http.StatusUnauthorized {
+		casCtx, casCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer casCancel()
+		if applied, mErr := repository.MarkProviderKeyVerificationFailedIfCurrent(s.db.WithContext(casCtx), pk.ID, provider.DestinationVersion, time.Now()); mErr != nil {
+			logger.Warn("gateway: mark provider key failed",
+				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.RequestID), zap.Error(mErr))
+		} else if !applied {
+			logger.Debug("gateway: provider key invalidation CAS lost race",
+				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.RequestID))
+		}
+	}
+
 	// Capture the obtainable upstream error body before close, verbatim.
 	// Error bodies are small; cap at 1MiB — beyond that is
 	// truncation of an error diagnostic, not a response body, and 1MiB is
@@ -681,31 +839,18 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 	// left by an earlier failed candidate, not leave it looking current.
 	// A subsequent SUCCESSFUL stream candidate clears
 	// it entirely — see dispatchPassthroughStream (dispatch.go).
+	//
+	// The body is already wrapped with a short total budget
+	// (errorBodyTotalBudget) so a slow-trickle upstream cannot hold this read
+	// open beyond that window.
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	rc.UpstreamResponseBody = errBody
 	_ = resp.Body.Close()
 
-	class := classifyUpstreamStatus(statusCode)
-	note := fmt.Sprintf("upstream %d", statusCode)
 	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, statusCode, class.Outcome, note))
 	switch class.Category {
 	case statusRotateKey:
-		// A 401 means the credential itself was rejected —
-		// persist verification_status=Failed so subsequent requests skip
-		// this key (filterEnabledKeys checks verification_status) instead
-		// of retrying the dead credential first. 429 (rate limit) is NOT
-		// persisted: it's transient and the key is still valid. CAS on
-		// (Passed, destination) so a concurrent edit or destination change
-		// can't be clobbered; applied=false is a benign lost race.
-		if statusCode == http.StatusUnauthorized {
-			if applied, mErr := repository.MarkProviderKeyVerificationFailedIfCurrent(s.db, pk.ID, provider.DestinationVersion, time.Now()); mErr != nil {
-				logger.Warn("gateway: mark provider key failed",
-					zap.Uint("key_id", pk.ID), zap.String("request_id", rc.RequestID), zap.Error(mErr))
-			} else if !applied {
-				logger.Debug("gateway: provider key invalidation CAS lost race",
-					zap.Uint("key_id", pk.ID), zap.String("request_id", rc.RequestID))
-			}
-		}
+		// 401 CAS was already performed above, before the error body read.
 		return attemptRotateKey
 	case statusFailover:
 		return attemptNextCandidate

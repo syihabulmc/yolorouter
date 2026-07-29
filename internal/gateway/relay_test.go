@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 
 	ycrypto "github.com/yolorouter/yolorouter/pkg/crypto"
 
+	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/settings"
@@ -50,14 +53,33 @@ func newRelaySvc(t *testing.T, db *gorm.DB) *RelayService {
 	return newRelaySvcWithSettings(t, db, stubSettingsProvider{})
 }
 
+// newRelaySvcWithSettingsAndGateway is the shared core behind
+// newRelaySvcWithSettings / newRelaySvcWithGateway: it wires the RelayService
+// against a caller-chosen settings provider AND gateway config, then swaps in
+// a plain transport so the test can dial a loopback httptest server (the
+// production safehttp transport deliberately refuses loopback for SSRF
+// defense, which would block every test here).
+func newRelaySvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProvider, gateway config.GatewayConfig) *RelayService {
+	t.Helper()
+	masterKey := bytes.Repeat([]byte{0x42}, 32)
+	svc := NewRelayService(db, masterKey, false, sp, gateway)
+	svc.client.httpClient.Transport = &http.Transport{}
+	return svc
+}
+
 // newRelaySvcWithSettings is newRelaySvc with a caller-built stub, so a test
 // can pre-seed the global compression / CSP state the gateway reads.
 func newRelaySvcWithSettings(t *testing.T, db *gorm.DB, sp stubSettingsProvider) *RelayService {
 	t.Helper()
-	masterKey := bytes.Repeat([]byte{0x42}, 32)
-	svc := NewRelayService(db, masterKey, false, sp)
-	svc.client.httpClient.Transport = &http.Transport{}
-	return svc
+	return newRelaySvcWithSettingsAndGateway(t, db, sp, testGatewayConfig())
+}
+
+// newRelaySvcWithGateway is newRelaySvc with a caller-built GatewayConfig, so
+// a test can exercise a non-default request_timeout budget (e.g. asserting
+// Handle stamps RequestDeadline = now + RequestTimeout).
+func newRelaySvcWithGateway(t *testing.T, db *gorm.DB, gateway config.GatewayConfig) *RelayService {
+	t.Helper()
+	return newRelaySvcWithSettingsAndGateway(t, db, stubSettingsProvider{}, gateway)
 }
 
 func newCtx(body []byte) (*gin.Context, *httptest.ResponseRecorder) {
@@ -303,6 +325,68 @@ func TestFinalizeNonStreamCapturesBodies(t *testing.T) {
 	}
 }
 
+// TestHandleSetsRequestDeadline verifies that Handle stamps the per-request
+// total-budget deadline (RequestDeadline = now + RequestTimeout) on entry, so
+// attemptOne can derive remaining = time.Until(RequestDeadline) for
+// its min(attempt_timeout, remaining) per-attempt cap. The deadline is read
+// here via the testHookHandleDone capture path (the same pattern
+// TestFinalizeNonStreamCapturesBodies uses); a non-default request_timeout
+// (15m, distinct from testGatewayConfig's 30m) makes the assertion
+// unambiguous — a zero-value or stale deadline would miss the (14m, 15m)
+// window.
+func TestHandleSetsRequestDeadline(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-4o-real","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`))
+	}))
+	defer upstream.Close()
+
+	// Use a non-default RequestTimeout (15m vs the 30m default) so the
+	// assertion pins the deadline to THIS config, not to any default.
+	svc := newRelaySvcWithGateway(t, db, config.GatewayConfig{
+		ConnectTimeout:   5 * time.Second,
+		HeaderTimeout:    600 * time.Second,
+		FirstByteTimeout: 600 * time.Second,
+		BodyIdleTimeout:  60 * time.Second,
+		AttemptTimeout:   10 * time.Minute,
+		RequestTimeout:   15 * time.Minute,
+	})
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-upstream-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`))
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	if captured.RequestDeadline.IsZero() {
+		t.Fatal("RequestDeadline not set on RelayContext")
+	}
+	// Deadline should be ~before + RequestTimeout (15m), allowing for Handle's
+	// own runtime. The window is wide enough to absorb test-machine variance
+	// but narrow enough that a zero-value (year 1) or 30m-default deadline
+	// would fail.
+	remaining := time.Until(captured.RequestDeadline)
+	if remaining <= 14*time.Minute || remaining >= 15*time.Minute {
+		t.Errorf("RequestDeadline remaining = %v, want within (14m, 15m) for a 15m RequestTimeout", remaining)
+	}
+	// Sanity: the deadline must be in the future, never in the past.
+	if remaining <= 0 {
+		t.Errorf("RequestDeadline is in the past: remaining = %v", remaining)
+	}
+}
+
 // TestRelayKeyRotation: the first key gets a 401, so the gateway
 // rotates to the second key on the same provider and succeeds.
 func TestRelayKeyRotation(t *testing.T) {
@@ -343,10 +427,15 @@ func TestRelayKeyRotation(t *testing.T) {
 // Each attempt must use its own candidate's provider_model_name.
 func TestRelayCandidateFailover(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	var seenModels []string
+	var (
+		seenMu     sync.Mutex
+		seenModels []string
+	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		seenMu.Lock()
 		seenModels = append(seenModels, extractModelFromJSON(t, body))
+		seenMu.Unlock()
 		if bytes.Contains(body, []byte(`"model":"c1-model"`)) {
 			w.WriteHeader(http.StatusBadGateway)
 			return
@@ -391,8 +480,11 @@ func TestRelayCandidateFailover(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 after failover; body = %s", w.Code, w.Body.String())
 	}
-	if len(seenModels) != 2 || seenModels[0] != "c1-model" || seenModels[1] != "c2-model" {
-		t.Fatalf("expected attempts with [c1-model, c2-model], got %v", seenModels)
+	seenMu.Lock()
+	got := append([]string(nil), seenModels...)
+	seenMu.Unlock()
+	if len(got) != 2 || got[0] != "c1-model" || got[1] != "c2-model" {
+		t.Fatalf("expected attempts with [c1-model, c2-model], got %v", got)
 	}
 	// Each attempt used the current candidate's provider name.
 	if !bytes.Contains(w.Body.Bytes(), []byte(`"model":"gpt-4o"`)) {
@@ -1539,5 +1631,306 @@ func TestCompressAndCSPCoexist(t *testing.T) {
 	}
 	if bytes.Contains(upstreamBody, []byte("=== RUN")) {
 		t.Errorf("upstream body still contains === RUN lines (compression did not shrink the content): %s", upstreamBody)
+	}
+}
+
+// TestAttemptOne_StreamBodyIdleIsTerminal pins the per-attempt idle-timeout
+// behavior for streaming: when an upstream emits one SSE chunk and then goes
+// silent longer than BodyIdleTimeout, the IdleReadCloser wrapping the response
+// body cuts the read, the stream pump surfaces a mid-stream error, and the
+// gateway finalizes the attempt as stream_partial terminal (no failover once
+// the first byte has been written). The test pins three things at once: the
+// first chunk IS delivered to the caller, the attempt's failure reason
+// carries the idle-timeout signal (not the legacy "stream ended without
+// [DONE]" / 120s absolute-wall behaviour), and no failover is attempted.
+//
+// Timeout budget: body_idle=100ms, upstream stall=500ms (5x the idle window,
+// so the idle timer deterministically fires before the handler's body write).
+// The whole test runs in well under one second.
+func TestAttemptOne_StreamBodyIdleIsTerminal(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if flusher != nil {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"model\":\"gpt-4o-real\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+		// Stall much longer than BodyIdleTimeout so the idle timer fires
+		// before any further bytes could arrive. The handler then returns,
+		// closing the connection.
+		time.Sleep(500 * time.Millisecond)
+	}))
+	defer upstream.Close()
+
+	gw := testGatewayConfig()
+	gw.BodyIdleTimeout = 100 * time.Millisecond
+	gw.AttemptTimeout = 2 * time.Second
+	gw.RequestTimeout = 5 * time.Second
+	svc := newRelaySvcWithGateway(t, db, gw)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	c, w := newCtx([]byte(`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (mid-stream truncation keeps the already-sent 200); body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	// The first chunk was forwarded before the idle timer fired.
+	if !strings.Contains(w.Body.String(), "hi") {
+		t.Errorf("response body missing the first streamed chunk: %s", w.Body.String())
+	}
+	// Exactly one attempt — no failover after the first byte went out.
+	if len(captured.Attempts) != 1 {
+		t.Fatalf("expected exactly 1 attempt (no failover on a mid-stream cut), got %d: %+v", len(captured.Attempts), captured.Attempts)
+	}
+	last := captured.Attempts[0]
+	if last.Outcome != AttemptServerError {
+		t.Errorf("attempt outcome = %q, want %q", last.Outcome, AttemptServerError)
+	}
+	if !strings.Contains(last.FailReason, "idle") {
+		t.Errorf("attempt FailReason = %q, want it to contain \"idle\" (the inter-chunk idle timeout)", last.FailReason)
+	}
+	// The finalize reason on the persisted log row carries the same signal.
+	var log model.RequestLog
+	if err := db.First(&log).Error; err != nil {
+		t.Fatalf("no request_log row: %v", err)
+	}
+	if log.FailReason == nil || !strings.Contains(*log.FailReason, "stream_partial") {
+		t.Errorf("log fail_reason = %v, want it to contain \"stream_partial\"", log.FailReason)
+	}
+}
+
+// TestAttemptOne_NonStreamBodyIdleFailovers pins the per-attempt first-byte
+// timeout behavior for non-streaming: when an upstream returns 200 headers but
+// then stalls sending the first body chunk longer than FirstByteTimeout, the
+// IdleReadCloser wrapping the response body cuts the read during io.ReadAll,
+// the dispatch path records a read-body failure for this candidate, and the
+// gateway fails over to the next candidate. The test pins: candidate A's body
+// read is cut by the first-byte timeout, candidate B is tried next and
+// succeeds, and the final caller-facing response carries candidate B's content.
+//
+// Timeout budget: first_byte=100ms, upstream A body delay=500ms (5x the
+// first-byte window, so the firstByte timer deterministically fires before the
+// body write).
+func TestAttemptOne_NonStreamBodyIdleFailovers(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	var (
+		callsMu sync.Mutex
+		calls   []string
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requested := extractModelFromJSON(t, body)
+		callsMu.Lock()
+		calls = append(calls, requested)
+		callsMu.Unlock()
+		flusher, _ := w.(http.Flusher)
+		if requested == "c1-model" {
+			// Candidate A: commit 200 headers immediately, then stall the
+			// body well past FirstByteTimeout so the IdleReadCloser fires
+			// during the dispatch layer's io.ReadAll.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(500 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"model":"c1-model","choices":[{"message":{"role":"assistant","content":"A"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+			return
+		}
+		// Candidate B: fast, clean success.
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"c2-model","choices":[{"message":{"role":"assistant","content":"B-ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	gw := testGatewayConfig()
+	gw.FirstByteTimeout = 100 * time.Millisecond
+	gw.BodyIdleTimeout = 100 * time.Millisecond
+	gw.AttemptTimeout = 2 * time.Second
+	gw.RequestTimeout = 5 * time.Second
+	svc := newRelaySvcWithGateway(t, db, gw)
+	p1 := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-1", "k1", 1, true)
+	p2 := createProvider(t, db, "p2", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p2.ID, "sk-2", "k2", 1, true)
+
+	// Two candidates backing the same external model, distinguished by their
+	// provider_model_name so the test upstream can route each one.
+	now := time.Now().UTC()
+	m := &model.Model{Name: "gpt-4o", ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatalf("seed model: %v", err)
+	}
+	for i, p := range []*model.Provider{p1, p2} {
+		name := "c1-model"
+		if i == 1 {
+			name = "c2-model"
+		}
+		if err := db.Create(&model.ModelCandidate{
+			ModelID: m.ID, ProviderID: p.ID, ProviderModelName: name,
+			InputPrice: 0, OutputPrice: 0, MaxOutput: 4096,
+			SupportsStreaming: true, SupportsFunctionCalling: true,
+			ManagementStatus: model.ModelCandidateStatusEnabled, SortOrder: i + 1,
+			VerificationStatus: model.ModelVerificationStatusPassed,
+			CreatedAt:          now, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("seed candidate %d: %v", i, err)
+		}
+	}
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (failover to candidate B); body = %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	callsMu.Lock()
+	gotCalls := append([]string(nil), calls...)
+	callsMu.Unlock()
+	// Two upstream calls: A then B.
+	if len(gotCalls) != 2 || gotCalls[0] != "c1-model" || gotCalls[1] != "c2-model" {
+		t.Fatalf("expected upstream calls [c1-model, c2-model], got %v", gotCalls)
+	}
+	// The caller-facing response is candidate B's, rewritten to the external name.
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"model":"gpt-4o"`)) {
+		t.Errorf("response body missing external model name (candidate B should win): %s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("B-ok")) {
+		t.Errorf("response body missing candidate B content: %s", w.Body.String())
+	}
+	// Two attempts recorded: A failed with a first-byte-timeout read-body error, B succeeded.
+	if len(captured.Attempts) != 2 {
+		t.Fatalf("expected 2 attempts (A failed, B succeeded), got %d: %+v", len(captured.Attempts), captured.Attempts)
+	}
+	if captured.Attempts[0].Outcome != AttemptBadStatus {
+		t.Errorf("attempt A outcome = %q, want %q (read-body failover)", captured.Attempts[0].Outcome, AttemptBadStatus)
+	}
+	// The firstByte/inter-chunk timeout error messages both contain "timeout"
+	// ("first byte timeout" / "idle timeout between chunks"); either is a
+	// legitimate read-body cut. The assertion accepts both so the test stays
+	// valid regardless of which phase fired.
+	if !strings.Contains(captured.Attempts[0].FailReason, "timeout") {
+		t.Errorf("attempt A FailReason = %q, want it to contain \"timeout\" (first-byte or inter-chunk)", captured.Attempts[0].FailReason)
+	}
+	if captured.Attempts[1].Outcome != AttemptSuccess {
+		t.Errorf("attempt B outcome = %q, want %q", captured.Attempts[1].Outcome, AttemptSuccess)
+	}
+}
+
+// TestRelayCandidateLoopRespectsRequestBudget verifies that the candidate
+// walk stops as soon as the per-request total budget (RequestDeadline) has
+// been exhausted. Before the per-iteration budget gate was added,
+// relayCandidates kept walking the chain after the budget had elapsed -
+// every subsequent candidate entered attemptOne just to be rejected by its
+// own remaining-check, burning wall-clock on a chain that could never
+// succeed. With the gate, the second candidate is never reached once the
+// first attempt consumes the entire budget.
+func TestRelayCandidateLoopRespectsRequestBudget(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+
+	// Slow upstream for candidate 1: sleeps well past RequestTimeout so the
+	// first attempt's context (capped at the remaining request budget) elapses
+	// before the handler returns.
+	var slowHit atomic.Bool
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slowHit.Store(true)
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer slow.Close()
+
+	// Fast upstream for candidate 2: should never be reached once the budget
+	// gate stops the walk.
+	var fastHit atomic.Bool
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fastHit.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"c2","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer fast.Close()
+
+	// Short RequestTimeout (150ms) + long AttemptTimeout (30s) so the first
+	// attempt is bounded by the request budget, not the per-attempt budget -
+	// exercising the candidate-loop gate rather than attemptOne's own check.
+	svc := newRelaySvcWithGateway(t, db, config.GatewayConfig{
+		ConnectTimeout:   5 * time.Second,
+		HeaderTimeout:    600 * time.Second,
+		FirstByteTimeout: 600 * time.Second,
+		BodyIdleTimeout:  60 * time.Second,
+		AttemptTimeout:   30 * time.Second,
+		RequestTimeout:   150 * time.Millisecond,
+	})
+	p1 := createProvider(t, db, "slow", slow.URL)
+	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-1", "k1", 1, true)
+	p2 := createProvider(t, db, "fast", fast.URL)
+	createProviderKey(t, db, svc.masterKey, p2.ID, "sk-2", "k2", 1, true)
+
+	now := time.Now().UTC()
+	m := &model.Model{Name: "gpt-4o", ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatalf("seed model: %v", err)
+	}
+	for i, p := range []*model.Provider{p1, p2} {
+		if err := db.Create(&model.ModelCandidate{
+			ModelID: m.ID, ProviderID: p.ID, ProviderModelName: "c" + string(rune('1'+i)),
+			InputPrice: 0, OutputPrice: 0, MaxOutput: 4096,
+			SupportsStreaming: true, SupportsFunctionCalling: true,
+			ManagementStatus: model.ModelCandidateStatusEnabled, SortOrder: i + 1,
+			VerificationStatus: model.ModelVerificationStatusPassed,
+			CreatedAt:          now, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("seed candidate %d: %v", i, err)
+		}
+	}
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *RelayContext
+	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (all candidates failed after budget exhausted); body = %s", w.Code, w.Body.String())
+	}
+	if !slowHit.Load() {
+		t.Error("slow upstream was never called - candidate 1 should have been attempted")
+	}
+	if fastHit.Load() {
+		t.Error("fast upstream was called - candidate 2 must NOT be reached once the request budget elapsed")
+	}
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	// Exactly one attempt recorded: candidate 1 timed out consuming the entire
+	// request budget, so the candidate-loop gate stopped the walk before
+	// candidate 2 could register its own budget-exhausted attempt.
+	if len(captured.Attempts) != 1 {
+		t.Errorf("expected exactly 1 attempt (budget gate stops the walk), got %d: %+v", len(captured.Attempts), captured.Attempts)
 	}
 }
