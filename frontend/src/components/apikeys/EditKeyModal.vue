@@ -4,7 +4,7 @@
      backend's 0-sentinel which clears the column. Expiry can be set or moved
      later but not cleared (backend has no clear-sentinel for timestamps) —
      to remove an expiry, revoke and re-create. Per-key custom-system-prompt
-     has its own dedicated modal (KeyCustomPromptModal.vue). -->
+     and compression are edited in the dedicated optimization modal. -->
 <template>
   <n-modal
     :show="show"
@@ -57,12 +57,9 @@
           :placeholder="t('apiKeys.modelAllowlist')"
         />
       </n-form-item>
-      <n-form-item path="expires_at">
-        <template #label>
-          <HelpLabel :tip="t('apiKeys.expiresAt_tip')">{{ t('apiKeys.expiresAt') }}</HelpLabel>
-        </template>
-        <NDatePicker v-model:value="form.expires_at" type="datetime" :clearable="false" class="full-width" />
-      </n-form-item>
+      <div style="position: absolute;top: 17px;left: 254px;">
+        <NDatePicker v-model:value="form.expires_at" type="datetime" :clearable="false" class="full-width" :placeholder="t('apiKeys.selectExpiresAt')" />
+      </div>
 
       <div class="limit-section">
         <div class="limit-section__label">{{ t('apiKeys.limitsSection') }}</div>

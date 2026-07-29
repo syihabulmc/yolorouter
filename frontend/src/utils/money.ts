@@ -15,9 +15,22 @@ import type { OverviewRow } from '../api/analytics'
 // One major unit = 1e6 micro-units, i.e. 6 decimal places of precision.
 export const MICROS_PER_UNIT = 1_000_000
 
-/** Formats an integer-micro amount as a fixed 6-decimal display string. */
-export function formatMicros(micros: number): string {
-  return fromMicros(micros).toFixed(6)
+/** Formats an integer-micro amount as a fixed-precision display string. */
+export function formatMicros(micros: number, precision = 6): string {
+  const s = fromMicros(micros).toFixed(precision)
+  // A tiny negative that rounds to zero (e.g. -0.003 at precision 2) renders as
+  // "-0.00"; collapse the misleading minus so it shows as plain "0.00".
+  return s.replace(/^-(0(?:\.0+)?)$/, '$1')
+}
+
+/**
+ * True when the amount renders with a real minus sign at `precision` decimals
+ * rather than a sub-rounding "-0.00". Derived from formatMicros so the rounding
+ * and negative-zero policy stay in one place — callers pass the same precision
+ * they format with, so a value that displays as zero is never styled as a loss.
+ */
+export function isNegativeMicros(micros: number, precision = 6): boolean {
+  return formatMicros(micros, precision).startsWith('-')
 }
 
 /** Micros -> major-unit number (the inverse of toMicros), for prefilling a form field. */

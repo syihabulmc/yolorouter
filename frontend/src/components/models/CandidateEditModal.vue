@@ -85,7 +85,7 @@
       <n-space :size="8">
         <n-tooltip trigger="hover" placement="top">
           <template #trigger>
-            <n-button size="small" :loading="testing === 'basic'" @click="onTest('basic')">{{ t('models.testBasic') }}</n-button>
+            <n-button size="small" :loading="testing === 'basic'" @click="onTest('basic')">{{ t('models.basicText') }}</n-button>
           </template>
           {{ t('models.testBasic_tip') }}
         </n-tooltip>

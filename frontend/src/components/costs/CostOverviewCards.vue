@@ -13,7 +13,7 @@
       <div class="metric__label">
         <HelpLabel :tip="t('costs.overview.spend_tip')">{{ t('costs.overview.spend') }}</HelpLabel>
       </div>
-      <div class="metric__value">¥{{ formatMicros(overview?.cost_micros ?? 0) }}</div>
+      <div class="metric__value">¥{{ formatMicros(overview?.cost_micros ?? 0,2) }}</div>
       <div v-if="(overview?.unknown_cost_calls ?? 0) > 0" class="metric__sub">
         {{ t('costs.overview.unknownCostSub', { n: overview?.unknown_cost_calls ?? 0 }) }}
       </div>
@@ -43,15 +43,15 @@
       <div class="metric__label">
         <HelpLabel :tip="t('costs.overview.cacheSaved_tip')">{{ t('costs.overview.cacheSaved') }}</HelpLabel>
       </div>
-      <div class="metric__value" :class="{ 'metric__value--negative': netCacheSaved < 0 }">
-        ¥{{ formatMicros(netCacheSaved) }}
+      <div class="metric__value" :class="{ 'metric__value--negative': isNegativeMicros(netCacheSaved, 2) }">
+        ¥{{ formatMicros(netCacheSaved,2) }}
       </div>
       <div class="metric__sub metric__sub--split">
         <span class="metric__chip metric__chip--up">
-          {{ t('costs.overview.cacheReadSaved') }} ¥{{ formatMicros(overview?.cache_read_saved_micros ?? 0) }}
+          {{ t('costs.overview.cacheReadSaved') }} ¥{{ formatMicros(overview?.cache_read_saved_micros ?? 0,2) }}
         </span>
         <span class="metric__chip metric__chip--down">
-          {{ t('costs.overview.cacheWriteExtra') }} ¥{{ formatMicros(overview?.cache_write_extra_micros ?? 0) }}
+          {{ t('costs.overview.cacheWriteExtra') }} ¥{{ formatMicros(overview?.cache_write_extra_micros ?? 0,2) }}
         </span>
       </div>
     </div>
@@ -62,7 +62,7 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import HelpLabel from '../HelpLabel.vue'
-import { formatMicros, netCacheSavedMicros } from '../../utils/money'
+import { formatMicros, isNegativeMicros, netCacheSavedMicros } from '../../utils/money'
 import { formatNumber, formatRate } from '../../utils/format'
 import type { OverviewRow } from '../../api/analytics'
 

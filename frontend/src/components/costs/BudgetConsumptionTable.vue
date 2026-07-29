@@ -27,6 +27,7 @@
 <script setup lang="ts">
 import { computed, h } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 import { NDataTable, type DataTableColumns } from 'naive-ui'
 import { Wallet } from '@lucide/vue'
 import EmptyState from '../EmptyState.vue'
@@ -47,6 +48,7 @@ const props = defineProps<{
 }>()
 
 const { t } = useI18n()
+const router = useRouter()
 
 // Capped keys sort by consumption descending (closest to the cap first, where
 // attention is needed); uncapped keys sink to the bottom since they have no
@@ -112,8 +114,14 @@ const columns = computed<DataTableColumns<BudgetRow>>(() => [
     minWidth: 180,
     render: (r) =>
       h('div', { class: 'budget-caller' }, [
-        h('span', { class: 'budget-caller__label' }, r.owner_label || t('costs.budget.unnamedKey')),
-        h('span', { class: 'budget-caller__prefix' }, `${r.key_prefix}…`),
+        h(
+          'span',
+          {
+            class: 'budget-caller__label budget-caller__label--link',
+            onClick: () => router.push(`/costs/keys/${r.id}`),
+          },
+          r.owner_label || t('costs.budget.unnamedKey'),
+        ),
       ]),
   },
   {
@@ -158,6 +166,13 @@ const columns = computed<DataTableColumns<BudgetRow>>(() => [
 .budget-caller__label {
   font-weight: 600;
   color: var(--color-text);
+}
+:deep(.budget-caller__label--link) {
+  cursor: pointer;
+  color: var(--color-accent);
+}
+:deep(.budget-caller__label--link:hover) {
+  text-decoration: underline;
 }
 .budget-caller__prefix {
   font-family: var(--font-mono, monospace);

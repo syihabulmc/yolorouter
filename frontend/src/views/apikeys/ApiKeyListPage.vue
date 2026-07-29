@@ -49,7 +49,7 @@
       </div>
     </div>
 
-    <EmptyState v-if="!store.loading && store.list.length === 0" :icon="KeyRound" :title="t('apiKeys.listEmpty')">
+    <EmptyState v-if="!store.loading && store.list.length === 0 && !store.total && !draftValueLength" :icon="KeyRound" :title="t('apiKeys.listEmpty')">
       <template #action>
         <n-button type="primary" @click="showCreate = true">{{ t('apiKeys.createButton') }}</n-button>
       </template>
@@ -70,21 +70,13 @@
 
     <CreateKeyModal v-model:show="showCreate" @created="onCreated" />
     <EditKeyModal v-if="editingId" :key="editingId" :show="showEdit" :api-key-id="editingId" @update:show="onEditShow" @saved="onSaved" />
-    <KeyCustomPromptModal
-      v-if="cspKeyId"
-      :key="cspKeyId"
-      :show="showCsp"
-      :api-key-id="cspKeyId"
-      @update:show="onCspShow"
-      @saved="onCspSaved"
-    />
-    <KeyCompressModal
+    <KeyOptimize
       v-if="compressKeyId"
       :key="compressKeyId"
       :show="showCompress"
       :api-key-id="compressKeyId"
-      @update:show="onCompressShow"
-      @saved="onCompressSaved"
+      @update:show="openOptimizeShow"
+      @saved="openOptimizeSaved"
     />
   </div>
 </template>
@@ -93,37 +85,29 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NSpace, NTag, useDialog, useMessage, type DataTableColumns, type PaginationProps } from 'naive-ui'
-import { KeyRound, Plus, Search } from '@lucide/vue'
+import { NButton, NTag, useDialog, useMessage,NDropdown, type DataTableColumns, type DropdownOption, type PaginationProps } from 'naive-ui'
+import { KeyRound, Plus, Search, MoreHorizontal } from '@lucide/vue'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { displayMessage } from '../../api/client'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
+import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
 import type { APIKey } from '../../api/apiKeys'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import CreateKeyModal from '../../components/apikeys/CreateKeyModal.vue'
 import EditKeyModal from '../../components/apikeys/EditKeyModal.vue'
-import KeyCustomPromptModal from '../../components/apikeys/KeyCustomPromptModal.vue'
-import KeyCompressModal from '../../components/apikeys/KeyCompressModal.vue'
+import KeyOptimize from '../../components/apikeys/KeyOptimize.vue'
 
 const { t } = useI18n()
 const router = useRouter()
 const dialog = useDialog()
 const message = useMessage()
 const store = useApiKeysStore()
+const { importToCCS } = useCCSwitchImport()
 const showCreate = ref(false)
 const showEdit = ref(false)
 const editingId = ref<number | null>(null)
-// CSP modal state — cspKeyId doubles as the v-if that mounts the modal, and
-// the :key that forces a fresh remount per row. The modal performs its own
-// authoritative GET on open, so only the key id is forwarded from the list
-// row (the row's CSP snapshot may already be stale).
-const showCsp = ref(false)
-const cspKeyId = ref<number | null>(null)
-// Compress modal state — mirrors the CSP modal pattern: compressKeyId is
-// both the v-if mount gate and the :key for a fresh remount per row. The
-// modal performs its own authoritative GET on open.
 const showCompress = ref(false)
 const compressKeyId = ref<number | null>(null)
 // Live draft of the filter controls; the server filters only update when the
@@ -136,6 +120,10 @@ const statusOptions = computed(() => [
   { label: t('apiKeys.statusBudgetExhausted'), value: 'budget_exhausted' },
   { label: t('apiKeys.statusRevoked'), value: 'revoked' },
 ])
+
+const draftValueLength = computed(() => {
+  return Object.values(draft).filter(e => !!e).length
+})
 
 onMounted(() => {
   void store.fetchList().catch((err) => message.error(displayMessage(err, t)))
@@ -217,38 +205,17 @@ function onEditShow(v: boolean) {
   if (!v) editingId.value = null
 }
 
-function openCsp(row: APIKey) {
-  // Only the id is forwarded — the modal does its own GET on mount to avoid
-  // initializing from a potentially stale list row.
-  cspKeyId.value = row.id
-  showCsp.value = true
-}
-
-function onCspShow(v: boolean) {
-  showCsp.value = v
-  if (!v) cspKeyId.value = null
-}
-
-function onCspSaved() {
-  showCsp.value = false
-  cspKeyId.value = null
-  message.success(t('apiKeys.saveSuccess'))
-  void reload()
-}
-
-function openCompress(row: APIKey) {
-  // Only the id is forwarded — the modal does its own GET on mount to avoid
-  // initializing from a potentially stale list row.
+function openOptimize(row: APIKey) {
   compressKeyId.value = row.id
   showCompress.value = true
 }
 
-function onCompressShow(v: boolean) {
+function openOptimizeShow(v: boolean) {
   showCompress.value = v
   if (!v) compressKeyId.value = null
 }
 
-function onCompressSaved() {
+function openOptimizeSaved() {
   showCompress.value = false
   compressKeyId.value = null
   message.success(t('apiKeys.saveSuccess'))
@@ -285,6 +252,24 @@ function onSaved() {
   editingId.value = null
   message.success(t('apiKeys.saveSuccess'))
   void reload()
+}
+
+function rowActions(row: APIKey): DropdownOption[] {
+  // Optimize and the destructive Revoke are no-ops on an already-revoked key,
+  // so they drop out for revoked rows; edit/view/import stay available.
+  const revoked = row.display_status === 'revoked'
+  return [
+    { label: t('apiKeys.editLimits'), key: 'edit' },
+    { label: t('costs.detail.viewCost'), key: 'look' },
+    ...(revoked ? [] : [{ label: t('costOptimization.title'), key: 'optimize' }]),
+    { label: t('ccswitch.importAction'), key: 'importCCSImport' },
+    ...(revoked
+      ? []
+      : [
+          { type: 'divider', key: 'd' },
+          { label: t('apiKeys.revoke'), key: 'delete', props: { style: 'color: var(--color-danger)' } },
+        ]),
+  ]
 }
 
 const columns = computed<DataTableColumns<APIKey>>(() => [
@@ -326,41 +311,36 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
     render: (row) => expiresCell(row),
   },
   {
-    // Actions column — no tooltip.
     title: t('common.actions'),
     key: 'actions',
-    width: 360,
-    render: (row) => {
-      const revoked = row.display_status === 'revoked'
-      return h(
-        NSpace,
-        { size: 'small' },
+    width: 60,
+    align: 'center',
+    render: (row) =>
+      h(
+        NDropdown,
         {
-          default: () => [
-            h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openEdit(row.id) }, { default: () => t('apiKeys.editLimits') }),
-            // Cost detail is always reachable — a revoked key still has
-            // historical spend worth reviewing.
+          trigger: 'click',
+          placement: 'bottom-end',
+          options: rowActions(row),
+          onSelect: (key: string) => {
+            if (key === 'edit') openEdit(row.id)
+            else if (key === 'look') router.push(`/costs/keys/${row.id}`)
+            else if (key === 'optimize') openOptimize(row)
+            else if (key === 'delete') confirmRevoke(row)
+            else if (key === 'importCCSImport')
+              importToCCS({ name: `YoloRouter${row.owner_label ? ` - ${row.owner_label}` : ''}` })
+          },
+        },
+        {
+          default: () =>
             h(
               NButton,
-              { size: 'small', text: true, type: 'primary', onClick: () => router.push(`/costs/keys/${row.id}`) },
-              { default: () => t('costs.detail.viewCost') },
+              { size: 'small', quaternary: true, circle: true },
+              { icon: () => h(MoreHorizontal, { size: 16 }) },
             ),
-            // CSP action is only meaningful on a live key — a revoked key
-            // routes no requests so its prompt has no effect.
-            revoked
-              ? null
-              : h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openCsp(row) }, { default: () => t('apiKeys.cspAction') }),
-            revoked
-              ? null
-              : h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openCompress(row) }, { default: () => t('apiKeys.compressAction') }),
-            revoked
-              ? null
-              : h(NButton, { size: 'small', text: true, type: 'error', onClick: () => confirmRevoke(row) }, { default: () => t('apiKeys.revoke') }),
-          ],
         },
-      )
-    },
-  },
+      ),
+  }
 ])
 </script>
 

@@ -2,16 +2,11 @@
   <AuthCard :title="t('auth.setupTitle')" :subtitle="t('auth.setupSubtitle')">
     <n-form require-mark-placement="left" ref="formRef" class="auth-form" :model="form" :rules="rules">
       <n-form-item path="username">
-        <template #label>
-          <HelpLabel :tip="t('auth.username_tip')">{{ t('auth.username') }}</HelpLabel>
-        </template>
-        <n-input v-model:value="form.username" size="large" :disabled="submitting" @keyup.enter="onSubmit" />
+        <n-input :placeholder="t('auth.usernamePlaceholder')" v-model:value="form.username" size="large" :disabled="submitting" @keyup.enter="onSubmit" />
       </n-form-item>
       <n-form-item path="password">
-        <template #label>
-          <HelpLabel :tip="t('auth.password_tip')">{{ t('auth.password') }}</HelpLabel>
-        </template>
         <n-input
+          :placeholder="t('auth.password_tip')"
           v-model:value="form.password"
           type="password"
           show-password-on="click"
@@ -21,10 +16,8 @@
         />
       </n-form-item>
       <n-form-item path="confirmPassword">
-        <template #label>
-          <HelpLabel :tip="t('auth.confirmPassword_tip')">{{ t('auth.confirmPassword') }}</HelpLabel>
-        </template>
         <n-input
+          :placeholder="t('auth.confirmPasswordPlaceholder')"
           v-model:value="form.confirmPassword"
           type="password"
           show-password-on="click"
@@ -33,7 +26,7 @@
           @keyup.enter="onSubmit"
         />
       </n-form-item>
-      <n-button type="primary" block size="large" :loading="submitting" @click="onSubmit">
+      <n-button type="primary" block size="large" :loading="submitting" @click="onSubmit" style="height: 50px;font-size: 16px;">
         {{ t('auth.createButton') }}
       </n-button>
     </n-form>
@@ -50,7 +43,6 @@ import { APIError, displayMessage } from '../../api/client'
 import { ACCOUNT_SETUP_ALREADY_DONE } from '../../api/errcodes'
 import { passwordStrengthRule, confirmPasswordRule, usernameFormatRule } from '../../utils/authValidators'
 import AuthCard from '../../components/AuthCard.vue'
-import HelpLabel from '../../components/HelpLabel.vue'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -103,6 +95,6 @@ async function onSubmit() {
 
 <style scoped>
 .auth-form {
-  margin-top: 24px;
+  margin-top: 12px;
 }
 </style>

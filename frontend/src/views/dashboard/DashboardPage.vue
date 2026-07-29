@@ -25,6 +25,16 @@
       <div class="setup-banner__body">
         <h3 class="setup-banner__title">{{ t(setupStep.titleKey) }}</h3>
         <p class="setup-banner__desc">{{ t(setupStep.descKey) }}</p>
+        <p v-if="setupStep.hint" class="setup-banner__desc">
+          <span> {{ t(setupStep.hint) }}</span>
+           <NButton
+              size="tiny"
+              secondary
+              @click="onCopy()"
+            >
+            {{reqUrl }}
+          </NButton>
+        </p>
       </div>
       <NButton v-if="setupStep.ctaKey && setupStep.to" type="primary" @click="router.push(setupStep.to)">{{ t(setupStep.ctaKey) }}</NButton>
     </div>
@@ -52,7 +62,7 @@
           <div class="kpi__label">
             <HelpLabel :tip="t('dashboard.costCard_tip')">{{ t('dashboard.costCard') }}</HelpLabel>
           </div>
-          <div class="kpi__value">¥{{ formatMicros(data?.today.total_cost_micros ?? 0) }}</div>
+          <div class="kpi__value">¥{{ formatMicros(data?.today.total_cost_micros ?? 0,2) }}</div>
           <div class="kpi__sub">{{ t('dashboard.costCard_sub') }}</div>
         </div>
       </div>
@@ -106,7 +116,7 @@
             <span class="caller-rank">{{ i + 1 }}</span>
             <span class="caller-label">{{ c.owner_label || t('dashboard.unknownCaller') }}</span>
             <span class="caller-meta">{{ formatNumber(c.calls) }} {{ t('dashboard.callsUnit') }}</span>
-            <span class="caller-cost">¥{{ formatMicros(c.cost_micros) }}</span>
+            <span class="caller-cost">¥{{ formatMicros(c.cost_micros, 2) }}</span>
           </li>
         </ul>
       </section>
@@ -202,6 +212,7 @@ const timeRange = ref<TimeRange>({ start: null, end: null })
 function onPresetChange(v: RangePreset) {
   preset.value = v
 }
+const reqUrl =  window.location.origin
 
 // The dashboard skeleton (KPI cards, trend, upstream status) always renders so
 // a fresh deployment sees a real overview reading zero rather than a blank
@@ -216,6 +227,7 @@ interface SetupStep {
   descKey: string
   icon: Component
   ctaKey?: string
+  hint?: string
   to?: string
 }
 
@@ -241,7 +253,7 @@ const setupStep = computed<SetupStep | null>(() => {
   // independent of the selected range, so a quiet custom window on an active
   // system no longer triggers this banner.
   if (s.total_requests === 0) {
-    return { titleKey: 'dashboard.setupWaitingTitle', descKey: 'dashboard.setupWaitingDesc', icon: Hourglass }
+    return { titleKey: 'dashboard.setupWaitingTitle', descKey: 'dashboard.setupWaitingDesc', hint: t('dashboard.requestAddress'), icon: Hourglass }
   }
   return null
 })
@@ -293,6 +305,15 @@ function failureStatusClass(code: number): string {
   if (code >= 500) return 'failure-status--error'
   if (code >= 400) return 'failure-status--warning'
   return 'failure-status--error' // any non-2xx in this list is a failure by definition
+}
+
+async function onCopy() {
+  try {
+    await navigator.clipboard.writeText(reqUrl)
+    message.success(t('apiKeys.copied'))
+  } catch {
+    message.error(t('apiKeys.copyFailed'))
+  }
 }
 
 // formatRelativeTime renders "5m ago" / "2h ago" / "3d ago" — the dashboard
