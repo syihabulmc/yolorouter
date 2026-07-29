@@ -34,7 +34,7 @@
         <div class="metric__label">
           <HelpLabel :tip="t('costs.overview.cacheSaved_tip')">{{ t('costs.overview.cacheSaved') }}</HelpLabel>
         </div>
-        <div class="metric__value" :class="{ 'metric__value--negative': netCacheSaved < 0 }">
+        <div class="metric__value" :class="{ 'metric__value--negative': isNegativeMicros(netCacheSaved, 2) }">
           ¥{{ formatMicros(netCacheSaved,2) }}
         </div>
         <div class="metric__sub metric__sub--split">
@@ -116,7 +116,7 @@ import CostTrendChart from '../../components/costs/CostTrendChart.vue'
 import CostBreakdownChart from '../../components/costs/CostBreakdownChart.vue'
 import TopSpendersChart from '../../components/costs/TopSpendersChart.vue'
 import BudgetConsumptionTable from '../../components/costs/BudgetConsumptionTable.vue'
-import { formatMicros, netCacheSavedMicros } from '../../utils/money'
+import { formatMicros, isNegativeMicros, netCacheSavedMicros } from '../../utils/money'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import { initialLast7DaysRange, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage } from '../../api/client'

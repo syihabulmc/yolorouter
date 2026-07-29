@@ -96,12 +96,14 @@ const customPromptExamples = computed(() => [
 ])
 
 const customPromptExamplesActive = computed(() => {
-  return customPromptExamples.value.filter(e => props.text.includes(e.text)).map(e => e.label)
+  return customPromptExamples.value.filter((e) => props.text.includes(e.text)).map((e) => e.label)
 })
 
-function multipleClick(str:string) {
+function multipleClick(str: string) {
   if (props.text.includes(str)) {
-    emit('update:text', props.text.replace(str,''))
+    // Remove every occurrence, not just the first — repeated toggles or a
+    // duplicated block must all be cleared so the button state stays truthful.
+    emit('update:text', props.text.split(str).join(''))
   } else {
     emit('update:text', props.text + str)
   }

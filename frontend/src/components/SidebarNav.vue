@@ -27,8 +27,8 @@ export interface NavItem {
   // badge lights a small indicator dot (e.g. "new version available") at the
   // item's top-right. Optional; absent means no badge.
   badge?: boolean
-  // A short green "money-saving" chip pinned to the row's right edge (e.g.
-  // "省钱" / "Save"), marking the entry as a cost-related feature. Optional.
+  // A short green "money-saving" chip pinned to the row's right edge, marking
+  // the entry as a cost-related feature. Optional.
   tag?: string
   // When true the entry is kept in the source list (route and code intact) but
   // never rendered in the sidebar — used to hide a menu item without deleting

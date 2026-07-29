@@ -116,7 +116,7 @@
             <span class="caller-rank">{{ i + 1 }}</span>
             <span class="caller-label">{{ c.owner_label || t('dashboard.unknownCaller') }}</span>
             <span class="caller-meta">{{ formatNumber(c.calls) }} {{ t('dashboard.callsUnit') }}</span>
-            <span class="caller-cost">¥{{ formatMicros(c.cost_micros) }}</span>
+            <span class="caller-cost">¥{{ formatMicros(c.cost_micros, 2) }}</span>
           </li>
         </ul>
       </section>

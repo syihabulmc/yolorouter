@@ -2,11 +2,11 @@
   <AuthCard :title="t('auth.setupTitle')" :subtitle="t('auth.setupSubtitle')">
     <n-form require-mark-placement="left" ref="formRef" class="auth-form" :model="form" :rules="rules">
       <n-form-item path="username">
-        <n-input :placeholder="t('auth.usernamePlaceholder')" v-model:value="form.username" size="large" :disabled="submitting" @keyup.enter="onSubmit" p/>
+        <n-input :placeholder="t('auth.usernamePlaceholder')" v-model:value="form.username" size="large" :disabled="submitting" @keyup.enter="onSubmit" />
       </n-form-item>
       <n-form-item path="password">
         <n-input
-          :placeholder="t('auth.passwordPlaceholder')"
+          :placeholder="t('auth.password_tip')"
           v-model:value="form.password"
           type="password"
           show-password-on="click"

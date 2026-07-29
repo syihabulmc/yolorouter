@@ -166,38 +166,10 @@ const { t } = useI18n();
   padding: 0 80px 80px;
 }
 
-.auth-brand-point-icon {
-  flex: none;
-  color: oklch(80% 0.12 282);
-}
-
-/* ---- Form panel ---- */
-.auth-form-panel {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-10) var(--space-6);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-lg);
-  padding: 0 40px 32px;
-  box-sizing: border-box;
-}
-
 .auth-locale-select {
   position: absolute;
   top: var(--space-5);
   right: var(--space-6);
-}
-
-.auth-form-inner {
-  width: 100%;
-}
-
-.auth-form-head {
-  margin-bottom: var(--space-1);
 }
 
 .auth-title {
@@ -221,38 +193,38 @@ const { t } = useI18n();
   color: #102c44;
 }
 
-/* ---- Mobile: stack brand strip above the form ---- */
+/* ---- Mobile: hide the brand panel and let the form card fill the width ---- */
 @media (max-width: 860px) {
-  .auth-hero-warp {
-    display: none;
+  .auth-page {
+    flex-direction: column;
+    width: 100%;
+    height: auto;
+    min-height: 100vh;
   }
+  .auth-hero-warp,
   .auth-hero {
     display: none;
   }
-  .auth-shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
+  .auth-main {
+    /* Reserve top room for the absolute locale switcher so it never overlaps
+       the card at narrow widths, and drop the desktop 80px inset that would
+       overflow a phone viewport. */
+    width: 100%;
+    padding: 64px 16px 24px;
+    box-sizing: border-box;
+    justify-content: center;
   }
-  .auth-brand {
-    padding: 32px 28px;
+  .auth-card-wrap {
+    width: 100%;
+    max-width: 420px;
+    margin: 0 auto;
   }
-  .auth-brand-inner {
-    max-width: none;
-    gap: var(--space-5);
+  .auth-card-logo {
+    height: 100px;
+    margin-bottom: 28px;
   }
-  .auth-brand-headline {
-    font-size: var(--text-xl);
-  }
-  /* Keep the mobile brand strip compact — supporting copy lives on desktop. */
-  .auth-brand-desc,
-  .auth-brand-points {
-    display: none;
-  }
-  .auth-form-panel {
-    /* Reserve top room for the absolute locale switcher (top 20px, 34px tall)
-       so it never overlaps the heading at narrow widths. */
-    padding: 4rem var(--space-5) var(--space-10);
-    align-items: flex-start;
+  .auth-card-body {
+    padding: 0 24px 40px;
   }
 }
 </style>

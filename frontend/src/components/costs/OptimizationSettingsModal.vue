@@ -21,7 +21,7 @@
         <HelpLabel :tip="t('costOptimization.cspTitle_tip')">{{ t('costOptimization.cspTitle') }}</HelpLabel>
       </div>
       <p class="setting-block__desc">{{ t('costOptimization.cspDesc') }}</p>
-      <div v-if="cspLoad === 'loading'" class="setting-block__state"></div>
+      <div v-if="cspLoad === 'loading'" class="setting-block__state">{{ t('common.loading') }}</div>
       <div v-else-if="cspLoad === 'error'" class="setting-block__state setting-block__state--err">
         <span>{{ t('costOptimization.loadFailed') }}</span>
         <NButton size="small" @click="loadCSP">{{ t('costOptimization.retry') }}</NButton>
@@ -50,10 +50,21 @@
             <template #label>
               <HelpLabel :tip="t('costOptimization.enabled_tip')">{{ t('costOptimization.enabled') }}</HelpLabel>
             </template>
-            <NSwitch v-model:value="cspForm.enabled" :disabled="!cspSetting" @change="saveCSP" style="margin-left: 490px;"/>
+            <NSwitch v-model:value="cspForm.enabled" :disabled="!cspSetting" class="block-switch" @change="saveCSP" />
           </NFormItem>
 
         </NForm>
+        <!-- The switch persists on @change, but text edits have no trigger of
+             their own, so an explicit Save is required to commit prompt text. -->
+        <div class="setting-block__foot">
+          <NButton
+            size="small"
+            type="primary"
+            :loading="cspSaving"
+            :disabled="!cspSetting"
+            @click="saveCSP"
+          >{{ t('costOptimization.save') }}</NButton>
+        </div>
       </template>
     </section>
 
@@ -65,7 +76,7 @@
         </HelpLabel>
       </div>
       <p class="setting-block__desc">{{ t('costOptimization.inputCompression.desc') }}</p>
-      <div v-if="icLoad === 'loading'" class="setting-block__state"></div>
+      <div v-if="icLoad === 'loading'" class="setting-block__state">{{ t('common.loading') }}</div>
       <div v-else-if="icLoad === 'error'" class="setting-block__state setting-block__state--err">
         <span>{{ t('costOptimization.loadFailed') }}</span>
         <NButton size="small" @click="loadIC">{{ t('costOptimization.retry') }}</NButton>
@@ -76,7 +87,7 @@
             <template #label>
               <HelpLabel :tip="t('costOptimization.inputCompression.enabledTip')">{{ t('costOptimization.enabled') }}</HelpLabel>
             </template>
-            <NSwitch v-model:value="icForm.enabled" @change="saveIC" :disabled="!icSetting" style="margin-left: 490px;"/>
+            <NSwitch v-model:value="icForm.enabled" class="block-switch" :disabled="!icSetting" @change="saveIC" />
           </NFormItem>
         </NForm>
       </template>
@@ -160,10 +171,18 @@ async function saveCSP() {
   // MaxCustomSystemPromptLen cap and the per-key CSP rule.
   if (cspForm.enabled && !cspForm.text.trim()) {
     message.error(t('costOptimization.emptyTextError'))
+    // The @change already flipped the switch optimistically; a rejected save
+    // must not leave the toggle ON while the backend stays OFF, so re-sync it
+    // to the last authoritative value.
+    cspForm.enabled = cspSetting.value.enabled
     return
   }
-  if (runeCount(cspForm.text) > MAX_CUSTOM_SYSTEM_PROMPT_LEN) {
+  // Length only matters when the prompt is active — disabling must always be
+  // allowed even if the stored text somehow exceeds the cap, otherwise the
+  // revert below would snap the switch back on and trap the setting.
+  if (cspForm.enabled && runeCount(cspForm.text) > MAX_CUSTOM_SYSTEM_PROMPT_LEN) {
     message.error(t('costOptimization.tooLongError'))
+    cspForm.enabled = cspSetting.value.enabled
     return
   }
   cspSaving.value = true
@@ -182,11 +201,16 @@ async function saveCSP() {
     emit('saved')
   } catch (err) {
     if (err instanceof APIError && err.code === CUSTOM_SYSTEM_PROMPT_CONFLICT) {
-      // Concurrent edit — surface and reload authoritative state.
+      // Concurrent edit — surface and reload authoritative state (which also
+      // re-syncs the switch).
       message.error(t('costOptimization.conflict'))
       void loadCSP()
     } else {
       message.error(displayMessage(err, t))
+      // A rejected save (network/500) must not leave the optimistically-toggled
+      // switch ON while the backend stays OFF — re-sync it to the last
+      // authoritative value, matching the client-side validation branches.
+      if (cspSetting.value) cspForm.enabled = cspSetting.value.enabled
     }
   } finally {
     cspSaving.value = false
@@ -282,13 +306,13 @@ watch(
 .setting-block__foot {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: var(--space-3);
   margin-top: var(--space-2);
 }
-.setting-block__version {
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-  font-variant-numeric: tabular-nums;
+/* Right-align the toggle within its form-item row without hard-coding a pixel
+   offset against the card width. */
+.block-switch {
+  margin-left: auto;
 }
 </style>

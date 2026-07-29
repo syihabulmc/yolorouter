@@ -42,6 +42,19 @@
       </n-form-item>
 
       <p v-else class="mode-hint">{{ cspMode === 'inherit' ? t('apiKeys.cspInheritHint') : t('apiKeys.cspOffHint') }}</p>
+
+      <n-form-item>
+        <template #label>
+          <HelpLabel :tip="t('apiKeys.compressOverride_tip')">{{ t('apiKeys.compressOverride') }}</HelpLabel>
+        </template>
+        <n-radio-group :value="compressMode" @update:value="onCompressModeChange">
+          <n-radio value="inherit">{{ t('apiKeys.compressOverrideInherit') }}</n-radio>
+          <n-radio value="on">{{ t('apiKeys.compressModeOn') }}</n-radio>
+          <n-radio value="off">{{ t('apiKeys.compressModeOff') }}</n-radio>
+        </n-radio-group>
+      </n-form-item>
+
+      <p class="mode-hint">{{ compressHint }}</p>
     </n-form>
 
     <template #footer>
@@ -59,7 +72,7 @@ import { useI18n } from 'vue-i18n'
 import { NRadio, NRadioGroup, useMessage, type FormInst, type FormRules } from 'naive-ui'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { displayMessage, APIError } from '../../api/client'
-import { getAPIKey } from '../../api/apiKeys'
+import { getAPIKey, type APIKey } from '../../api/apiKeys'
 import { API_KEY_CONFLICT } from '../../api/errcodes'
 import { customSystemPromptRule } from '../../utils/apiKeyValidators'
 import HelpLabel from '../HelpLabel.vue'
@@ -91,6 +104,8 @@ const form = reactive({
   custom_system_prompt_enabled_override: false,
   custom_system_prompt_enabled: false,
   custom_system_prompt: '',
+  compress_enabled_override: false,
+  compress_enabled: false,
 })
 
 const rules = computed<FormRules>(() => ({
@@ -119,27 +134,47 @@ function onCspModeChange(mode: CspMode) {
   }
 }
 
+// compressMode is the independent counterpart of cspMode: input compression
+// and the custom system prompt are two separate per-key overrides, so this
+// modal edits each with its own three-way radio rather than deriving one from
+// the other.
+type CompressMode = 'inherit' | 'on' | 'off'
+const compressMode = computed<CompressMode>(() => {
+  if (!form.compress_enabled_override) return 'inherit'
+  return form.compress_enabled ? 'on' : 'off'
+})
+const compressHint = computed(() => {
+  if (compressMode.value === 'inherit') return t('apiKeys.compressInheritHint')
+  if (compressMode.value === 'on') return t('apiKeys.compressOnHint')
+  return t('apiKeys.compressOffHint')
+})
+function onCompressModeChange(mode: CompressMode) {
+  if (mode === 'inherit') {
+    form.compress_enabled_override = false
+  } else {
+    form.compress_enabled_override = true
+    form.compress_enabled = mode === 'on'
+  }
+}
+
 // fill adopts the authoritative GET response into the form and captures the
 // CAS token. A failed GET keeps loading=true off and surfaces the error; the
 // modal stays non-editable so a network blip can't trick the admin into
 // saving empty defaults over the real row.
-function fill(override: boolean, enabled: boolean, text: string, updatedAt: string) {
-  form.custom_system_prompt_enabled_override = override
-  form.custom_system_prompt_enabled = enabled
-  form.custom_system_prompt = text
-  expectedUpdatedAt.value = updatedAt
+function fill(key: APIKey) {
+  form.custom_system_prompt_enabled_override = key.custom_system_prompt_enabled_override
+  form.custom_system_prompt_enabled = key.custom_system_prompt_enabled
+  form.custom_system_prompt = key.custom_system_prompt
+  form.compress_enabled_override = key.compress_enabled_override
+  form.compress_enabled = key.compress_enabled
+  expectedUpdatedAt.value = key.updated_at
 }
 
 async function load() {
   loading.value = true
   try {
     const key = await getAPIKey(props.apiKeyId)
-    fill(
-      key.custom_system_prompt_enabled_override,
-      key.custom_system_prompt_enabled,
-      key.custom_system_prompt,
-      key.updated_at,
-    )
+    fill(key)
   } catch (err) {
     message.error(displayMessage(err, t))
     emit('update:show', false)
@@ -166,8 +201,8 @@ async function onSave() {
       custom_system_prompt_enabled_override: form.custom_system_prompt_enabled_override,
       custom_system_prompt_enabled: form.custom_system_prompt_enabled,
       custom_system_prompt: form.custom_system_prompt,
-      compress_enabled_override: form.custom_system_prompt_enabled_override,
-      compress_enabled: form.custom_system_prompt_enabled,
+      compress_enabled_override: form.compress_enabled_override,
+      compress_enabled: form.compress_enabled,
       // expected_updated_at ties this save to the GET we opened with — a 409
       // means the row moved underneath us and we must re-read before saving.
       expected_updated_at: expectedUpdatedAt.value ?? undefined,
