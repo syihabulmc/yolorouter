@@ -31,3 +31,5 @@ web/dist/
 
 # Cloudflare Worker source is kept private (first-party infra, not published)
 deploy/cloudflare-worker/
+
+gui-test-screenshots/
