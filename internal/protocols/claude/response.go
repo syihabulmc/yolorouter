@@ -139,6 +139,7 @@ func (d *StreamDecoder) DecodeChunk(raw string) ([]protocols.IRStreamDelta, erro
 		} `json:"content_block,omitempty"`
 		Usage *struct {
 			OutputTokens             int `json:"output_tokens"`
+			InputTokens              int `json:"input_tokens,omitempty"`
 			CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 			CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 		} `json:"usage,omitempty"`
@@ -221,18 +222,26 @@ func (d *StreamDecoder) DecodeChunk(raw string) ([]protocols.IRStreamDelta, erro
 		}
 		if event.Usage != nil {
 			d.usage.CompletionTokens = event.Usage.OutputTokens
-			// Anthropic updates the final cache token counts in message_delta
-			// (message_start input_tokens is 0 on a full cache hit)
+			// message_delta is the terminal usage event: its non-zero fields
+			// replace message_start's value (last-wins). A converting upstream
+			// (OpenAI/Gemini/Responses, whose usage only resolves at stream end)
+			// emits message_start with input_tokens=0 and reports the real input
+			// here, so adopt the delta's value whenever it is non-zero.
 			if event.Usage.CacheCreationInputTokens > 0 {
 				d.usage.CacheWriteTokens = event.Usage.CacheCreationInputTokens
 			}
 			if event.Usage.CacheReadInputTokens > 0 {
 				d.usage.CacheReadTokens = event.Usage.CacheReadInputTokens
 			}
-			newTotal := d.usage.PromptTokens + event.Usage.OutputTokens + d.usage.CacheWriteTokens + d.usage.CacheReadTokens
-			if d.usage.TotalTokens == 0 || d.usage.TotalTokens < newTotal {
-				d.usage.TotalTokens = newTotal
+			if event.Usage.InputTokens > 0 {
+				d.usage.PromptTokens = event.Usage.InputTokens
 			}
+			// TotalTokens is recomputed from the per-field totals on every
+			// message_delta so it stays consistent when a last-wins update
+			// lowers a field (e.g. message_delta correcting message_start's
+			// input downward). A "never decrease" high-water mark here would
+			// leave TotalTokens above the sum of its parts and leak into billing.
+			d.usage.TotalTokens = d.usage.PromptTokens + event.Usage.OutputTokens + d.usage.CacheWriteTokens + d.usage.CacheReadTokens
 			// Extract Anthropic web search count from raw payload
 			var wsExtract struct {
 				Usage *struct {

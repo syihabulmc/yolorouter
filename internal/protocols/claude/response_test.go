@@ -340,6 +340,152 @@ func TestClaudeStreamDecoder_MessageDeltaWithStopReason(t *testing.T) {
 	}
 }
 
+func TestClaudeStreamDecoder_MessageDeltaBackfillsInputTokens(t *testing.T) {
+	// A converting upstream (an OpenAI/Gemini/Responses provider behind a
+	// translating gateway) can only report input usage at stream end, so its
+	// message_start carries input_tokens=0 and the real input lands on the
+	// terminal message_delta. The decoder must backfill PromptTokens from
+	// message_delta rather than trust the 0 left by message_start.
+	dec := NewStreamDecoder()
+
+	_, _ = dec.DecodeChunk(`data: {"type":"message_start","message":{"id":"msg_x","model":"claude-3-opus","usage":{"input_tokens":0,"output_tokens":0}}}`)
+	deltas, _ := dec.DecodeChunk(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":16819,"output_tokens":38}}`)
+
+	var foundUsage bool
+	for _, d := range deltas {
+		if du, ok := d.(protocols.DeltaUsage); ok {
+			foundUsage = true
+			if du.Usage.PromptTokens != 16819 {
+				t.Errorf("PromptTokens = %d, want 16819 (backfilled from message_delta)", du.Usage.PromptTokens)
+			}
+			if du.Usage.CompletionTokens != 38 {
+				t.Errorf("CompletionTokens = %d, want 38", du.Usage.CompletionTokens)
+			}
+			if du.Usage.TotalTokens != 16857 { // 16819 + 38
+				t.Errorf("TotalTokens = %d, want 16857 (PromptTokens+CompletionTokens)", du.Usage.TotalTokens)
+			}
+			// input backfill must not pollute the cache fields.
+			if du.Usage.CacheWriteTokens != 0 || du.Usage.CacheReadTokens != 0 {
+				t.Errorf("cache fields polluted by input backfill: write=%d read=%d", du.Usage.CacheWriteTokens, du.Usage.CacheReadTokens)
+			}
+		}
+	}
+	if !foundUsage {
+		t.Error("Missing protocols.DeltaUsage")
+	}
+}
+
+func TestClaudeStreamDecoder_MessageDeltaInputOverwritesStart(t *testing.T) {
+	// message_delta is the terminal usage event: its non-zero input_tokens is
+	// authoritative and replaces whatever message_start carried (last-wins, the
+	// same rule as the cache fields). Covers a converting upstream that reports
+	// a placeholder input at message_start and the real value on message_delta.
+	dec := NewStreamDecoder()
+
+	_, _ = dec.DecodeChunk(`data: {"type":"message_start","message":{"id":"msg_y","model":"claude-3-opus","usage":{"input_tokens":100,"output_tokens":0}}}`)
+	deltas, _ := dec.DecodeChunk(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":999,"output_tokens":5}}`)
+
+	var foundUsage bool
+	for _, d := range deltas {
+		if du, ok := d.(protocols.DeltaUsage); ok {
+			foundUsage = true
+			if du.Usage.PromptTokens != 999 {
+				t.Errorf("PromptTokens = %d, want 999 (message_delta input is terminal-authoritative)", du.Usage.PromptTokens)
+			}
+			if du.Usage.TotalTokens != 1004 { // 999 + 5
+				t.Errorf("TotalTokens = %d, want 1004 (PromptTokens+CompletionTokens)", du.Usage.TotalTokens)
+			}
+		}
+	}
+	if !foundUsage {
+		t.Error("Missing protocols.DeltaUsage")
+	}
+}
+
+func TestClaudeStreamDecoder_MessageDeltaInputLoweredFromStart(t *testing.T) {
+	// Regression guard: when message_delta's input is LOWER than message_start's,
+	// TotalTokens must follow it down (PromptTokens+CompletionTokens sum), not
+	// stick at message_start's higher value via a "never decrease" guard.
+	dec := NewStreamDecoder()
+
+	_, _ = dec.DecodeChunk(`data: {"type":"message_start","message":{"id":"msg_l","model":"claude-3-opus","usage":{"input_tokens":200,"output_tokens":0}}}`)
+	deltas, _ := dec.DecodeChunk(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":100,"output_tokens":38}}`)
+
+	var foundUsage bool
+	for _, d := range deltas {
+		if du, ok := d.(protocols.DeltaUsage); ok {
+			foundUsage = true
+			if du.Usage.PromptTokens != 100 {
+				t.Errorf("PromptTokens = %d, want 100 (lowered by message_delta)", du.Usage.PromptTokens)
+			}
+			if du.Usage.TotalTokens != 138 { // 100 + 38, NOT the stale 200
+				t.Errorf("TotalTokens = %d, want 138 (must follow the lowered input, not stick at message_start's 200)", du.Usage.TotalTokens)
+			}
+		}
+	}
+	if !foundUsage {
+		t.Error("Missing protocols.DeltaUsage")
+	}
+}
+
+func TestClaudeStreamDecoder_MessageDeltaInputAndCacheBackfill(t *testing.T) {
+	// When message_delta carries input and cache fields together, all of them
+	// backfill into d.usage and TotalTokens must sum every field
+	// (PromptTokens + CompletionTokens + CacheWrite + CacheRead).
+	dec := NewStreamDecoder()
+
+	_, _ = dec.DecodeChunk(`data: {"type":"message_start","message":{"id":"msg_c","model":"claude-3-opus","usage":{"input_tokens":0,"output_tokens":0}}}`)
+	deltas, _ := dec.DecodeChunk(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":1000,"output_tokens":40,"cache_creation_input_tokens":20,"cache_read_input_tokens":30}}`)
+
+	var foundUsage bool
+	for _, d := range deltas {
+		if du, ok := d.(protocols.DeltaUsage); ok {
+			foundUsage = true
+			if du.Usage.PromptTokens != 1000 {
+				t.Errorf("PromptTokens = %d, want 1000", du.Usage.PromptTokens)
+			}
+			if du.Usage.CacheWriteTokens != 20 {
+				t.Errorf("CacheWriteTokens = %d, want 20", du.Usage.CacheWriteTokens)
+			}
+			if du.Usage.CacheReadTokens != 30 {
+				t.Errorf("CacheReadTokens = %d, want 30", du.Usage.CacheReadTokens)
+			}
+			if du.Usage.TotalTokens != 1090 { // 1000 + 40 + 20 + 30
+				t.Errorf("TotalTokens = %d, want 1090 (all four fields summed)", du.Usage.TotalTokens)
+			}
+		}
+	}
+	if !foundUsage {
+		t.Error("Missing protocols.DeltaUsage")
+	}
+}
+
+func TestClaudeStreamDecoder_MessageDeltaLastWinsAcrossMultipleDeltas(t *testing.T) {
+	// A second message_delta's non-zero input_tokens replaces the first's
+	// (last-wins across multiple terminal events), and TotalTokens follows.
+	dec := NewStreamDecoder()
+
+	_, _ = dec.DecodeChunk(`data: {"type":"message_start","message":{"id":"msg_m","model":"claude-3-opus","usage":{"input_tokens":0,"output_tokens":0}}}`)
+	_, _ = dec.DecodeChunk(`data: {"type":"message_delta","delta":{"stop_reason":null,"stop_sequence":null},"usage":{"input_tokens":100,"output_tokens":5}}`)
+	deltas, _ := dec.DecodeChunk(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":200,"output_tokens":10}}`)
+
+	var foundUsage bool
+	for _, d := range deltas {
+		if du, ok := d.(protocols.DeltaUsage); ok {
+			foundUsage = true
+			if du.Usage.PromptTokens != 200 {
+				t.Errorf("PromptTokens = %d, want 200 (second message_delta wins)", du.Usage.PromptTokens)
+			}
+			if du.Usage.TotalTokens != 210 { // 200 + 10
+				t.Errorf("TotalTokens = %d, want 210", du.Usage.TotalTokens)
+			}
+		}
+	}
+	if !foundUsage {
+		t.Error("Missing protocols.DeltaUsage")
+	}
+}
+
 func TestClaudeStreamDecoder_IgnoresEventLines(t *testing.T) {
 	dec := NewStreamDecoder()
 
