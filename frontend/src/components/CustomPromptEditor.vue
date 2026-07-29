@@ -74,7 +74,10 @@ const props = withDefaults(defineProps<Props>(), {
   multiple: false,
 })
 
-const emit = defineEmits<{ (e: 'update:text', v: string): void }>()
+const emit = defineEmits<{
+  (e: 'update:text', v: string): void
+  (e: 'change', v: string): void
+}>()
 
 const { t } = useI18n()
 
@@ -100,13 +103,11 @@ const customPromptExamplesActive = computed(() => {
 })
 
 function multipleClick(str: string) {
-  if (props.text.includes(str)) {
-    // Remove every occurrence, not just the first — repeated toggles or a
-    // duplicated block must all be cleared so the button state stays truthful.
-    emit('update:text', props.text.split(str).join(''))
-  } else {
-    emit('update:text', props.text + str)
-  }
+  // Remove every occurrence, not just the first — repeated toggles or a
+  // duplicated block must all be cleared so the button state stays truthful.
+  const next = props.text.includes(str) ? props.text.split(str).join('') : props.text + str
+  emit('update:text', next)
+  emit('change', next)
 }
 function onUpdateValue(v: string) {
   // Enforce the cap by Unicode code point, not the textarea's native UTF-16

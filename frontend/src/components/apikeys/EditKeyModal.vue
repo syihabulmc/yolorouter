@@ -57,12 +57,9 @@
           :placeholder="t('apiKeys.modelAllowlist')"
         />
       </n-form-item>
-      <n-form-item path="expires_at">
-        <template #label>
-          <HelpLabel :tip="t('apiKeys.expiresAt_tip')">{{ t('apiKeys.expiresAt') }}</HelpLabel>
-        </template>
+      <div style="position: absolute;top: 17px;left: 254px;">
         <NDatePicker v-model:value="form.expires_at" type="datetime" :clearable="false" class="full-width" :placeholder="t('apiKeys.selectExpiresAt')" />
-      </n-form-item>
+      </div>
 
       <div class="limit-section">
         <div class="limit-section__label">{{ t('apiKeys.limitsSection') }}</div>

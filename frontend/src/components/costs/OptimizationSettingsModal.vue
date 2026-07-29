@@ -41,6 +41,7 @@
                   multiple
                   :showInput="false"
                   :placeholder="t('costOptimization.textPlaceholder')"
+                  @change="changeText"
                  />
                 </div>
             </div>
@@ -54,17 +55,6 @@
           </NFormItem>
 
         </NForm>
-        <!-- The switch persists on @change, but text edits have no trigger of
-             their own, so an explicit Save is required to commit prompt text. -->
-        <div class="setting-block__foot">
-          <NButton
-            size="small"
-            type="primary"
-            :loading="cspSaving"
-            :disabled="!cspSetting"
-            @click="saveCSP"
-          >{{ t('costOptimization.save') }}</NButton>
-        </div>
       </template>
     </section>
 
@@ -160,7 +150,12 @@ async function loadCSP() {
     if (!(err instanceof APIError)) message.error(displayMessage(err, t))
   }
 }
-
+function changeText() {
+   if (!cspForm.text) {
+    cspForm.enabled = false
+  }
+  saveCSP()
+}
 async function saveCSP() {
   // Hard guard: never let a save fire before a successful GET — otherwise a
   // click during the error state could submit the empty defaults.

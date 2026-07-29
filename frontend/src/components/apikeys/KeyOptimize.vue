@@ -19,18 +19,20 @@
     >
       <n-form-item>
         <template #label>
-          <HelpLabel :tip="t('apiKeys.cspOverride_tip')">{{ t('apiKeys.cspOverride') }}</HelpLabel>
+          <HelpLabel :tip="t('apiKeys.cspOverride_tip')">{{ t('apiKeys.cspAction') }}</HelpLabel>
         </template>
-        <n-radio-group :value="cspMode" @update:value="onCspModeChange">
-          <n-radio value="inherit">{{ t('apiKeys.cspOverrideInherit') }}</n-radio>
-          <n-radio value="on">{{ t('apiKeys.cspModeOn') }}</n-radio>
-          <n-radio value="off">{{ t('apiKeys.cspModeOff') }}</n-radio>
-        </n-radio-group>
+        <div>
+          <n-radio-group :value="cspMode" @update:value="onCspModeChange">
+            <n-radio value="inherit">{{ t('apiKeys.cspOverrideInherit') }}</n-radio>
+            <n-radio value="on">{{ t('apiKeys.cspModeOn') }}</n-radio>
+            <n-radio value="off">{{ t('apiKeys.cspModeOff') }}</n-radio>
+          </n-radio-group>
+          <p v-if="cspMode !== 'on'" class="mode-hint">{{ cspMode === 'inherit' ? t('apiKeys.cspInheritHint') : t('apiKeys.cspOffHint') }}</p>
+        </div>
       </n-form-item>
-
       <n-form-item v-if="cspMode === 'on'" path="custom_system_prompt">
         <template #label>
-          <HelpLabel :tip="t('costOptimization.cspTitle_tip')">{{ t('costOptimization.cspTitle') }}</HelpLabel>
+          <HelpLabel :tip="t('costOptimization.cspTitle_tip')">{{ t('apiKeys.cspText') }}</HelpLabel>
         </template>
         <CustomPromptEditor
           v-model:text="form.custom_system_prompt"
@@ -40,21 +42,20 @@
           :placeholder="t('apiKeys.cspTextPlaceholder')"
         />
       </n-form-item>
-
-      <p v-else class="mode-hint">{{ cspMode === 'inherit' ? t('apiKeys.cspInheritHint') : t('apiKeys.cspOffHint') }}</p>
-
-      <n-form-item>
+      <n-form-item >
         <template #label>
-          <HelpLabel :tip="t('apiKeys.compressOverride_tip')">{{ t('apiKeys.compressOverride') }}</HelpLabel>
+          <HelpLabel :tip="t('apiKeys.compressOverride_tip')">{{ t('apiKeys.compressAction') }}</HelpLabel>
         </template>
-        <n-radio-group :value="compressMode" @update:value="onCompressModeChange">
-          <n-radio value="inherit">{{ t('apiKeys.compressOverrideInherit') }}</n-radio>
-          <n-radio value="on">{{ t('apiKeys.compressModeOn') }}</n-radio>
-          <n-radio value="off">{{ t('apiKeys.compressModeOff') }}</n-radio>
-        </n-radio-group>
+        <div>        
+          <n-radio-group :value="compressMode" @update:value="onCompressModeChange">
+            <n-radio value="inherit">{{ t('apiKeys.compressOverrideInherit') }}</n-radio>
+            <n-radio value="on">{{ t('apiKeys.compressModeOn') }}</n-radio>
+            <n-radio value="off">{{ t('apiKeys.compressModeOff') }}</n-radio>
+          </n-radio-group>
+          <p class="mode-hint">{{ compressHint }}</p>
+        </div>
       </n-form-item>
 
-      <p class="mode-hint">{{ compressHint }}</p>
     </n-form>
 
     <template #footer>
@@ -227,13 +228,14 @@ async function onSave() {
 
 <style scoped>
 .mode-hint {
-  margin: 0;
+  margin: 10px 0 0;
   padding: var(--space-2) var(--space-3);
   font-size: var(--text-sm);
   color: var(--color-text-muted);
   background: var(--color-bg-elevated, var(--color-bg));
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
+  width: 470px;
 }
 
 .loading-row {
