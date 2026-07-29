@@ -94,6 +94,63 @@
       </div>
     </div>
 
+    <!-- Token KPI cards row. The four buckets are mutually exclusive (input is
+         the net prompt, cache reads/writes counted separately), so they sum to
+         the period's true token total. -->
+    <div class="kpi-row">
+      <div class="kpi">
+        <div class="kpi__icon kpi__icon--neutral">
+          <ArrowDownToLine :size="18" />
+        </div>
+        <div class="kpi__body">
+          <div class="kpi__label">
+            <HelpLabel :tip="t('dashboard.inputTokensCard_tip')">{{ t('dashboard.inputTokensCard') }}</HelpLabel>
+          </div>
+          <div class="kpi__value">{{ formatNumber(data?.today.input_tokens ?? 0) }}</div>
+          <div class="kpi__sub">{{ t('dashboard.inputTokensCard_sub') }}</div>
+        </div>
+      </div>
+
+      <div class="kpi">
+        <div class="kpi__icon kpi__icon--neutral">
+          <ArrowUpFromLine :size="18" />
+        </div>
+        <div class="kpi__body">
+          <div class="kpi__label">
+            <HelpLabel :tip="t('dashboard.outputTokensCard_tip')">{{ t('dashboard.outputTokensCard') }}</HelpLabel>
+          </div>
+          <div class="kpi__value">{{ formatNumber(data?.today.output_tokens ?? 0) }}</div>
+          <div class="kpi__sub">{{ t('dashboard.outputTokensCard_sub') }}</div>
+        </div>
+      </div>
+
+      <div class="kpi">
+        <div class="kpi__icon kpi__icon--neutral">
+          <HardDriveUpload :size="18" />
+        </div>
+        <div class="kpi__body">
+          <div class="kpi__label">
+            <HelpLabel :tip="t('dashboard.cacheWriteTokensCard_tip')">{{ t('dashboard.cacheWriteTokensCard') }}</HelpLabel>
+          </div>
+          <div class="kpi__value">{{ formatNumber(data?.today.cache_write_tokens ?? 0) }}</div>
+          <div class="kpi__sub">{{ t('dashboard.cacheWriteTokensCard_sub') }}</div>
+        </div>
+      </div>
+
+      <div class="kpi">
+        <div class="kpi__icon kpi__icon--neutral">
+          <HardDriveDownload :size="18" />
+        </div>
+        <div class="kpi__body">
+          <div class="kpi__label">
+            <HelpLabel :tip="t('dashboard.cacheReadTokensCard_tip')">{{ t('dashboard.cacheReadTokensCard') }}</HelpLabel>
+          </div>
+          <div class="kpi__value">{{ formatNumber(data?.today.cache_read_tokens ?? 0) }}</div>
+          <div class="kpi__sub">{{ t('dashboard.cacheReadTokensCard_sub') }}</div>
+        </div>
+      </div>
+    </div>
+
     <!-- Trend chart -->
     <section class="section-card">
       <header class="section-head">
@@ -188,7 +245,20 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NButton, useMessage } from 'naive-ui'
 import type { Component } from 'vue'
-import { Activity, AlertTriangle, Boxes, DollarSign, Hourglass, KeyRound, Server, TrendingUp } from '@lucide/vue'
+import {
+  Activity,
+  AlertTriangle,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Boxes,
+  DollarSign,
+  HardDriveDownload,
+  HardDriveUpload,
+  Hourglass,
+  KeyRound,
+  Server,
+  TrendingUp,
+} from '@lucide/vue'
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import EmptyState from '../../components/EmptyState.vue'
@@ -385,9 +455,12 @@ function goToRequestLog(requestId: string) {
   }
 }
 
+/* minmax(0, 1fr) rather than 1fr: a bare 1fr track has an auto minimum, so a
+   long unbreakable value (token counts reach 8-10 grouped digits) would push
+   its column past an equal share and skew the row. */
 .kpi-row {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
 }
 
@@ -436,6 +509,20 @@ function goToRequestLog(requestId: string) {
   color: var(--color-warning);
 }
 
+/* Token counters are volume, not health. They deliberately sit outside the
+   semantic palette so amber/green keep meaning "needs attention" / "good"
+   on the row above. */
+.kpi__icon--neutral {
+  background: var(--color-bg-soft);
+  color: var(--color-text-muted);
+}
+
+/* min-width: 0 lets the body shrink inside the flex row instead of forcing the
+   card wider than its grid track. */
+.kpi__body {
+  min-width: 0;
+}
+
 .kpi__label {
   font-size: var(--text-xs);
   font-weight: 700;
@@ -451,6 +538,9 @@ function goToRequestLog(requestId: string) {
   line-height: 1;
   font-variant-numeric: tabular-nums;
   color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .kpi__sub {

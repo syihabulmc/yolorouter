@@ -41,6 +41,10 @@ type todayMetrics struct {
 	TotalCostMicros  int64   `json:"total_cost_micros"`
 	SuccessRate      float64 `json:"success_rate"`
 	UnknownCostCalls int64   `json:"unknown_cost_calls"`
+	InputTokens      int64   `json:"input_tokens"`
+	OutputTokens     int64   `json:"output_tokens"`
+	CacheWriteTokens int64   `json:"cache_write_tokens"`
+	CacheReadTokens  int64   `json:"cache_read_tokens"`
 }
 
 type trendPoint struct {
@@ -179,36 +183,47 @@ func TestGetDashboardTodayMetricsCountRowsInLocalDay(t *testing.T) {
 	// Two clean successes (200, cost_known=true), one failure (500, 0 cost),
 	// one unknown-cost success (200, cost_known=false, cost_micros=0), one
 	// caller-cancel (499 — counts toward total but NOT success rate).
+	//
+	// Token counts differ per row and per bucket (input/output/cache-write/
+	// cache-read use distinct magnitudes) so a transposed column mapping shows
+	// up as a wrong sum rather than passing on symmetric values. Unlike cost,
+	// tokens are summed across every row regardless of status or cost_known.
 	insertRequestLog(t, db, now.Add(-5*time.Minute), func(r *model.RequestLog) {
 		r.StatusCode = 200
 		r.CostMicros = 100
 		r.CostKnown = true
+		r.InputTokens, r.OutputTokens, r.CacheWriteTokens, r.CacheReadTokens = 10, 1, 100, 1000
 	})
 	insertRequestLog(t, db, now.Add(-4*time.Minute), func(r *model.RequestLog) {
 		r.StatusCode = 200
 		r.CostMicros = 200
 		r.CostKnown = true
+		r.InputTokens, r.OutputTokens, r.CacheWriteTokens, r.CacheReadTokens = 20, 2, 200, 2000
 	})
 	insertRequestLog(t, db, now.Add(-3*time.Minute), func(r *model.RequestLog) {
 		r.StatusCode = 500
 		r.CostMicros = 0
 		r.CostKnown = true
+		r.InputTokens, r.OutputTokens, r.CacheWriteTokens, r.CacheReadTokens = 30, 3, 300, 3000
 	})
 	insertRequestLog(t, db, now.Add(-2*time.Minute), func(r *model.RequestLog) {
 		r.StatusCode = 200
 		r.CostMicros = 0
 		r.CostKnown = false
+		r.InputTokens, r.OutputTokens, r.CacheWriteTokens, r.CacheReadTokens = 40, 4, 400, 4000
 	})
 	insertRequestLog(t, db, now.Add(-1*time.Minute), func(r *model.RequestLog) {
 		r.StatusCode = 499
 		r.CostMicros = 0
 		r.CostKnown = true
+		r.InputTokens, r.OutputTokens, r.CacheWriteTokens, r.CacheReadTokens = 50, 5, 500, 5000
 	})
 	// One row just before today's window — must NOT count toward today.
 	insertRequestLog(t, db, start.Add(-time.Second), func(r *model.RequestLog) {
 		r.StatusCode = 200
 		r.CostMicros = 9999
 		r.CostKnown = true
+		r.InputTokens, r.OutputTokens, r.CacheWriteTokens, r.CacheReadTokens = 99999, 99999, 99999, 99999
 	})
 
 	w, env := doJSON(t, r, http.MethodGet, "/api/admin/dashboard", nil, nil)
@@ -235,6 +250,22 @@ func TestGetDashboardTodayMetricsCountRowsInLocalDay(t *testing.T) {
 	}
 	if body.Today.UnknownCostCalls != 1 {
 		t.Fatalf("UnknownCostCalls: want 1, got %d", body.Today.UnknownCostCalls)
+	}
+	// Token sums cover all 5 in-window rows and exclude the pre-window row,
+	// whose 99999s would swamp any of these totals if the window leaked.
+	for _, tc := range []struct {
+		name string
+		got  int64
+		want int64
+	}{
+		{"InputTokens", body.Today.InputTokens, 150},
+		{"OutputTokens", body.Today.OutputTokens, 15},
+		{"CacheWriteTokens", body.Today.CacheWriteTokens, 1500},
+		{"CacheReadTokens", body.Today.CacheReadTokens, 15000},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s: want %d, got %d", tc.name, tc.want, tc.got)
+		}
 	}
 
 	// Sanity: end-exclusive window means a row at exactly `end` would fall
