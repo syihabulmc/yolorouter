@@ -159,6 +159,17 @@ func NewTransport(allowPrivate bool, connectTimeout, tlsHandshake time.Duration)
 // produces an already-expired context, which would fail every dial
 // immediately instead of disabling the bound. In that case the parent ctx is
 // used directly, unmodified, for the dial phase too.
+// resolveHost is net.DefaultResolver.LookupIPAddr behind a variable so a test
+// can see which context resolution is handed. That is the whole of the
+// "connectTimeout does not bound DNS" contract, and it is invisible from
+// outside: an implementation that wrongly passes the connect deadline to the
+// resolver still returns the same connection for any reachable host, and any
+// test that tries to catch it by making the deadline tiny is really testing the
+// platform's clock granularity rather than this code.
+var resolveHost = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
 func safeDialContext(ctx context.Context, dialer *net.Dialer, network, addr string, allowPrivate bool, connectTimeout time.Duration) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -166,7 +177,7 @@ func safeDialContext(ctx context.Context, dialer *net.Dialer, network, addr stri
 	}
 	// Resolution is bounded only by the caller's own ctx (the per-attempt
 	// budget), never by connectTimeout — see the doc comment above.
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	ips, err := resolveHost(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %q: %w", host, err)
 	}

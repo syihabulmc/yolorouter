@@ -22,8 +22,21 @@ type Config struct {
 	Console  bool
 }
 
+// fileSink is the rotating file writer installed by the most recent Init, kept
+// so the next Init can close it. Dropping a lumberjack.Logger does not close the
+// file it holds open, so re-initializing — bootstrap does it once the real
+// config is loaded, and tests do it repeatedly — would leak one handle per call
+// for the life of the process. On Windows it also keeps the previous log file
+// undeletable, which is how the leak first became visible.
+var fileSink *lumberjack.Logger
+
 // Init initializes the logging system. Call once at process startup.
 func Init(cfg Config) {
+	if fileSink != nil {
+		_ = fileSink.Close()
+		fileSink = nil
+	}
+
 	level := zapcore.InfoLevel
 	if cfg.Level != "" {
 		_ = level.UnmarshalText([]byte(cfg.Level))
@@ -64,14 +77,14 @@ func Init(cfg Config) {
 			EncodeDuration: zapcore.SecondsDurationEncoder,
 			EncodeCaller:   zapcore.ShortCallerEncoder,
 		})
-		writer := zapcore.AddSync(&lumberjack.Logger{
+		fileSink = &lumberjack.Logger{
 			Filename:   cfg.Filename,
 			MaxSize:    100, // MB
 			MaxBackups: 7,
 			MaxAge:     30, // days
 			Compress:   true,
-		})
-		cores = append(cores, zapcore.NewCore(fileEncoder, writer, level))
+		}
+		cores = append(cores, zapcore.NewCore(fileEncoder, zapcore.AddSync(fileSink), level))
 	}
 
 	globalLogger = zap.New(zapcore.NewTee(cores...), zap.AddCaller(), zap.AddCallerSkip(1))

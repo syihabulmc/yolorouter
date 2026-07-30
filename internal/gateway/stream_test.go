@@ -309,6 +309,13 @@ func runStreamPumpCapture(t *testing.T, upstreamBody, requestID, bodiesDir strin
 	}
 	rc := &RelayContext{RequestID: requestID, OriginalModel: "ext", IsStream: true, WantsStreamUsage: true}
 	usage, err := passthroughStreamToClient(c, resp, rc)
+	// The pump deliberately leaves the capture file open for its caller to
+	// close (dispatchPassthroughStream does it on every exit path, so a
+	// mid-stream error frame can still be appended). Calling the pump directly
+	// means standing in for that caller: without this the handle outlives the
+	// test and t.TempDir() cleanup fails on Windows, which forbids deleting a
+	// file that is still open.
+	closeStreamBodyFile(rc)
 	return rc, rec, usage, err
 }
 

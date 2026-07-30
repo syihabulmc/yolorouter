@@ -122,22 +122,74 @@ func TestCompressSkipReasonFailOpenOnPanic(t *testing.T) {
 	}
 }
 
-func TestCompressSkipReasonTimeout(t *testing.T) {
-	// With opts.Timeout = 1ns, the context deadline elapses before the per-block
-	// loop reaches its first iteration (json.Valid + locate + size-gate already
-	// take microseconds). The select { case <-ctx.Done() } guard at the top of
-	// each block iteration therefore fires immediately and returns the original
-	// body with SkipReasonTimeout. 1ns is the smallest non-zero Duration; it is
-	// reliable here because the timeout is checked at the head of each block
-	// iteration rather than mid-compress, so any elapsed budget is sufficient.
+// slowCompressor burns a fixed amount of real wall time, then hands the content
+// back unchanged. Wall time is what makes the timeout tests below deterministic:
+// they never depend on a sub-tick deadline being observable, only on more time
+// having genuinely passed than the budget allowed.
+type slowCompressor struct{ delay time.Duration }
+
+func (c *slowCompressor) Name() string { return "slow" }
+
+func (c *slowCompressor) Compress(_ context.Context, content string) (string, error) {
+	time.Sleep(c.delay)
+	return content, nil
+}
+
+// withSlowBuildCompressor swaps the build-output chain for one that stalls, and
+// restores it afterwards.
+func withSlowBuildCompressor(t *testing.T, delay time.Duration) {
+	t.Helper()
+	original := buildCompressors
+	buildCompressors = []compressors.Compressor{&slowCompressor{delay: delay}}
+	t.Cleanup(func() { buildCompressors = original })
+}
+
+// twoBlockBody builds a request with two live blocks, so the per-block timeout
+// guard is reached a second time after the first block has been worked on.
+func twoBlockBody(t *testing.T) []byte {
+	t.Helper()
 	big := "=== RUN   TestA\n--- PASS: TestA (0.00s)\n" +
 		strings.Repeat("=== RUN   TestX\n--- PASS: TestX (0.00s)\n", 200) +
 		"PASS\nok  \tpkg\t0.1s\n"
-	body := []byte(`{"messages":[{"role":"user","content":` + mustJSONStr(big) + `}]}`)
+	return []byte(`{"messages":[` +
+		`{"role":"user","content":` + mustJSONStr(big) + `},` +
+		`{"role":"user","content":` + mustJSONStr(big) + `}]}`)
+}
+
+// The budget configured through CompressOptions.Timeout must stop the work.
+// The first block's compressor sleeps well past that budget, so by the time the
+// guard at the head of the second block runs, the deadline has genuinely
+// elapsed — no reliance on a 1ns deadline being observable, which is what made
+// the original form fail on Windows, where the clock granularity is coarse
+// enough that time.Now() and the time.Until() inside context.WithDeadline can
+// land on the same tick and leave the deadline in the future.
+func TestCompressOptionsTimeoutStopsTheWork(t *testing.T) {
+	withSlowBuildCompressor(t, 200*time.Millisecond)
+	body := twoBlockBody(t)
 
 	opts := DefaultOptions()
-	opts.Timeout = 1 * time.Nanosecond
+	opts.Timeout = 20 * time.Millisecond
+
 	out, res := CompressChat(context.Background(), body, opts)
+	if !bytes.Equal(out, body) {
+		t.Fatal("timeout must return original body untouched")
+	}
+	if !res.Skipped || res.SkipReason != SkipReasonTimeout {
+		t.Fatalf("expected Skipped=true SkipReason=Timeout, got skip=%v reason=%v", res.Skipped, res.SkipReason)
+	}
+}
+
+// The same guard, reached through the caller's own context instead of the
+// option. An already-elapsed deadline is deterministic everywhere:
+// context.WithDeadline cancels immediately, without arming a timer, when the
+// deadline has already passed.
+func TestCompressSkipReasonTimeout(t *testing.T) {
+	body := twoBlockBody(t)
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	out, res := CompressChat(ctx, body, DefaultOptions())
 	if !bytes.Equal(out, body) {
 		t.Fatal("timeout must return original body untouched")
 	}

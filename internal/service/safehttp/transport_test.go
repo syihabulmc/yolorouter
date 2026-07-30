@@ -2,6 +2,7 @@ package safehttp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -364,6 +365,14 @@ func TestSafeDialContextReportsResolveFailure(t *testing.T) {
 // (5s) and "localhost" resolves near-instantly regardless of connectTimeout;
 // only the SUBSEQUENT dial phase is bound by the 1ns budget and is expected
 // to fail there instead.
+// connectTimeout bounds the connect phase and nothing else. The only way to see
+// that from outside is to look at the context resolution is handed: an
+// implementation that wrongly passes the connect deadline to the resolver still
+// dials every reachable host successfully, so no amount of asserting on the
+// returned error can tell the two apart. Asserting on the deadline also removes
+// the platform dependency that made the earlier form of this test fail on
+// Windows, where the clock granularity is coarse enough that a 1ns deadline is
+// not yet elapsed when it is checked.
 func TestSafeDialContextDNSNotBoundByConnectTimeout(t *testing.T) {
 	withDeniedCIDRs(t, nil) // treat every IP as allowed so localhost isn't SSRF-blocked
 
@@ -376,26 +385,95 @@ func TestSafeDialContextDNSNotBoundByConnectTimeout(t *testing.T) {
 		t.Fatalf("split listener addr: %v", err)
 	}
 
-	dialer := &net.Dialer{Timeout: 2 * time.Second}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err = safeDialContext(ctx, dialer, "tcp", "localhost:"+port, false, 1*time.Nanosecond)
-	if err == nil {
-		t.Fatal("expected the dial phase to fail under a 1ns connectTimeout")
+	var resolverDeadline time.Time
+	var resolverHadDeadline bool
+	original := resolveHost
+	resolveHost = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		resolverDeadline, resolverHadDeadline = ctx.Deadline()
+		return original(ctx, host)
 	}
-	if strings.Contains(err.Error(), "resolve") {
-		t.Errorf("DNS resolution must not fail from a connectTimeout-derived deadline, got: %v", err)
+	t.Cleanup(func() { resolveHost = original })
+
+	const callerBudget = 30 * time.Second
+	callerCtx, cancel := context.WithTimeout(context.Background(), callerBudget)
+	defer cancel()
+	callerDeadline, _ := callerCtx.Deadline()
+
+	conn, err := safeDialContext(callerCtx, dialerForTest(), "tcp", "localhost:"+port, false, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	_ = conn.Close()
+
+	if !resolverHadDeadline {
+		t.Fatal("resolution should inherit the caller's deadline, got a context with none")
+	}
+	// The caller's budget is three orders of magnitude larger than the connect
+	// budget, so which one resolution received is unambiguous.
+	if !resolverDeadline.Equal(callerDeadline) {
+		t.Errorf("resolution must be bounded by the caller's deadline (%v), got %v — a connectTimeout-derived deadline would be ~%v away",
+			callerDeadline, resolverDeadline, 50*time.Millisecond)
 	}
 }
 
-// TestDialResolvedIPsSharesConnectDeadlineAcrossIPs verifies the core fix:
-// when DNS resolves N unreachable IPs, the total dial phase must be bounded
-// by ~connectTimeout, NOT N*connectTimeout. Before the shared-deadline fix,
-// each IP independently consumed a full connectTimeout. Two TEST-NET-1
-// addresses (RFC 5737, unroutable) with a 200ms budget should complete in
-// well under 2*200ms. Environments that immediately reject the route are
-// skipped (there is nothing to exercise).
+// The connect phase, by contrast, must be bounded by connectTimeout.
+//
+// Nothing else in this test may be able to end the dial, or the assertion is
+// satisfied by the wrong mechanism: an earlier version gave the dialer its own
+// 2s Timeout and allowed anything under 5s, so deleting the connectTimeout
+// handling entirely still passed — in 2.00s, ended by the dialer. The dialer
+// therefore carries no Timeout here, and the caller's budget is two orders of
+// magnitude above the connect budget, so the only way to return quickly is for
+// connectTimeout to have been applied.
+func TestSafeDialContextConnectBoundByConnectTimeout(t *testing.T) {
+	withDeniedCIDRs(t, nil)
+
+	// 203.0.113.0/24 is TEST-NET-3, reserved for documentation and not routed,
+	// so this touches no real host. What it does depends on the network: it
+	// either black-holes the SYN (the case this test wants) or is rejected
+	// outright by the local stack, which the skip below detects.
+	const (
+		addr           = "203.0.113.1:9"
+		connectTimeout = 300 * time.Millisecond
+		callerBudget   = 30 * time.Second
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), callerBudget)
+	defer cancel()
+
+	start := time.Now()
+	conn, err := safeDialContext(ctx, &net.Dialer{}, "tcp", addr, false, connectTimeout)
+	elapsed := time.Since(start)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if err == nil {
+		t.Fatalf("expected the connect phase to fail under a %v connectTimeout", connectTimeout)
+	}
+
+	var netErr net.Error
+	timedOut := errors.As(err, &netErr) && netErr.Timeout()
+	if !timedOut && elapsed < connectTimeout/2 {
+		t.Skipf("this network rejects %s immediately (%v after %v) instead of black-holing it, "+
+			"so the connect budget is never reached and there is nothing to assert", addr, err, elapsed)
+	}
+	if !timedOut {
+		t.Fatalf("expected a timeout error from the connect phase, got %v after %v", err, elapsed)
+	}
+	if strings.Contains(err.Error(), "resolve") {
+		t.Errorf("an IP literal needs no resolution; the error must come from the connect phase, got: %v", err)
+	}
+	// Ending anywhere near the caller's budget means the connect budget was
+	// never applied and the caller's context ended the dial instead.
+	if elapsed > callerBudget/6 {
+		t.Errorf("connect budget was not applied: dial took %v under a %v connectTimeout", elapsed, connectTimeout)
+	}
+}
+
+// dialerForTest deliberately carries no Timeout: a dialer-level bound would be
+// able to end a dial on its own, which is exactly how the connect-budget test
+// above was once satisfied without the code under test doing anything.
+func dialerForTest() *net.Dialer { return &net.Dialer{} }
 func TestDialResolvedIPsSharesConnectDeadlineAcrossIPs(t *testing.T) {
 	withDeniedCIDRs(t, nil) // treat every IP as allowed
 

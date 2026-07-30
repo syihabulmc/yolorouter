@@ -5,7 +5,10 @@
 package testutil
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"gorm.io/gorm"
@@ -14,10 +17,71 @@ import (
 	"github.com/yolorouter/yolorouter/pkg/database"
 )
 
-// NewSQLiteDB opens a fresh temp-file SQLite database, runs every embedded
-// migration against it via the same database.RunMigrations call production
-// startup uses (see cmd/yolorouter/serve.go), and returns the resulting
-// *gorm.DB. Each call gets its own temp file (t.TempDir()).
+var (
+	templateOnce  sync.Once
+	templateBytes []byte
+	templateErr   error
+)
+
+// migratedTemplate returns the bytes of a fully migrated, cleanly closed SQLite
+// database, building it the first time it is asked and reusing it afterwards.
+//
+// The migrations run once per test binary rather than once per test. Applying
+// the whole tree costs microseconds per statement on Linux and macOS but 130ms
+// to 290ms on Windows, where the file I/O is far slower — at roughly 2.5s per
+// database, packages that build one per test spent over eight minutes there and
+// internal/handler crossed the 10-minute per-package test timeout outright.
+// Copying a prepared file is a single write.
+//
+// Copying the raw bytes is sound because the connection is closed before they
+// are read and the driver runs in SQLite's default rollback-journal mode, so a
+// closed database is one self-contained file with no sidecar -wal or -shm.
+func migratedTemplate() ([]byte, error) {
+	templateOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "yolorouter-schema-template")
+		if err != nil {
+			templateErr = fmt.Errorf("create template dir: %w", err)
+			return
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+
+		path := filepath.Join(dir, "template.db")
+		if err := database.Init(database.Config{Driver: "sqlite", SQLitePath: path}); err != nil {
+			templateErr = fmt.Errorf("database.Init for the template: %w", err)
+			return
+		}
+		sqlDB, err := database.DB.DB()
+		if err != nil {
+			templateErr = fmt.Errorf("get underlying *sql.DB for the template: %w", err)
+			return
+		}
+		if err := database.RunMigrations(sqlDB, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+			_ = sqlDB.Close()
+			templateErr = fmt.Errorf("run migrations for the template: %w", err)
+			return
+		}
+		// Closed before the file is read: an open handle can still be holding
+		// pages that have not reached the file.
+		if err := sqlDB.Close(); err != nil {
+			templateErr = fmt.Errorf("close the template: %w", err)
+			return
+		}
+		templateBytes, err = os.ReadFile(path) //nolint:gosec // path is this function's own temp file
+		if err != nil {
+			templateErr = fmt.Errorf("read the template: %w", err)
+		}
+	})
+	return templateBytes, templateErr
+}
+
+// NewSQLiteDB opens a fresh temp-file SQLite database already carrying every
+// embedded migration, and returns the resulting *gorm.DB. Each call gets its own
+// temp file (t.TempDir()), so tests never share state.
+//
+// The schema comes from a snapshot taken by running the same
+// database.RunMigrations call production startup uses (see
+// cmd/yolorouter/serve.go) once per test binary — see migratedTemplate. What
+// each test opens is therefore byte-identical to a freshly migrated database.
 //
 // database.Init sets the package-level database.DB variable rather than
 // returning a connection directly (see pkg/database/database.go) — this
@@ -29,7 +93,18 @@ import (
 func NewSQLiteDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
+	schema, err := migratedTemplate()
+	if err != nil {
+		t.Fatalf("prepare migrated schema template: %v", err)
+	}
+
 	dbPath := filepath.Join(t.TempDir(), "test.db")
+	// Written before Init so the file SQLite opens is already the finished
+	// schema. Init only ever opens an existing file (mode=rw) and tightens its
+	// permissions, so seeding it here is exactly the state it expects.
+	if err := os.WriteFile(dbPath, schema, 0o600); err != nil {
+		t.Fatalf("write schema template to the test database: %v", err)
+	}
 	if err := database.Init(database.Config{Driver: "sqlite", SQLitePath: dbPath}); err != nil {
 		t.Fatalf("database.Init failed: %v", err)
 	}
@@ -41,9 +116,6 @@ func NewSQLiteDB(t *testing.T) *gorm.DB {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	if err := database.RunMigrations(sqlDB, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
-		t.Fatalf("RunMigrations failed: %v", err)
-	}
 	return gormDB
 }
 

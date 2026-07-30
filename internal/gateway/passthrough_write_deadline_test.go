@@ -263,6 +263,12 @@ func TestPassthroughStreamToClient_WriteErrorPropagatedAsClientWrite(t *testing.
 		Body:       io.NopCloser(strings.NewReader(`data: {"model":"real","choices":[{"delta":{"content":"hi"}}]}` + "\n\n")),
 		Header:     make(http.Header),
 	}
+	// The pump leaves the capture file open for its caller to close
+	// (dispatchPassthroughStream does, on every exit path). Calling it directly
+	// means standing in for that caller: an unclosed handle outlives the test
+	// and t.TempDir() cleanup fails on Windows, which will not delete a file
+	// that is still open.
+	defer func() { closeStreamBodyFile(rc) }()
 	_, err := passthroughStreamToClient(c, resp, rc)
 	if err == nil {
 		t.Fatal("expected a write error, got nil")
@@ -301,6 +307,12 @@ func TestPassthroughStreamToClientDecoded_WriteErrorPropagatedAsClientWrite(t *t
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Header:     make(http.Header),
 	}
+	// The pump leaves the capture file open for its caller to close
+	// (dispatchPassthroughStream does, on every exit path). Calling it directly
+	// means standing in for that caller: an unclosed handle outlives the test
+	// and t.TempDir() cleanup fails on Windows, which will not delete a file
+	// that is still open.
+	defer func() { closeStreamBodyFile(rc) }()
 	_, err := passthroughStreamToClientDecoded(c, resp, rc, protocols.ProtocolClaude)
 	if err == nil {
 		t.Fatal("expected a write error, got nil")
