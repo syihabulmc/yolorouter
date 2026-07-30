@@ -86,8 +86,6 @@ export function useCCSwitchImport() {
       openCleanup = null
       if (!maybeOpened && document.visibilityState === 'visible') {
         message.error(t('ccswitch.openFailed'))
-      } else {
-        message.success(t('ccswitch.openSuccess'))
       }
     }, OPEN_DETECT_MS)
   }

@@ -63,13 +63,17 @@ export const useModelsStore = defineStore('models', {
     async setStatus(id: number, enabled: boolean) {
       await modelsApi.setModelStatus(id, enabled)
     },
-    async testMapping(modelId: number, providerId: number, providerModelName: string, testType: 'basic' | 'streaming' | 'function_calling') {
-      return modelsApi.testCandidateMapping(modelId, providerId, providerModelName, testType)
-    },
     async createCandidate(modelId: number, input: CreateCandidateInput): Promise<ModelCandidate> {
       return modelsApi.createCandidate(modelId, input)
     },
-    async updateCandidate(modelId: number, candidateId: number, input: UpdateCandidateInput): Promise<ModelCandidate> {
+    async testAndCreateCandidate(modelId: number, input: CreateCandidateInput): Promise<modelsApi.TestAndCreateResult> {
+      return modelsApi.testAndCreateCandidate(modelId, input)
+    },
+    async updateCandidate(
+      modelId: number,
+      candidateId: number,
+      input: UpdateCandidateInput,
+    ): Promise<modelsApi.UpdateCandidateResult> {
       return modelsApi.updateCandidate(modelId, candidateId, input)
     },
     async reorderCandidate(modelId: number, candidateId: number, direction: 'up' | 'down') {
@@ -78,8 +82,8 @@ export const useModelsStore = defineStore('models', {
     async setCandidateStatus(modelId: number, candidateId: number, enabled: boolean) {
       await modelsApi.setCandidateStatus(modelId, candidateId, enabled)
     },
-    async testCandidate(modelId: number, candidateId: number, testType: 'basic' | 'streaming' | 'function_calling'): Promise<ModelCandidate> {
-      return modelsApi.testCandidate(modelId, candidateId, testType)
+    async retestCandidate(modelId: number, candidateId: number): Promise<ModelCandidate> {
+      return modelsApi.retestCandidate(modelId, candidateId)
     },
     async deleteCandidate(modelId: number, candidateId: number) {
       await modelsApi.deleteCandidate(modelId, candidateId)

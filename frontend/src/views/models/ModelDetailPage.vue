@@ -52,6 +52,7 @@
       :model-name="modelData.name"
       :editing-candidate="editingCandidate"
       @saved="reload"
+      @retest="onRetestCandidate"
     />
     <ModelEditModal v-model:show="showEditModel" :model="modelData" @updated="reload" />
   </div>
@@ -61,12 +62,15 @@
 import { computed, h, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NDropdown, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+// NTooltip is not in main.ts's create() registry, so it must be imported
+// explicitly or Vue renders it as an inert unknown element.
+import { NButton, NDropdown, NSwitch, NTag, NTooltip, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { ChevronDown, ChevronUp, MoreHorizontal, Plus } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import { toggleStatusWithConfirm } from '../../composables/useConfirmedStatusToggle'
-import { candidateTestPassed, candidateTestResultText, modelRunningStatusDisplay } from '../../utils/modelStatusDisplay'
+import { candidateTestResultText, capabilityState, modelRunningStatusDisplay } from '../../utils/modelStatusDisplay'
+import { isTestSuccess } from '../../utils/testOutcomeDisplay'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import type { Model, ModelCandidate } from '../../api/models'
 import PageHeader from '../../components/PageHeader.vue'
@@ -121,14 +125,19 @@ function onEditCandidate(candidate: ModelCandidate) {
   showEditCandidate.value = true
 }
 
-async function onTestCandidate(candidateId: number, testType: 'basic' | 'streaming' | 'function_calling') {
+async function onRetestCandidate(candidateId: number) {
   testingCandidateId.value = candidateId
   try {
-    const updated = await store.testCandidate(modelId, candidateId, testType)
+    const updated = await store.retestCandidate(modelId, candidateId)
     await reload()
     // Two-tier feedback so the click is never silent: pass (green) vs. the
     // specific outcome reason (yellow).
-    const passed = candidateTestPassed(testType, updated)
+    //
+    // Judged on last_test_result — THIS run's basic-probe outcome — not on
+    // verification_status. An inconclusive run (rate limited, unreachable)
+    // deliberately leaves a previously passing status alone, so reading the
+    // status would report "test passed" for a run the provider actually refused.
+    const passed = updated.last_test_result !== null && isTestSuccess(updated.last_test_result)
     message[passed ? 'success' : 'warning'](candidateTestResultText(t, passed, updated.last_test_result))
   } catch (err) {
     message.error(displayMessage(err, t))
@@ -202,6 +211,41 @@ function onToggleModelStatus() {
   )
 }
 
+// Capability cells render each state distinctly. An unconfirmed capability is not
+// a failure — routing ignores these flags entirely — it just means no probe has
+// confirmed it yet, so the tag is clickable to retest rather than alarming.
+function renderCapability(row: ModelCandidate, flag: boolean | null) {
+  const busy = testingCandidateId.value === row.id
+  switch (capabilityState(flag)) {
+    case 'confirmed':
+      return h(NTag, { size: 'small', type: 'success', bordered: false }, { default: () => '✓' })
+    case 'unsupported':
+      return h(NTag, { size: 'small', type: 'error', bordered: false }, { default: () => '✗' })
+    default:
+      return h(
+        NTooltip,
+        { trigger: 'hover' },
+        {
+          trigger: () =>
+            h(
+              NTag,
+              {
+                size: 'small',
+                type: 'warning',
+                bordered: false,
+                style: busy ? 'cursor: progress' : 'cursor: pointer',
+                onClick: () => {
+                  if (!busy) void onRetestCandidate(row.id)
+                },
+              },
+              { default: () => '?' },
+            ),
+          default: () => t('models.probeUnconfirmedHint'),
+        },
+      )
+  }
+}
+
 // Actions column collapses into an NDropdown — a convention established
 // after flat buttons pushed the table into horizontal scroll.
 const candidateColumns = computed<DataTableColumns<ModelCandidate>>(() => [
@@ -219,14 +263,14 @@ const candidateColumns = computed<DataTableColumns<ModelCandidate>>(() => [
     key: 'supports_streaming',
     width: STATUS_COL_WIDTH,
     align: 'center',
-    render: (row) => (row.supports_streaming ? h(NTag, { size: 'small', type: 'success', bordered: false }, { default: () => '✓' }) : null),
+    render: (row) => renderCapability(row, row.supports_streaming),
   },
   {
     title: columnTitle(t('models.supportsFunctionCalling'), t('models.supportsFunctionCalling_tip')),
     key: 'supports_function_calling',
     width: STATUS_COL_WIDTH,
     align: 'center',
-    render: (row) => (row.supports_function_calling ? h(NTag, { size: 'small', type: 'success', bordered: false }, { default: () => '✓' }) : null),
+    render: (row) => renderCapability(row, row.supports_function_calling),
   },
   {
     title: t('models.reorderColumn'),
@@ -266,13 +310,15 @@ const candidateColumns = computed<DataTableColumns<ModelCandidate>>(() => [
           placement: 'bottom-end',
           options: [
             { label: t('models.editCandidate'), key: 'edit' },
-            { label: t('models.testBasic'), key: 'test_basic' },
+            // Titled so the dropdown says what a retest actually does — it
+            // reruns all three probes and rewrites the stored verdicts.
+            { label: t('models.retest'), key: 'retest', props: { title: t('models.retest_tip') } },
             { type: 'divider', key: 'd' },
             { label: t('models.deleteCandidate'), key: 'delete', props: { style: 'color: var(--color-danger)' } },
           ],
           onSelect: (key: string) => {
             if (key === 'edit') onEditCandidate(row)
-            else if (key === 'test_basic') onTestCandidate(row.id, 'basic')
+            else if (key === 'retest') onRetestCandidate(row.id)
             else if (key === 'delete') onDeleteCandidate(row)
           },
         },

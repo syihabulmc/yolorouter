@@ -15,16 +15,23 @@ import (
 	"github.com/yolorouter/yolorouter/internal/model"
 )
 
-// TodayMetricsDTO is the four today-card values the dashboard renders at the
+// TodayMetricsDTO is the KPI card values the dashboard renders at the
 // top. SuccessRate is in [0, 1] — the frontend formats it as a
 // percentage. TotalCostMicros sums cost_micros, which finalize leaves at 0
 // whenever cost_known=false, so this sum equals the known-cost total without
 // a dialect-specific CASE on the boolean column.
+// The four token sums are mutually exclusive buckets: input_tokens is the net
+// prompt (cache reads/writes excluded), so input + output + cache_write +
+// cache_read is the true total without double counting.
 type TodayMetricsDTO struct {
 	Calls            int64   `json:"calls"`
 	TotalCostMicros  int64   `json:"total_cost_micros"`
 	SuccessRate      float64 `json:"success_rate"`
 	UnknownCostCalls int64   `json:"unknown_cost_calls"`
+	InputTokens      int64   `json:"input_tokens"`
+	OutputTokens     int64   `json:"output_tokens"`
+	CacheWriteTokens int64   `json:"cache_write_tokens"`
+	CacheReadTokens  int64   `json:"cache_read_tokens"`
 }
 
 // GetRangeMetrics returns calls / total known cost / success rate / unknown-
@@ -40,6 +47,10 @@ func GetRangeMetrics(db *gorm.DB, start, end time.Time) (*TodayMetricsDTO, error
 		TotalCostMicros:  m.KnownCostMicros,
 		SuccessRate:      m.SuccessRate(),
 		UnknownCostCalls: m.UnknownCostCalls,
+		InputTokens:      m.InputTokens,
+		OutputTokens:     m.OutputTokens,
+		CacheWriteTokens: m.CacheWriteTokens,
+		CacheReadTokens:  m.CacheReadTokens,
 	}, nil
 }
 

@@ -295,16 +295,94 @@ func (d *StreamDecoder) Finish() ([]protocols.IRStreamDelta, error) {
 	return d.DecodeChunk(remaining + "\n\n")
 }
 
+// usageMetadata is the token-accounting block both the streaming and the
+// non-streaming decoder read. Shared so the two paths can never drift into
+// reporting different totals for the same response.
+type usageMetadata struct {
+	PromptTokenCount     int `json:"promptTokenCount"`
+	CandidatesTokenCount int `json:"candidatesTokenCount"`
+	TotalTokenCount      int `json:"totalTokenCount"`
+	// Thinking-model reasoning tokens. Whether candidatesTokenCount already
+	// contains them depends on which backend answered — the Google AI endpoint
+	// folds them in, Vertex AI reports them alongside — so this field can never
+	// be added to candidatesTokenCount unconditionally. See toIRUsage.
+	ThoughtsTokenCount int `json:"thoughtsTokenCount,omitempty"`
+	// Tokens from tool-execution results fed back to the model. Google
+	// documents these as input, and totalTokenCount counts them, so they bill
+	// at the input rate and must be excluded when deriving output from the
+	// total.
+	ToolUsePromptTokenCount int `json:"toolUsePromptTokenCount,omitempty"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
+}
+
+// toIRUsage converts the block, reporting false when any count is negative.
+// The negative check has to happen HERE rather than downstream: folding
+// thoughts into candidates sums two numbers, and a sum hides the sign of its
+// parts (10 + -5 looks like a perfectly ordinary 5). Rejecting the whole block
+// leaves usage unknown, which bills nothing — strictly safer than billing a
+// plausible-looking number derived from garbage.
+func (m *usageMetadata) toIRUsage() (protocols.IRUsage, bool) {
+	if m.PromptTokenCount < 0 || m.CandidatesTokenCount < 0 || m.ThoughtsTokenCount < 0 ||
+		m.TotalTokenCount < 0 || m.CachedContentTokenCount < 0 || m.ToolUsePromptTokenCount < 0 {
+		return protocols.IRUsage{}, false
+	}
+	prompt := m.promptTokens()
+	completion := m.completionTokens()
+	// In the normal case completion was derived from the total, so this holds
+	// already. It only bites when the total was unusable and completion fell
+	// back to the sum: reporting the stated total then would hand downstream a
+	// triple whose parts exceed their own total, which the gateway's coherence
+	// check reads as garbage and refuses to bill at all.
+	total := max(m.TotalTokenCount, prompt+completion)
+	return protocols.IRUsage{
+		PromptTokens:          prompt,
+		CompletionTokens:      completion,
+		ReasoningTokens:       m.ThoughtsTokenCount,
+		TotalTokens:           total,
+		CacheReadTokens:       m.CachedContentTokenCount,
+		CacheIncludedInPrompt: true,
+	}, true
+}
+
+// promptTokens returns the full billable input. Tool-execution results are
+// input by nature — Google describes them as "provided back to the model as
+// input" — so they belong on the input line rather than being left out (which
+// would drop them from the bill) or swept into the output derivation below
+// (which would charge them at the output rate, typically several times higher).
+func (m *usageMetadata) promptTokens() int {
+	return m.PromptTokenCount + m.ToolUsePromptTokenCount
+}
+
+// completionTokens returns the full billable output — the answer plus any
+// thinking tokens, which bill at the same output rate.
+//
+// Deriving it from the total is the only formula that holds on both backends.
+// The Google AI endpoint already counts thinking inside candidatesTokenCount
+// while Vertex AI reports the two side by side, so adding them unconditionally
+// double-charges thinking on the former, and no field in the response says
+// which convention is in force. Subtracting the input side sidesteps the
+// question. Google defines the total as
+//
+//	prompt + candidates + tool_use_prompt + thoughts
+//
+// so total - (prompt + tool_use_prompt) leaves exactly the generated tokens
+// under either convention. promptTokenCount already includes
+// cachedContentTokenCount, so a cache hit doesn't distort the subtraction.
+//
+// The sum is the fallback for responses that omit the total (or report one at
+// or below the input, which can't be right).
+func (m *usageMetadata) completionTokens() int {
+	if prompt := m.promptTokens(); m.TotalTokenCount > prompt {
+		return m.TotalTokenCount - prompt
+	}
+	return m.CandidatesTokenCount + m.ThoughtsTokenCount
+}
+
 func (d *StreamDecoder) parseGeminiChunk(raw json.RawMessage) []protocols.IRStreamDelta {
 	var chunk struct {
-		UsageMetadata *struct {
-			PromptTokenCount        int `json:"promptTokenCount"`
-			CandidatesTokenCount    int `json:"candidatesTokenCount"`
-			TotalTokenCount         int `json:"totalTokenCount"`
-			CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
-		} `json:"usageMetadata"`
-		ModelVersion string `json:"modelVersion"`
-		Candidates   []struct {
+		UsageMetadata *usageMetadata `json:"usageMetadata"`
+		ModelVersion  string         `json:"modelVersion"`
+		Candidates    []struct {
 			Content *struct {
 				Parts []json.RawMessage `json:"parts"`
 			} `json:"content"`
@@ -385,13 +463,11 @@ func (d *StreamDecoder) parseGeminiChunk(raw json.RawMessage) []protocols.IRStre
 	}
 
 	if chunk.UsageMetadata != nil {
-		deltas = append(deltas, protocols.DeltaUsage{Usage: protocols.IRUsage{
-			PromptTokens:          chunk.UsageMetadata.PromptTokenCount,
-			CompletionTokens:      chunk.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:           chunk.UsageMetadata.TotalTokenCount,
-			CacheReadTokens:       chunk.UsageMetadata.CachedContentTokenCount,
-			CacheIncludedInPrompt: true,
-		}})
+		// A rejected block emits no DeltaUsage at all, so usage stays unknown
+		// rather than being merged in as a sanitized-looking value.
+		if u, ok := chunk.UsageMetadata.toIRUsage(); ok {
+			deltas = append(deltas, protocols.DeltaUsage{Usage: u})
+		}
 	}
 
 	return deltas
@@ -408,13 +484,8 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 			} `json:"content"`
 			FinishReason string `json:"finishReason"`
 		} `json:"candidates"`
-		UsageMetadata *struct {
-			PromptTokenCount        int `json:"promptTokenCount"`
-			CandidatesTokenCount    int `json:"candidatesTokenCount"`
-			TotalTokenCount         int `json:"totalTokenCount"`
-			CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
-		} `json:"usageMetadata"`
-		ModelVersion string `json:"modelVersion"`
+		UsageMetadata *usageMetadata `json:"usageMetadata"`
+		ModelVersion  string         `json:"modelVersion"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err
@@ -471,12 +542,10 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 	}
 
 	if resp.UsageMetadata != nil {
-		irResp.Usage = protocols.IRUsage{
-			PromptTokens:          resp.UsageMetadata.PromptTokenCount,
-			CompletionTokens:      resp.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:           resp.UsageMetadata.TotalTokenCount,
-			CacheReadTokens:       resp.UsageMetadata.CachedContentTokenCount,
-			CacheIncludedInPrompt: true,
+		// Leaves the zero-value usage (unknown, not zero-cost) when the block
+		// is rejected — same treatment the streaming path gives it.
+		if u, ok := resp.UsageMetadata.toIRUsage(); ok {
+			irResp.Usage = u
 		}
 	}
 

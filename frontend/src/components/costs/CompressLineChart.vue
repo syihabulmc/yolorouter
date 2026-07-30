@@ -10,7 +10,7 @@
      collide. -->
 <template>
   <div class="compress-line">
-    <div v-if="!values.length" class="compress-line__empty">
+    <div v-if="!effectiveContent" class="compress-line__empty">
       <EmptyState :icon="BarChart3" :title="emptyText" />
     </div>
     <VChart
@@ -48,6 +48,10 @@ const props = withDefaults(
     emptyText: '',
   },
 )
+
+const effectiveContent = computed(() => {
+  return props.values.filter(e => !!e).length
+})
 
 const option = computed(() => {
   // Pair labels and values defensively; if a caller hands in mismatched

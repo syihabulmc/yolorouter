@@ -89,6 +89,7 @@ import { displayMessage } from '../../api/client'
 import { toggleStatusWithConfirm } from '../../composables/useConfirmedStatusToggle'
 import { modelRunningStatusDisplay, MODEL_RUNNING_STATUS_DISPLAY } from '../../utils/modelStatusDisplay'
 import { columnTitle } from '../../utils/columnTitle'
+import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import { useClientPagination } from '../../composables/useClientPagination'
 import type { Model } from '../../api/models'
 import PageHeader from '../../components/PageHeader.vue'
@@ -268,10 +269,12 @@ const columns = computed<DataTableColumns<Model>>(() => [
               placement: 'bottom-end',
               options: [
                 { label: t('models.editModel'), key: 'edit' },
+                { label: t('costs.detail.viewCost'), key: 'viewCost' },
                 { label: t('ccswitch.importAction'), key: 'importCCSImport' },
               ],
               onSelect: (key: string) => {
                 if (key === 'edit') openEditModel(row)
+                else if (key === 'viewCost') router.push(modelCostDetailLocation(row.name))
                 else if (key === 'importCCSImport')
                   importToCCS({ name: `YoloRouter${row.name ? ` - ${row.name}` : ''}`, model: row.name })
               },

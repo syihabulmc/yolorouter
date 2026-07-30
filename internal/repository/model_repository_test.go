@@ -277,14 +277,26 @@ func TestSetModelCandidateManagementStatusIfVerifiedSkipsWhenUntested(t *testing
 	}
 }
 
-func TestCommitModelCandidateBasicTestResult(t *testing.T) {
+// CommitModelCandidateProbeResults writes a whole probe run in one UPDATE, so
+// last_test_result and last_tested_at describe the run as a whole rather than
+// whichever probe happened to finish last.
+func TestCommitModelCandidateProbeResultsWritesVerificationAndCapabilities(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	_, _, candidate := seedModelWithCandidate(t, db, "smart", "provider-a")
 	now := time.Now().UTC().Truncate(time.Second)
 	outcome := 0
+	passed := model.ModelVerificationStatusPassed
+	supported := true
+	unsupported := false
 
-	if err := CommitModelCandidateBasicTestResult(db, candidate.ID, model.ModelVerificationStatusPassed, &outcome, 42, now); err != nil {
-		t.Fatalf("CommitModelCandidateBasicTestResult failed: %v", err)
+	if _, err := CommitModelCandidateProbeResults(db, candidate.ID, "gpt-4o", CandidateProbeCommit{
+		VerificationStatus:      &passed,
+		LastTestResult:          &outcome,
+		DurationMs:              42,
+		SupportsStreaming:       &supported,
+		SupportsFunctionCalling: &unsupported,
+	}, now); err != nil {
+		t.Fatalf("CommitModelCandidateProbeResults failed: %v", err)
 	}
 	reloaded, err := FindModelCandidateByID(db, candidate.ID)
 	if err != nil {
@@ -299,44 +311,56 @@ func TestCommitModelCandidateBasicTestResult(t *testing.T) {
 	if reloaded.LastTestDurationMs == nil || *reloaded.LastTestDurationMs != 42 {
 		t.Fatalf("expected last_test_duration_ms=42, got %+v", reloaded.LastTestDurationMs)
 	}
+	if reloaded.SupportsStreaming == nil || !*reloaded.SupportsStreaming {
+		t.Fatalf("expected supports_streaming=true, got %v", reloaded.SupportsStreaming)
+	}
+	if reloaded.SupportsFunctionCalling == nil || *reloaded.SupportsFunctionCalling {
+		t.Fatalf("expected supports_function_calling=false, got %v", reloaded.SupportsFunctionCalling)
+	}
 }
 
-// TestCommitModelCandidateCapabilityTestResultDoesNotTouchVerificationStatus
-// is the direct regression test for the rule that streaming and
-// function-calling test results are independent of the basic-text
-// verification gate.
-func TestCommitModelCandidateCapabilityTestResultDoesNotTouchVerificationStatus(t *testing.T) {
+// A failing basic probe skips the capability probes, and that must leave
+// previously earned verdicts alone rather than clearing them: a broken mapping
+// is no evidence about what the mapping can do once it is fixed.
+func TestCommitModelCandidateProbeResultsLeavesCapabilitiesAloneWhenNotProbed(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	_, _, candidate := seedModelWithCandidate(t, db, "smart", "provider-a")
 	now := time.Now().UTC().Truncate(time.Second)
 	outcome := 0
+	passed := model.ModelVerificationStatusPassed
+	supported := true
 
-	if err := CommitModelCandidateCapabilityTestResult(db, candidate.ID, "streaming", true, &outcome, 10, now); err != nil {
-		t.Fatalf("CommitModelCandidateCapabilityTestResult(streaming) failed: %v", err)
+	if _, err := CommitModelCandidateProbeResults(db, candidate.ID, "gpt-4o", CandidateProbeCommit{
+		VerificationStatus:      &passed,
+		LastTestResult:          &outcome,
+		SupportsStreaming:       &supported,
+		SupportsFunctionCalling: &supported,
+	}, now); err != nil {
+		t.Fatalf("seed capability verdicts failed: %v", err)
 	}
+	authFailed := 1
+	failed := model.ModelVerificationStatusFailed
+	if _, err := CommitModelCandidateProbeResults(db, candidate.ID, "gpt-4o", CandidateProbeCommit{
+		VerificationStatus: &failed,
+		LastTestResult:     &authFailed,
+		// Both capability verdicts nil: those probes were skipped, so the stored
+		// values must survive.
+	}, now); err != nil {
+		t.Fatalf("CommitModelCandidateProbeResults(skipped capabilities) failed: %v", err)
+	}
+
 	reloaded, err := FindModelCandidateByID(db, candidate.ID)
 	if err != nil {
 		t.Fatalf("FindModelCandidateByID failed: %v", err)
 	}
-	if !reloaded.SupportsStreaming {
-		t.Fatalf("expected supports_streaming=true")
+	if reloaded.VerificationStatus != model.ModelVerificationStatusFailed {
+		t.Fatalf("expected verification_status=failed, got %d", reloaded.VerificationStatus)
 	}
-	if reloaded.VerificationStatus != model.ModelVerificationStatusUntested {
-		t.Fatalf("expected verification_status to remain untested, got %d", reloaded.VerificationStatus)
+	if reloaded.SupportsStreaming == nil || !*reloaded.SupportsStreaming {
+		t.Fatalf("expected supports_streaming to be preserved, got %v", reloaded.SupportsStreaming)
 	}
-
-	if err := CommitModelCandidateCapabilityTestResult(db, candidate.ID, "function_calling", true, &outcome, 15, now); err != nil {
-		t.Fatalf("CommitModelCandidateCapabilityTestResult(function_calling) failed: %v", err)
-	}
-	reloaded, err = FindModelCandidateByID(db, candidate.ID)
-	if err != nil {
-		t.Fatalf("FindModelCandidateByID failed: %v", err)
-	}
-	if !reloaded.SupportsFunctionCalling {
-		t.Fatalf("expected supports_function_calling=true")
-	}
-	if !reloaded.SupportsStreaming {
-		t.Fatalf("expected supports_streaming to remain true after a separate function_calling test")
+	if reloaded.SupportsFunctionCalling == nil || !*reloaded.SupportsFunctionCalling {
+		t.Fatalf("expected supports_function_calling to be preserved, got %v", reloaded.SupportsFunctionCalling)
 	}
 }
 

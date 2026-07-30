@@ -651,6 +651,185 @@ func TestGeminiResponseDecoder_CachedTokens(t *testing.T) {
 	}
 }
 
+// TestGeminiThinkingTokenAccounting: thinking tokens bill at the output rate, so
+// CompletionTokens has to cover them — but the two Gemini backends disagree on
+// where they live. Vertex AI reports thoughtsTokenCount alongside
+// candidatesTokenCount; the Google AI endpoint folds them into
+// candidatesTokenCount. Nothing in the response says which convention applies,
+// so the decoder derives output from totalTokenCount - promptTokenCount, which
+// is correct under both. Adding candidates + thoughts unconditionally would
+// double-charge thinking on the folded-in backend.
+func TestGeminiThinkingTokenAccounting(t *testing.T) {
+	cases := []struct {
+		name           string
+		usageMeta      string
+		wantPrompt     int
+		wantCompletion int
+		wantReasoning  int
+	}{
+		{
+			// Vertex AI shape: 100 prompt + 10 answer + 40 thinking = 150.
+			name:           "thoughts reported separately from candidates",
+			usageMeta:      `{"promptTokenCount":100,"candidatesTokenCount":10,"thoughtsTokenCount":40,"totalTokenCount":150}`,
+			wantPrompt:     100,
+			wantCompletion: 50,
+			wantReasoning:  40,
+		},
+		{
+			// Tool results are input fed back to the model, and Google counts
+			// them in the total: prompt 100 + tools 200 + answer 10 + thinking
+			// 40 = 350. Leaving them in the subtraction would bill 250 output
+			// tokens instead of 50, at the (higher) output rate.
+			name:           "tool-use prompt billed as input",
+			usageMeta:      `{"promptTokenCount":100,"toolUsePromptTokenCount":200,"candidatesTokenCount":10,"thoughtsTokenCount":40,"totalTokenCount":350}`,
+			wantPrompt:     300,
+			wantCompletion: 50,
+			wantReasoning:  40,
+		},
+		{
+			// Tool use without thinking — the common function-calling shape.
+			name:           "tool-use prompt without thinking",
+			usageMeta:      `{"promptTokenCount":100,"toolUsePromptTokenCount":200,"candidatesTokenCount":10,"totalTokenCount":310}`,
+			wantPrompt:     300,
+			wantCompletion: 10,
+			wantReasoning:  0,
+		},
+		{
+			// Google AI shape: candidates already covers the 40 thinking tokens,
+			// so total is 100 + 50. Summing would wrongly yield 90.
+			name:           "thoughts already folded into candidates",
+			usageMeta:      `{"promptTokenCount":100,"candidatesTokenCount":50,"thoughtsTokenCount":40,"totalTokenCount":150}`,
+			wantPrompt:     100,
+			wantCompletion: 50,
+			wantReasoning:  40,
+		},
+		{
+			// No thinking at all — the ordinary case must stay untouched.
+			name:           "non-thinking model",
+			usageMeta:      `{"promptTokenCount":100,"candidatesTokenCount":10,"totalTokenCount":110}`,
+			wantPrompt:     100,
+			wantCompletion: 10,
+			wantReasoning:  0,
+		},
+		{
+			// Total missing: fall back to the sum rather than reporting no output.
+			name:           "total omitted falls back to sum",
+			usageMeta:      `{"promptTokenCount":100,"candidatesTokenCount":10,"thoughtsTokenCount":40}`,
+			wantPrompt:     100,
+			wantCompletion: 50,
+			wantReasoning:  40,
+		},
+		{
+			// A total at or below the prompt can't be right; the sum is the
+			// safer reading.
+			name:           "total not larger than prompt falls back to sum",
+			usageMeta:      `{"promptTokenCount":100,"candidatesTokenCount":10,"thoughtsTokenCount":40,"totalTokenCount":100}`,
+			wantPrompt:     100,
+			wantCompletion: 50,
+			wantReasoning:  40,
+		},
+		{
+			// promptTokenCount already includes the cached portion, so a cache
+			// hit must not shift the subtraction.
+			name:           "cached prompt does not distort the subtraction",
+			usageMeta:      `{"promptTokenCount":100,"candidatesTokenCount":10,"thoughtsTokenCount":40,"cachedContentTokenCount":80,"totalTokenCount":150}`,
+			wantPrompt:     100,
+			wantCompletion: 50,
+			wantReasoning:  40,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := json.RawMessage(`{
+				"candidates": [{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],
+				"usageMetadata":` + tc.usageMeta + `,
+				"modelVersion":"gemini-2.5-pro"
+			}`)
+			irResp, err := ResponseDecoder{}.DecodeResponse(body)
+			if err != nil {
+				t.Fatalf("DecodeResponse: %v", err)
+			}
+			if irResp.Usage.PromptTokens != tc.wantPrompt {
+				t.Errorf("PromptTokens = %d, want %d", irResp.Usage.PromptTokens, tc.wantPrompt)
+			}
+			if irResp.Usage.CompletionTokens != tc.wantCompletion {
+				t.Errorf("CompletionTokens = %d, want %d", irResp.Usage.CompletionTokens, tc.wantCompletion)
+			}
+			if irResp.Usage.ReasoningTokens != tc.wantReasoning {
+				t.Errorf("ReasoningTokens = %d, want %d", irResp.Usage.ReasoningTokens, tc.wantReasoning)
+			}
+			// The triple must be self-consistent whichever branch produced the
+			// completion count, otherwise the gateway rejects the whole usage
+			// as incoherent and bills nothing.
+			if got := irResp.Usage.PromptTokens + irResp.Usage.CompletionTokens; got > irResp.Usage.TotalTokens {
+				t.Errorf("prompt+completion = %d exceeds total %d", got, irResp.Usage.TotalTokens)
+			}
+
+			// The streaming path must agree exactly — both decoders share
+			// usageMetadata, and this is what keeps them from drifting.
+			dec := NewStreamDecoder()
+			deltas, _ := dec.DecodeChunk("data: {\"usageMetadata\":" + tc.usageMeta + ",\"candidates\":[]}\n\n")
+			found := false
+			for _, d := range deltas {
+				u, ok := d.(protocols.DeltaUsage)
+				if !ok {
+					continue
+				}
+				found = true
+				if u.Usage.CompletionTokens != tc.wantCompletion {
+					t.Errorf("stream CompletionTokens = %d, want %d", u.Usage.CompletionTokens, tc.wantCompletion)
+				}
+			}
+			if !found {
+				t.Error("missing protocols.DeltaUsage")
+			}
+		})
+	}
+}
+
+// TestGeminiNegativeUsageRejected: folding thoughts into candidates sums two
+// numbers, and a sum hides the sign of its parts — candidates=10 with
+// thoughts=-5 would look like an ordinary 5 by the time the gateway's coherence
+// check sees it. The block must therefore be rejected at decode time, leaving
+// usage unknown (which bills nothing) instead of billing a laundered figure.
+func TestGeminiNegativeUsageRejected(t *testing.T) {
+	bodies := map[string]string{
+		"negative thoughts":   `{"promptTokenCount":100,"candidatesTokenCount":10,"thoughtsTokenCount":-5,"totalTokenCount":105}`,
+		"negative candidates": `{"promptTokenCount":100,"candidatesTokenCount":-10,"totalTokenCount":90}`,
+		"negative prompt":     `{"promptTokenCount":-100,"candidatesTokenCount":10,"totalTokenCount":10}`,
+		"negative cached":     `{"promptTokenCount":100,"candidatesTokenCount":10,"cachedContentTokenCount":-80,"totalTokenCount":110}`,
+		"negative total":      `{"promptTokenCount":100,"candidatesTokenCount":10,"totalTokenCount":-1}`,
+	}
+	for name, um := range bodies {
+		t.Run(name, func(t *testing.T) {
+			body := json.RawMessage(`{
+				"candidates": [{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],
+				"usageMetadata":` + um + `,
+				"modelVersion":"gemini-2.5-pro"
+			}`)
+			irResp, err := ResponseDecoder{}.DecodeResponse(body)
+			if err != nil {
+				t.Fatalf("DecodeResponse: %v", err)
+			}
+			// All-zero usage is what the gateway reads as "unknown", never as
+			// a free request (irUsageToUsage returns nil for it).
+			if irResp.Usage.PromptTokens != 0 || irResp.Usage.CompletionTokens != 0 || irResp.Usage.TotalTokens != 0 {
+				t.Errorf("expected usage left unset, got %+v", irResp.Usage)
+			}
+
+			dec := NewStreamDecoder()
+			chunk := "data: {\"usageMetadata\":" + um + ",\"candidates\":[]}\n\n"
+			deltas, _ := dec.DecodeChunk(chunk)
+			for _, d := range deltas {
+				if u, ok := d.(protocols.DeltaUsage); ok {
+					t.Errorf("stream emitted usage for a rejected block: %+v", u.Usage)
+				}
+			}
+		})
+	}
+}
+
 func TestGeminiResponseDecoder_MaxTokensFinish(t *testing.T) {
 	body := json.RawMessage(`{
 		"candidates": [{"content":{"role":"model","parts":[{"text":"truncated"}]},"finishReason":"MAX_TOKENS"}],

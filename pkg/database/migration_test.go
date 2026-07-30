@@ -81,9 +81,10 @@ func TestGetCurrentVersionOnFreshSQLiteDB(t *testing.T) {
 	// 00014_api_keys_allow_all_models.sql +
 	// 00015_system_settings_and_custom_system_prompt.sql +
 	// 00016_input_compression.sql +
-	// 00017_request_endpoints.sql).
-	if version != 17 {
-		t.Fatalf("expected version 17 after all migrations, got %d", version)
+	// 00017_request_endpoints.sql +
+	// 00018_model_candidate_capability_tristate.sql).
+	if version != 18 {
+		t.Fatalf("expected version 18 after all migrations, got %d", version)
 	}
 }
 
@@ -372,5 +373,120 @@ func TestMigration00016InputCompression(t *testing.T) {
 		if hasColumn(c.table, c.col) {
 			t.Fatalf("expected %s.%s to be dropped after rollback to 15", c.table, c.col)
 		}
+	}
+}
+
+// TestMigration00018ModelCandidateCapabilityTristate verifies that migration
+// 00018 makes the two capability columns nullable so they can express "unknown"
+// alongside supported/unsupported, and that rolling back restores the old
+// two-state shape by collapsing unknown to false.
+//
+// Nullability is the whole point of the migration: the gateway drops candidates
+// whose capability flag reads false from streaming and tool-calling rotation, so
+// an inconclusive probe needs somewhere to go other than false.
+func TestMigration00018ModelCandidateCapabilityTristate(t *testing.T) {
+	db := newMemoryDB(t)
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	// Roll back so the up-migration's value handling is exercised against a
+	// database holding the two-state data the old schema actually stored.
+	if err := RollbackTo(db, "sqlite", migrations.SQLiteFS, "sqlite", 17); err != nil {
+		t.Fatalf("RollbackTo(17) to stage pre-migration data failed: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO models (id, name, management_status, created_at, updated_at)
+		VALUES (1, 'm', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`); err != nil {
+		t.Fatalf("seed model: %v", err)
+	}
+	// Two providers, because model_candidates carries UNIQUE(model_id, provider_id).
+	for id, name := range map[int]string{1: "p1", 2: "p2", 3: "p3"} {
+		if _, err := db.Exec(`INSERT INTO providers (id, name, provider_type, base_url, management_status, destination_version, created_at, updated_at)
+			VALUES (?, ?, 'openai', 'https://example.invalid', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`, id, name); err != nil {
+			t.Fatalf("seed provider %d: %v", id, err)
+		}
+	}
+	// Candidate 1 has a PROVEN streaming capability and a stored false for tools;
+	// candidate 2 has false for both.
+	seedCandidate := func(t *testing.T, id, providerID, sortOrder int, streaming, functionCalling int) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO model_candidates
+			(id, model_id, provider_id, provider_model_name, input_price, output_price, max_output,
+			 management_status, sort_order, verification_status, created_at, updated_at,
+			 supports_streaming, supports_function_calling)
+			VALUES (?, 1, ?, 'gpt-4o', 0, 0, 0, 1, ?, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00', ?, ?)`,
+			id, providerID, sortOrder, streaming, functionCalling); err != nil {
+			t.Fatalf("seed candidate %d: %v", id, err)
+		}
+	}
+	seedCandidate(t, 1, 1, 1, 1, 0)
+	seedCandidate(t, 2, 2, 2, 0, 0)
+
+	// The up-migration under test.
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("re-applying migrations failed: %v", err)
+	}
+
+	readCapabilities := func(t *testing.T, id int) (streaming, functionCalling sql.NullBool) {
+		t.Helper()
+		if err := db.QueryRow(`SELECT supports_streaming, supports_function_calling FROM model_candidates WHERE id = ?`, id).
+			Scan(&streaming, &functionCalling); err != nil {
+			t.Fatalf("read capability columns for candidate %d: %v", id, err)
+		}
+		return streaming, functionCalling
+	}
+
+	// A stored false was written by the old "anything not proven is false" rule
+	// and cannot be told apart from a misclassified probe, so it must become
+	// unknown. A stored true came from a probe that actually succeeded and must
+	// survive — discarding it would make every verified candidate demand a retest.
+	streaming, functionCalling := readCapabilities(t, 1)
+	if !streaming.Valid || !streaming.Bool {
+		t.Fatalf("expected a proven supports_streaming=true to survive the migration, got %+v", streaming)
+	}
+	if functionCalling.Valid {
+		t.Fatalf("expected a stored supports_function_calling=false to become unknown, got %+v", functionCalling)
+	}
+	if streaming, functionCalling = readCapabilities(t, 2); streaming.Valid || functionCalling.Valid {
+		t.Fatalf("expected both stored falses to become unknown, got streaming=%+v function_calling=%+v", streaming, functionCalling)
+	}
+
+	// Nullability is the point of the migration: before it, these columns were
+	// NOT NULL and this insert would fail.
+	if _, err := db.Exec(`INSERT INTO model_candidates
+		(id, model_id, provider_id, provider_model_name, input_price, output_price, max_output,
+		 management_status, sort_order, verification_status, created_at, updated_at,
+		 supports_streaming, supports_function_calling)
+		VALUES (3, 1, 3, 'gpt-4o-mini', 0, 0, 0, 2, 3, 0, '2026-01-01 00:00:00', '2026-01-01 00:00:00', NULL, NULL)`); err != nil {
+		t.Fatalf("inserting NULL capabilities failed — columns are still NOT NULL: %v", err)
+	}
+
+	// Rolling back collapses unknown to false, restoring the two-state
+	// convention, while still carrying proven trues over.
+	if err := RollbackTo(db, "sqlite", migrations.SQLiteFS, "sqlite", 17); err != nil {
+		t.Fatalf("RollbackTo(17) failed: %v", err)
+	}
+	var downStreaming, downFunctionCalling bool
+	if err := db.QueryRow(`SELECT supports_streaming, supports_function_calling FROM model_candidates WHERE id = 1`).
+		Scan(&downStreaming, &downFunctionCalling); err != nil {
+		t.Fatalf("read capability columns after rollback: %v", err)
+	}
+	if !downStreaming {
+		t.Fatal("expected rollback to preserve a proven supports_streaming=true, got false")
+	}
+	if downFunctionCalling {
+		t.Fatal("expected rollback to collapse an unknown supports_function_calling to false, got true")
+	}
+
+	// Re-applying must work, so an operator who rolls back is not stuck there.
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("re-applying migrations after rollback failed: %v", err)
+	}
+	version, err := GetCurrentVersion(db, "sqlite")
+	if err != nil {
+		t.Fatalf("GetCurrentVersion failed: %v", err)
+	}
+	if version != 18 {
+		t.Fatalf("expected version 18 after re-apply, got %d", version)
 	}
 }

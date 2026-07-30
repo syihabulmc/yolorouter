@@ -13,11 +13,17 @@ import { apiFetch, browserTimezone } from './client'
 
 // === Dashboard =====================================================
 
+// The four token sums are mutually exclusive buckets: input_tokens is the net
+// prompt (cache reads/writes excluded), so the four add up to the true total.
 export interface TodayMetrics {
   calls: number
   total_cost_micros: number
   success_rate: number // [0,1] — frontend formats as percentage
   unknown_cost_calls: number
+  input_tokens: number
+  output_tokens: number
+  cache_write_tokens: number
+  cache_read_tokens: number
 }
 
 export interface TrendPoint {

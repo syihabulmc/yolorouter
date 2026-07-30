@@ -94,8 +94,8 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
-import { Plus, Search, Server } from '@lucide/vue'
+import { NButton, NDropdown, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { MoreHorizontal, Plus, Search, Server } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
 import type { Provider } from '../../api/providers'
@@ -310,6 +310,7 @@ const columns = computed<DataTableColumns<Provider>>(() => [
   {
     title: t('common.actions'),
     key: 'actions',
+    align: 'center',
     width: 90,
     render: (row) =>
       h(
@@ -317,9 +318,27 @@ const columns = computed<DataTableColumns<Provider>>(() => [
         { onClick: (e: MouseEvent) => e.stopPropagation() },
         [
           h(
-            NButton,
-            { size: 'small', quaternary: true, onClick: () => openEditProvider(row) },
-            { default: () => t('providers.editProvider') },
+            NDropdown,
+            {
+              trigger: 'click',
+              placement: 'bottom-end',
+              options: [
+                { label: t('providers.editProvider'), key: 'edit' },
+                { label: t('costs.detail.viewCost'), key: 'viewCost' },
+              ],
+              onSelect: (key: string) => {
+                if (key === 'edit') openEditProvider(row)
+                else if (key === 'viewCost') router.push(`/costs/providers/${row.id}`)
+              },
+            },
+            {
+              default: () =>
+                h(
+                  NButton,
+                  { size: 'small', quaternary: true, circle: true },
+                  { icon: () => h(MoreHorizontal, { size: 16 }) },
+                ),
+            },
           ),
         ],
       ),

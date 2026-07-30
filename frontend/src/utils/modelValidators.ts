@@ -20,9 +20,9 @@ export function modelNameRule(t: (key: string) => string): FormItemRule[] {
 }
 
 // Optional: leaving this blank means "use the model's own external name
-// upstream unchanged" — the backend (CreateModelCandidate/UpdateModelCandidate/
-// TestCandidateMappingPreview in internal/service/model_service.go) defaults
-// it to the model's name when empty.
+// upstream unchanged" — the backend (TestAndCreateCandidate /
+// CreateModelCandidate / UpdateModelCandidate in
+// internal/service/model_service.go) defaults it to the model's name when empty.
 export function providerModelNameRule(t: (key: string) => string): FormItemRule[] {
   return [
     { max: 200, message: t('models.fieldRequired'), trigger: ['blur', 'input'] },

@@ -26,6 +26,75 @@ import (
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
 
+// boolPtr builds a tri-state capability flag. A nil flag means "unknown", so
+// tests that care about a capability being present or absent must say so
+// explicitly rather than relying on a zero value.
+func boolPtr(v bool) *bool { return &v }
+
+// Capability flags are recorded for the admin UI only. Routing must ignore them
+// entirely: a flag that merely failed to be confirmed would otherwise take a
+// working candidate out of rotation, and excluding a candidate is not something
+// failover can recover from (attemptOne treats the upstream 4xx a missing
+// capability produces as terminal).
+func TestFilterCandidatesIgnoresCapabilityFlags(t *testing.T) {
+	candidateWith := func(streaming, functionCalling *bool) model.ModelCandidate {
+		return model.ModelCandidate{
+			ID:                      1,
+			ManagementStatus:        model.ModelCandidateStatusEnabled,
+			VerificationStatus:      model.ModelVerificationStatusPassed,
+			SupportsStreaming:       streaming,
+			SupportsFunctionCalling: functionCalling,
+		}
+	}
+	for _, tc := range []struct {
+		name                 string
+		streaming, functions *bool
+	}{
+		{name: "unknown", streaming: nil, functions: nil},
+		{name: "supported", streaming: boolPtr(true), functions: boolPtr(true)},
+		{name: "recorded as unsupported", streaming: boolPtr(false), functions: boolPtr(false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			routable, anyEnabled := filterCandidates([]model.ModelCandidate{candidateWith(tc.streaming, tc.functions)})
+			if len(routable) != 1 {
+				t.Fatalf("expected the candidate to route regardless of its capability flags, got %d routable", len(routable))
+			}
+			if !anyEnabled {
+				t.Fatal("expected anyEnabled to be reported")
+			}
+		})
+	}
+}
+
+// The two gates that DO apply, so removing the capability check does not quietly
+// widen routing beyond what was intended.
+func TestFilterCandidatesRequiresEnabledAndVerified(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		management     int
+		verification   int
+		wantRoutable   bool
+		wantAnyEnabled bool
+	}{
+		{name: "enabled and verified", management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusPassed, wantRoutable: true, wantAnyEnabled: true},
+		{name: "enabled but unverified", management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusUntested, wantRoutable: false, wantAnyEnabled: true},
+		{name: "enabled but failed", management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusFailed, wantRoutable: false, wantAnyEnabled: true},
+		{name: "disabled though verified", management: model.ModelCandidateStatusDisabled, verification: model.ModelVerificationStatusPassed, wantRoutable: false, wantAnyEnabled: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			routable, anyEnabled := filterCandidates([]model.ModelCandidate{{
+				ID: 1, ManagementStatus: tc.management, VerificationStatus: tc.verification,
+			}})
+			if got := len(routable) == 1; got != tc.wantRoutable {
+				t.Fatalf("expected routable=%v, got %v", tc.wantRoutable, got)
+			}
+			if anyEnabled != tc.wantAnyEnabled {
+				t.Fatalf("expected anyEnabled=%v, got %v", tc.wantAnyEnabled, anyEnabled)
+			}
+		})
+	}
+}
+
 // stubSettingsProvider implements SettingsProvider for tests (disabled by
 // default). Tests that need a specific prompt can swap the value on the
 // returned struct after construction.
@@ -145,7 +214,7 @@ func createModelAndCandidate(t *testing.T, db *gorm.DB, provider *model.Provider
 	cand := &model.ModelCandidate{
 		ModelID: m.ID, ProviderID: provider.ID, ProviderModelName: providerModelName,
 		InputPrice: 1.0, OutputPrice: 2.0, MaxOutput: 4096,
-		SupportsStreaming: stream, SupportsFunctionCalling: fn,
+		SupportsStreaming: boolPtr(stream), SupportsFunctionCalling: boolPtr(fn),
 		ManagementStatus: model.ModelCandidateStatusEnabled, SortOrder: order,
 		VerificationStatus: model.ModelVerificationStatusPassed,
 		CreatedAt:          now, UpdatedAt: now,
@@ -464,7 +533,7 @@ func TestRelayCandidateFailover(t *testing.T) {
 		if err := db.Create(&model.ModelCandidate{
 			ModelID: m.ID, ProviderID: p.ID, ProviderModelName: name,
 			InputPrice: 0, OutputPrice: 0, MaxOutput: 4096,
-			SupportsStreaming: true, SupportsFunctionCalling: true,
+			SupportsStreaming: boolPtr(true), SupportsFunctionCalling: boolPtr(true),
 			ManagementStatus: model.ModelCandidateStatusEnabled, SortOrder: i + 1,
 			VerificationStatus: model.ModelVerificationStatusPassed,
 			CreatedAt:          now, UpdatedAt: now,
@@ -1785,7 +1854,7 @@ func TestAttemptOne_NonStreamBodyIdleFailovers(t *testing.T) {
 		if err := db.Create(&model.ModelCandidate{
 			ModelID: m.ID, ProviderID: p.ID, ProviderModelName: name,
 			InputPrice: 0, OutputPrice: 0, MaxOutput: 4096,
-			SupportsStreaming: true, SupportsFunctionCalling: true,
+			SupportsStreaming: boolPtr(true), SupportsFunctionCalling: boolPtr(true),
 			ManagementStatus: model.ModelCandidateStatusEnabled, SortOrder: i + 1,
 			VerificationStatus: model.ModelVerificationStatusPassed,
 			CreatedAt:          now, UpdatedAt: now,
@@ -1898,7 +1967,7 @@ func TestRelayCandidateLoopRespectsRequestBudget(t *testing.T) {
 		if err := db.Create(&model.ModelCandidate{
 			ModelID: m.ID, ProviderID: p.ID, ProviderModelName: "c" + string(rune('1'+i)),
 			InputPrice: 0, OutputPrice: 0, MaxOutput: 4096,
-			SupportsStreaming: true, SupportsFunctionCalling: true,
+			SupportsStreaming: boolPtr(true), SupportsFunctionCalling: boolPtr(true),
 			ManagementStatus: model.ModelCandidateStatusEnabled, SortOrder: i + 1,
 			VerificationStatus: model.ModelVerificationStatusPassed,
 			CreatedAt:          now, UpdatedAt: now,

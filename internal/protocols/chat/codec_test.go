@@ -439,6 +439,55 @@ func TestOpenAIStreamDecoder_Usage(t *testing.T) {
 	}
 }
 
+// TestDeepSeekCacheTokensDecode: DeepSeek splits prompt_tokens into
+// prompt_cache_hit_tokens + prompt_cache_miss_tokens. The hit half is a cache
+// READ; the miss half is the plain non-cached remainder, NOT a cache write.
+// Reporting it as a write both prices those tokens at the cache-write rate and
+// drives the logged net input to zero (prompt - hit - miss == 0).
+func TestDeepSeekCacheTokensDecode(t *testing.T) {
+	const body = `{"id":"x","model":"deepseek-chat","choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],` +
+		`"usage":{"prompt_tokens":1000,"completion_tokens":10,"total_tokens":1010,` +
+		`"prompt_cache_hit_tokens":600,"prompt_cache_miss_tokens":400}}`
+
+	resp, err := ResponseDecoder{}.DecodeResponse([]byte(body))
+	if err != nil {
+		t.Fatalf("DecodeResponse: %v", err)
+	}
+	if resp.Usage.CacheReadTokens != 600 {
+		t.Errorf("CacheReadTokens = %d, want 600", resp.Usage.CacheReadTokens)
+	}
+	if resp.Usage.CacheWriteTokens != 0 {
+		t.Errorf("CacheWriteTokens = %d, want 0 (miss tokens are not a cache write)", resp.Usage.CacheWriteTokens)
+	}
+	if resp.Usage.PromptTokens != 1000 {
+		t.Errorf("PromptTokens = %d, want 1000", resp.Usage.PromptTokens)
+	}
+
+	// Same expectations on the streaming path.
+	dec := NewStreamDecoder()
+	chunk := "data: {\"id\":\"x\",\"model\":\"deepseek-chat\",\"choices\":[]," +
+		"\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10,\"total_tokens\":1010," +
+		"\"prompt_cache_hit_tokens\":600,\"prompt_cache_miss_tokens\":400}}\n\n"
+	deltas, _ := dec.DecodeChunk(chunk)
+	found := false
+	for _, d := range deltas {
+		u, ok := d.(protocols.DeltaUsage)
+		if !ok {
+			continue
+		}
+		found = true
+		if u.Usage.CacheReadTokens != 600 {
+			t.Errorf("stream CacheReadTokens = %d, want 600", u.Usage.CacheReadTokens)
+		}
+		if u.Usage.CacheWriteTokens != 0 {
+			t.Errorf("stream CacheWriteTokens = %d, want 0", u.Usage.CacheWriteTokens)
+		}
+	}
+	if !found {
+		t.Error("missing protocols.DeltaUsage")
+	}
+}
+
 func TestOpenAIStreamDecoder_Finish(t *testing.T) {
 	dec := NewStreamDecoder()
 
