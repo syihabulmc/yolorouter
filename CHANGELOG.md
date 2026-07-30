@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.1] - 2026-07-31
 
 Yolorouter becomes multi-protocol: it now accepts four wire protocols and can
 translate any of them to any other on the way to the provider. Adds
@@ -76,5 +76,6 @@ failover, and observe usage and cost.
 - Single binary with the web console embedded via `go:embed`; SQLite or PostgreSQL storage; upstream keys encrypted at rest (AES-256).
 - Self-update via the `update` command and update-check API.
 
-[Unreleased]: https://github.com/yolorouter/yolorouter/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/yolorouter/yolorouter/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/yolorouter/yolorouter/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/yolorouter/yolorouter/releases/tag/v0.1.0
