@@ -86,16 +86,28 @@ func CreateModelCandidate(db *gorm.DB, c *model.ModelCandidate) error {
 	return db.Create(c).Error
 }
 
+// UpdateModelCandidate writes the edited fields. priceChanged must be true only
+// when one of the four price values actually differs from what is stored: the
+// price clock is what the auto-suggest look-up orders by, so stamping it on an
+// edit that merely re-sent the same numbers (which every save from the candidate
+// form does — it always posts the full record) would let a candidate nobody
+// repriced overtake one that was, and resurrect its stale rate.
 func UpdateModelCandidate(db *gorm.DB, id uint, providerModelName string, inputPrice, outputPrice float64,
-	cacheWritePrice, cacheReadPrice *float64, maxOutput int, resetVerification bool, now time.Time) error {
+	cacheWritePrice, cacheReadPrice *float64, maxOutput int, resetVerification, priceChanged bool, now time.Time) error {
 	updates := map[string]interface{}{
 		"provider_model_name": providerModelName,
-		"input_price":         inputPrice,
-		"output_price":        outputPrice,
-		"cache_write_price":   cacheWritePrice,
-		"cache_read_price":    cacheReadPrice,
-		"max_output":          maxOutput,
-		"updated_at":          now,
+		// Never written without its source column: a row whose folded copy is
+		// stale is silently invisible to the price look-up.
+		"provider_model_name_folded": model.FoldModelName(providerModelName),
+		"input_price":                inputPrice,
+		"output_price":               outputPrice,
+		"cache_write_price":          cacheWritePrice,
+		"cache_read_price":           cacheReadPrice,
+		"max_output":                 maxOutput,
+		"updated_at":                 now,
+	}
+	if priceChanged {
+		updates["price_updated_at"] = now
 	}
 	if resetVerification {
 		// The mapping test and capability probes validated the OLD
@@ -117,6 +129,51 @@ func UpdateModelCandidate(db *gorm.DB, id uint, providerModelName string, inputP
 func SetModelCandidateManagementStatus(db *gorm.DB, id uint, status int, now time.Time) error {
 	return db.Model(&model.ModelCandidate{}).Where("id = ?", id).
 		Updates(map[string]interface{}{"management_status": status, "updated_at": now}).Error
+}
+
+// FindLatestCandidatePrice returns the most recently PRICED candidate row for
+// the given provider + provider_model_name, used to auto-suggest prices when
+// adding a new candidate for the same model (prices follow the provider).
+// Returns gorm.ErrRecordNotFound when no such candidate exists — the caller
+// then falls back to the built-in seed catalog.
+//
+// Recency is price_updated_at, not updated_at. Enabling, disabling, retesting
+// and probing all bump updated_at without touching a price, so ordering by it
+// would let a retest on an old candidate promote its stale rate over a newer
+// one. Ties break on id so the answer is deterministic rather than
+// storage-order dependent.
+//
+// The name is matched case-insensitively, matching pricecatalog.Lookup: upstream
+// model names are quoted inconsistently ("DeepSeek-V4-Pro" vs "deepseek-v4-pro")
+// and a byte-exact match would miss the provider's own negotiated price and fall
+// through to the catalog's generic figure — inverting the intended precedence.
+// The comparison runs against the stored folded copy rather than a SQL LOWER()
+// of the name, because LOWER() is not the same function on both supported
+// backends and the same data would otherwise match on one and miss on the other.
+// Both sides go through model.FoldModelName, and the predicate stays a plain
+// equality the index can seek on — one row read, not a scan of the provider's
+// whole catalogue on every keystroke in the candidate form.
+//
+// Only the columns needed to answer the question are selected; the row is a
+// price carrier, not a full candidate, so everything else stays zero-valued and
+// must not be relied on.
+func FindLatestCandidatePrice(db *gorm.DB, providerID uint, providerModelName string) (*model.ModelCandidate, error) {
+	folded := model.FoldModelName(providerModelName)
+	if folded == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var c model.ModelCandidate
+	err := db.
+		Select("input_price", "output_price", "cache_write_price", "cache_read_price", "price_updated_at").
+		Where("provider_id = ? AND provider_model_name_folded = ?", providerID, folded).
+		// Take rather than First: First appends its own ascending primary-key
+		// ordering, which would fight the descending tie-breaker here.
+		Order("price_updated_at DESC, id DESC").
+		Take(&c).Error
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // SetModelCandidateManagementStatusIfVerified CAS-guards enabling a candidate on

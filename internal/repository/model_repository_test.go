@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -103,7 +104,7 @@ func seedModelWithCandidate(t *testing.T, db *gorm.DB, modelName, providerName s
 	candidate := &model.ModelCandidate{
 		ModelID: m.ID, ProviderID: provider.ID, ProviderModelName: "gpt-4o", SortOrder: 1,
 		ManagementStatus: model.ModelCandidateStatusDisabled, VerificationStatus: model.ModelVerificationStatusUntested,
-		CreatedAt: now, UpdatedAt: now,
+		CreatedAt: now, UpdatedAt: now, PriceUpdatedAt: now,
 	}
 	if err := CreateModelCandidate(db, candidate); err != nil {
 		t.Fatalf("CreateModelCandidate failed: %v", err)
@@ -201,7 +202,7 @@ func TestUpdateModelCandidate(t *testing.T) {
 	cacheWrite := 0.5
 	cacheRead := 0.1
 
-	if err := UpdateModelCandidate(db, candidate.ID, "gpt-4o-2024", 1.5, 3.0, &cacheWrite, &cacheRead, 4096, false, now); err != nil {
+	if err := UpdateModelCandidate(db, candidate.ID, "gpt-4o-2024", 1.5, 3.0, &cacheWrite, &cacheRead, 4096, false, true, now); err != nil {
 		t.Fatalf("UpdateModelCandidate failed: %v", err)
 	}
 	reloaded, err := FindModelCandidateByID(db, candidate.ID)
@@ -500,5 +501,280 @@ func TestDeleteModelCandidate(t *testing.T) {
 	}
 	if _, err := FindModelCandidateByID(db, candidate.ID); err == nil {
 		t.Fatalf("expected the candidate to be gone after deletion")
+	}
+}
+
+// seedCandidatePrice attaches one more model to an existing provider, carrying
+// the given upstream name and prices. A second candidate on the same provider
+// needs its own model row because of UNIQUE(model_id, provider_id).
+func seedCandidatePrice(
+	t *testing.T, db *gorm.DB, providerID uint, modelName, providerModelName string,
+	inputPrice, outputPrice float64, updatedAt time.Time,
+) *model.ModelCandidate {
+	t.Helper()
+	m := &model.Model{Name: modelName, ManagementStatus: model.ModelStatusEnabled, CreatedAt: updatedAt, UpdatedAt: updatedAt}
+	if err := CreateModel(db, m); err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	c := &model.ModelCandidate{
+		ModelID: m.ID, ProviderID: providerID, ProviderModelName: providerModelName,
+		InputPrice: inputPrice, OutputPrice: outputPrice, SortOrder: 1,
+		ManagementStatus: model.ModelCandidateStatusDisabled, VerificationStatus: model.ModelVerificationStatusUntested,
+		CreatedAt: updatedAt, UpdatedAt: updatedAt, PriceUpdatedAt: updatedAt,
+	}
+	if err := CreateModelCandidate(db, c); err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+	return c
+}
+
+func TestFindLatestCandidatePriceReturnsMostRecentlyUpdated(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	seedCandidatePrice(t, db, provider.ID, "older-alias", "deepseek-v4-pro", 1, 2, now.Add(-time.Hour))
+	seedCandidatePrice(t, db, provider.ID, "newer-alias", "deepseek-v4-pro", 3, 6, now)
+
+	got, err := FindLatestCandidatePrice(db, provider.ID, "deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("FindLatestCandidatePrice failed: %v", err)
+	}
+	if got.InputPrice != 3 || got.OutputPrice != 6 {
+		t.Fatalf("want the newest row's prices 3/6, got %v/%v", got.InputPrice, got.OutputPrice)
+	}
+	// Documented contract: the row is a price carrier, so anything outside the
+	// selected columns stays zero and must not be read. provider_model_name IS
+	// selected — it is what the case-insensitive match is done against.
+	if got.ModelID != 0 || got.SortOrder != 0 || !got.UpdatedAt.IsZero() {
+		t.Fatalf("expected only the look-up columns to be populated, got %+v", got)
+	}
+}
+
+// Upstream model names are quoted inconsistently. A byte-exact match would miss
+// the provider's own negotiated price and silently fall through to the seed
+// catalog's generic figure, which is exactly the wrong way round.
+func TestFindLatestCandidatePriceMatchesNameCaseInsensitively(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	now := time.Now().UTC().Truncate(time.Second)
+	seedCandidatePrice(t, db, provider.ID, "alias", "DeepSeek-V4-Pro", 2.4, 4.8, now)
+
+	for _, name := range []string{"deepseek-v4-pro", "DEEPSEEK-V4-PRO", "DeepSeek-V4-Pro"} {
+		got, err := FindLatestCandidatePrice(db, provider.ID, name)
+		if err != nil {
+			t.Fatalf("FindLatestCandidatePrice(%q) failed: %v", name, err)
+		}
+		if got.InputPrice != 2.4 || got.OutputPrice != 4.8 {
+			t.Errorf("%q: want 2.4/4.8, got %v/%v", name, got.InputPrice, got.OutputPrice)
+		}
+	}
+}
+
+func TestFindLatestCandidatePriceIsScopedToOneProvider(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, providerA, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	providerB, _ := seedProviderWithKey(t, db, "provider-b")
+	now := time.Now().UTC().Truncate(time.Second)
+	seedCandidatePrice(t, db, providerA.ID, "alias-a", "deepseek-v4-pro", 1, 2, now)
+
+	// Prices follow the provider: B's own resale price is not A's.
+	if _, err := FindLatestCandidatePrice(db, providerB.ID, "deepseek-v4-pro"); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected ErrRecordNotFound for a different provider, got %v", err)
+	}
+}
+
+func TestFindLatestCandidatePriceReturnsNotFoundForUnknownModel(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+
+	if _, err := FindLatestCandidatePrice(db, provider.ID, "never-configured"); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected ErrRecordNotFound, got %v", err)
+	}
+}
+
+func TestFindLatestCandidatePriceReturnsErrorWhenDBUnavailable(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	testutil.CloseDB(t, db)
+
+	if _, err := FindLatestCandidatePrice(db, provider.ID, "gpt-4o"); err == nil {
+		t.Fatalf("expected an error once the underlying connection is closed")
+	}
+}
+
+// updated_at moves for reasons that have nothing to do with money — enabling a
+// candidate, retesting it, committing a probe result. If price recency were read
+// from that column, any of those on an old candidate would resurrect its stale
+// rate and auto-fill it into the next candidate for the same upstream model.
+func TestFindLatestCandidatePriceIgnoresNonPriceUpdates(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	stale := seedCandidatePrice(t, db, provider.ID, "older-alias", "deepseek-v4-pro", 1, 2, now.Add(-time.Hour))
+	seedCandidatePrice(t, db, provider.ID, "newer-alias", "deepseek-v4-pro", 3, 6, now)
+
+	// Toggling the older candidate's status bumps its updated_at past the newer
+	// one's without restating its price.
+	if err := SetModelCandidateManagementStatus(db, stale.ID, model.ModelCandidateStatusEnabled, now.Add(time.Hour)); err != nil {
+		t.Fatalf("SetModelCandidateManagementStatus failed: %v", err)
+	}
+
+	got, err := FindLatestCandidatePrice(db, provider.ID, "deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("FindLatestCandidatePrice failed: %v", err)
+	}
+	if got.InputPrice != 3 || got.OutputPrice != 6 {
+		t.Fatalf("want the most recently priced 3/6, got %v/%v", got.InputPrice, got.OutputPrice)
+	}
+}
+
+// The other half of the same rule: an edit that DOES restate a price makes that
+// candidate the newest, even though it was created first.
+func TestFindLatestCandidatePriceFollowsPriceEdits(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	older := seedCandidatePrice(t, db, provider.ID, "older-alias", "deepseek-v4-pro", 1, 2, now.Add(-time.Hour))
+	seedCandidatePrice(t, db, provider.ID, "newer-alias", "deepseek-v4-pro", 3, 6, now)
+
+	if err := UpdateModelCandidate(db, older.ID, "deepseek-v4-pro", 2.4, 4.8, nil, nil, 0, false, true, now.Add(time.Hour)); err != nil {
+		t.Fatalf("UpdateModelCandidate failed: %v", err)
+	}
+
+	got, err := FindLatestCandidatePrice(db, provider.ID, "deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("FindLatestCandidatePrice failed: %v", err)
+	}
+	if got.InputPrice != 2.4 || got.OutputPrice != 4.8 {
+		t.Fatalf("want the freshly restated 2.4/4.8, got %v/%v", got.InputPrice, got.OutputPrice)
+	}
+}
+
+// GORM writes every mapped column on insert rather than omitting an unset one,
+// so a candidate built without a price clock would land on year 0001 and lose
+// every recency comparison forever. The model's BeforeCreate hook is what stops
+// that; this pins it, because the failure is silent.
+func TestCreateModelCandidateNeverStoresAZeroPriceClock(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	m, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	other := &model.Model{Name: "other", ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	if err := CreateModel(db, other); err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	_ = m
+	c := &model.ModelCandidate{
+		ModelID: other.ID, ProviderID: provider.ID, ProviderModelName: "gpt-4o", SortOrder: 1,
+		ManagementStatus: model.ModelCandidateStatusDisabled, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := CreateModelCandidate(db, c); err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+
+	stored, err := FindModelCandidateByID(db, c.ID)
+	if err != nil {
+		t.Fatalf("FindModelCandidateByID failed: %v", err)
+	}
+	if stored.PriceUpdatedAt.IsZero() || stored.PriceUpdatedAt.Year() < 2000 {
+		t.Fatalf("expected the price clock to be stamped, got %v", stored.PriceUpdatedAt)
+	}
+}
+
+// The candidate form always posts the whole record, so an edit that touches only
+// max_output or the enabled switch re-sends the same prices. Advancing the price
+// clock there would let a candidate nobody repriced overtake one that was.
+func TestUpdateModelCandidateLeavesPriceClockAloneWhenPricesAreUnchanged(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	stale := seedCandidatePrice(t, db, provider.ID, "older-alias", "deepseek-v4-pro", 1, 2, now.Add(-time.Hour))
+	seedCandidatePrice(t, db, provider.ID, "newer-alias", "deepseek-v4-pro", 3, 6, now)
+
+	// Same prices, different max_output: priceChanged is false.
+	if err := UpdateModelCandidate(db, stale.ID, "deepseek-v4-pro", 1, 2, nil, nil, 4096, false, false, now.Add(time.Hour)); err != nil {
+		t.Fatalf("UpdateModelCandidate failed: %v", err)
+	}
+
+	got, err := FindLatestCandidatePrice(db, provider.ID, "deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("FindLatestCandidatePrice failed: %v", err)
+	}
+	if got.InputPrice != 3 || got.OutputPrice != 6 {
+		t.Fatalf("a non-price edit promoted the stale rate: got %v/%v, want 3/6", got.InputPrice, got.OutputPrice)
+	}
+}
+
+// The stored fold has to behave the same for names SQL LOWER() would disagree
+// on across backends — that divergence is why the match is against a folded
+// column written by Go rather than a LOWER() in the predicate.
+func TestFindLatestCandidatePriceFoldsNonASCIINames(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	now := time.Now().UTC().Truncate(time.Second)
+	seedCandidatePrice(t, db, provider.ID, "alias", "Модель-Про", 2.4, 4.8, now)
+
+	got, err := FindLatestCandidatePrice(db, provider.ID, "модель-про")
+	if err != nil {
+		t.Fatalf("FindLatestCandidatePrice failed: %v", err)
+	}
+	if got.InputPrice != 2.4 {
+		t.Fatalf("want 2.4 from the folded match, got %v", got.InputPrice)
+	}
+}
+
+// The folded name is derived, so nothing may write one column without the other:
+// a stale copy makes the row silently invisible to price suggestions.
+func TestUpdateModelCandidateKeepsTheFoldedNameInStep(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	now := time.Now().UTC().Truncate(time.Second)
+	c := seedCandidatePrice(t, db, provider.ID, "alias", "deepseek-v4-flash", 1, 2, now)
+
+	if err := UpdateModelCandidate(db, c.ID, "DeepSeek-V4-Pro", 3, 6, nil, nil, 0, true, true, now.Add(time.Minute)); err != nil {
+		t.Fatalf("UpdateModelCandidate failed: %v", err)
+	}
+
+	// Findable under the new name...
+	got, err := FindLatestCandidatePrice(db, provider.ID, "deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("FindLatestCandidatePrice after retarget failed: %v", err)
+	}
+	if got.InputPrice != 3 || got.OutputPrice != 6 {
+		t.Fatalf("want 3/6 under the new name, got %v/%v", got.InputPrice, got.OutputPrice)
+	}
+	// ...and no longer under the old one.
+	if _, err := FindLatestCandidatePrice(db, provider.ID, "deepseek-v4-flash"); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected the old name to stop matching, got %v", err)
+	}
+}
+
+// Retargeting restates the price for a model this row never priced before, so it
+// has to advance the clock even when every number stayed the same.
+func TestUpdateModelCandidateStampsPriceClockOnRetarget(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	_, provider, _ := seedModelWithCandidate(t, db, "smart", "provider-a")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// An existing, more recently priced candidate for the name we retarget onto.
+	seedCandidatePrice(t, db, provider.ID, "incumbent", "deepseek-v4-pro", 3, 6, now)
+	// An older candidate on a different name, carrying the rate we keep.
+	moved := seedCandidatePrice(t, db, provider.ID, "moved", "deepseek-v4-flash", 1, 2, now.Add(-time.Hour))
+
+	// Same numbers, new target: priceChanged is driven by targetChanged.
+	if err := UpdateModelCandidate(db, moved.ID, "deepseek-v4-pro", 1, 2, nil, nil, 0, true, true, now.Add(time.Hour)); err != nil {
+		t.Fatalf("UpdateModelCandidate failed: %v", err)
+	}
+
+	got, err := FindLatestCandidatePrice(db, provider.ID, "deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("FindLatestCandidatePrice failed: %v", err)
+	}
+	if got.InputPrice != 1 || got.OutputPrice != 2 {
+		t.Fatalf("the retargeted row should be newest for this name, got %v/%v", got.InputPrice, got.OutputPrice)
 	}
 }

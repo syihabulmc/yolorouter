@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -186,6 +187,32 @@ func PatchModelStatus(svc *service.ModelService) gin.HandlerFunc {
 			return
 		}
 		response.Success(c, nil)
+	}
+}
+
+// GetCandidateSuggestPrice returns a price to pre-fill when adding a candidate
+// for a provider+model, checking the provider's own history first then the
+// built-in seed catalog. provider_id and provider_model_name come from query
+// params because this is a look-up the candidate form fires on model-name
+// select, not a candidate-scoped path. An empty Source means nothing matched
+// and the form stays at its default.
+func GetCandidateSuggestPrice(svc *service.ModelService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		providerID, ok := requireUintQuery(c, "provider_id")
+		if !ok {
+			return
+		}
+		modelName := strings.TrimSpace(c.Query("provider_model_name"))
+		if modelName == "" {
+			response.ParamError(c, "provider_model_name is required")
+			return
+		}
+		view, err := svc.SuggestCandidatePrice(providerID, modelName)
+		if err != nil {
+			writeModelServiceError(c, err)
+			return
+		}
+		response.Success(c, view)
 	}
 }
 

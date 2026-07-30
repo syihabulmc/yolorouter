@@ -178,3 +178,34 @@ export function retestCandidate(modelId: number, candidateId: number): Promise<M
 export function deleteCandidate(modelId: number, candidateId: number): Promise<void> {
   return apiFetch(`/api/admin/models/${modelId}/candidates/${candidateId}`, { method: 'DELETE' })
 }
+
+// SuggestedPrice is a price to pre-fill when adding a candidate for a provider
+// + model. Source records where it came from ("history" = this provider's own
+// last-saved price, "seed" = the built-in official catalog, "" = nothing
+// matched) so the UI can tell the admin and they can sanity-check it.
+export interface SuggestedPrice {
+  input_price: number
+  output_price: number
+  cache_write_price: number | null
+  cache_read_price: number | null
+  source: 'history' | 'seed' | ''
+  // When the built-in catalog was last synced (YYYY-MM-DD), set only for
+  // source 'seed'. The seed is a hand-compiled snapshot of vendor pricing, so
+  // its age is what tells the admin whether "from the official catalog" means
+  // "trust this" or "this may be a year out of date".
+  catalog_updated_at: string
+}
+
+// suggestCandidatePrice looks up a price for a provider+model (history first,
+// then the built-in seed). The form fires it on model-name select so the four
+// price fields auto-fill; the admin can still edit them before saving.
+export function suggestCandidatePrice(
+  providerId: number,
+  providerModelName: string,
+): Promise<SuggestedPrice> {
+  const q = new URLSearchParams({
+    provider_id: String(providerId),
+    provider_model_name: providerModelName,
+  })
+  return apiFetch(`/api/admin/models/candidates/suggest-price?${q.toString()}`)
+}

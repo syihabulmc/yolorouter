@@ -262,6 +262,10 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	protected.PATCH("/models/:id", handler.PatchModel(modelSvc))
 	protected.PATCH("/models/:id/status", handler.PatchModelStatus(modelSvc))
 	protected.POST("/models/:id/candidates", handler.PostModelCandidate(modelSvc))
+	// suggest-price takes its subject (provider id + upstream model name) from
+	// the query string rather than the path, because the candidate it is pricing
+	// does not exist yet — there is no :candidateId to scope it to.
+	protected.GET("/models/candidates/suggest-price", handler.GetCandidateSuggestPrice(modelSvc))
 	protected.POST("/models/:id/candidates/test-and-create", handler.PostModelCandidateTestAndCreate(modelSvc))
 	protected.PATCH("/models/:id/candidates/:candidateId", handler.PatchModelCandidate(modelSvc))
 	protected.PATCH("/models/:id/candidates/:candidateId/order", handler.PatchModelCandidateOrder(modelSvc))

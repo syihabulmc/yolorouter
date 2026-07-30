@@ -183,17 +183,47 @@ func applyRequestLogFilterParams(c *gin.Context, filter *service.RequestLogListF
 // when the caller should continue; on a malformed value it writes a 400
 // envelope and returns false. Absent param = no-op (setter not called).
 func applyUintQueryParam(c *gin.Context, key string, setter func(uint)) bool {
-	raw := c.Query(key)
-	if raw == "" {
+	if c.Query(key) == "" {
 		return true
 	}
-	v, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil {
-		response.ParamError(c, key+" must be a non-negative integer")
+	v, ok := parseUintQueryValue(c, key)
+	if !ok {
 		return false
 	}
-	setter(uint(v))
+	setter(v)
 	return true
+}
+
+// requireUintQuery is applyUintQueryParam's mandatory sibling, for a look-up
+// whose subject arrives in the query string rather than the path (see
+// GetCandidateSuggestPrice). Absent is reported separately from unusable, so a
+// client is never told a value it did supply is missing. Everything it cannot
+// use — non-numeric, negative, zero — gets one message stating the whole
+// contract, rather than the optional helper's "non-negative" wording, which
+// would invite a retry with the zero this function also rejects.
+func requireUintQuery(c *gin.Context, key string) (uint, bool) {
+	raw := c.Query(key)
+	if raw == "" {
+		response.ParamError(c, key+" is required")
+		return 0, false
+	}
+	v, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || v == 0 {
+		response.ParamError(c, key+" must be a positive integer")
+		return 0, false
+	}
+	return uint(v), true
+}
+
+// parseUintQueryValue parses one present-but-possibly-malformed uint query
+// value, writing the 400 envelope itself so both callers word it identically.
+func parseUintQueryValue(c *gin.Context, key string) (uint, bool) {
+	v, err := strconv.ParseUint(c.Query(key), 10, 64)
+	if err != nil {
+		response.ParamError(c, key+" must be a non-negative integer")
+		return 0, false
+	}
+	return uint(v), true
 }
 
 // applyBoolQueryParam parses an optional bool query param accepting the

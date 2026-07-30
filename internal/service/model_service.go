@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/pricecatalog"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
@@ -344,6 +346,78 @@ type CreateCandidateInput struct {
 	ManagementStatus  int // requested target status; only ==Enabled triggers the server-side retest
 }
 
+// SuggestedPrice is one auto-fill result for a provider+model pair. The four
+// price slots mirror model.ModelCandidate; Source records where the value came
+// from so the UI can tell the admin ("from history" vs "from official catalog")
+// and is empty ("") when nothing was found — the form then stays at its default.
+type SuggestedPrice struct {
+	InputPrice      float64  `json:"input_price"`
+	OutputPrice     float64  `json:"output_price"`
+	CacheWritePrice *float64 `json:"cache_write_price"`
+	CacheReadPrice  *float64 `json:"cache_read_price"`
+	Source          string   `json:"source"` // "history" | "seed" | ""
+	// CatalogUpdatedAt is when the built-in catalog was last synced, in
+	// YYYY-MM-DD form, and is set only for Source "seed". The seed is a snapshot
+	// compiled by hand from vendor pricing pages, so its age is the difference
+	// between a figure worth trusting and one that quietly bills last year's
+	// rate; the UI shows it next to the suggestion. Empty for the other sources,
+	// where the price came from this deployment's own records.
+	CatalogUpdatedAt string `json:"catalog_updated_at"`
+}
+
+// SuggestCandidatePrice looks up a price to pre-fill when adding a candidate,
+// checking two sources in order: this provider's own previously-saved price
+// for the same model (history), then the built-in seed catalog keyed by the
+// provider's base_url host. Prices follow the provider, so history takes
+// precedence — it reflects what this provider actually charges (possibly a
+// negotiated rate) rather than the catalog's generic figure. An empty Source
+// means neither source matched and the caller leaves the fields at default.
+//
+// providerModelName is the name that will actually be sent upstream. Leaving
+// the field blank means "use the model's own name", and the caller resolves
+// that substitution before asking — a blank name here matches nothing and
+// yields an empty suggestion rather than pricing the wrong model.
+func (s *ModelService) SuggestCandidatePrice(providerID uint, providerModelName string) (SuggestedPrice, error) {
+	providerModelName = strings.TrimSpace(providerModelName)
+	if providerModelName == "" {
+		return SuggestedPrice{}, nil
+	}
+
+	// 1. History: the most recent candidate for this provider + model name.
+	if hist, err := repository.FindLatestCandidatePrice(s.db, providerID, providerModelName); err == nil {
+		return SuggestedPrice{
+			InputPrice:      hist.InputPrice,
+			OutputPrice:     hist.OutputPrice,
+			CacheWritePrice: hist.CacheWritePrice,
+			CacheReadPrice:  hist.CacheReadPrice,
+			Source:          "history",
+		}, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return SuggestedPrice{}, err
+	}
+
+	// 2. Seed catalog: needs the provider's base_url to resolve the host key.
+	provider, err := repository.FindProviderByID(s.db, providerID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return SuggestedPrice{}, errcode.ErrProviderNotFound
+		}
+		return SuggestedPrice{}, err
+	}
+	if p, ok := pricecatalog.Lookup(provider.BaseURL, providerModelName); ok {
+		return SuggestedPrice{
+			InputPrice:       p.Input,
+			OutputPrice:      p.Output,
+			CacheWritePrice:  p.CacheWrite,
+			CacheReadPrice:   p.CacheRead,
+			Source:           "seed",
+			CatalogUpdatedAt: pricecatalog.UpdatedAt(),
+		}, nil
+	}
+
+	return SuggestedPrice{}, nil
+}
+
 // decryptHighestPriorityAvailableKey picks the sort_order-first available
 // key (enabled+verified+authorized for the provider's current
 // destination_version) and decrypts it — candidate tests never touch a key
@@ -658,7 +732,7 @@ func (s *ModelService) createCandidateWithProbeResults(
 		SupportsStreaming:       commit.SupportsStreaming,
 		SupportsFunctionCalling: commit.SupportsFunctionCalling,
 		LastTestResult:          commit.LastTestResult,
-		CreatedAt:               now, UpdatedAt: now,
+		CreatedAt:               now, UpdatedAt: now, PriceUpdatedAt: now,
 	}
 	// The test timestamp and duration are only written when a probe actually
 	// ran. Stamping them unconditionally would leave a row that simultaneously
@@ -738,7 +812,8 @@ func (s *ModelService) CreateModelCandidate(ctx context.Context, modelID uint, i
 		InputPrice: input.InputPrice, OutputPrice: input.OutputPrice,
 		CacheWritePrice: input.CacheWritePrice, CacheReadPrice: input.CacheReadPrice, MaxOutput: input.MaxOutput,
 		ManagementStatus:   model.ModelCandidateStatusDisabled,
-		VerificationStatus: model.ModelVerificationStatusUntested, CreatedAt: now, UpdatedAt: now,
+		VerificationStatus: model.ModelVerificationStatusUntested,
+		CreatedAt:          now, UpdatedAt: now, PriceUpdatedAt: now,
 	}
 	if err := s.insertCandidateWithSortOrder(candidate); err != nil {
 		return nil, err
@@ -859,6 +934,15 @@ type UpdateCandidateResult struct {
 	Report    *CandidateTestReport `json:"report"`
 }
 
+// sameOptionalPrice compares two nullable prices, where nil ("this model has no
+// such price") is a distinct value from any number including zero.
+func sameOptionalPrice(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // UpdateModelCandidate saves the edited fields and re-probes only when the
 // change could have invalidated what was previously verified.
 //
@@ -894,8 +978,21 @@ func (s *ModelService) UpdateModelCandidate(ctx context.Context, id uint, input 
 	// mapping test, so the candidate must be re-verified before it can route
 	// or be enabled again (repository resets verification + capability flags).
 	targetChanged := providerModelName != candidate.ProviderModelName
+	// The form always posts the whole record, so "a price arrived" is not the
+	// same as "a price changed". Only a real change may advance the price clock
+	// the auto-suggest look-up ranks candidates by.
+	//
+	// Retargeting counts as one even when every number stays put: the row now
+	// states that rate for a DIFFERENT upstream model, which is a fresh claim
+	// about a pair it had never priced. Leaving the clock behind would let some
+	// other candidate's older rate for that pair keep winning the look-up.
+	priceChanged := targetChanged ||
+		input.InputPrice != candidate.InputPrice ||
+		input.OutputPrice != candidate.OutputPrice ||
+		!sameOptionalPrice(input.CacheWritePrice, candidate.CacheWritePrice) ||
+		!sameOptionalPrice(input.CacheReadPrice, candidate.CacheReadPrice)
 	if err := repository.UpdateModelCandidate(s.db, id, providerModelName, input.InputPrice, input.OutputPrice,
-		input.CacheWritePrice, input.CacheReadPrice, input.MaxOutput, targetChanged, now); err != nil {
+		input.CacheWritePrice, input.CacheReadPrice, input.MaxOutput, targetChanged, priceChanged, now); err != nil {
 		return nil, err
 	}
 

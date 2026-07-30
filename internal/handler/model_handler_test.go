@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -45,6 +46,7 @@ func newModelTestRouterWithClient(t *testing.T, client service.ProviderClient) (
 	admin.PATCH("/models/:id/candidates/:candidateId/order", PatchModelCandidateOrder(svc))
 	admin.PATCH("/models/:id/candidates/:candidateId/status", PatchModelCandidateStatus(svc))
 	admin.POST("/models/:id/candidates/:candidateId/test", PostModelCandidateTest(svc))
+	admin.GET("/models/candidates/suggest-price", GetCandidateSuggestPrice(svc))
 	admin.DELETE("/models/:id/candidates/:candidateId", DeleteModelCandidate(svc))
 	return r, db
 }
@@ -278,6 +280,7 @@ func newModelTestRouterSharingProviderDB(t *testing.T, db *gorm.DB, client servi
 	admin.PATCH("/models/:id/candidates/:candidateId/order", PatchModelCandidateOrder(svc))
 	admin.PATCH("/models/:id/candidates/:candidateId/status", PatchModelCandidateStatus(svc))
 	admin.POST("/models/:id/candidates/:candidateId/test", PostModelCandidateTest(svc))
+	admin.GET("/models/candidates/suggest-price", GetCandidateSuggestPrice(svc))
 	admin.DELETE("/models/:id/candidates/:candidateId", DeleteModelCandidate(svc))
 	return r
 }
@@ -682,5 +685,117 @@ func TestDeleteModelCandidateReturns400WhenNotFound(t *testing.T) {
 	}
 	if env.Code != errcode.ModelCandidateNotFound {
 		t.Fatalf("expected code %d, got %d", errcode.ModelCandidateNotFound, env.Code)
+	}
+}
+
+// createProviderOnHostForModelTest is createProviderAndKeyForModelTest with the
+// base_url spelled out, so a test can put the provider on a host the seed price
+// catalog does or does not carry.
+func createProviderOnHostForModelTest(t *testing.T, r *gin.Engine, name, baseURL string) uint {
+	t.Helper()
+	body := map[string]interface{}{
+		"name": name, "base_url": baseURL,
+		"key_label": "primary", "key_plaintext": "sk-abcdefghijklmnopqrstuvwxyz1234", "test_model": "gpt-4o-mini",
+		"management_status": 1,
+	}
+	w, env := doJSON(t, r, http.MethodPost, "/api/admin/providers", body, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: create provider failed: %d, body: %s", w.Code, w.Body.String())
+	}
+	var view struct {
+		ID uint `json:"id"`
+	}
+	if err := json.Unmarshal(env.Data, &view); err != nil {
+		t.Fatalf("unmarshal provider view: %v", err)
+	}
+	return view.ID
+}
+
+type suggestPriceResponse struct {
+	InputPrice      float64  `json:"input_price"`
+	OutputPrice     float64  `json:"output_price"`
+	CacheWritePrice *float64 `json:"cache_write_price"`
+	CacheReadPrice  *float64 `json:"cache_read_price"`
+	Source          string   `json:"source"`
+}
+
+func getSuggestPrice(t *testing.T, r *gin.Engine, query string) (*httptest.ResponseRecorder, envelope) {
+	t.Helper()
+	return doJSON(t, r, http.MethodGet, "/api/admin/models/candidates/suggest-price?"+query, nil, nil)
+}
+
+func TestGetCandidateSuggestPriceReturnsSeedPrice(t *testing.T) {
+	providerRouter, db := newProviderTestRouter(t)
+	providerID := createProviderOnHostForModelTest(t, providerRouter, "deepseek", "https://api.deepseek.com/v1")
+	r := newModelTestRouterSharingProviderDB(t, db, &alwaysSuccessClient{})
+
+	w, env := getSuggestPrice(t, r, fmt.Sprintf("provider_id=%d&provider_model_name=deepseek-v4-flash", providerID))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var got suggestPriceResponse
+	if err := json.Unmarshal(env.Data, &got); err != nil {
+		t.Fatalf("unmarshal suggestion: %v", err)
+	}
+	if got.Source != "seed" {
+		t.Fatalf("expected the built-in catalog to answer, got source=%q body=%s", got.Source, w.Body.String())
+	}
+	if got.InputPrice <= 0 || got.OutputPrice <= 0 {
+		t.Fatalf("expected non-zero catalog prices, got %+v", got)
+	}
+}
+
+func TestGetCandidateSuggestPriceReturnsEmptySourceForUnknownPair(t *testing.T) {
+	providerRouter, db := newProviderTestRouter(t)
+	providerID := createProviderOnHostForModelTest(t, providerRouter, "self-hosted", "https://llm.internal.example/v1")
+	r := newModelTestRouterSharingProviderDB(t, db, &alwaysSuccessClient{})
+
+	w, env := getSuggestPrice(t, r, fmt.Sprintf("provider_id=%d&provider_model_name=some-local-model", providerID))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var got suggestPriceResponse
+	if err := json.Unmarshal(env.Data, &got); err != nil {
+		t.Fatalf("unmarshal suggestion: %v", err)
+	}
+	if got.Source != "" || got.InputPrice != 0 {
+		t.Fatalf("expected an empty suggestion, got %+v", got)
+	}
+}
+
+func TestGetCandidateSuggestPriceRejectsBadQueryParams(t *testing.T) {
+	r, _ := newModelTestRouter(t)
+	cases := []struct {
+		name, query, wantMessage string
+	}{
+		{"absent provider_id", "provider_model_name=gpt-4o", "provider_id is required"},
+		{"blank provider_id", "provider_id=&provider_model_name=gpt-4o", "provider_id is required"},
+		// A supplied-but-unusable value must not be reported as a missing one,
+		// and every unusable form must name the same contract — telling a client
+		// "non-negative" here would invite a retry with the zero also rejected.
+		{"malformed provider_id", "provider_id=abc&provider_model_name=gpt-4o", "provider_id must be a positive integer"},
+		{"negative provider_id", "provider_id=-1&provider_model_name=gpt-4o", "provider_id must be a positive integer"},
+		{"zero provider_id", "provider_id=0&provider_model_name=gpt-4o", "provider_id must be a positive integer"},
+		{"absent model name", "provider_id=1", "provider_model_name is required"},
+		{"blank model name", "provider_id=1&provider_model_name=%20%20", "provider_model_name is required"},
+	}
+	for _, tc := range cases {
+		w, env := getSuggestPrice(t, r, tc.query)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d, body: %s", tc.name, w.Code, w.Body.String())
+			continue
+		}
+		if env.Message != tc.wantMessage {
+			t.Errorf("%s: expected message %q, got %q", tc.name, tc.wantMessage, env.Message)
+		}
+	}
+}
+
+func TestGetCandidateSuggestPriceReturnsProviderNotFound(t *testing.T) {
+	r, _ := newModelTestRouter(t)
+
+	w, env := getSuggestPrice(t, r, "provider_id=999999&provider_model_name=gpt-4o")
+	if env.Code != errcode.ProviderNotFound {
+		t.Fatalf("expected ProviderNotFound, got code=%d body: %s", env.Code, w.Body.String())
 	}
 }

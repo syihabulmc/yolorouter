@@ -49,25 +49,45 @@
         <template #label>
           <HelpLabel :tip="t('models.inputPrice_tip')">{{ t('models.inputPrice') }}</HelpLabel>
         </template>
-        <n-input-number v-model:value="form.inputPrice" :min="0" style="width: 100%" />
+        <n-input-number
+          :value="form.inputPrice"
+          :min="0"
+          style="width: 100%"
+          @update:value="(v: number | null) => onPriceInput('inputPrice', v)"
+        />
       </n-form-item>
       <n-form-item path="outputPrice">
         <template #label>
           <HelpLabel :tip="t('models.outputPrice_tip')">{{ t('models.outputPrice') }}</HelpLabel>
         </template>
-        <n-input-number v-model:value="form.outputPrice" :min="0" style="width: 100%" />
+        <n-input-number
+          :value="form.outputPrice"
+          :min="0"
+          style="width: 100%"
+          @update:value="(v: number | null) => onPriceInput('outputPrice', v)"
+        />
       </n-form-item>
       <n-form-item>
         <template #label>
           <HelpLabel :tip="t('models.cacheWritePrice_tip')">{{ t('models.cacheWritePrice') }}</HelpLabel>
         </template>
-        <n-input-number v-model:value="form.cacheWritePrice" :min="0" style="width: 100%" />
+        <n-input-number
+          :value="form.cacheWritePrice"
+          :min="0"
+          style="width: 100%"
+          @update:value="(v: number | null) => onPriceInput('cacheWritePrice', v)"
+        />
       </n-form-item>
       <n-form-item>
         <template #label>
           <HelpLabel :tip="t('models.cacheReadPrice_tip')">{{ t('models.cacheReadPrice') }}</HelpLabel>
         </template>
-        <n-input-number v-model:value="form.cacheReadPrice" :min="0" style="width: 100%" />
+        <n-input-number
+          :value="form.cacheReadPrice"
+          :min="0"
+          style="width: 100%"
+          @update:value="(v: number | null) => onPriceInput('cacheReadPrice', v)"
+        />
       </n-form-item>
       <n-form-item>
         <template #label>
@@ -83,6 +103,17 @@
         <n-switch v-model:value="form.enabled" />
       </n-form-item>
     </n-form>
+
+    <!-- Rendered in place rather than as a toast: this one blocks saving, so it
+         has to stay on screen until the operator answers it. -->
+    <n-alert v-if="priceUnresolvedKey" type="warning" style="margin-top: 4px">
+      <div class="price-alert">
+        <span>{{ t(priceUnresolvedKey) }}</span>
+        <n-button text type="primary" size="small" @click="keepUnresolvedPrices">
+          {{ t('models.priceKeepAnyway') }}
+        </n-button>
+      </div>
+    </n-alert>
 
     <!-- Only rendered once there is something to report: while idle the modal
          stays a plain form, matching the provider and key dialogs. -->
@@ -119,15 +150,34 @@
           <n-button :disabled="submitting" @click="onUpdateShow(false)">{{ t('models.cancel') }}</n-button>
           <n-tooltip v-if="basicFailedBlockingSave" trigger="hover" placement="top">
             <template #trigger>
-              <n-button :loading="savingDisabled" :disabled="submitting" @click="onSaveAnywayDisabled">
+              <n-button
+                :loading="savingDisabled"
+                :disabled="submitting || priceUnresolvedKey !== null"
+                @click="onSaveAnywayDisabled"
+              >
                 {{ t('models.saveAnywayDisabled') }}
               </n-button>
             </template>
             {{ t('models.saveAnywayDisabled_tip') }}
           </n-tooltip>
-          <n-button type="primary" :loading="submitting" :disabled="savingDisabled" @click="onSave">
-            {{ basicFailedBlockingSave ? t('models.retry') : t('models.save') }}
-          </n-button>
+          <n-tooltip :disabled="priceUnresolvedKey === null" trigger="hover" placement="top">
+            <template #trigger>
+              <!-- A disabled <button> fires no hover events, so the tooltip
+                   hangs off a wrapper span: without it the greyed-out Save has
+                   no explanation anywhere the operator is looking. -->
+              <span>
+                <n-button
+                  type="primary"
+                  :loading="submitting"
+                  :disabled="savingDisabled || priceUnresolvedKey !== null"
+                  @click="onSave"
+                >
+                  {{ basicFailedBlockingSave ? t('models.retry') : t('models.save') }}
+                </n-button>
+              </span>
+            </template>
+            {{ priceUnresolvedKey ? t(priceUnresolvedKey) : '' }}
+          </n-tooltip>
         </template>
       </n-space>
     </template>
@@ -159,7 +209,8 @@ import { capabilityState } from '../../utils/modelStatusDisplay'
 import { testOutcomeI18nKey, TEST_OUTCOME_VERIFICATION_UNSUPPORTED } from '../../utils/testOutcomeDisplay'
 import HelpLabel from '../HelpLabel.vue'
 import NewProviderModal from '../providers/NewProviderModal.vue'
-import type { CandidateTestReport, ModelCandidate, ProbeReport } from '../../api/models'
+import type { CandidateTestReport, ModelCandidate, ProbeReport, SuggestedPrice } from '../../api/models'
+import { suggestCandidatePrice } from '../../api/models'
 
 const CANDIDATE_STATUS_ENABLED = 1
 const CANDIDATE_STATUS_DISABLED = 2
@@ -194,20 +245,87 @@ const persisted = ref(false)
 // saveSeq is bumped whenever the dialog opens, so a save whose probe outlives its
 // own opening can tell that its results are no longer wanted.
 let saveSeq = 0
+// The same guard for the price look-up, which is fired by picking a model name
+// and can just as easily outlive the opening that started it.
+let priceFillSeq = 0
+// The look-up currently in flight, so a save can wait for it. Saving is far more
+// likely than not to be the very next thing the admin does after picking a
+// model, and a payload built while the prices are still arriving would store the
+// previous mapping's rates while the form goes on to display the new ones.
+let pendingPriceFill: Promise<void> | null = null
 
 const showNewProviderModal = ref(false)
 let providerIdBeforeCreate = 0
 
+// The numeric fields are `number | null` because that is what NInputNumber
+// itself uses for "empty" — it emits null when the box is cleared. Typing them
+// as plain numbers let a null through unchecked and made "untouched" impossible
+// to tell from "cleared".
 const form = reactive({
   providerId: null as number | null,
   providerModelName: '',
-  inputPrice: 0,
-  outputPrice: 0,
-  cacheWritePrice: undefined as number | undefined,
-  cacheReadPrice: undefined as number | undefined,
-  maxOutput: 0,
+  inputPrice: 0 as number | null,
+  outputPrice: 0 as number | null,
+  cacheWritePrice: null as number | null,
+  cacheReadPrice: null as number | null,
+  maxOutput: 0 as number | null,
   enabled: true,
 })
+
+type PriceField = 'inputPrice' | 'outputPrice' | 'cacheWritePrice' | 'cacheReadPrice'
+
+// For each price field, the provider+model pair that was selected when the admin
+// last changed it by hand — or null if they never did. Auto-fill never
+// overwrites a hand-entered rate: it exists to save typing, not to overrule
+// someone who read the number off a vendor's pricing page. Which pair the edit
+// belongs to still matters, because an edit made for a DIFFERENT pair than the
+// one now suggested means the form is about to hold two models' rates at once,
+// and that has to be said out loud rather than silently preserved.
+const priceEditedAt = reactive<Record<PriceField, string | null>>({
+  inputPrice: null,
+  outputPrice: null,
+  cacheWritePrice: null,
+  cacheReadPrice: null,
+})
+
+const PRICE_FIELDS: PriceField[] = ['inputPrice', 'outputPrice', 'cacheWritePrice', 'cacheReadPrice']
+
+// Whether the price fields stand for a specific provider+model pair rather than
+// being the untouched defaults of a blank form. Tracked rather than inferred
+// from the values because zero is a real rate — a free or self-hosted model —
+// and a form showing 0/0 for the previously selected pair still needs the
+// "check these before saving" warning when the next pair has no known price.
+let pricesDescribeAnotherPair = false
+
+// Holds an i18n key while the prices on screen have not been shown to apply to
+// the pair now selected — the look-up either failed or knows no price for it,
+// and what the fields hold was established for a different provider or model.
+// Saving is blocked until the operator edits a price or explicitly keeps it:
+// these numbers feed cost accounting and API-key budgets, and a warning that
+// scrolls away in a toast is no protection for someone who already clicked Save.
+const priceUnresolvedKey = ref<string | null>(null)
+
+// Bound instead of v-model so an edit is recorded as it happens. NInputNumber
+// suppresses its own update when the value would not change, so focusing a
+// field and tabbing out does not count as an edit — only a real change does.
+function onPriceInput(field: PriceField, value: number | null) {
+  form[field] = value
+  priceEditedAt[field] = currentPairKey()
+  pricesDescribeAnotherPair = true
+  // Touching a price is the operator looking at it, which is all the block was
+  // ever waiting for.
+  priceUnresolvedKey.value = null
+}
+
+// The explicit way out for prices that are already correct — a provider whose
+// rate the catalog has never heard of, typed once and reused.
+function keepUnresolvedPrices() {
+  priceUnresolvedKey.value = null
+}
+
+function resetPriceEdited() {
+  for (const field of PRICE_FIELDS) priceEditedAt[field] = null
+}
 
 // The basic probe having failed while the admin asked to enable is the one state
 // that blocks saving: nothing was stored, so the footer offers a retry and the
@@ -344,6 +462,139 @@ const providerModelName = computed<string | null>({
   },
 })
 
+// The name that will actually be sent upstream. A blank field means "use the
+// model's own name", and the server makes that substitution when the candidate
+// is saved — so the price look-up has to make it too, or the default flow (pick
+// a provider, leave the name blank) would never be priced at all.
+const effectiveProviderModelName = computed(
+  () => form.providerModelName.trim() || (props.modelName ?? '').trim(),
+)
+
+// The provider+model pair the price fields currently correspond to. Seeding the
+// form records the pair it seeded, so merely opening an existing candidate does
+// not re-price it; any later change to either half is a different pair and gets
+// a fresh look-up. Prices follow the provider AND the model, so switching either
+// one leaves the fields describing something the candidate no longer is.
+let pricedPairKey = ''
+function pairKey(providerId: number | null, modelName: string): string {
+  // The separator cannot occur in either half: an id is digits and a model
+  // name is trimmed, so a space keeps two different pairs from colliding.
+  return `${providerId ?? 0} ${modelName.toLowerCase()}`
+}
+
+function currentPairKey(): string {
+  return pairKey(form.providerId, effectiveProviderModelName.value)
+}
+
+watch([() => form.providerId, effectiveProviderModelName], ([providerId, modelName]) => {
+  // The modal is kept alive between openings, so a parent-driven prop change
+  // can move this pair while nothing is on screen. The next opening seeds the
+  // pair itself, which makes a look-up now both invisible and pointless.
+  if (!props.show || !providerId || !modelName) return
+  const key = pairKey(providerId, modelName)
+  if (key === pricedPairKey) return
+  pricedPairKey = key
+  // The look-up about to run is the authority on this pair; any verdict left
+  // over from the previous one says nothing about it.
+  priceUnresolvedKey.value = null
+
+  const seq = ++priceFillSeq
+  pendingPriceFill = suggestCandidatePrice(providerId, modelName)
+    .then(
+      (s) => {
+        // A newer look-up started, or the dialog was closed or reopened —
+        // either way these prices describe a pair the form no longer shows.
+        if (seq !== priceFillSeq || !props.show) return
+        applySuggestion(s, key)
+      },
+      () => {
+        // A rejection handler rather than a trailing .catch: chained after the
+        // fulfilled path it would also swallow anything applySuggestion throws
+        // — a missing i18n key, a toast fired after its provider is gone — and
+        // report a look-up that actually succeeded as a failed one.
+        //
+        // Auto-fill is a convenience and its failure never blocks a blank form.
+        // But prices left over from another pair are now unvouched for, and the
+        // operator is the only one who can say whether they still apply.
+        if (seq !== priceFillSeq || !props.show) return
+        if (pricesDescribeAnotherPair) priceUnresolvedKey.value = 'models.priceLookupFailed'
+      },
+    )
+    .finally(() => {
+      if (seq === priceFillSeq) pendingPriceFill = null
+    })
+})
+
+function applySuggestion(s: SuggestedPrice, key: string) {
+  if (!s.source) {
+    // Nothing is known about this pair, so there is nothing to fill. Whatever
+    // the fields hold was established for a different provider or model, and
+    // silently keeping it is how traffic ends up billed at another model's rate
+    // — say so instead. This includes a deliberate zero, which is a real rate
+    // ("free"), not an empty field.
+    if (pricesDescribeAnotherPair) priceUnresolvedKey.value = 'models.priceCheckAfterChange'
+    return
+  }
+  // A field typed by hand for an EARLIER pair is kept — that number was
+  // deliberate, often read straight off a vendor's pricing page. But keeping it
+  // silently while the other fields move to this pair's rates would leave the
+  // candidate priced half from one model and half from another, under a toast
+  // reporting success. So it is kept AND reported.
+  const staleEdits = PRICE_FIELDS.some((f) => priceEditedAt[f] !== null && priceEditedAt[f] !== key)
+  const changed = PRICE_FIELDS.map((f) => fillPrice(f, suggestedValue(s, f)))
+  pricesDescribeAnotherPair = true
+  if (staleEdits) {
+    priceUnresolvedKey.value = 'models.priceMixedAfterChange'
+    return
+  }
+  // The fields now hold this pair's own prices, vouched for by the look-up.
+  priceUnresolvedKey.value = null
+  if (changed.some(Boolean)) {
+    message.info(
+      s.source === 'history'
+        ? t('models.pricePrefilledFromHistory')
+        : t('models.pricePrefilledFromSeed', { date: s.catalog_updated_at }),
+    )
+  }
+}
+
+function suggestedValue(s: SuggestedPrice, field: PriceField): number | null {
+  switch (field) {
+    case 'inputPrice':
+      return s.input_price
+    case 'outputPrice':
+      return s.output_price
+    case 'cacheWritePrice':
+      return s.cache_write_price
+    default:
+      return s.cache_read_price
+  }
+}
+
+// Writes one suggested price unless the admin has typed into that field. A null
+// is applied like any other value: a model with no cache pricing has to clear a
+// cache price carried over from the model that was selected before.
+function fillPrice(field: PriceField, value: number | null): boolean {
+  if (priceEditedAt[field] !== null || form[field] === value) return false
+  form[field] = value
+  return true
+}
+
+// Waits for an auto-fill still in flight, so a save started right after picking
+// a model stores the prices the admin is about to be shown rather than the ones
+// the form happened to hold when they clicked.
+async function settlePendingPriceFill() {
+  let pending = pendingPriceFill
+  while (pending) {
+    await pending
+    // Changing the pair again during the wait starts a newer look-up, and it is
+    // that one the payload has to reflect — not whichever happened to be in
+    // flight when the save started.
+    const next = pendingPriceFill
+    pending = next === pending ? null : next
+  }
+}
+
 async function loadProviderModels(providerId: number | null) {
   const seq = ++modelFetchSeq
   fetchedModels.value = []
@@ -388,12 +639,21 @@ const rules: FormRules = {
 watch(
   () => props.show,
   (visible) => {
+    // A price look-up is abandoned the moment the dialog closes, not merely when
+    // it reopens: left alive it would fill a hidden form and toast about prices
+    // for a candidate the operator has already cancelled out of. A save in
+    // flight is deliberately NOT invalidated here — it is still going to be
+    // written, and its 'saved' emit is what refreshes the list behind the modal.
+    priceFillSeq += 1
+    pendingPriceFill = null
     if (!visible) return
     // Invalidate any probe still in flight from a previous opening. Without this
     // a run the operator abandoned by closing the dialog would land its verdicts,
     // its persisted flag and even its auto-close on whichever candidate is open
     // when it finally resolves, up to 30 seconds later.
     saveSeq += 1
+    resetPriceEdited()
+    priceUnresolvedKey.value = null
     submitting.value = false
     savingDisabled.value = false
     report.value = null
@@ -403,19 +663,27 @@ watch(
       form.providerModelName = props.editingCandidate.provider_model_name
       form.inputPrice = props.editingCandidate.input_price
       form.outputPrice = props.editingCandidate.output_price
-      form.cacheWritePrice = props.editingCandidate.cache_write_price ?? undefined
-      form.cacheReadPrice = props.editingCandidate.cache_read_price ?? undefined
+      form.cacheWritePrice = props.editingCandidate.cache_write_price
+      form.cacheReadPrice = props.editingCandidate.cache_read_price
       form.maxOutput = props.editingCandidate.max_output
       form.enabled = props.editingCandidate.management_status === CANDIDATE_STATUS_ENABLED
+      // The stored prices already describe this pair, so opening the dialog is
+      // not a reason to re-price it. Only a change from here is.
+      pricedPairKey = pairKey(form.providerId, effectiveProviderModelName.value)
+      pricesDescribeAnotherPair = true
     } else {
       form.providerId = null
       form.providerModelName = ''
       form.inputPrice = 0
       form.outputPrice = 0
-      form.cacheWritePrice = undefined
-      form.cacheReadPrice = undefined
+      form.cacheWritePrice = null
+      form.cacheReadPrice = null
       form.maxOutput = 0
       form.enabled = true
+      pricedPairKey = ''
+      // A blank form's zeros stand for nothing yet, so replacing them silently
+      // is correct and there is nothing to warn about.
+      pricesDescribeAnotherPair = false
       providersStore.fetchList()
     }
   },
@@ -444,11 +712,15 @@ watch(showNewProviderModal, async (visible) => {
 function candidatePayload() {
   return {
     provider_model_name: form.providerModelName,
-    input_price: form.inputPrice,
-    output_price: form.outputPrice,
-    cache_write_price: form.cacheWritePrice,
-    cache_read_price: form.cacheReadPrice,
-    max_output: form.maxOutput,
+    // The required fields are validated non-null before this runs; the ?? is
+    // what keeps the payload's types honest rather than a second default.
+    input_price: form.inputPrice ?? 0,
+    output_price: form.outputPrice ?? 0,
+    // A cleared optional price is omitted, which the server stores as NULL —
+    // "this model has no cache pricing", not "it is free".
+    cache_write_price: form.cacheWritePrice ?? undefined,
+    cache_read_price: form.cacheReadPrice ?? undefined,
+    max_output: form.maxOutput ?? 0,
     management_status: form.enabled ? CANDIDATE_STATUS_ENABLED : CANDIDATE_STATUS_DISABLED,
   }
 }
@@ -518,12 +790,28 @@ async function onSave() {
   } catch {
     return
   }
-  report.value = null
   submitting.value = true
   const seq = saveSeq
   const enabled = form.enabled
   const editingId = props.editingCandidate?.id ?? null
   try {
+    // Saving right after picking a model is the common case, so the payload has
+    // to wait for the price the form is about to display. Building it now would
+    // store the previous mapping's rates — or a blank form's zeros — under a
+    // toast announcing the new ones.
+    await settlePendingPriceFill()
+    if (seq !== saveSeq) return
+    // The look-up that just landed could not vouch for these prices, so nothing
+    // is sent until the operator answers the alert. Reported as a toast too:
+    // the alert lives in the scrollable modal body and can be off-screen, and a
+    // spinner that just stops with no explanation reads as a broken button.
+    if (priceUnresolvedKey.value) {
+      message.warning(t(priceUnresolvedKey.value))
+      return
+    }
+    // Clearing the previous verdicts waits until here so an aborted save leaves
+    // the probe results the operator was reading on screen.
+    report.value = null
     if (editingId !== null) {
       const result = await store.updateCandidate(props.modelId, editingId, candidatePayload())
       if (seq !== saveSeq) return
@@ -565,6 +853,13 @@ async function onSaveAnywayDisabled() {
   savingDisabled.value = true
   const seq = saveSeq
   try {
+    // Same reason as onSave: this path writes the same price columns.
+    await settlePendingPriceFill()
+    if (seq !== saveSeq) return
+    if (priceUnresolvedKey.value) {
+      message.warning(t(priceUnresolvedKey.value))
+      return
+    }
     if (props.editingCandidate) {
       await store.updateCandidate(props.modelId, props.editingCandidate.id, {
         ...candidatePayload(),
@@ -698,6 +993,16 @@ async function onSaveAnywayDisabled() {
 .probe-row__icon--untested,
 .probe-row__verdict--untested {
   color: var(--n-text-color-3, rgba(0, 0, 0, 0.45));
+}
+
+/* The acknowledgement sits inside the alert body because NAlert has no action
+   slot — only default, header and icon — so a #action template would render
+   nothing and leave the save block with no way out. */
+.price-alert {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
 }
 
 /* Numeric fields (prices, max output) hold at most a handful of digits, so a

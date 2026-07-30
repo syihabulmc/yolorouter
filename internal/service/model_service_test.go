@@ -9,6 +9,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/pricecatalog"
+	"github.com/yolorouter/yolorouter/internal/testutil"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
 
@@ -2225,5 +2227,212 @@ func TestListModelsAvoidsNPlusOneCandidateQueries(t *testing.T) {
 		if len(v.Candidates) != 1 {
 			t.Fatalf("expected each model to have exactly 1 candidate, got %+v", v)
 		}
+	}
+}
+
+// seedProviderWithBaseURL creates an enabled provider on a specific base_url, so
+// a test can decide whether the seed catalog has an entry for its host.
+func seedProviderWithBaseURL(t *testing.T, providerService *ProviderService, name, baseURL string) *ProviderView {
+	t.Helper()
+	provider, err := providerService.CreateProvider(context.Background(), CreateProviderInput{
+		Name: name, BaseURL: baseURL, KeyLabel: "k1",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ManagementStatus: model.ProviderStatusEnabled,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	return provider
+}
+
+// catalogSeededHost is a base_url the built-in seed catalog is known to carry an
+// entry for. The tests below assert against pricecatalog.Lookup rather than
+// against literal figures, so re-syncing catalog.json cannot break them.
+const catalogSeededHost = "https://api.deepseek.com/v1"
+
+func catalogSeededModel(t *testing.T) string {
+	t.Helper()
+	const name = "deepseek-v4-flash"
+	if _, ok := pricecatalog.Lookup(catalogSeededHost, name); !ok {
+		t.Fatalf("the seed catalog no longer carries %s/%s; pick another pair for this test", catalogSeededHost, name)
+	}
+	return name
+}
+
+func TestSuggestCandidatePriceFallsBackToSeedCatalog(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	provider := seedProviderWithBaseURL(t, providerService, "deepseek", catalogSeededHost)
+	svc := NewModelService(db, testMasterKey(), client)
+	name := catalogSeededModel(t)
+
+	got, err := svc.SuggestCandidatePrice(provider.ID, name)
+	if err != nil {
+		t.Fatalf("SuggestCandidatePrice failed: %v", err)
+	}
+	if got.Source != "seed" {
+		t.Fatalf("want source=seed, got %q", got.Source)
+	}
+	want, _ := pricecatalog.Lookup(catalogSeededHost, name)
+	if got.InputPrice != want.Input || got.OutputPrice != want.Output {
+		t.Fatalf("want %v/%v from the catalog, got %v/%v", want.Input, want.Output, got.InputPrice, got.OutputPrice)
+	}
+	if (got.CacheWritePrice == nil) != (want.CacheWrite == nil) || (got.CacheReadPrice == nil) != (want.CacheRead == nil) {
+		t.Fatalf("cache slots must carry the catalog's nils through, got %+v", got)
+	}
+}
+
+// The provider's own saved price outranks the catalog: it is what this provider
+// actually charges, possibly a negotiated rate the generic figure does not know.
+func TestSuggestCandidatePricePrefersHistoryOverSeedCatalog(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	provider := seedProviderWithBaseURL(t, providerService, "deepseek", catalogSeededHost)
+	svc := NewModelService(db, testMasterKey(), client)
+	name := catalogSeededModel(t)
+
+	modelView, err := svc.CreateModel(CreateModelInput{Name: "negotiated"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	if _, err := svc.CreateModelCandidate(context.Background(), modelView.ID, CreateCandidateInput{
+		ProviderID: provider.ID, ProviderModelName: name, InputPrice: 0.42, OutputPrice: 0.84,
+	}, now); err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+
+	got, err := svc.SuggestCandidatePrice(provider.ID, name)
+	if err != nil {
+		t.Fatalf("SuggestCandidatePrice failed: %v", err)
+	}
+	if got.Source != "history" {
+		t.Fatalf("want source=history, got %q", got.Source)
+	}
+	if got.InputPrice != 0.42 || got.OutputPrice != 0.84 {
+		t.Fatalf("want the negotiated 0.42/0.84, got %v/%v", got.InputPrice, got.OutputPrice)
+	}
+}
+
+func TestSuggestCandidatePriceMatchesHistoryCaseInsensitively(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	provider := seedProviderWithBaseURL(t, providerService, "provider-a", "https://a.example.com")
+	svc := NewModelService(db, testMasterKey(), client)
+
+	modelView, err := svc.CreateModel(CreateModelInput{Name: "alias"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	if _, err := svc.CreateModelCandidate(context.Background(), modelView.ID, CreateCandidateInput{
+		ProviderID: provider.ID, ProviderModelName: "DeepSeek-V4-Pro", InputPrice: 2.4, OutputPrice: 4.8,
+	}, now); err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+
+	got, err := svc.SuggestCandidatePrice(provider.ID, "deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("SuggestCandidatePrice failed: %v", err)
+	}
+	if got.Source != "history" || got.InputPrice != 2.4 || got.OutputPrice != 4.8 {
+		t.Fatalf("want the stored 2.4/4.8 from history, got %+v", got)
+	}
+}
+
+func TestSuggestCandidatePriceReturnsEmptyWhenNothingMatches(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	// A host the seed catalog does not carry, with no candidate saved for it.
+	provider := seedProviderWithBaseURL(t, providerService, "self-hosted", "https://llm.internal.example")
+	svc := NewModelService(db, testMasterKey(), client)
+
+	got, err := svc.SuggestCandidatePrice(provider.ID, "some-local-model")
+	if err != nil {
+		t.Fatalf("SuggestCandidatePrice failed: %v", err)
+	}
+	if got.Source != "" || got.InputPrice != 0 || got.OutputPrice != 0 {
+		t.Fatalf("expected an empty suggestion, got %+v", got)
+	}
+}
+
+// A blank name reaches the service only defensively — the caller substitutes the
+// model's own name first — and must not be priced as if it were a real model.
+func TestSuggestCandidatePriceReturnsEmptyForBlankModelName(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	provider := seedProviderWithBaseURL(t, providerService, "deepseek", catalogSeededHost)
+	svc := NewModelService(db, testMasterKey(), client)
+
+	for _, name := range []string{"", "   "} {
+		got, err := svc.SuggestCandidatePrice(provider.ID, name)
+		if err != nil {
+			t.Fatalf("SuggestCandidatePrice(%q) failed: %v", name, err)
+		}
+		if got.Source != "" {
+			t.Errorf("%q: expected an empty suggestion, got %+v", name, got)
+		}
+	}
+}
+
+func TestSuggestCandidatePriceReturnsProviderNotFound(t *testing.T) {
+	_, db, client := newTestProviderService(t)
+	svc := NewModelService(db, testMasterKey(), client)
+
+	if _, err := svc.SuggestCandidatePrice(999999, "deepseek-v4-flash"); !errors.Is(err, errcode.ErrProviderNotFound) {
+		t.Fatalf("expected ErrProviderNotFound, got %v", err)
+	}
+}
+
+func TestSuggestCandidatePriceReturnsErrorWhenDBUnavailable(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	provider := seedProviderWithBaseURL(t, providerService, "deepseek", catalogSeededHost)
+	svc := NewModelService(db, testMasterKey(), client)
+	testutil.CloseDB(t, db)
+
+	if _, err := svc.SuggestCandidatePrice(provider.ID, "deepseek-v4-flash"); err == nil {
+		t.Fatal("expected an error once the underlying connection is closed")
+	}
+}
+
+// The service, not just the repository, must treat a retarget as a fresh price
+// statement: an operator who moves a candidate to another upstream model and
+// keeps the numbers has priced that model, and the next suggestion for it has to
+// reflect that rather than an older candidate's rate.
+func TestUpdateModelCandidateRetargetWinsTheNextSuggestion(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	provider := seedProviderWithBaseURL(t, providerService, "provider-a", "https://a.example.com")
+	svc := NewModelService(db, testMasterKey(), client)
+
+	incumbent, err := svc.CreateModel(CreateModelInput{Name: "incumbent"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	if _, err := svc.CreateModelCandidate(context.Background(), incumbent.ID, CreateCandidateInput{
+		ProviderID: provider.ID, ProviderModelName: "vendor-pro", InputPrice: 9, OutputPrice: 9,
+	}, now); err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+
+	moved, err := svc.CreateModel(CreateModelInput{Name: "moved"}, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	movedCandidate, err := svc.CreateModelCandidate(context.Background(), moved.ID, CreateCandidateInput{
+		ProviderID: provider.ID, ProviderModelName: "vendor-flash", InputPrice: 1, OutputPrice: 2,
+	}, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+
+	// Same numbers, different upstream model.
+	if _, err := svc.UpdateModelCandidate(context.Background(), movedCandidate.ID, UpdateCandidateInput{
+		ProviderModelName: "vendor-pro", InputPrice: 1, OutputPrice: 2,
+	}, now.Add(time.Hour)); err != nil {
+		t.Fatalf("UpdateModelCandidate failed: %v", err)
+	}
+
+	got, err := svc.SuggestCandidatePrice(provider.ID, "vendor-pro")
+	if err != nil {
+		t.Fatalf("SuggestCandidatePrice failed: %v", err)
+	}
+	if got.Source != "history" || got.InputPrice != 1 || got.OutputPrice != 2 {
+		t.Fatalf("want the retargeted 1/2 from history, got %+v", got)
 	}
 }

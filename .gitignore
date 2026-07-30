@@ -34,3 +34,8 @@ web/dist/
 deploy/cloudflare-worker/
 
 gui-test-screenshots/
+# Article drafts and their assets stay local. Scoped to this one subdirectory
+# on purpose: a bare "docs/" also swallows docs/screenshots/, which README.md
+# and README_zh.md embed, so every future screenshot would go missing from the
+# project page with no local signal that it was never committed.
+/docs/articles/
