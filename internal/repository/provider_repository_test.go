@@ -447,7 +447,7 @@ func TestCommitProviderKeyPlaintextTestResultAppliesWhenCASMatches(t *testing.T)
 	}
 
 	applied, err := CommitProviderKeyPlaintextTestResult(db, key.ID, configVersion, testGeneration, snapshot,
-		true, model.VerificationStatusPassed, new(0), "gpt-4o-mini", 123, now)
+		true, model.VerificationStatusPassed, testutil.Ptr(0), "gpt-4o-mini", 123, now)
 	if err != nil {
 		t.Fatalf("CommitProviderKeyPlaintextTestResult failed: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestCommitProviderKeyPlaintextTestResultDiscardsWhenAddressChangedMidTest(t
 	}
 
 	applied, err := CommitProviderKeyPlaintextTestResult(db, key.ID, configVersion, testGeneration, snapshot,
-		true, model.VerificationStatusPassed, new(0), "gpt-4o-mini", 123, now)
+		true, model.VerificationStatusPassed, testutil.Ptr(0), "gpt-4o-mini", 123, now)
 	if err != nil {
 		t.Fatalf("CommitProviderKeyPlaintextTestResult failed: %v", err)
 	}
@@ -508,7 +508,7 @@ func TestCommitProviderKeyPlaintextTestResultPreservesVerificationWhenNotOverwri
 	// "untested" value SwapProviderKeyPlaintext already forced, not
 	// whatever verificationStatus value is passed here.
 	applied, err := CommitProviderKeyPlaintextTestResult(db, key.ID, configVersion, testGeneration, snapshot,
-		false, model.VerificationStatusPassed, new(3), "gpt-4o-mini", 50, now)
+		false, model.VerificationStatusPassed, testutil.Ptr(3), "gpt-4o-mini", 50, now)
 	if err != nil {
 		t.Fatalf("CommitProviderKeyPlaintextTestResult failed: %v", err)
 	}
@@ -543,7 +543,7 @@ func TestCommitProviderKeyRetestResultDiscardsWhenGenerationStale(t *testing.T) 
 	}
 
 	applied, err := CommitProviderKeyRetestResult(db, key.ID, configVersion, testGeneration,
-		true, model.VerificationStatusPassed, new(0), "gpt-4o-mini", 100, now)
+		true, model.VerificationStatusPassed, testutil.Ptr(0), "gpt-4o-mini", 100, now)
 	if err != nil {
 		t.Fatalf("CommitProviderKeyRetestResult failed: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestCommitProviderKeyRetestResultAppliesWhenCASMatches(t *testing.T) {
 	}
 
 	applied, err := CommitProviderKeyRetestResult(db, key.ID, configVersion, testGeneration,
-		true, model.VerificationStatusFailed, new(1), "gpt-4o-mini", 200, now)
+		true, model.VerificationStatusFailed, testutil.Ptr(1), "gpt-4o-mini", 200, now)
 	if err != nil {
 		t.Fatalf("CommitProviderKeyRetestResult failed: %v", err)
 	}
@@ -1049,7 +1049,7 @@ func TestCommitProviderKeyPlaintextTestResultReturnsErrorWhenDBUnavailable(t *te
 	now := time.Now().UTC().Truncate(time.Second)
 	testutil.CloseDB(t, db)
 
-	_, err := CommitProviderKeyPlaintextTestResult(db, key.ID, 1, 1, 1, true, model.VerificationStatusPassed, new(0), "gpt-4o-mini", 1, now)
+	_, err := CommitProviderKeyPlaintextTestResult(db, key.ID, 1, 1, 1, true, model.VerificationStatusPassed, testutil.Ptr(0), "gpt-4o-mini", 1, now)
 	if err == nil {
 		t.Fatalf("expected an error once the underlying connection is closed")
 	}
@@ -1061,7 +1061,7 @@ func TestCommitProviderKeyRetestResultReturnsErrorWhenDBUnavailable(t *testing.T
 	now := time.Now().UTC().Truncate(time.Second)
 	testutil.CloseDB(t, db)
 
-	_, err := CommitProviderKeyRetestResult(db, key.ID, 1, 1, true, model.VerificationStatusPassed, new(0), "gpt-4o-mini", 1, now)
+	_, err := CommitProviderKeyRetestResult(db, key.ID, 1, 1, true, model.VerificationStatusPassed, testutil.Ptr(0), "gpt-4o-mini", 1, now)
 	if err == nil {
 		t.Fatalf("expected an error once the underlying connection is closed")
 	}

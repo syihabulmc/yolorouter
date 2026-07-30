@@ -5,7 +5,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"syscall"
 	"testing"
 	"time"
 
@@ -76,11 +75,10 @@ func TestStopInstanceIgnoresInstanceLockHolder(t *testing.T) {
 	if err := stopInstance(sqlitePath); err != nil {
 		t.Fatalf("stopInstance should report no running server: %v", err)
 	}
-	// signal 0 probes liveness without delivering a signal: the victim must
-	// still be alive, proving stopInstance never signaled the stale pid.
-	if err := victim.Process.Signal(syscall.Signal(0)); err != nil {
-		t.Fatalf("stopInstance wrongly signaled an unrelated process: %v", err)
-	}
+	// The victim must still be alive, proving stopInstance never signaled the
+	// stale pid. How liveness is probed is platform-specific (see
+	// process_alive_unix_test.go / process_alive_windows_test.go).
+	assertProcessAlive(t, victim.Process)
 }
 
 // TestHelperSleeps is not a real test: it is the unrelated victim process spawned
@@ -129,9 +127,21 @@ func TestStopInstanceStopsRunningChild(t *testing.T) {
 }
 
 // TestHelperHoldsLock is not a real test: it is the child process spawned by
-// TestStopInstanceStopsRunningChild. It acquires the serve lock, writes its
-// pid, and blocks until the default SIGTERM disposition terminates it (which
-// releases the flock via process exit).
+// TestStopInstanceStopsRunningChild. It stands in for a running server, so it
+// mirrors what serve actually does to become stoppable on each platform: take
+// the serve lock, register the stop waiter, publish its pid, then block.
+//
+// How the stop arrives is platform-specific. On unix newStopWaiter is a no-op
+// returning a nil channel and the default SIGTERM disposition terminates this
+// process. On windows there is no SIGTERM delivery, so newStopWaiter creates
+// the named event stopInstance sets, and the receive below is what ends the
+// wait. The timeout is only a backstop against a hung test.
+//
+// Ordering matters: the waiter is registered BEFORE the pid file is written.
+// The parent treats a readable pid file as "helper is ready" and calls
+// stopInstance immediately after, and on windows signalStop is a silent no-op
+// when the event does not exist yet — so publishing the pid first would race
+// the stop request against event creation and leave the lock held.
 func TestHelperHoldsLock(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_LOCK") != "1" {
 		return
@@ -142,8 +152,19 @@ func TestHelperHoldsLock(t *testing.T) {
 		os.Exit(3)
 	}
 	defer func() { _ = unlock() }()
+
+	stopCh, stopCleanup, err := newStopWaiter(sqlitePath)
+	if err != nil {
+		os.Exit(5)
+	}
+	defer stopCleanup()
+
 	if err := writePIDFile(instancePIDPath(sqlitePath)); err != nil {
 		os.Exit(4)
 	}
-	time.Sleep(60 * time.Second) // outlived by SIGTERM from stopInstance
+
+	select {
+	case <-stopCh:
+	case <-time.After(60 * time.Second):
+	}
 }

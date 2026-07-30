@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -169,6 +170,9 @@ func TestIsExecutable(t *testing.T) {
 }
 
 func TestWriteStagedBinarySetsExecutableMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("asserts unix file-permission bits")
+	}
 	path, err := writeStagedBinary(t.TempDir(), []byte("x"), 0o755)
 	if err != nil {
 		t.Fatalf("writeStagedBinary: %v", err)
@@ -242,11 +246,14 @@ func TestReplaceBinaryBacksUpAndReplaces(t *testing.T) {
 		t.Fatalf("backup path = %q, want %s.bak", backup, current)
 	}
 	// The replaced binary keeps the staging file's executable permission.
+	// Only this assertion is unix-specific — the backup and rename behavior
+	// above is checked on windows too, so the guard is scoped to the mode
+	// check rather than skipping the whole test.
 	info, err := os.Stat(current)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0o111 == 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("replaced binary must stay executable, got %v", info.Mode())
 	}
 	// The staging file is consumed by the rename — no leftover.

@@ -1,6 +1,6 @@
-// Package testutil provides shared test helpers that need a real migrated
-// database connection. Only ever imported from _test.go files across
-// internal/repository, internal/service, internal/handler, and
+// Package testutil provides shared test helpers, including ones that need a
+// real migrated database connection. Only ever imported from _test.go files
+// across internal/repository, internal/service, internal/handler, and
 // internal/middleware — never from production code.
 package testutil
 

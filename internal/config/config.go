@@ -166,6 +166,18 @@ func DefaultGatewayConfig() GatewayConfig {
 	return g
 }
 
+// ResolvePath returns the config file path Load resolves explicitPath to:
+// explicitPath itself when non-empty, otherwise the default
+// "configs/config.yaml" relative to the process cwd. Exported so callers that
+// need to name the file in a message (see bootstrap.Init) can't drift from
+// the path Load actually reads.
+func ResolvePath(explicitPath string) string {
+	if explicitPath != "" {
+		return explicitPath
+	}
+	return filepath.Join("configs", "config.yaml")
+}
+
 // Load resolves the config path (explicitPath wins if non-empty, otherwise
 // "configs/config.yaml" relative to the process cwd at call time), then:
 //   - if the path exists: strict-parse it, no auto-generation ever happens
@@ -174,12 +186,8 @@ func DefaultGatewayConfig() GatewayConfig {
 //     defaults, generate a random provider_master_key, and atomically write
 //     the effective config out to that path so restarts reuse the same key
 func Load(explicitPath string) (*Config, error) {
-	path := explicitPath
-	usingDefaultPath := false
-	if path == "" {
-		path = filepath.Join("configs", "config.yaml")
-		usingDefaultPath = true
-	}
+	path := ResolvePath(explicitPath)
+	usingDefaultPath := explicitPath == ""
 
 	if _, err := os.Stat(path); err != nil {
 		if !usingDefaultPath {
@@ -328,12 +336,13 @@ func loadStrict(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stat config file %s: %w", path, err)
 	}
-	// The file holds security.provider_master_key in plaintext — treat it
-	// like any other secret file and reject group/other-readable permission
-	// bits (this only carries meaning on Unix; Go emulates harmless
-	// permission bits on Windows, so the check is a no-op there).
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("config file %s must not be group- or other-readable (mode %04o); run chmod 600 %s", path, info.Mode().Perm(), path)
+	// The file holds security.provider_master_key in plaintext, so it is
+	// treated like any other secret file. The actual check is platform-split
+	// (perm_unix.go / perm_windows.go) because Unix permission bits only
+	// exist on Unix — see PermEnforcementSupported for what that means on
+	// Windows.
+	if err := checkConfigFilePerm(info, path); err != nil {
+		return nil, err
 	}
 
 	data, err := os.ReadFile(path)

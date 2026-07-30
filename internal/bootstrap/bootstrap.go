@@ -6,6 +6,7 @@ package bootstrap
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,36 @@ func Init(explicitConfigPath string) (*App, error) {
 
 	// logger.Init has no failure mode (it never returns an error).
 	logger.Init(logger.Config{Level: cfg.Log.Level})
+
+	// Surface the platforms where the config file's permissions cannot be
+	// checked (currently Windows — see config.PermEnforcementSupported). This
+	// has to happen here rather than inside config.Load, which runs before the
+	// logger exists because it is what supplies the log level. Warning once at
+	// startup keeps a known gap in the operator's view instead of degrading
+	// silently.
+	if !config.PermEnforcementSupported {
+		// Absolute, not the bare relative default: this warning is read out of
+		// a log file long after startup, and the hints below are meant to be
+		// pasted verbatim. A relative path only resolves in the server's own
+		// working directory — which for a service-launched process is nowhere
+		// near the install dir — so it would either fail outright or, worse,
+		// restrict some unrelated file of the same name while the real
+		// master-key file stays exposed. Abs only fails if the cwd is
+		// unreadable; fall back to the relative form rather than losing the
+		// warning entirely.
+		cfgPath := config.ResolvePath(explicitConfigPath)
+		if abs, absErr := filepath.Abs(cfgPath); absErr == nil {
+			cfgPath = abs
+		}
+		logger.Warn("config file permissions are not enforced on this platform; the file stores the master key that encrypts upstream credentials, so restrict access to it yourself",
+			zap.String("path", cfgPath),
+			zap.String("restrict", restrictFileHint(cfgPath)),
+			// The restrict command clears the broad principals a file is
+			// realistically exposed through, but it cannot guarantee an empty
+			// DACL for an arbitrary one, so the result is worth confirming
+			// rather than assuming.
+			zap.String("then_verify", verifyFileACLHint(cfgPath)))
+	}
 
 	dbCfg := database.Config{
 		Driver:     cfg.Database.Driver,

@@ -1213,7 +1213,7 @@ func TestUpdateProviderKeyWithNewPlaintextResetsAndRetests(t *testing.T) {
 
 	newPlaintext := "sk-newnewnewnewnewnewnewnewnewnew"
 	updated, err := svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: provider.Keys[0].Label, Plaintext: &newPlaintext, TestModel: "gpt-4o-mini", ManagementStatus: new(model.ProviderKeyStatusEnabled),
+		Label: provider.Keys[0].Label, Plaintext: &newPlaintext, TestModel: "gpt-4o-mini", ManagementStatus: testutil.Ptr(model.ProviderKeyStatusEnabled),
 	}, now)
 	if err != nil {
 		t.Fatalf("UpdateProviderKey failed: %v", err)
@@ -1235,7 +1235,7 @@ func TestUpdateProviderKeyLabelOnlyDoesNotRetrigger(t *testing.T) {
 	callsBefore := client.calls
 
 	_, err = svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: "renamed", TestModel: provider.Keys[0].TestModel, ManagementStatus: new(provider.Keys[0].ManagementStatus),
+		Label: "renamed", TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(provider.Keys[0].ManagementStatus),
 	}, now)
 	if err != nil {
 		t.Fatalf("UpdateProviderKey failed: %v", err)
@@ -1299,7 +1299,7 @@ func TestUpdateProviderKeyLabelOnlyEditCannotEnableUnverifiedKey(t *testing.T) {
 	// key's verification_status is now "failed" (client returned TestAuthFailed).
 
 	_, err = svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: "renamed", TestModel: provider.Keys[0].TestModel, ManagementStatus: new(model.ProviderKeyStatusEnabled),
+		Label: "renamed", TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(model.ProviderKeyStatusEnabled),
 	}, now)
 	if !errors.Is(err, errcode.ErrProviderKeyNotVerified) {
 		t.Fatalf("expected ErrProviderKeyNotVerified, got %v", err)
@@ -1328,7 +1328,7 @@ func TestUpdateProviderKeyLabelOnlyEditCannotEnableKeyNeedingReentry(t *testing.
 	// despite verification_status still reading "passed".
 
 	_, err = svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: "renamed", TestModel: provider.Keys[0].TestModel, ManagementStatus: new(model.ProviderKeyStatusEnabled),
+		Label: "renamed", TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(model.ProviderKeyStatusEnabled),
 	}, now)
 	if !errors.Is(err, errcode.ErrProviderKeyNeedsReentry) {
 		t.Fatalf("expected ErrProviderKeyNeedsReentry, got %v", err)
@@ -1385,7 +1385,7 @@ func TestUpdateProviderKeyRejectsKeyBelongingToDifferentProvider(t *testing.T) {
 	}
 
 	_, err = svc.UpdateProviderKey(context.Background(), providerA.ID, providerB.Keys[0].ID, UpdateKeyInput{
-		Label: "renamed", TestModel: providerB.Keys[0].TestModel, ManagementStatus: new(providerB.Keys[0].ManagementStatus),
+		Label: "renamed", TestModel: providerB.Keys[0].TestModel, ManagementStatus: testutil.Ptr(providerB.Keys[0].ManagementStatus),
 	}, now)
 	if !errors.Is(err, errcode.ErrProviderKeyNotFound) {
 		t.Fatalf("expected ErrProviderKeyNotFound for a key belonging to a different provider, got %v", err)
@@ -1489,7 +1489,7 @@ func TestUpdateProviderKeyErrorsWhenReloadFailsAfterLabelOnlyEdit(t *testing.T) 
 	}
 
 	_, err = svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: "renamed", TestModel: provider.Keys[0].TestModel, ManagementStatus: new(provider.Keys[0].ManagementStatus),
+		Label: "renamed", TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(provider.Keys[0].ManagementStatus),
 	}, now)
 	if err == nil {
 		t.Fatalf("expected an error when the reload after a label-only edit fails")
@@ -1571,7 +1571,7 @@ func TestUpdateProviderKeyRejectsDuplicateLabelOnLabelOnlyEdit(t *testing.T) {
 		t.Fatalf("CreateProviderKey failed: %v", err)
 	}
 
-	_, err = svc.UpdateProviderKey(context.Background(), provider.ID, k2.ID, UpdateKeyInput{Label: "k1", TestModel: k2.TestModel, ManagementStatus: new(k2.ManagementStatus)}, now)
+	_, err = svc.UpdateProviderKey(context.Background(), provider.ID, k2.ID, UpdateKeyInput{Label: "k1", TestModel: k2.TestModel, ManagementStatus: testutil.Ptr(k2.ManagementStatus)}, now)
 	if !errors.Is(err, errcode.ErrProviderKeyLabelTaken) {
 		t.Fatalf("expected ErrProviderKeyLabelTaken, got %v", err)
 	}
@@ -1589,7 +1589,7 @@ func TestUpdateProviderKeyErrorsWhenLabelStatusUpdateFailsForNonUniqueReason(t *
 	blockTableWrites(t, db, "provider_keys", "UPDATE")
 
 	_, err = svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: "renamed", TestModel: provider.Keys[0].TestModel, ManagementStatus: new(provider.Keys[0].ManagementStatus),
+		Label: "renamed", TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(provider.Keys[0].ManagementStatus),
 	}, now)
 	if err == nil || errors.Is(err, errcode.ErrProviderKeyLabelTaken) {
 		t.Fatalf("expected a raw DB error (not ErrProviderKeyLabelTaken), got %v", err)
@@ -1633,7 +1633,7 @@ func TestUpdateProviderKeyRejectsDuplicateLabelWithNewPlaintext(t *testing.T) {
 	newPlaintext := "sk-newnewnewnewnewnewnewnewnewnew"
 
 	_, err = svc.UpdateProviderKey(context.Background(), provider.ID, k2.ID, UpdateKeyInput{
-		Label: "k1", Plaintext: &newPlaintext, TestModel: k2.TestModel, ManagementStatus: new(k2.ManagementStatus),
+		Label: "k1", Plaintext: &newPlaintext, TestModel: k2.TestModel, ManagementStatus: testutil.Ptr(k2.ManagementStatus),
 	}, now)
 	if !errors.Is(err, errcode.ErrProviderKeyLabelTaken) {
 		t.Fatalf("expected ErrProviderKeyLabelTaken, got %v", err)
@@ -1983,7 +1983,7 @@ func TestTestAllProviderKeysSkipsWhenBeginRetestFails(t *testing.T) {
 		t.Fatalf("CreateProvider failed: %v", err)
 	}
 	if _, err := svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: new(model.ProviderKeyStatusEnabled),
+		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(model.ProviderKeyStatusEnabled),
 	}, now); err != nil {
 		t.Fatalf("re-enable after create failed: %v", err)
 	}
@@ -2009,7 +2009,7 @@ func TestTestAllProviderKeysSkipsWhenDecryptFails(t *testing.T) {
 		t.Fatalf("CreateProvider failed: %v", err)
 	}
 	if _, err := svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: new(model.ProviderKeyStatusEnabled),
+		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(model.ProviderKeyStatusEnabled),
 	}, now); err != nil {
 		t.Fatalf("re-enable after create failed: %v", err)
 	}
@@ -2037,7 +2037,7 @@ func TestTestAllProviderKeysSkipsWhenClientCallErrors(t *testing.T) {
 		t.Fatalf("CreateProvider failed: %v", err)
 	}
 	if _, err := svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: new(model.ProviderKeyStatusEnabled),
+		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(model.ProviderKeyStatusEnabled),
 	}, now); err != nil {
 		t.Fatalf("re-enable after create failed: %v", err)
 	}
@@ -2070,7 +2070,7 @@ func TestTestAllProviderKeysSkipsWhenCommitLosesCASRace(t *testing.T) {
 	}
 	keyID := provider.Keys[0].ID
 	if _, err := svc.UpdateProviderKey(context.Background(), provider.ID, keyID, UpdateKeyInput{
-		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: new(model.ProviderKeyStatusEnabled),
+		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(model.ProviderKeyStatusEnabled),
 	}, now); err != nil {
 		t.Fatalf("re-enable after create failed: %v", err)
 	}
@@ -2121,7 +2121,7 @@ func TestTestAllProviderKeysRecordsOutcomeOnSuccessfulRetest(t *testing.T) {
 		t.Fatalf("CreateProvider failed: %v", err)
 	}
 	if _, err := svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: new(model.ProviderKeyStatusEnabled),
+		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(model.ProviderKeyStatusEnabled),
 	}, now); err != nil {
 		t.Fatalf("re-enable after create failed: %v", err)
 	}
@@ -2161,7 +2161,7 @@ func TestTestAllProviderKeysSkipsNeedsReentryWithoutNetworkCall(t *testing.T) {
 		t.Fatalf("CreateProvider failed: %v", err)
 	}
 	if _, err := svc.UpdateProviderKey(context.Background(), provider.ID, provider.Keys[0].ID, UpdateKeyInput{
-		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: new(model.ProviderKeyStatusEnabled),
+		Label: provider.Keys[0].Label, TestModel: provider.Keys[0].TestModel, ManagementStatus: testutil.Ptr(model.ProviderKeyStatusEnabled),
 	}, now); err != nil {
 		t.Fatalf("re-enable after create failed: %v", err)
 	}

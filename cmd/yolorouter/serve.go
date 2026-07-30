@@ -60,24 +60,33 @@ func runServe(ctx context.Context, args []string) error {
 	}
 	defer func() { _ = unlockServe() }()
 
-	// Record our pid so `stop` knows which process to signal, and stand up
-	// the platform stop waiter (a no-op on unix, a named event on windows).
-	// The pid file is written only after the serve lock is held, and its
-	// removal defer is registered after the serve-unlock defer so it runs first
-	// (LIFO): the pid file is removed and the event handle closed while the
-	// serve lock is still held, so a held serve lock always implies a valid
-	// pid file.
-	pidPath := instancePIDPath(app.Config.Database.SQLitePath)
-	if err := writePIDFile(pidPath); err != nil {
-		return fmt.Errorf("write pid file: %w", err)
-	}
-	defer func() { _ = os.Remove(pidPath) }()
-
+	// Stand up the platform stop waiter (a no-op on unix, a named event on
+	// windows), then record our pid so `stop` knows which process to signal.
+	//
+	// This order is load-bearing on windows. `stop` treats a readable pid file
+	// as "a server is live, signal it" and its signalStop is a deliberate
+	// silent no-op when the named event does not exist yet. Publishing the pid
+	// first would therefore leave a window where a stop request is accepted,
+	// delivered nowhere, and reported to the operator as a 20s timeout while
+	// the server keeps running — and windows has no SIGTERM fallback to catch
+	// it. Creating the event first closes that window: once the pid is visible,
+	// the delivery channel already exists.
+	//
+	// Teardown stays correct under this order too. Both defers are registered
+	// after the serve-unlock defer, so LIFO runs them first: the pid file is
+	// removed and the event handle closed while the serve lock is still held,
+	// which is what lets a held serve lock imply a valid pid file.
 	stopCh, stopCleanup, err := newStopWaiter(app.Config.Database.SQLitePath)
 	if err != nil {
 		return fmt.Errorf("init stop waiter: %w", err)
 	}
 	defer stopCleanup()
+
+	pidPath := instancePIDPath(app.Config.Database.SQLitePath)
+	if err := writePIDFile(pidPath); err != nil {
+		return fmt.Errorf("write pid file: %w", err)
+	}
+	defer func() { _ = os.Remove(pidPath) }()
 
 	// router.New validates the embedded frontend build (if any) and must run
 	// before any database migration: it has no side effects of its own, so

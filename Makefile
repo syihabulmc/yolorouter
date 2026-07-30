@@ -1,4 +1,4 @@
-.PHONY: build build-embed build-release build-windows build-macos frontend embed-frontend test test-release test-embed vet vet-embed dev migrate
+.PHONY: build build-embed build-release build-windows build-windows-check build-macos frontend embed-frontend test test-release test-embed vet vet-embed dev migrate
 
 # Release-build metadata injected via -ldflags into internal/version (the
 # package both the `--version` CLI flag and the system-info API read from).
@@ -21,10 +21,20 @@ build:
 	go build -o ./bin/yolorouter ./cmd/yolorouter
 
 # Cross-compile check: the project must always build for windows so the
-# platform-split instance lock / stop paths never regress. No embed needed —
-# this only verifies compilation.
-build-windows:
+# platform-split instance lock / stop / config-permission paths never regress.
+# No embed needed (and so no npm) — this only verifies compilation, which is
+# what makes it cheap enough to run on its own. Produces no artifact; use
+# build-windows for that.
+build-windows-check:
 	GOOS=windows GOARCH=amd64 go build ./...
+
+# Cross-compile runnable Windows binaries for both architectures goreleaser
+# publishes, with the real frontend embedded — enough to test the whole flow
+# on an actual Windows machine (first-run config generation, migrations,
+# console, gateway). Requires embed-frontend first, like build-macos.
+build-windows: embed-frontend
+	GOOS=windows GOARCH=amd64 go build -tags embed -o ./bin/yolorouter-windows-amd64.exe ./cmd/yolorouter
+	GOOS=windows GOARCH=arm64 go build -tags embed -o ./bin/yolorouter-windows-arm64.exe ./cmd/yolorouter
 
 # Cross-compile macOS binaries for both Intel and Apple Silicon, with the
 # real frontend embedded. Requires embed-frontend (npm build + copy to

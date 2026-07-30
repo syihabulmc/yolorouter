@@ -127,6 +127,12 @@ func TestBackupSQLiteFailsWhenSourceMissing(t *testing.T) {
 // produces a real file at the special-character path for BackupSQLite
 // (the thing actually under test) to open.
 func TestBackupSQLiteHandlesURISpecialCharactersInPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// '?' is a reserved character in windows filenames, so the path this
+		// test needs cannot exist there and the escaping rule it exercises has
+		// no windows equivalent to verify.
+		t.Skip("requires a filename containing '?', which windows rejects")
+	}
 	dir := t.TempDir()
 	plainPath := filepath.Join(dir, "source.db")
 	// Contains all three characters sqliteFileURIEscaper handles: '?', '#',
@@ -176,6 +182,12 @@ func TestBackupSQLiteHandlesURISpecialCharactersInPath(t *testing.T) {
 // silently opening (or, worse, creating) a completely different location
 // than os.Stat/a plain path open would resolve to for the same string.
 func TestSQLiteFileURICollapsesLeadingDoubleSlash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// sqliteFileURI runs the path through filepath.Clean, which on windows
+		// keeps a leading '\\' as a UNC prefix and emits backslash separators
+		// instead of collapsing to the single-slash unix form asserted below.
+		t.Skip("asserts unix filepath.Clean semantics for a leading '//'")
+	}
 	got := sqliteFileURI("//tmp/double-slash.db", "mode=rw")
 	want := "file:/tmp/double-slash.db?mode=rw"
 	if got != want {

@@ -10,7 +10,7 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 
 Requirements:
 
-- **Go 1.26+**
+- **Go 1.25.7+**
 - **Node.js 22.12+**
 
 ```bash
