@@ -39,7 +39,7 @@
         </div>
         <div class="cta-banner__pills">
           <span class="status-pill" :class="cspEnabled ? 'status-pill--on' : 'status-pill--off'">
-            {{ t('costOptimization.cspTitle') }} · {{ cspEnabled ? t('costOptimization.statusOn') : t('costOptimization.statusOff') }}
+            {{ t('costOptimization.cspSubTitle') }} · {{ cspEnabled ? t('costOptimization.statusOn') : t('costOptimization.statusOff') }}
           </span>
           <span class="status-pill" :class="icEnabled ? 'status-pill--on' : 'status-pill--off'">
             {{ t('costOptimization.inputCompression.title') }} · {{ icEnabled ? t('costOptimization.statusOn') : t('costOptimization.statusOff') }}

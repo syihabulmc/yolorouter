@@ -19,7 +19,7 @@
     >
       <n-form-item>
         <template #label>
-          <HelpLabel :tip="t('apiKeys.cspOverride_tip')">{{ t('apiKeys.cspAction') }}</HelpLabel>
+          <HelpLabel :tip="t('apiKeys.cspOverride_tip')">{{ t('costOptimization.cspSubTitle') }}</HelpLabel>
         </template>
         <div>
           <n-radio-group :value="cspMode" @update:value="onCspModeChange">
@@ -27,20 +27,8 @@
             <n-radio value="on">{{ t('apiKeys.cspModeOn') }}</n-radio>
             <n-radio value="off">{{ t('apiKeys.cspModeOff') }}</n-radio>
           </n-radio-group>
-          <p v-if="cspMode !== 'on'" class="mode-hint">{{ cspMode === 'inherit' ? t('apiKeys.cspInheritHint') : t('apiKeys.cspOffHint') }}</p>
+          <p class="mode-hint">{{ cspHint }}</p>
         </div>
-      </n-form-item>
-      <n-form-item v-if="cspMode === 'on'" path="custom_system_prompt">
-        <template #label>
-          <HelpLabel :tip="t('costOptimization.cspTitle_tip')">{{ t('apiKeys.cspText') }}</HelpLabel>
-        </template>
-        <CustomPromptEditor
-          v-model:text="form.custom_system_prompt"
-          :autosize="{ minRows: 4 }"
-          :show-input="false"
-          :multiple="true"
-          :placeholder="t('apiKeys.cspTextPlaceholder')"
-        />
       </n-form-item>
       <n-form-item >
         <template #label>
@@ -77,7 +65,6 @@ import { getAPIKey, type APIKey } from '../../api/apiKeys'
 import { API_KEY_CONFLICT } from '../../api/errcodes'
 import { customSystemPromptRule } from '../../utils/apiKeyValidators'
 import HelpLabel from '../HelpLabel.vue'
-import CustomPromptEditor from '../CustomPromptEditor.vue'
 
 // The parent passes only the key id and remounts via :key="apiKeyId" on each
 // open, so onMounted fires once per open and performs the authoritative GET
@@ -149,6 +136,12 @@ const compressHint = computed(() => {
   if (compressMode.value === 'on') return t('apiKeys.compressOnHint')
   return t('apiKeys.compressOffHint')
 })
+const cspHint = computed(() => {
+  if (cspMode.value === 'inherit') return t('apiKeys.cspInheritHint')
+  if (cspMode.value === 'on') return t('apiKeys.cspInheritHintOn')
+  return t('apiKeys.cspOffHint')
+})
+
 function onCompressModeChange(mode: CompressMode) {
   if (mode === 'inherit') {
     form.compress_enabled_override = false
@@ -165,7 +158,7 @@ function onCompressModeChange(mode: CompressMode) {
 function fill(key: APIKey) {
   form.custom_system_prompt_enabled_override = key.custom_system_prompt_enabled_override
   form.custom_system_prompt_enabled = key.custom_system_prompt_enabled
-  form.custom_system_prompt = key.custom_system_prompt
+  form.custom_system_prompt = t('costOptimization.exampleConciseText') + t('costOptimization.exampleMinimalCodeText')
   form.compress_enabled_override = key.compress_enabled_override
   form.compress_enabled = key.compress_enabled
   expectedUpdatedAt.value = key.updated_at
