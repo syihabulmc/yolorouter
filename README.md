@@ -95,7 +95,7 @@ add providers and upstream keys, create models with their provider candidates, a
 issue API keys.
 
 → **Full installation guide for every platform, including building from source:**
-[yolorouter.com/docs/self-hosted/installation](https://yolorouter.com/docs/self-hosted/installation?utm_source=oss-readme&utm_medium=repo)
+[yolorouter.com/help?p=self-hosted/installation](https://yolorouter.com/help?p=self-hosted/installation&utm_source=oss-readme&utm_medium=repo)
 
 ## Protocols
 
@@ -145,7 +145,7 @@ claude
 
 → **Per-protocol request examples and setup guides for 19 agent tools**
 (Claude Code, Cursor, Codex CLI, Cherry Studio, Gemini CLI, opencode …):
-[yolorouter.com/docs](https://yolorouter.com/docs?utm_source=oss-readme&utm_medium=repo)
+[yolorouter.com/help](https://yolorouter.com/help?utm_source=oss-readme&utm_medium=repo)
 
 ## Cost optimization
 
@@ -168,17 +168,17 @@ Cache-read and cache-write tokens are metered and priced separately throughout t
 dashboard, so prompt-cache savings are a number you can see rather than a feeling.
 
 → **Details and tuning:**
-[yolorouter.com/docs/self-hosted/configuration](https://yolorouter.com/docs/self-hosted/configuration?utm_source=oss-readme&utm_medium=repo)
+[yolorouter.com/help?p=self-hosted/configuration](https://yolorouter.com/help?p=self-hosted/configuration&utm_source=oss-readme&utm_medium=repo)
 
 ## Documentation
 
 | Topic | Link |
 | --- | --- |
-| Installation (all platforms, from source) | [Installation](https://yolorouter.com/docs/self-hosted/installation?utm_source=oss-readme&utm_medium=repo) |
-| Every `config.yaml` field and the CLI | [Configuration](https://yolorouter.com/docs/self-hosted/configuration?utm_source=oss-readme&utm_medium=repo) |
-| Upgrading, rolling back, uninstalling | [Updating](https://yolorouter.com/docs/self-hosted/updating?utm_source=oss-readme&utm_medium=repo) |
-| Layering, protocol IR, storage | [Architecture](https://yolorouter.com/docs/self-hosted/architecture?utm_source=oss-readme&utm_medium=repo) |
-| API reference and model catalogue | [Docs home](https://yolorouter.com/docs?utm_source=oss-readme&utm_medium=repo) |
+| Installation (all platforms, from source) | [Installation](https://yolorouter.com/help?p=self-hosted/installation&utm_source=oss-readme&utm_medium=repo) |
+| Every `config.yaml` field and the CLI | [Configuration](https://yolorouter.com/help?p=self-hosted/configuration&utm_source=oss-readme&utm_medium=repo) |
+| Upgrading, rolling back, uninstalling | [Updating](https://yolorouter.com/help?p=self-hosted/updating&utm_source=oss-readme&utm_medium=repo) |
+| Layering, protocol IR, storage | [Architecture](https://yolorouter.com/help?p=self-hosted/architecture&utm_source=oss-readme&utm_medium=repo) |
+| API reference and model catalogue | [Docs home](https://yolorouter.com/help?utm_source=oss-readme&utm_medium=repo) |
 
 Self-hosting means bringing your own upstream API keys. If you would rather not sign
 up with every provider separately, **YoloRouter Cloud** ships in the console's provider
