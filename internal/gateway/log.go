@@ -95,6 +95,91 @@ func netPromptTokens(usage *Usage) int {
 	return n
 }
 
+// normalizeCacheConvention settles which cache-accounting convention a usage
+// record actually follows, before anything prices or persists it.
+//
+// Every OpenAI-shaped decoder marks its usage CacheIncludedInPrompt=true,
+// because the OpenAI schema defines cached_tokens as a subset of prompt_tokens.
+// Plenty of OpenAI-compatible upstreams break that rule — anything fronting an
+// Anthropic model especially, since Anthropic's input_tokens is already net of
+// cache. They copy that net figure into prompt_tokens and report the cached
+// portion only under prompt_tokens_details. Read as inclusive, such a record has
+// its cache subtracted from a prompt the cache was never part of: the input line
+// of the bill and request_logs.input_tokens both lose min(prompt, cache) tokens
+// on EVERY request. When the cache happens to exceed the prompt the subtraction
+// also goes negative, at which point the record looks impossible and is rejected
+// whole, discarding the completion and cache figures that were never in doubt.
+//
+// Reclassifying requires the inclusive reading to be positively ruled out, and
+// there are exactly two ways to do that. Either is enough on its own; slack in
+// the stated total is not, because slack alone cannot tell the two conventions
+// apart — a net-convention upstream leaves room for the cache read, an inclusive
+// one can leave room for anything the Usage shape does not model, and the two
+// look identical in the numbers.
+//
+//  1. The cache read exceeds the prompt. The inclusive convention defines the
+//     cache read as a SUBSET of the prompt, and a subset cannot outgrow the set
+//     that contains it, so the inclusive reading is not merely unlikely here but
+//     impossible.
+//  2. The stated total accounts for the cache read on a line of its own, exactly:
+//     prompt + completion + cache write + cache read == total. Under the
+//     inclusive convention the cache read is already inside the prompt, so that
+//     sum would overshoot the total by the whole cache read. Requiring equality
+//     rather than "fits inside" is what keeps unexplained slack from passing as
+//     evidence.
+//
+// Both are gated on the net reading fitting inside the stated total at all. A
+// net sum that overshoots the upstream's own total is self-contradictory, and
+// without the gate an absurd or over-reported cache count could talk its way
+// into being billed through rule 1.
+//
+// Every early return errs toward NOT reclassifying, deliberately: a missed
+// reclassification undercounts the input line, while a wrong one bills the gross
+// prompt at the input price AND the cache at the cache price — the same tokens
+// charged twice.
+//
+// Left alone by design: a record with no cache read (nothing to decide), one
+// with no stated total (no evidence available), and negative or absurd counts
+// (genuinely corrupt — usageIsCoherent rejects them).
+func normalizeCacheConvention(u *Usage) {
+	if u == nil || !u.CacheIncludedInPrompt || u.CacheReadTokens <= 0 {
+		return
+	}
+	if u.TotalTokens <= 0 {
+		return
+	}
+	// Cache WRITE belongs to BOTH readings, never to just one: no convention
+	// counts it inside the prompt (the same fact that keeps netPromptTokens from
+	// subtracting it), so an upstream reporting one has it in the total on its
+	// own line either way. Counting it on one side only would tilt every
+	// cache-writing upstream toward that side.
+	netTotal, ok := addTokenCounts(u.PromptTokens, u.CompletionTokens, u.CacheWriteTokens, u.CacheReadTokens)
+	if !ok || netTotal > u.TotalTokens {
+		// !ok means counts so large the sum wrapped; a wrapped sum compares as
+		// though it fits, which would turn an absurd count into a billable one.
+		return
+	}
+	cacheCannotBeASubsetOfPrompt := u.CacheReadTokens > u.PromptTokens
+	totalCountsCacheSeparately := netTotal == u.TotalTokens
+	if cacheCannotBeASubsetOfPrompt || totalCountsCacheSeparately {
+		u.CacheIncludedInPrompt = false
+	}
+}
+
+// addTokenCounts sums upstream-reported token counts, reporting false if any
+// count is negative or the total would overflow. Both are reachable from the
+// wire: JSON numbers are signed, and nothing bounds their magnitude.
+func addTokenCounts(counts ...int) (int, bool) {
+	sum := 0
+	for _, n := range counts {
+		if n < 0 || n > math.MaxInt-sum {
+			return 0, false
+		}
+		sum += n
+	}
+	return sum, true
+}
+
 // usageIsCoherent reports whether the upstream-reported counts describe a
 // physically possible request. Counts arrive from third-party upstreams over
 // the wire, so a buggy or hostile provider can send negatives (JSON numbers are
@@ -112,7 +197,11 @@ func usageIsCoherent(u *Usage) bool {
 		return false
 	}
 	// Only meaningful when the prompt total is supposed to contain the cache
-	// read; under Anthropic's convention the two are independent counts.
+	// read; under Anthropic's convention the two are independent counts. This is
+	// also the sole bound on the cache count, so it has to stay: a record that
+	// normalizeCacheConvention declined to reclassify still claims the cache sits
+	// inside the prompt, and an unbounded cache line prices straight into the
+	// bill and into the key's budget.
 	if u.CacheIncludedInPrompt && u.CacheReadTokens > u.PromptTokens {
 		return false
 	}
@@ -217,6 +306,18 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 	}
 	rc.StatusCode = statusCode
 	durationMs := time.Since(start).Milliseconds()
+	// Settle the cache convention once, here, before either consumer of the
+	// usage reads it: pricing below and the persisted counts further down must
+	// not be able to disagree about whether the prompt includes the cache. One
+	// normalization point covers every ingress protocol and both the streaming
+	// and non-streaming paths.
+	//
+	// A truncated stream can reach this with a partial record (the pumps keep
+	// whatever usage arrived before the cut, deliberately), so the reclassification
+	// must not depend on the record being complete — it doesn't: a partial record
+	// whose stated total no longer corroborates the net reading simply stays
+	// inclusive and is rejected as incoherent, exactly as it was before.
+	normalizeCacheConvention(rc.Usage)
 	cost := computeCost(rc.Candidate, rc.Usage, rc.CompressEstimatedTokensSaved)
 
 	var providerID *uint
