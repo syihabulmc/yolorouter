@@ -18,7 +18,7 @@
     <!-- Custom system prompt -->
     <section class="setting-block">
       <div class="setting-block__head">
-        <HelpLabel :tip="t('costOptimization.cspTitle_tip')">{{ t('costOptimization.cspTitle') }}</HelpLabel>
+        <HelpLabel :tip="t('costOptimization.cspDesc')">{{ t('costOptimization.cspSubTitle') }}</HelpLabel>
       </div>
       <p class="setting-block__desc">{{ t('costOptimization.cspDesc') }}</p>
       <div v-if="cspLoad === 'loading'" class="setting-block__state">{{ t('common.loading') }}</div>
@@ -28,26 +28,7 @@
       </div>
       <template v-else>
         <NForm label-placement="left" :show-require-mark="false">
-          <NFormItem path="text">
-            <template #label>
-              <HelpLabel :tip="t('costOptimization.text_tip')">{{ t('costOptimization.text') }}</HelpLabel>
-            </template>
-            <div style="display: flex;justify-content: end;width: 100%;">
-              <div>
-                <CustomPromptEditor
-                  style="margin-top: 6px;"
-                  v-model:text="cspForm.text"
-                  :rows="6"
-                  multiple
-                  :showInput="false"
-                  :placeholder="t('costOptimization.textPlaceholder')"
-                  @change="changeText"
-                 />
-                </div>
-            </div>
-          
-          </NFormItem>
-          <NFormItem path="enabled" style="margin-top: -20px;">
+          <NFormItem path="enabled">
             <template #label>
               <HelpLabel :tip="t('costOptimization.enabled_tip')">{{ t('costOptimization.enabled') }}</HelpLabel>
             </template>
@@ -90,7 +71,6 @@ import { reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NModal, NForm, NFormItem, NSwitch, NButton, useMessage } from 'naive-ui'
 import HelpLabel from '../HelpLabel.vue'
-import CustomPromptEditor from '../CustomPromptEditor.vue'
 import { APIError, displayMessage } from '../../api/client'
 import {
   getCustomSystemPrompt,
@@ -141,7 +121,7 @@ async function loadCSP() {
     const s = await getCustomSystemPrompt()
     cspSetting.value = s
     cspForm.enabled = s.enabled
-    cspForm.text = s.text
+    cspForm.text = t('costOptimization.exampleConciseText') + t('costOptimization.exampleMinimalCodeText')
     cspForm.version = s.version
     cspLoad.value = 'loaded'
   } catch (err) {
@@ -149,12 +129,6 @@ async function loadCSP() {
     cspLoad.value = 'error'
     if (!(err instanceof APIError)) message.error(displayMessage(err, t))
   }
-}
-function changeText() {
-   if (!cspForm.text) {
-    cspForm.enabled = false
-  }
-  saveCSP()
 }
 async function saveCSP() {
   // Hard guard: never let a save fire before a successful GET — otherwise a
