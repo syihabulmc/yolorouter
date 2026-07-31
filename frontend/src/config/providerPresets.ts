@@ -33,9 +33,10 @@ export interface ProviderPreset {
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
   // YoloRouter Cloud is this project's own hosted service, not a third-party
-  // vendor, so it leads the list and its localized name says so explicitly.
-  // It is an ordinary preset in every other respect: no key ships with it, and
-  // nothing here is a default — an admin still has to pick it and paste a key.
+  // vendor, so it leads the list, its localized name says so explicitly, and
+  // the create dialog opens with it preselected. It is an ordinary preset in
+  // every other respect: no key ships with it, every field it prefills stays
+  // editable, and any other card (including "custom") replaces it in one click.
   {
     id: 'yolorouter',
     baseUrl: 'https://api.yolorouter.com/v1',
