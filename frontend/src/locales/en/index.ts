@@ -107,6 +107,8 @@ export default {
     presetTitle: 'Choose a provider',
     presetHint: 'Picking a preset auto-fills the base URL, protocol and default test model. Choose "Custom" to fill them in yourself',
     presetCustom: 'Custom',
+    presetGetKey: 'No key yet? Get one from {provider} →',
+    preset_yolorouter: 'YoloRouter Cloud (official hosted)',
     preset_deepseek: 'DeepSeek',
     preset_moonshot: 'Kimi (Moonshot)',
     preset_zhipu: 'Zhipu GLM',

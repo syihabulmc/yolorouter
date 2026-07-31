@@ -107,6 +107,8 @@ export default {
     presetTitle: '选择供应商',
     presetHint: '选择预置厂商可自动填充服务地址、协议与默认测试模型；也可选择「自定义」手动填写',
     presetCustom: '自定义',
+    presetGetKey: '没有 Key？前往 {provider} 获取 →',
+    preset_yolorouter: 'YoloRouter Cloud（官方托管）',
     preset_deepseek: 'DeepSeek',
     preset_moonshot: '月之暗面 Kimi',
     preset_zhipu: '智谱 GLM',
