@@ -1,4 +1,4 @@
-#!/usr/bin/env pwsh
+ï»¿#!/usr/bin/env pwsh
 # scripts/dev.ps1 - local one-shot rebuild + restart for yolorouter (Windows / PowerShell).
 # Usage: .\scripts\dev.ps1 [-Backend] [-Frontend] [-Migrate] [-Restart] [-Help]
 #
@@ -55,19 +55,19 @@ function err($msg)  { if ($script:HasColor) { Write-Host " !! $msg" -ForegroundC
 if ($Help -or $HelpAlias) {
   if ($script:LangSel -eq 'zh') {
     Write-Host @"
-ÓÃ·¨: $($MyInvocation.MyCommand.Name) [Ä£Ê½]
+ç”¨æ³•: $($MyInvocation.MyCommand.Name) [æ¨¡å¼]
 
-Ä£Ê½:
-  (ÎŞ)         È«Á¿£º¹¹½¨Ç°¶Ë + ºó¶Ë + ÖØÆô£¨Ä¬ÈÏ£©
-  -Backend     ½öÖØĞÂ¹¹½¨ Go ¶ş½øÖÆ²¢ÖØÆô£¨Ìø¹ıÇ°¶Ë£©
-  -Frontend    ½öÖØĞÂ¹¹½¨Ç°¶Ë²¢ÖØÆô£¨Ìø¹ıºó¶Ë×¨ÓĞ²½Öè£©
-  -Migrate     ½öÖ´ĞĞ db:migrate ²¢ÖØÆô
-  -Restart     ½öÖØÆô£¬²»¹¹½¨
-  -Help, -h    ÏÔÊ¾±¾°ïÖú
+æ¨¡å¼:
+  (æ— )         å…¨é‡ï¼šæ„å»ºå‰ç«¯ + åç«¯ + é‡å¯ï¼ˆé»˜è®¤ï¼‰
+  -Backend     ä»…é‡æ–°æ„å»º Go äºŒè¿›åˆ¶å¹¶é‡å¯ï¼ˆè·³è¿‡å‰ç«¯ï¼‰
+  -Frontend    ä»…é‡æ–°æ„å»ºå‰ç«¯å¹¶é‡å¯ï¼ˆè·³è¿‡åç«¯ä¸“æœ‰æ­¥éª¤ï¼‰
+  -Migrate     ä»…æ‰§è¡Œ db:migrate å¹¶é‡å¯
+  -Restart     ä»…é‡å¯ï¼Œä¸æ„å»º
+  -Help, -h    æ˜¾ç¤ºæœ¬å¸®åŠ©
 
-»·¾³±äÁ¿:
-  YOLO_LANG=zh|en   Ç¿ÖÆÊä³öÓïÑÔ£¨Ä¬ÈÏ°´ÏµÍ³ locale ×Ô¶¯ÅĞ¶¨£©
-  NO_COLOR          ÉèÖÃºó½ûÓÃ²ÊÉ«Êä³ö
+ç¯å¢ƒå˜é‡:
+  YOLO_LANG=zh|en   å¼ºåˆ¶è¾“å‡ºè¯­è¨€ï¼ˆé»˜è®¤æŒ‰ç³»ç»Ÿ locale è‡ªåŠ¨åˆ¤å®šï¼‰
+  NO_COLOR          è®¾ç½®åç¦ç”¨å½©è‰²è¾“å‡º
 "@
   } else {
     Write-Host @"
@@ -118,14 +118,14 @@ $null = New-Item -ItemType Directory -Path $logDir -Force
 # ---------------------------------------------------------------------------
 function Require-Command($cmd, $hint) {
   if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
-    err "$(t "Missing required command: " "È±ÉÙ±ØĞèÃüÁî£º")$cmd"
+    err "$(t "Missing required command: " "ç¼ºå°‘å¿…éœ€å‘½ä»¤ï¼š")$cmd"
     err "  $hint"
     exit 1
   }
 }
 
-if ($buildFrontend) { Require-Command 'npm' "$(t 'Install from https://nodejs.org/' 'Çë´Ó https://nodejs.org/ °²×° Node.js')" }
-if ($buildBackend)  { Require-Command 'go'  "$(t 'Install from https://go.dev/' 'Çë´Ó https://go.dev/ °²×° Go')" }
+if ($buildFrontend) { Require-Command 'npm' "$(t 'Install from https://nodejs.org/' 'è¯·ä» https://nodejs.org/ å®‰è£… Node.js')" }
+if ($buildBackend)  { Require-Command 'go'  "$(t 'Install from https://go.dev/' 'è¯·ä» https://go.dev/ å®‰è£… Go')" }
 
 # ---------------------------------------------------------------------------
 # Lock (mutual exclusion via a directory)
@@ -134,8 +134,8 @@ $lockDir = Join-Path $logDir 'dev.ps1.lock'
 try {
   $null = New-Item -ItemType Directory -Path $lockDir -ErrorAction Stop
 } catch {
-  err "$(t "Another dev.ps1 instance appears to be in progress (lock: ${lockDir})" "ÁíÒ»¸ö dev.ps1 ÊµÀıËÆºõÕıÔÚÔËĞĞ£¨Ëø: ${lockDir}£©")"
-  err "$(t "If sure no other instance is running, delete that directory and retry:" "Èç¹ûÈ·ÈÏÃ»ÓĞÆäËûÊµÀıÔÚÔËĞĞ£¬É¾³ı¸ÃÄ¿Â¼ºóÖØÊÔ£º")"
+  err "$(t "Another dev.ps1 instance appears to be in progress (lock: ${lockDir})" "å¦ä¸€ä¸ª dev.ps1 å®ä¾‹ä¼¼ä¹æ­£åœ¨è¿è¡Œï¼ˆé”: ${lockDir}ï¼‰")"
+  err "$(t "If sure no other instance is running, delete that directory and retry:" "å¦‚æœç¡®è®¤æ²¡æœ‰å…¶ä»–å®ä¾‹åœ¨è¿è¡Œï¼Œåˆ é™¤è¯¥ç›®å½•åé‡è¯•ï¼š")"
   err "  Remove-Item -Recurse -Force '${lockDir}'"
   exit 1
 }
@@ -144,7 +144,7 @@ try {
   # ---------------------------------------------------------------------------
   # Stop existing process
   # ---------------------------------------------------------------------------
-  step "$(t "Stopping existing yolorouter process (if any)" "Í£Ö¹ÒÑÓĞµÄ yolorouter ½ø³Ì£¨Èç¹ûÓĞ£©")"
+  step "$(t "Stopping existing yolorouter process (if any)" "åœæ­¢å·²æœ‰çš„ yolorouter è¿›ç¨‹ï¼ˆå¦‚æœæœ‰ï¼‰")"
   $stoppedOld = $false
 
   if (Test-Path $pidFile) {
@@ -159,7 +159,7 @@ try {
         $proc = Get-Process -Id $oldPid -ErrorAction Stop
         # Verify the process is actually our binary before signalling it.
         if ($proc.Path -and $proc.Path -like "$binPath*") {
-          step "$(t "  Stopping PID ${oldPid}..." "  ÕıÔÚÍ£Ö¹½ø³Ì ${oldPid}...")"
+          step "$(t "  Stopping PID ${oldPid}..." "  æ­£åœ¨åœæ­¢è¿›ç¨‹ ${oldPid}...")"
           $proc.CloseMainWindow() | Out-Null
           Start-Sleep -Milliseconds 500
           if (-not $proc.HasExited) {
@@ -167,19 +167,19 @@ try {
           }
           $proc.WaitForExit(15000) | Out-Null
           $stoppedOld = $true
-          step "$(t "  Previous instance stopped" "  ¾ÉÊµÀıÒÑÍ£Ö¹")"
+          step "$(t "  Previous instance stopped" "  æ—§å®ä¾‹å·²åœæ­¢")"
         } else {
-          warn "$(t "  PID ${oldPid} is no longer running our binary" "  PID ${oldPid} ÒÑ²»ÔÙÔËĞĞÎÒÃÇµÄ³ÌĞò")"
+          warn "$(t "  PID ${oldPid} is no longer running our binary" "  PID ${oldPid} å·²ä¸å†è¿è¡Œæˆ‘ä»¬çš„ç¨‹åº")"
         }
       } catch {
-        warn "$(t "  No process with PID ${oldPid}" "  Ã»ÓĞ PID Îª ${oldPid} µÄ½ø³Ì")"
+        warn "$(t "  No process with PID ${oldPid}" "  æ²¡æœ‰ PID ä¸º ${oldPid} çš„è¿›ç¨‹")"
       }
     }
     Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
   }
 
   if (-not $stoppedOld) {
-    step "$(t "  no running process" "  Ã»ÓĞÕıÔÚÔËĞĞµÄ½ø³Ì")"
+    step "$(t "  no running process" "  æ²¡æœ‰æ­£åœ¨è¿è¡Œçš„è¿›ç¨‹")"
   }
 
   # ---------------------------------------------------------------------------
@@ -209,8 +209,8 @@ try {
   }
 
   if ($connection) {
-    err "$(t "Port ${port} is already in use by another process (not managed by dev.ps1)." "¶Ë¿Ú ${port} ÒÑ±»·Ç±¾½Å±¾¹ÜÀíµÄ½ø³ÌÕ¼ÓÃ¡£")"
-    err "$(t "Free it, or change server.port in configs/config.yaml, then retry." "ÇëÊÍ·Å¸Ã¶Ë¿Ú£¬»òĞŞ¸Ä configs/config.yaml µÄ server.port ºóÖØÊÔ¡£")"
+    err "$(t "Port ${port} is already in use by another process (not managed by dev.ps1)." "ç«¯å£ ${port} å·²è¢«éæœ¬è„šæœ¬ç®¡ç†çš„è¿›ç¨‹å ç”¨ã€‚")"
+    err "$(t "Free it, or change server.port in configs/config.yaml, then retry." "è¯·é‡Šæ”¾è¯¥ç«¯å£ï¼Œæˆ–ä¿®æ”¹ configs/config.yaml çš„ server.port åé‡è¯•ã€‚")"
     exit 1
   }
 
@@ -218,7 +218,7 @@ try {
   # Build frontend
   # ---------------------------------------------------------------------------
   if ($buildFrontend) {
-    step "$(t "Building frontend" "¹¹½¨Ç°¶Ë")"
+    step "$(t "Building frontend" "æ„å»ºå‰ç«¯")"
     $frontendDist = Join-Path (Join-Path $rootDir 'frontend') 'dist'
     if (Test-Path $frontendDist) {
       Remove-Item -Recurse -Force $frontendDist
@@ -233,7 +233,7 @@ try {
       Pop-Location
     }
 
-    step "$(t "Copying frontend dist into Go embed target" "¸´ÖÆÇ°¶Ë dist µ½ Go embed Ä¿±êÄ¿Â¼")"
+    step "$(t "Copying frontend dist into Go embed target" "å¤åˆ¶å‰ç«¯ dist åˆ° Go embed ç›®æ ‡ç›®å½•")"
     $webDist = Join-Path (Join-Path $rootDir 'web') 'dist'
     if (Test-Path $webDist) {
       Remove-Item -Recurse -Force $webDist
@@ -246,7 +246,7 @@ try {
   # Build Go binary
   # ---------------------------------------------------------------------------
   if ($buildBackend -or $buildFrontend) {
-    step "$(t "Building Go binary" "¹¹½¨ Go ¶ş½øÖÆ")"
+    step "$(t "Building Go binary" "æ„å»º Go äºŒè¿›åˆ¶")"
 
     $webDist = Join-Path (Join-Path $rootDir 'web') 'dist'
     $useEmbed = $false
@@ -272,7 +272,7 @@ try {
   # Run explicit db:migrate
   # ---------------------------------------------------------------------------
   if ($explicitMigrate) {
-    step "$(t "Running explicit db:migrate" "Ö´ĞĞ db:migrate")"
+    step "$(t "Running explicit db:migrate" "æ‰§è¡Œ db:migrate")"
     Push-Location $rootDir
     try {
       & $binPath db:migrate
@@ -285,7 +285,7 @@ try {
   # ---------------------------------------------------------------------------
   # Start server
   # ---------------------------------------------------------------------------
-  step "$(t "Starting yolorouter serve" "Æô¶¯ yolorouter serve")"
+  step "$(t "Starting yolorouter serve" "å¯åŠ¨ yolorouter serve")"
 
   # Launch the server as an independent background process with its output
   # redirected to log files at the OS level. Unlike a synchronous
@@ -317,17 +317,17 @@ try {
   # ---------------------------------------------------------------------------
   # Health check
   # ---------------------------------------------------------------------------
-  step "$(t "Waiting for /healthz" "µÈ´ı /healthz ¾ÍĞ÷")"
+  step "$(t "Waiting for /healthz" "ç­‰å¾… /healthz å°±ç»ª")"
   $ready = $false
   for ($i = 0; $i -lt 30; $i++) {
     try {
       $proc = Get-Process -Id $serverPid -ErrorAction Stop
       if ($proc.HasExited) {
-        err "$(t "yolorouter exited before becoming ready." "yolorouter ÔÚ¾ÍĞ÷Ç°ÒÑÍË³ö¡£")"
+        err "$(t "yolorouter exited before becoming ready." "yolorouter åœ¨å°±ç»ªå‰å·²é€€å‡ºã€‚")"
         break
       }
     } catch {
-      err "$(t "yolorouter exited before becoming ready." "yolorouter ÔÚ¾ÍĞ÷Ç°ÒÑÍË³ö¡£")"
+      err "$(t "yolorouter exited before becoming ready." "yolorouter åœ¨å°±ç»ªå‰å·²é€€å‡ºã€‚")"
       break
     }
 
@@ -348,7 +348,7 @@ try {
   }
 
   if (-not $ready) {
-    err "$(t "Health check failed - last lines of the logs:" "½¡¿µ¼ì²éÊ§°Ü ¡ª¡ª ÈÕÖ¾Î²²¿£º")"
+    err "$(t "Health check failed - last lines of the logs:" "å¥åº·æ£€æŸ¥å¤±è´¥ â€”â€” æ—¥å¿—å°¾éƒ¨ï¼š")"
     foreach ($f in @($logFile, $errFile)) {
       if (Test-Path $f) {
         $lines = Get-Content $f -Tail 20 -ErrorAction SilentlyContinue
@@ -363,12 +363,12 @@ try {
   }
 
   Write-Host
-  ok "$(t "yolorouter ready" "yolorouter ÒÑ¾ÍĞ÷") (PID ${serverPid})"
-  Write-Host "  $(t 'App:'     '·ÃÎÊ:')  http://127.0.0.1:${port}/"
-  Write-Host "  $(t 'Health:'  '½¡¿µ:')  http://127.0.0.1:${port}/healthz"
-  Write-Host "  $(t 'Logs:'    'ÈÕÖ¾:')  Get-Content '${logFile}' -Wait"
-  Write-Host "  $(t 'Restart:' 'ÖØÆô:')  $($MyInvocation.MyCommand.Name) -Restart"
-  Write-Host "  $(t 'Stop:'    'Í£Ö¹:')  Stop-Process -Id ${serverPid}"
+  ok "$(t "yolorouter ready" "yolorouter å·²å°±ç»ª") (PID ${serverPid})"
+  Write-Host "  $(t 'App:'     'è®¿é—®:')  http://127.0.0.1:${port}/"
+  Write-Host "  $(t 'Health:'  'å¥åº·:')  http://127.0.0.1:${port}/healthz"
+  Write-Host "  $(t 'Logs:'    'æ—¥å¿—:')  Get-Content '${logFile}' -Wait"
+  Write-Host "  $(t 'Restart:' 'é‡å¯:')  $($MyInvocation.MyCommand.Name) -Restart"
+  Write-Host "  $(t 'Stop:'    'åœæ­¢:')  Stop-Process -Id ${serverPid}"
 
 } finally {
   # Clean up the lock directory

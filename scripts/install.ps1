@@ -1,4 +1,4 @@
-#!/usr/bin/env pwsh
+ï»¿#!/usr/bin/env pwsh
 <#
 .SYNOPSIS
     yolorouter one-command installer for Windows.
@@ -70,7 +70,7 @@ function warn  { Write-Host " ! $args" -ForegroundColor Yellow -ErrorAction Cont
 function die   { Write-Host " ? $args" -ForegroundColor Red -ErrorAction Continue; exit 1 }
 
 # ---------------------------------------------------------------------------
-# i18n ¡ª returns a string for the chosen language.
+# i18n â€” returns a string for the chosen language.
 # ---------------------------------------------------------------------------
 function m($zh, $en) {
     if ($script:LANG_CHOICE -eq 'zh') { return $zh } else { return $en }
@@ -103,7 +103,7 @@ function Test-Admin {
 
 function Require-Admin {
     if (-not $script:IS_ADMIN) {
-        $msg = m '´Ë²Ù×÷ĞèÒª¹ÜÀíÔ±È¨ÏŞ¡£ÇëÒÔ¹ÜÀíÔ±Éí·İÖØĞÂÔËĞĞ PowerShell¡£' 'This operation requires admin privileges. Re-run PowerShell as Administrator.'
+        $msg = m 'æ­¤æ“ä½œéœ€è¦ç®¡ç†å‘˜æƒé™ã€‚è¯·ä»¥ç®¡ç†å‘˜èº«ä»½é‡æ–°è¿è¡Œ PowerShellã€‚' 'This operation requires admin privileges. Re-run PowerShell as Administrator.'
         die $msg
     }
 }
@@ -118,7 +118,7 @@ function Cleanup {
 }
 
 # ---------------------------------------------------------------------------
-# Step 1 ¡ª language
+# Step 1 â€” language
 # ---------------------------------------------------------------------------
 function Choose-Language {
     if ($env:YOLO_LANG) {
@@ -146,8 +146,8 @@ function Choose-Language {
         return
     }
 
-    Write-Host "Select language / Ñ¡ÔñÓïÑÔ" -ForegroundColor White
-    Write-Host "  1) ÖĞÎÄ"
+    Write-Host "Select language / é€‰æ‹©è¯­è¨€" -ForegroundColor White
+    Write-Host "  1) ä¸­æ–‡"
     Write-Host "  2) English"
     $defIdx = if ($localeDefault -eq 'zh') { '1' } else { '2' }
     $choice = Read-Host "Enter 1 or 2 [$defIdx]"
@@ -160,7 +160,7 @@ function Choose-Language {
 }
 
 # ---------------------------------------------------------------------------
-# Step 2 ¡ª dependency check
+# Step 2 â€” dependency check
 # ---------------------------------------------------------------------------
 function Require-Cmd {
     param($Cmd, $Hint)
@@ -169,13 +169,13 @@ function Require-Cmd {
 }
 
 function Check-Deps {
-    Require-Cmd 'curl.exe' "$(m 'È±ÉÙ±ØĞèÃüÁî curl.exe£¨Windows 10+ ×Ô´ø£©¡£Çë°²×°»òĞŞ¸´ºóÖØÊÔ¡£' 'Required command curl.exe is missing (available on Windows 10+). Install or fix it, then retry.')"
-    Require-Cmd 'tar.exe'  "$(m 'È±ÉÙ±ØĞèÃüÁî tar.exe£¨Windows 10 build 17063+ ×Ô´ø£©¡£Çë°²×°»òĞŞ¸´ºóÖØÊÔ¡£' 'Required command tar.exe is missing (available on Windows 10 build 17063+). Install or fix it, then retry.')"
+    Require-Cmd 'curl.exe' "$(m 'ç¼ºå°‘å¿…éœ€å‘½ä»¤ curl.exeï¼ˆWindows 10+ è‡ªå¸¦ï¼‰ã€‚è¯·å®‰è£…æˆ–ä¿®å¤åé‡è¯•ã€‚' 'Required command curl.exe is missing (available on Windows 10+). Install or fix it, then retry.')"
+    Require-Cmd 'tar.exe'  "$(m 'ç¼ºå°‘å¿…éœ€å‘½ä»¤ tar.exeï¼ˆWindows 10 build 17063+ è‡ªå¸¦ï¼‰ã€‚è¯·å®‰è£…æˆ–ä¿®å¤åé‡è¯•ã€‚' 'Required command tar.exe is missing (available on Windows 10 build 17063+). Install or fix it, then retry.')"
     # Get-FileHash is built into PowerShell 4+, no check needed.
 }
 
 # ---------------------------------------------------------------------------
-# Step 3 ¡ª platform detection
+# Step 3 â€” platform detection
 # ---------------------------------------------------------------------------
 function Detect-Platform {
     $archRaw = $env:PROCESSOR_ARCHITECTURE
@@ -183,16 +183,16 @@ function Detect-Platform {
         'AMD64' { $script:ARCH = 'amd64' }
         'ARM64' { $script:ARCH = 'arm64' }
         default { 
-          $msg = m "²»Ö§³ÖµÄ¼Ü¹¹: $archRaw£¨½öÖ§³Ö amd64/arm64£©" "Unsupported architecture: $archRaw (only amd64/arm64 are supported)"
+          $msg = m "ä¸æ”¯æŒçš„æ¶æ„: $archRawï¼ˆä»…æ”¯æŒ amd64/arm64ï¼‰" "Unsupported architecture: $archRaw (only amd64/arm64 are supported)"
           die $msg
       }
     }
 
-    info ("$(m '¼Ü¹¹: {0}' 'Architecture: {0}')" -f $script:ARCH)
+    info ("$(m 'æ¶æ„: {0}' 'Architecture: {0}')" -f $script:ARCH)
 }
 
 # ---------------------------------------------------------------------------
-# Step 4 ¡ª scope (system vs user) + derived paths
+# Step 4 â€” scope (system vs user) + derived paths
 # ---------------------------------------------------------------------------
 function Choose-Scope {
     $script:IS_ADMIN = Test-Admin
@@ -203,7 +203,7 @@ function Choose-Scope {
             'system' { $want = 'system' }
             'user'   { $want = 'user' }
             default  { 
-              $msg = m "YOLO_SCOPE Ö»ÄÜÊÇ system »ò user" "YOLO_SCOPE must be 'system' or 'user'"
+              $msg = m "YOLO_SCOPE åªèƒ½æ˜¯ system æˆ– user" "YOLO_SCOPE must be 'system' or 'user'"
               die $msg
             }
         }
@@ -216,9 +216,9 @@ function Choose-Scope {
         }
 
         if ($interactive) {
-            Write-Host "$(m 'Ñ¡Ôñ°²×°¼¶±ğ' 'Select install level')" -ForegroundColor White
-            Write-Host "  1) $(m 'ÏµÍ³¼¶·şÎñ£¨¿ª»ú×ÔÆô£¬ĞèÒª¹ÜÀíÔ±È¨ÏŞ£©[ÍÆ¼ö]' 'System service (starts on boot, needs admin) [recommended]')"
-            Write-Host "  2) $(m 'ÓÃ»§¼¶·şÎñ£¨Ãâ¹ÜÀíÔ±£¬Ëæµ±Ç°ÓÃ»§ÔËĞĞ£©' 'User service (no admin, runs under the current user)')"
+            Write-Host "$(m 'é€‰æ‹©å®‰è£…çº§åˆ«' 'Select install level')" -ForegroundColor White
+            Write-Host "  1) $(m 'ç³»ç»Ÿçº§æœåŠ¡ï¼ˆå¼€æœºè‡ªå¯ï¼Œéœ€è¦ç®¡ç†å‘˜æƒé™ï¼‰[æ¨è]' 'System service (starts on boot, needs admin) [recommended]')"
+            Write-Host "  2) $(m 'ç”¨æˆ·çº§æœåŠ¡ï¼ˆå…ç®¡ç†å‘˜ï¼Œéšå½“å‰ç”¨æˆ·è¿è¡Œï¼‰' 'User service (no admin, runs under the current user)')"
             $choice = Read-Host "Enter 1 or 2 [1]"
             if (-not $choice) { $choice = '1' }
             $want = if ($choice -eq '2') { 'user' } else { 'system' }
@@ -228,7 +228,7 @@ function Choose-Scope {
                 $want = 'system'
             } else {
                 $want = 'user'
-                warn "$(m '·Ç½»»¥Ä£Ê½ÇÒ·Ç¹ÜÀíÔ±£¬×Ô¶¯ÍË»ØÓÃ»§¼¶°²×°£¨Éè YOLO_SCOPE=system ¿ÉÇ¿ÖÆ£©' 'Non-interactive and not admin; falling back to user install (set YOLO_SCOPE=system to force)')"
+                warn "$(m 'éäº¤äº’æ¨¡å¼ä¸”éç®¡ç†å‘˜ï¼Œè‡ªåŠ¨é€€å›ç”¨æˆ·çº§å®‰è£…ï¼ˆè®¾ YOLO_SCOPE=system å¯å¼ºåˆ¶ï¼‰' 'Non-interactive and not admin; falling back to user install (set YOLO_SCOPE=system to force)')"
             }
         }
     }
@@ -260,29 +260,29 @@ function Set-DirectoryPermissions {
         return
     }
     
-    info "$(m 'ÉèÖÃÄ¿Â¼È¨ÏŞ...' 'Setting directory permissions...')"
+    info "$(m 'è®¾ç½®ç›®å½•æƒé™...' 'Setting directory permissions...')"
     
     try {
-        # 1. °ÑËùÓĞÈ¨½»¸ø SYSTEM
+        # 1. æŠŠæ‰€æœ‰æƒäº¤ç»™ SYSTEM
         takeown /F "$Path" /R /D Y 2>$null | Out-Null
         
-        # 2. °ÑËùÓĞÈ¨´ÓÄã×ªÒÆ¸ø Administrators£¨ÈÃ¹ÜÀíÔ±×éÓµÓĞ£©
+        # 2. æŠŠæ‰€æœ‰æƒä»ä½ è½¬ç§»ç»™ Administratorsï¼ˆè®©ç®¡ç†å‘˜ç»„æ‹¥æœ‰ï¼‰
         icacls "$Path" /setowner "NT AUTHORITY\SYSTEM" /T /Q 2>$null
         
-        # 3. SYSTEM ÍêÈ«¿ØÖÆ
+        # 3. SYSTEM å®Œå…¨æ§åˆ¶
         icacls "$Path" /grant SYSTEM:F /T /Q 2>$null
         
-        # 4. Administrators ÍêÈ«¿ØÖÆ
+        # 4. Administrators å®Œå…¨æ§åˆ¶
         icacls "$Path" /grant Administrators:F /T /Q 2>$null
         
-        ok "$(m 'Ä¿Â¼È¨ÏŞÉèÖÃÍê³É' 'Directory permissions set')"
+        ok "$(m 'ç›®å½•æƒé™è®¾ç½®å®Œæˆ' 'Directory permissions set')"
     } catch {
-        warn "$(m 'ÉèÖÃÄ¿Â¼È¨ÏŞÊ§°Ü' 'Failed to set directory permissions'): $_"
+        warn "$(m 'è®¾ç½®ç›®å½•æƒé™å¤±è´¥' 'Failed to set directory permissions'): $_"
     }
 }
 
 # ---------------------------------------------------------------------------
-# Step 5 ¡ª resolve version
+# Step 5 â€” resolve version
 # ---------------------------------------------------------------------------
 function Resolve-Version {
     if ($env:YOLO_VERSION) {
@@ -291,18 +291,18 @@ function Resolve-Version {
         return
     }
 
-    info "$(m '²éÑ¯×îĞÂ°æ±¾...' 'Resolving latest release...')"
+    info "$(m 'æŸ¥è¯¢æœ€æ–°ç‰ˆæœ¬...' 'Resolving latest release...')"
     try {
         $json = Invoke-WebRequest -Uri (Mirror-Url "$GITHUB_API/releases/latest") -UseBasicParsing -ErrorAction Stop
         $data = $json.Content | ConvertFrom-Json
         $script:TAG = $data.tag_name
     } catch {
-        die (m "ÎŞ·¨»ñÈ¡×îĞÂ°æ±¾£¨¼ì²éÍøÂç»ò YOLO_REPO=$REPO ÊÇ·ñÓĞ·¢²¼£©¡£Ò²¿ÉÓÃ YOLO_VERSION Ö¸¶¨¡£" "Could not resolve the latest release (check network, or whether YOLO_REPO=$REPO has any release). You can also set YOLO_VERSION.")
+        die (m "æ— æ³•è·å–æœ€æ–°ç‰ˆæœ¬ï¼ˆæ£€æŸ¥ç½‘ç»œæˆ– YOLO_REPO=$REPO æ˜¯å¦æœ‰å‘å¸ƒï¼‰ã€‚ä¹Ÿå¯ç”¨ YOLO_VERSION æŒ‡å®šã€‚" "Could not resolve the latest release (check network, or whether YOLO_REPO=$REPO has any release). You can also set YOLO_VERSION.")
     }
 }
 
 # ---------------------------------------------------------------------------
-# Step 6 ¡ª download + verify + extract
+# Step 6 â€” download + verify + extract
 # ---------------------------------------------------------------------------
 function Get-Sha256 {
     param($Path)
@@ -326,22 +326,22 @@ function Download-AndExtract {
     $localBinary = Join-Path $localBin "$BINARY_NAME.exe"
 
     if ((Test-Path $localAsset) -or (Test-Path $localBinary)) {
-        info "$(m 'Ê¹ÓÃ±¾µØ bin/ Ä¿Â¼µÄÎÄ¼ş...' 'Using local files from bin/...')"
+        info "$(m 'ä½¿ç”¨æœ¬åœ° bin/ ç›®å½•çš„æ–‡ä»¶...' 'Using local files from bin/...')"
 
         if (Test-Path $localAsset) {
             Copy-Item $localAsset $assetPath -Force
         } else {
-            # No zip ¡ª copy the binary directly, skip checksum and extraction.
+            # No zip â€” copy the binary directly, skip checksum and extraction.
             Copy-Item $localBinary (Join-Path $script:TMP_DIR "$BINARY_NAME.exe") -Force
             $skipVerify = $true
-            info "$(m 'Ìø¹ıĞ£ÑéºÍ½âÑ¹£¨±¾µØ¿ª·¢Ä£Ê½£¬Ö±½ÓÊ¹ÓÃ .exe£©' 'Skipping checksum and extraction (local dev mode, using .exe directly)')"
+            info "$(m 'è·³è¿‡æ ¡éªŒå’Œè§£å‹ï¼ˆæœ¬åœ°å¼€å‘æ¨¡å¼ï¼Œç›´æ¥ä½¿ç”¨ .exeï¼‰' 'Skipping checksum and extraction (local dev mode, using .exe directly)')"
         }
 
         if (-not $skipVerify) {
             if (Test-Path $localSums) {
                 Copy-Item $localSums $sumsPath -Force
             } else {
-                warn "$(m '±¾µØ bin/ ÏÂÃ»ÓĞ checksums.txt£¬Ìø¹ıĞ£Ñé' 'No checksums.txt in local bin/, skipping verification')"
+                warn "$(m 'æœ¬åœ° bin/ ä¸‹æ²¡æœ‰ checksums.txtï¼Œè·³è¿‡æ ¡éªŒ' 'No checksums.txt in local bin/, skipping verification')"
                 $skipVerify = $true
             }
         }
@@ -351,7 +351,7 @@ function Download-AndExtract {
         $sumsUrlCanonical = "$GITHUB_DL/download/$($script:TAG)/checksums.txt"
         $sumsUrl = Mirror-Url $sumsUrlCanonical
 
-        info ("$(m 'ÏÂÔØ {0}' 'Downloading {0}')" -f $asset)
+        info ("$(m 'ä¸‹è½½ {0}' 'Downloading {0}')" -f $asset)
         $prevProgress = $ProgressPreference
         $ProgressPreference = 'SilentlyContinue'
         try {
@@ -363,18 +363,18 @@ function Download-AndExtract {
             if ($resp -and $resp.StatusCode) { $status = [int]$resp.StatusCode }
             $detail = $_.Exception.Message
             if ($status -eq 404) {
-                die (m "ÏÂÔØÊ§°Ü£¨404£©: $assetUrl¡£¸Ã°æ±¾¿ÉÄÜÃ»ÓĞÕë¶Ô±¾Æ½Ì¨µÄ·¢²¼×Ê²ú£¨windows_${script:ARCH}£©¡£" "Download failed (404): $assetUrl. This release may have no asset for this platform (windows_${script:ARCH}).")
+                die (m "ä¸‹è½½å¤±è´¥ï¼ˆ404ï¼‰: $assetUrlã€‚è¯¥ç‰ˆæœ¬å¯èƒ½æ²¡æœ‰é’ˆå¯¹æœ¬å¹³å°çš„å‘å¸ƒèµ„äº§ï¼ˆwindows_${script:ARCH}ï¼‰ã€‚" "Download failed (404): $assetUrl. This release may have no asset for this platform (windows_${script:ARCH}).")
             } elseif ($status) {
-                die (m "ÏÂÔØÊ§°Ü£¨HTTP $status£©: $assetUrl¡£$detail" "Download failed (HTTP $status): $assetUrl. $detail")
+                die (m "ä¸‹è½½å¤±è´¥ï¼ˆHTTP $statusï¼‰: $assetUrlã€‚$detail" "Download failed (HTTP $status): $assetUrl. $detail")
             } else {
-                $mirrorHint = if ($MIRROR) { m "µ±Ç°¾µÏñ: $MIRROR£¬ÇëÈ·ÈÏ¾µÏñ¿ÉÓÃ¡£" "Current mirror: $MIRROR; check the mirror is reachable." } else { m "Î´ÉèÖÃ¾µÏñ£¬ÒÑÖ±Á¬ GitHub¡£ÈçÎŞ·¨·ÃÎÊ GitHub£¬ÇëÉèÖÃ YOLO_MIRROR=https://ÄãµÄ¾µÏñ/ ºóÖØÊÔ¡£" "No mirror set, connecting to GitHub directly. If GitHub is unreachable, set YOLO_MIRROR=https://your-mirror/ and retry." }
-                die (m "ÏÂÔØÊ§°Ü£¨ÍøÂç´íÎó£¬·Ç 404£©: $assetUrl¡£$detail $mirrorHint" "Download failed (network error, not a 404): $assetUrl. $detail $mirrorHint")
+                $mirrorHint = if ($MIRROR) { m "å½“å‰é•œåƒ: $MIRRORï¼Œè¯·ç¡®è®¤é•œåƒå¯ç”¨ã€‚" "Current mirror: $MIRROR; check the mirror is reachable." } else { m "æœªè®¾ç½®é•œåƒï¼Œå·²ç›´è¿ GitHubã€‚å¦‚æ— æ³•è®¿é—® GitHubï¼Œè¯·è®¾ç½® YOLO_MIRROR=https://ä½ çš„é•œåƒ/ åé‡è¯•ã€‚" "No mirror set, connecting to GitHub directly. If GitHub is unreachable, set YOLO_MIRROR=https://your-mirror/ and retry." }
+                die (m "ä¸‹è½½å¤±è´¥ï¼ˆç½‘ç»œé”™è¯¯ï¼Œé 404ï¼‰: $assetUrlã€‚$detail $mirrorHint" "Download failed (network error, not a 404): $assetUrl. $detail $mirrorHint")
             }
         } finally {
             $ProgressPreference = $prevProgress
         }
 
-        info "$(m 'Ğ£Ñé sha256...' 'Verifying sha256...')"
+        info "$(m 'æ ¡éªŒ sha256...' 'Verifying sha256...')"
         $prevProgress = $ProgressPreference
         $ProgressPreference = 'SilentlyContinue'
         try {
@@ -382,14 +382,14 @@ function Download-AndExtract {
                 Invoke-WebRequest -Uri $sumsUrlCanonical -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
             } catch {
                 if ($sumsUrl -ne $sumsUrlCanonical) {
-                    warn (m "ÎŞ·¨´Ó GitHub »ñÈ¡ checksums.txt£¬¸ÄÓÃ¾µÏñ£»¾µÏñ·µ»ØµÄĞ£ÑéÖµ½öÔÚ¾µÏñ±¾Éí¿ÉĞÅÊ±²Å¿ÉĞÅ" "Could not fetch checksums.txt from GitHub; falling back to the mirror. The mirror checksum is only as trustworthy as the mirror itself.")
+                    warn (m "æ— æ³•ä» GitHub è·å– checksums.txtï¼Œæ”¹ç”¨é•œåƒï¼›é•œåƒè¿”å›çš„æ ¡éªŒå€¼ä»…åœ¨é•œåƒæœ¬èº«å¯ä¿¡æ—¶æ‰å¯ä¿¡" "Could not fetch checksums.txt from GitHub; falling back to the mirror. The mirror checksum is only as trustworthy as the mirror itself.")
                     Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
                 } else {
                     throw
                 }
             }
         } catch {
-            die (m "ÏÂÔØ checksums.txt Ê§°Ü: $sumsUrl" "Failed to download checksums.txt: $sumsUrl")
+            die (m "ä¸‹è½½ checksums.txt å¤±è´¥: $sumsUrl" "Failed to download checksums.txt: $sumsUrl")
         } finally {
             $ProgressPreference = $prevProgress
         }
@@ -410,33 +410,33 @@ function Download-AndExtract {
             }
         }
         if (-not $expected) {
-            die (m "checksums.txt ÖĞÕÒ²»µ½ $asset µÄĞ£ÑéÖµ" "No checksum entry for $asset in checksums.txt")
+            die (m "checksums.txt ä¸­æ‰¾ä¸åˆ° $asset çš„æ ¡éªŒå€¼" "No checksum entry for $asset in checksums.txt")
         }
 
         $actual = Get-Sha256 $assetPath
         if ($expected -ne $actual) {
-            die (m "sha256 Ğ£ÑéÊ§°Ü£¬ÒÑÖĞÖ¹°²×°¡£ÆÚÍû $expected£¬ÊµµÃ $actual" "sha256 verification failed, aborting. Expected $expected, got $actual")
+            die (m "sha256 æ ¡éªŒå¤±è´¥ï¼Œå·²ä¸­æ­¢å®‰è£…ã€‚æœŸæœ› $expectedï¼Œå®å¾— $actual" "sha256 verification failed, aborting. Expected $expected, got $actual")
         }
-        ok (m 'sha256 Ğ£ÑéÍ¨¹ı' 'sha256 verified')
+        ok (m 'sha256 æ ¡éªŒé€šè¿‡' 'sha256 verified')
     }
 
     # ---- extract ----
     if (-not $skipVerify) {
         # Only extract if we have a zip archive (downloaded or copied as zip).
-        info "$(m '½âÑ¹ÖĞ...' 'Extracting...')"
+        info "$(m 'è§£å‹ä¸­...' 'Extracting...')"
         tar.exe -xf $assetPath -C $script:TMP_DIR
     }
     $binaryPath = Join-Path $script:TMP_DIR "$BINARY_NAME.exe"
     if (-not (Test-Path $binaryPath)) {
-        die (m "Ñ¹Ëõ°üÀïÕÒ²»µ½ $BINARY_NAME.exe ¶ş½øÖÆ" "Binary $BINARY_NAME.exe not found in the archive")
+        die (m "å‹ç¼©åŒ…é‡Œæ‰¾ä¸åˆ° $BINARY_NAME.exe äºŒè¿›åˆ¶" "Binary $BINARY_NAME.exe not found in the archive")
     }
 }
 
 # ---------------------------------------------------------------------------
-# Step 7 ¡ª install files
+# Step 7 â€” install files
 # ---------------------------------------------------------------------------
 function Install-Files {
-    info ("$(m '°²×°µ½ {0}' 'Installing into {0}')" -f $script:APP_HOME)
+    info ("$(m 'å®‰è£…åˆ° {0}' 'Installing into {0}')" -f $script:APP_HOME)
 
     # Create directory structure.
     $dirs = @(
@@ -458,7 +458,7 @@ function Install-Files {
         Copy-Item $target "$target.old" -Force
     }
     # Move-Item $staged $target -Force
-    # Ê¹ÓÃ Copy-Item + Remove-Item ±ÜÃâ¿ç¾í Move-Item ±¨´í
+    # ä½¿ç”¨ Copy-Item + Remove-Item é¿å…è·¨å· Move-Item æŠ¥é”™
     Copy-Item $staged $target -Force
     Remove-Item $staged -Force -ErrorAction SilentlyContinue
 
@@ -473,20 +473,20 @@ function Install-Files {
         }
         Copy-Item $target $script:BIN_LINK -Force
     } else {
-        Write-Host "BIN_LINK ºÍ target ÏàÍ¬£¬Ìø¹ı¸´ÖÆ"
+        Write-Host "BIN_LINK å’Œ target ç›¸åŒï¼Œè·³è¿‡å¤åˆ¶"
     }
 
     # Record that this run created the service (consumed by uninstall).
     if ($script:USER_CREATED_BY_INSTALLER) {
         New-Item -Path (Join-Path $script:APP_HOME '.user_created_by_installer') -ItemType File -Force | Out-Null
     }
-        # Èç¹ûÊÇÏµÍ³¼¶°²×°£¬ÉèÖÃÈ¨ÏŞ
+        # å¦‚æœæ˜¯ç³»ç»Ÿçº§å®‰è£…ï¼Œè®¾ç½®æƒé™
     if ($script:SCOPE -eq 'system') {
-        info "$(m 'ÉèÖÃÄ¿Â¼È¨ÏŞ...' 'Setting directory permissions...')"
+        info "$(m 'è®¾ç½®ç›®å½•æƒé™...' 'Setting directory permissions...')"
         Set-DirectoryPermissions -Path $script:APP_HOME
     }
     Add-BinToPath
-     # ========== ĞÂÔö£º´´½¨°ü×°½Å±¾ ==========
+     # ========== æ–°å¢ï¼šåˆ›å»ºåŒ…è£…è„šæœ¬ ==========
     Create-WrapperScript
 }
 function Create-WrapperScript {
@@ -494,7 +494,7 @@ function Create-WrapperScript {
     $appHome = $script:APP_HOME
     $exePath = Join-Path $script:BIN_DIR "$BINARY_NAME.exe"
     
-    info "$(m '´´½¨°ü×°½Å±¾...' 'Creating wrapper script...')"
+    info "$(m 'åˆ›å»ºåŒ…è£…è„šæœ¬...' 'Creating wrapper script...')"
     
     $wrapperContent = @"
 @echo off
@@ -504,7 +504,7 @@ cd /d "$appHome"
 "@
     
     $wrapperContent | Out-File -FilePath $wrapperPath -Encoding ASCII -Force
-    ok "$(m '°ü×°½Å±¾´´½¨³É¹¦' 'Wrapper script created')"
+    ok "$(m 'åŒ…è£…è„šæœ¬åˆ›å»ºæˆåŠŸ' 'Wrapper script created')"
 }
 function Set-RawPath($scope, $value) {
     # Write PATH straight to the registry as REG_EXPAND_SZ.
@@ -526,40 +526,40 @@ function Set-RawPath($scope, $value) {
 function Add-BinToPath {
     $binDir = $script:BIN_DIR
     
-    # ¼ì²éÊÇ·ñÒÑ¾­ÔÚ PATH ÖĞ
+    # æ£€æŸ¥æ˜¯å¦å·²ç»åœ¨ PATH ä¸­
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     if ($currentPath -like "*$binDir*") {
-        info "$(m 'bin Ä¿Â¼ÒÑÔÚ PATH ÖĞ' 'bin directory already in PATH')"
+        info "$(m 'bin ç›®å½•å·²åœ¨ PATH ä¸­' 'bin directory already in PATH')"
         return
     }
 
-    info "$(m 'Ìí¼Ó bin Ä¿Â¼µ½ PATH...' 'Adding bin directory to PATH...')"
+    info "$(m 'æ·»åŠ  bin ç›®å½•åˆ° PATH...' 'Adding bin directory to PATH...')"
     
     try {
-        # ÏµÍ³¼¶°²×° ¡ú ¼Óµ½ÏµÍ³ PATH
+        # ç³»ç»Ÿçº§å®‰è£… â†’ åŠ åˆ°ç³»ç»Ÿ PATH
         if ($script:SCOPE -eq 'system') {
             if (-not $script:IS_ADMIN) {
-                warn "$(m '·Ç¹ÜÀíÔ±£¬ÎŞ·¨ĞŞ¸ÄÏµÍ³ PATH' 'Not admin, cannot modify system PATH')"
+                warn "$(m 'éç®¡ç†å‘˜ï¼Œæ— æ³•ä¿®æ”¹ç³»ç»Ÿ PATH' 'Not admin, cannot modify system PATH')"
                 return
             }
             $newPath = $currentPath + ";$binDir"
             Set-RawPath 'Machine' $newPath
-            ok "$(m 'ÒÑÌí¼Óµ½ÏµÍ³ PATH' 'Added to system PATH')"
+            ok "$(m 'å·²æ·»åŠ åˆ°ç³»ç»Ÿ PATH' 'Added to system PATH')"
         } else {
-            # ÓÃ»§¼¶°²×° ¡ú ¼Óµ½ÓÃ»§ PATH
+            # ç”¨æˆ·çº§å®‰è£… â†’ åŠ åˆ°ç”¨æˆ· PATH
             $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
             if ($currentPath -like "*$binDir*") { return }
             $newPath = $currentPath + ";$binDir"
             Set-RawPath 'User' $newPath
-            ok "$(m 'ÒÑÌí¼Óµ½ÓÃ»§ PATH' 'Added to user PATH')"
+            ok "$(m 'å·²æ·»åŠ åˆ°ç”¨æˆ· PATH' 'Added to user PATH')"
         }
         
-        # ¸üĞÂµ±Ç°½ø³ÌµÄ PATH£¨Á¢¼´ÉúĞ§£©
+        # æ›´æ–°å½“å‰è¿›ç¨‹çš„ PATHï¼ˆç«‹å³ç”Ÿæ•ˆï¼‰
         $env:Path += ";$binDir"
         
-        ok "$(m "PATH ÒÑ¸üĞÂ£¬ÏÖÔÚ¿ÉÒÔÊ¹ÓÃ 'yolorouter' ÃüÁî" 'PATH updated, you can now use ''yolorouter'' command')"
+        ok "$(m "PATH å·²æ›´æ–°ï¼Œç°åœ¨å¯ä»¥ä½¿ç”¨ 'yolorouter' å‘½ä»¤" 'PATH updated, you can now use ''yolorouter'' command')"
     } catch {
-        warn "$(m 'Ìí¼Ó PATH Ê§°Ü' 'Failed to add to PATH'): $_"
+        warn "$(m 'æ·»åŠ  PATH å¤±è´¥' 'Failed to add to PATH'): $_"
     }
 }
 
@@ -592,46 +592,46 @@ function Stop-ServiceIfRunning {
 }
 
 # ---------------------------------------------------------------------------
-# Step 8 ¡ª upgrade safety: back up before upgrade
+# Step 8 â€” upgrade safety: back up before upgrade
 # ---------------------------------------------------------------------------
 function Backup-BeforeUpgrade {
     if (-not $script:IS_UPGRADE) { return }
     if ($env:YOLO_SKIP_BACKUP -eq '1') {
-        warn "$(m 'ÒÑ°´ YOLO_SKIP_BACKUP=1 Ìø¹ıÉı¼¶Ç°±¸·İ' 'Skipping pre-upgrade backup (YOLO_SKIP_BACKUP=1)')"
+        warn "$(m 'å·²æŒ‰ YOLO_SKIP_BACKUP=1 è·³è¿‡å‡çº§å‰å¤‡ä»½' 'Skipping pre-upgrade backup (YOLO_SKIP_BACKUP=1)')"
         return
     }
 
     $backupDir = Join-Path $script:APP_HOME 'backups'
     $binary = Join-Path $script:BIN_DIR "$BINARY_NAME.exe"
 
-    # ÈôÉÏ´Î°²×°ÖĞÍ¾ÖĞ¶Ï£¨ÈçÏÂÔØÊ§°Ü£©£¬bin\yolorouter.exe ²»»áÂäµØ£¬
-    # µ« config ¿ÉÄÜ²ĞÁô£¬»á±»ÉÏÃæµÄÂß¼­ÎóÅĞÎªÉı¼¶¡£´ËÊ±±¸·İÒªÓÃµÄ¾É
-    # ¶ş½øÖÆ²»´æÔÚ£¬ÊµÎªÈ«ĞÂ°²×°£¬Ö±½ÓÌø¹ı±¸·İ¡£
+    # è‹¥ä¸Šæ¬¡å®‰è£…ä¸­é€”ä¸­æ–­ï¼ˆå¦‚ä¸‹è½½å¤±è´¥ï¼‰ï¼Œbin\yolorouter.exe ä¸ä¼šè½åœ°ï¼Œ
+    # ä½† config å¯èƒ½æ®‹ç•™ï¼Œä¼šè¢«ä¸Šé¢çš„é€»è¾‘è¯¯åˆ¤ä¸ºå‡çº§ã€‚æ­¤æ—¶å¤‡ä»½è¦ç”¨çš„æ—§
+    # äºŒè¿›åˆ¶ä¸å­˜åœ¨ï¼Œå®ä¸ºå…¨æ–°å®‰è£…ï¼Œç›´æ¥è·³è¿‡å¤‡ä»½ã€‚
     if (-not (Test-Path $binary)) {
-        warn "$(m '¾É¶ş½øÖÆ²»´æÔÚ£¨ÉÏ´Î°²×°Î´Íê³É£©£¬ÊÓÎªÈ«ĞÂ°²×°£¬Ìø¹ıÉı¼¶Ç°±¸·İ¡£' 'No existing binary (previous install incomplete); treating as a fresh install and skipping the pre-upgrade backup.')"
+        warn "$(m 'æ—§äºŒè¿›åˆ¶ä¸å­˜åœ¨ï¼ˆä¸Šæ¬¡å®‰è£…æœªå®Œæˆï¼‰ï¼Œè§†ä¸ºå…¨æ–°å®‰è£…ï¼Œè·³è¿‡å‡çº§å‰å¤‡ä»½ã€‚' 'No existing binary (previous install incomplete); treating as a fresh install and skipping the pre-upgrade backup.')"
         $script:IS_UPGRADE = $false
         return
     }
 
-    info "$(m 'Éı¼¶Ç°±¸·İÊı¾İ¿â...' 'Backing up the database before upgrade...')"
+    info "$(m 'å‡çº§å‰å¤‡ä»½æ•°æ®åº“...' 'Backing up the database before upgrade...')"
     Push-Location $script:APP_HOME
     try {
         & $binary db:backup --output-dir $backupDir
         if (-not $?) { throw "backup failed" }
     } catch {
         Pop-Location
-        die (m 'Éı¼¶Ç°Êı¾İ¿â±¸·İÊ§°Ü£¬ÒÑÖĞÖ¹Éı¼¶£¨ÏÖÓĞ·şÎñÎ´ÊÜÓ°Ïì£©¡£ĞŞ¸´ºóÖØÊÔ£¬»òÉè YOLO_SKIP_BACKUP=1 ÏÔÊ½Ìø¹ı¡£' 'Pre-upgrade database backup failed; upgrade aborted (the running service is untouched). Fix the cause and retry, or set YOLO_SKIP_BACKUP=1 to skip deliberately.')
+        die (m 'å‡çº§å‰æ•°æ®åº“å¤‡ä»½å¤±è´¥ï¼Œå·²ä¸­æ­¢å‡çº§ï¼ˆç°æœ‰æœåŠ¡æœªå—å½±å“ï¼‰ã€‚ä¿®å¤åé‡è¯•ï¼Œæˆ–è®¾ YOLO_SKIP_BACKUP=1 æ˜¾å¼è·³è¿‡ã€‚' 'Pre-upgrade database backup failed; upgrade aborted (the running service is untouched). Fix the cause and retry, or set YOLO_SKIP_BACKUP=1 to skip deliberately.')
     }
     Pop-Location
     $script:BACKUP_TAKEN = $true
-    ok "$(m 'Êı¾İ¿âÒÑ±¸·İ' 'Database backed up')"
+    ok "$(m 'æ•°æ®åº“å·²å¤‡ä»½' 'Database backed up')"
 }
 
 # ---------------------------------------------------------------------------
-# Step 9 ¡ª service setup (Windows Service or Scheduled Task)
+# Step 9 â€” service setup (Windows Service or Scheduled Task)
 # ---------------------------------------------------------------------------
 function Setup-Service {
-    # ²»¹ÜÊÇ system »¹ÊÇ user£¬¶¼ÓÃ¼Æ»®ÈÎÎñ
+    # ä¸ç®¡æ˜¯ system è¿˜æ˜¯ userï¼Œéƒ½ç”¨è®¡åˆ’ä»»åŠ¡
     Setup-ScheduledTask
 }
 
@@ -640,9 +640,9 @@ function Setup-ScheduledTask {
     $appHome = $script:APP_HOME
     $logFile = Join-Path $appHome 'logs\server.log'
 
-    # Í¨¹ı launcher .cmd Æô¶¯£ºÏÈ cd µ½ app-home£¬ÔÙ°Ñ stdout+stderr ×·¼ÓĞ´Èë
-    # server.log£¨¶ÔÓ¦ macOS launchd µÄ StandardOut/ErrorPath£©£¬ÕâÑù¼Æ»®ÈÎÎñ
-    # ºÍ±¾´ÎÁ¢¼´Æô¶¯¶¼»á²úÉúÈÕÖ¾£¬ÕıºÃ¶ÔÉÏ Get-LogsHint ÌáÊ¾µÄÄÇ¸öÎÄ¼ş¡£
+    # é€šè¿‡ launcher .cmd å¯åŠ¨ï¼šå…ˆ cd åˆ° app-homeï¼Œå†æŠŠ stdout+stderr è¿½åŠ å†™å…¥
+    # server.logï¼ˆå¯¹åº” macOS launchd çš„ StandardOut/ErrorPathï¼‰ï¼Œè¿™æ ·è®¡åˆ’ä»»åŠ¡
+    # å’Œæœ¬æ¬¡ç«‹å³å¯åŠ¨éƒ½ä¼šäº§ç”Ÿæ—¥å¿—ï¼Œæ­£å¥½å¯¹ä¸Š Get-LogsHint æç¤ºçš„é‚£ä¸ªæ–‡ä»¶ã€‚
     $launcher = Join-Path $script:BIN_DIR "$BINARY_NAME-serve.cmd"
     # Hand the mirror to the service via env so its self-update path routes
     # through the same mirror; empty (no mirror) omits the line entirely.
@@ -651,27 +651,27 @@ function Setup-ScheduledTask {
     $launcherContent = "@echo off`r`ncd /d `"$appHome`"`r`n$proxyLine`"$binary`" serve >> `"$logFile`" 2>&1`r`n"
     Set-Content -Path $launcher -Value $launcherContent -Encoding Default -NoNewline
 
-    # ÏÈÉ¾³ıÒÑ´æÔÚµÄÍ¬ÃûÈÎÎñ
+    # å…ˆåˆ é™¤å·²å­˜åœ¨çš„åŒåä»»åŠ¡
     schtasks.exe /Delete /TN $SERVICE_NAME /F 2>$null | Out-Null
 
-    # -WorkingDirectory °Ñ½ø³Ì¹¤×÷Ä¿Â¼¹Ì¶¨µ½ app-home£¬ÈÃ serve ÄÜÕÒµ½
-    # configs\config.yaml£¨·ñÔò ONSTART/ONLOGON ÈÎÎñÄ¬ÈÏÔÚ System32 Æô¶¯£©¡£
-    # Í¨¹ı cmd.exe Ö´ĞĞ launcher£¬ÈÃ¿ª»ú×ÔÆôÒ²´øÈÕÖ¾ÖØ¶¨Ïò¡£
+    # -WorkingDirectory æŠŠè¿›ç¨‹å·¥ä½œç›®å½•å›ºå®šåˆ° app-homeï¼Œè®© serve èƒ½æ‰¾åˆ°
+    # configs\config.yamlï¼ˆå¦åˆ™ ONSTART/ONLOGON ä»»åŠ¡é»˜è®¤åœ¨ System32 å¯åŠ¨ï¼‰ã€‚
+    # é€šè¿‡ cmd.exe æ‰§è¡Œ launcherï¼Œè®©å¼€æœºè‡ªå¯ä¹Ÿå¸¦æ—¥å¿—é‡å®šå‘ã€‚
     $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument "/c `"$launcher`"" -WorkingDirectory $appHome
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
 
     if ($script:SCOPE -eq 'system') {
         Require-Admin
-        info "$(m '´´½¨¼Æ»®ÈÎÎñ£¨¿ª»ú×ÔÆô£¬SYSTEM ÕË»§£©...' 'Creating scheduled task (starts on boot as SYSTEM)...')"
-        # SYSTEM + AtStartup£ºÔÚÈÎºÎÓÃ»§µÇÂ¼Ç°¾ÍÔËĞĞ¡£ÕâÕıÊÇ¾É°æ
-        # /TR È±ÉÙ /RU Ê±¿ª»ú×ÔÆôÊ§Ğ§µÄÔ­Òò¡£
+        info "$(m 'åˆ›å»ºè®¡åˆ’ä»»åŠ¡ï¼ˆå¼€æœºè‡ªå¯ï¼ŒSYSTEM è´¦æˆ·ï¼‰...' 'Creating scheduled task (starts on boot as SYSTEM)...')"
+        # SYSTEM + AtStartupï¼šåœ¨ä»»ä½•ç”¨æˆ·ç™»å½•å‰å°±è¿è¡Œã€‚è¿™æ­£æ˜¯æ—§ç‰ˆ
+        # /TR ç¼ºå°‘ /RU æ—¶å¼€æœºè‡ªå¯å¤±æ•ˆçš„åŸå› ã€‚
         $trigger = New-ScheduledTaskTrigger -AtStartup
         $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     } else {
-        info "$(m '´´½¨¼Æ»®ÈÎÎñ£¨µÇÂ¼Ê±×ÔÆô£©...' 'Creating scheduled task (starts at logon)...')"
-        # ÓÃ»§¼¶£ºÎŞ¹ÜÀíÔ±¡¢²»´æÃÜÂë¡£ÒÔµ±Ç°½»»¥ÕË»§ÔÚµÇÂ¼Ê±Æô¶¯£¬
-        # ÊÇÕâ¸ö³¡¾°ÏÂ×îºÏÀíµÄ¿ª»úµÈ¼Û·½°¸¡£
+        info "$(m 'åˆ›å»ºè®¡åˆ’ä»»åŠ¡ï¼ˆç™»å½•æ—¶è‡ªå¯ï¼‰...' 'Creating scheduled task (starts at logon)...')"
+        # ç”¨æˆ·çº§ï¼šæ— ç®¡ç†å‘˜ã€ä¸å­˜å¯†ç ã€‚ä»¥å½“å‰äº¤äº’è´¦æˆ·åœ¨ç™»å½•æ—¶å¯åŠ¨ï¼Œ
+        # æ˜¯è¿™ä¸ªåœºæ™¯ä¸‹æœ€åˆç†çš„å¼€æœºç­‰ä»·æ–¹æ¡ˆã€‚
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $script:RUN_USER
         $principal = New-ScheduledTaskPrincipal -UserId $script:RUN_USER -LogonType Interactive -RunLevel Limited
     }
@@ -680,19 +680,19 @@ function Setup-ScheduledTask {
         Register-ScheduledTask -TaskName $SERVICE_NAME -Action $action -Trigger $trigger `
             -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
     } catch {
-        warn "$(m '´´½¨¼Æ»®ÈÎÎñÊ§°Ü' 'Failed to create scheduled task'): $_"
+        warn "$(m 'åˆ›å»ºè®¡åˆ’ä»»åŠ¡å¤±è´¥' 'Failed to create scheduled task'): $_"
         $script:SERVICE_START_OK = $false
         return
     }
 
-    # ´¥·¢Æ÷Ö»ÔÚ¿ª»ú/µÇÂ¼Ê±´¥·¢£»±¾´Î»á»°Ò²Á¢¼´À­ÆğÒ»´Î£¨Í¬Ñù×ß launcher ¼ÇÈÕÖ¾£©¡£
+    # è§¦å‘å™¨åªåœ¨å¼€æœº/ç™»å½•æ—¶è§¦å‘ï¼›æœ¬æ¬¡ä¼šè¯ä¹Ÿç«‹å³æ‹‰èµ·ä¸€æ¬¡ï¼ˆåŒæ ·èµ° launcher è®°æ—¥å¿—ï¼‰ã€‚
     Start-Process -FilePath $launcher -WorkingDirectory $appHome -WindowStyle Hidden
     $script:SERVICE_START_OK = $true
-    info "$(m '·şÎñÒÑÆô¶¯' 'Service started')"
+    info "$(m 'æœåŠ¡å·²å¯åŠ¨' 'Service started')"
 }
 
 # ---------------------------------------------------------------------------
-# Step 10 ¡ª health check + summary
+# Step 10 â€” health check + summary
 # ---------------------------------------------------------------------------
 function Get-ConfigPort {
     $cfg = Join-Path $script:APP_HOME 'configs\config.yaml'
@@ -736,17 +736,17 @@ function Get-PrimaryIP {
 function Test-Health {
     param($Port)
     $url = "http://localhost:$Port/healthz"
-    info ("$(m 'µÈ´ı·şÎñ¾ÍĞ÷£¨×î¶à {0}s£©...' 'Waiting for the service (up to {0}s)...')" -f $HEALTH_TIMEOUT)
+    info ("$(m 'ç­‰å¾…æœåŠ¡å°±ç»ªï¼ˆæœ€å¤š {0}sï¼‰...' 'Waiting for the service (up to {0}s)...')" -f $HEALTH_TIMEOUT)
     for ($i = 0; $i -lt $HEALTH_TIMEOUT; $i++) {
         try {
             $req = Invoke-WebRequest -Uri $url -UseBasicParsing -ErrorAction Stop
             if ($req.StatusCode -eq 200) { 
-              ok "$(m '·şÎñ½¡¿µ¼ì²éÍ¨¹ı' 'Health check passed')"
+              ok "$(m 'æœåŠ¡å¥åº·æ£€æŸ¥é€šè¿‡' 'Health check passed')"
               return $true 
             }
         } catch {
             if ($i -eq $HEALTH_TIMEOUT - 1) {
-                warn "$(m '½¡¿µ¼ì²éÊ§°Ü£º' 'Health check failed:') $_"
+                warn "$(m 'å¥åº·æ£€æŸ¥å¤±è´¥ï¼š' 'Health check failed:') $_"
             }
         }
         Start-Sleep -Seconds 1
@@ -755,7 +755,7 @@ function Test-Health {
 }
 
 function Get-LogsHint {
-    return "$(m '²é¿´ÈÕÖ¾: Get-Content -Path ''{0}\logs\server.log'' -Wait' 'Check logs: Get-Content -Path ''{0}\logs\server.log'' -Wait')" -f $script:APP_HOME
+    return "$(m 'æŸ¥çœ‹æ—¥å¿—: Get-Content -Path ''{0}\logs\server.log'' -Wait' 'Check logs: Get-Content -Path ''{0}\logs\server.log'' -Wait')" -f $script:APP_HOME
 }
 
 function Get-SvcCmds {
@@ -772,8 +772,8 @@ function Check-Path {
     if ($script:SCOPE -eq 'user') {
         $envPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         if ($envPath -notlike "*$binDir*") {
-            warn "$(m "~/.local/bin ²»ÔÚ PATH ÖĞ£¬yolorouter ÃüÁî¿ÉÄÜÎŞ·¨Ö±½ÓÊ¹ÓÃ" "~/.local/bin is not in PATH, yolorouter command may not work directly")"
-            warn "$(m "  ½â¾ö: ½«ÒÔÏÂÄÚÈİÌí¼Óµ½ PATH: $binDir" "  Fix: Add this to PATH: $binDir")"
+            warn "$(m "~/.local/bin ä¸åœ¨ PATH ä¸­ï¼Œyolorouter å‘½ä»¤å¯èƒ½æ— æ³•ç›´æ¥ä½¿ç”¨" "~/.local/bin is not in PATH, yolorouter command may not work directly")"
+            warn "$(m "  è§£å†³: å°†ä»¥ä¸‹å†…å®¹æ·»åŠ åˆ° PATH: $binDir" "  Fix: Add this to PATH: $binDir")"
         }
     }
 }
@@ -785,30 +785,30 @@ function Write-Summary {
     $installUrl = "https://raw.githubusercontent.com/$REPO/main/scripts/install.ps1"
 
     Write-Host
-    ok "$(m 'yolorouter ÒÑ°²×°²¢Æô¶¯' 'yolorouter is installed and running')"
+    ok "$(m 'yolorouter å·²å®‰è£…å¹¶å¯åŠ¨' 'yolorouter is installed and running')"
     Write-Host
-    Write-Host "$(m '·ÃÎÊ¿ØÖÆÌ¨£º' 'Open the console:')" -ForegroundColor White
+    Write-Host "$(m 'è®¿é—®æ§åˆ¶å°ï¼š' 'Open the console:')" -ForegroundColor White
     Write-Host "  http://localhost:$Port/"
     if ($ip) { Write-Host "  http://$($ip):$Port/" }
-    Write-Host "$(m '  È»ºóÔÚä¯ÀÀÆ÷Àï´´½¨µÚÒ»¸ö¹ÜÀíÔ±ÕËºÅ¡£' '  Then create the first admin account in your browser.')"
+    Write-Host "$(m '  ç„¶ååœ¨æµè§ˆå™¨é‡Œåˆ›å»ºç¬¬ä¸€ä¸ªç®¡ç†å‘˜è´¦å·ã€‚' '  Then create the first admin account in your browser.')"
     Write-Host
-    Write-Host "$(m '³£ÓÃÃüÁî£º' 'Handy commands:')" -ForegroundColor White
-    Write-Host "  $(m '×´Ì¬:   ' 'status:  ') $($svcCmds.Status)"
-    Write-Host "  $(m 'ÈÕÖ¾:   ' 'logs:    ') $(Get-LogsHint)"
-    Write-Host "  $(m 'Í£Ö¹:   ' 'stop:    ') $($svcCmds.Stop)"
-    Write-Host "  $(m 'ÖØÆô:   ' 'restart: ') $($svcCmds.Restart)"
-    Write-Host "  $(m 'Éı¼¶:   ' 'upgrade:') $(m 'ÖØÅÜ°²×°ÃüÁî£¬»ò ' 're-run the installer, or ')$BINARY_NAME update"
-    Write-Host "  $(m 'Ğ¶ÔØ:   ' 'remove: ') & ([scriptblock]::Create((irm $installUrl))) --uninstall"
+    Write-Host "$(m 'å¸¸ç”¨å‘½ä»¤ï¼š' 'Handy commands:')" -ForegroundColor White
+    Write-Host "  $(m 'çŠ¶æ€:   ' 'status:  ') $($svcCmds.Status)"
+    Write-Host "  $(m 'æ—¥å¿—:   ' 'logs:    ') $(Get-LogsHint)"
+    Write-Host "  $(m 'åœæ­¢:   ' 'stop:    ') $($svcCmds.Stop)"
+    Write-Host "  $(m 'é‡å¯:   ' 'restart: ') $($svcCmds.Restart)"
+    Write-Host "  $(m 'å‡çº§:   ' 'upgrade:') $(m 'é‡è·‘å®‰è£…å‘½ä»¤ï¼Œæˆ– ' 're-run the installer, or ')$BINARY_NAME update"
+    Write-Host "  $(m 'å¸è½½:   ' 'remove: ') & ([scriptblock]::Create((irm $installUrl))) --uninstall"
     Write-Host
-    Write-Host "$(m "  ¸Ä¶Ë¿Ú = ±à¼­ $($script:APP_HOME)\configs\config.yaml µÄ server.port ºóÖØÆô·şÎñ¡£" "  Change port = edit server.port in $($script:APP_HOME)\configs\config.yaml, then restart.")"
-    Write-Host "$(m "  ĞèÒª PostgreSQL£¿±à¼­Í¬Ò»ÎÄ¼şµÄ database ¶ÎºóÖØÆô¡£" "  Need PostgreSQL? Edit the database section in that file, then restart.")"
+    Write-Host "$(m "  æ”¹ç«¯å£ = ç¼–è¾‘ $($script:APP_HOME)\configs\config.yaml çš„ server.port åé‡å¯æœåŠ¡ã€‚" "  Change port = edit server.port in $($script:APP_HOME)\configs\config.yaml, then restart.")"
+    Write-Host "$(m "  éœ€è¦ PostgreSQLï¼Ÿç¼–è¾‘åŒä¸€æ–‡ä»¶çš„ database æ®µåé‡å¯ã€‚" "  Need PostgreSQL? Edit the database section in that file, then restart.")"
 }
 
 # ---------------------------------------------------------------------------
 # Uninstall
 # ---------------------------------------------------------------------------
 function Resolve-UninstallScope {
-    # An explicit YOLO_SCOPE wins ¡ª only infer from disk in non-interactive fallback.
+    # An explicit YOLO_SCOPE wins â€” only infer from disk in non-interactive fallback.
     if ($env:YOLO_SCOPE) { return }
 
     try {
@@ -833,26 +833,26 @@ function Resolve-UninstallScope {
 }
 
 function Do-Uninstall {
-    info "$(m 'Ğ¶ÔØ yolorouter...' 'Uninstalling yolorouter...')"
+    info "$(m 'å¸è½½ yolorouter...' 'Uninstalling yolorouter...')"
 
-    # ========== Í£Ö¹²¢É¾³ı¼Æ»®ÈÎÎñ£¨²»¹Ü system »¹ÊÇ user£© ==========
+    # ========== åœæ­¢å¹¶åˆ é™¤è®¡åˆ’ä»»åŠ¡ï¼ˆä¸ç®¡ system è¿˜æ˜¯ userï¼‰ ==========
     schtasks.exe /End /TN $SERVICE_NAME 2>$null
     schtasks.exe /Delete /TN $SERVICE_NAME /F 2>$null
 
-    # ========== Ç¿ÖÆ½áÊø²ĞÁô½ø³Ì ==========
+    # ========== å¼ºåˆ¶ç»“æŸæ®‹ç•™è¿›ç¨‹ ==========
     Get-Process yolorouter -ErrorAction SilentlyContinue | Stop-Process -Force
 
-    # ========== É¾³ıÎÄ¼ş ==========
+    # ========== åˆ é™¤æ–‡ä»¶ ==========
     if (Test-Path $script:BIN_LINK) { Remove-Item $script:BIN_LINK -Force -ErrorAction SilentlyContinue }
     $target = Join-Path $script:BIN_DIR "$BINARY_NAME.exe"
     if (Test-Path $target) { Remove-Item $target -Force -ErrorAction SilentlyContinue }
     $old = "$target.old"
     if (Test-Path $old) { Remove-Item $old -Force -ErrorAction SilentlyContinue }
 
-    # ´Ó PATH ÖĞÒÆ³ı bin Ä¿Â¼
+    # ä» PATH ä¸­ç§»é™¤ bin ç›®å½•
     Remove-BinFromPath
 
-    # Ñ¯ÎÊÊÇ·ñÉ¾³ıÊı¾İ
+    # è¯¢é—®æ˜¯å¦åˆ é™¤æ•°æ®
     if (Test-Path $script:APP_HOME) {
         $del = 'n'
         try {
@@ -863,19 +863,19 @@ function Do-Uninstall {
         }
 
         if ($interactive) {
-            $del = Read-Host "$(m "É¾³ıÈ«²¿Êı¾İ£¿Õâ»áÇå³ı $($script:APP_HOME)£¨ÅäÖÃ + Êı¾İ¿â£¬²»¿É»Ö¸´£© [y/N]:" "Delete all data? This wipes $($script:APP_HOME) (config + database, irreversible) [y/N]:")"
+            $del = Read-Host "$(m "åˆ é™¤å…¨éƒ¨æ•°æ®ï¼Ÿè¿™ä¼šæ¸…é™¤ $($script:APP_HOME)ï¼ˆé…ç½® + æ•°æ®åº“ï¼Œä¸å¯æ¢å¤ï¼‰ [y/N]:" "Delete all data? This wipes $($script:APP_HOME) (config + database, irreversible) [y/N]:")"
             if (-not $del) { $del = 'n' }
         }
 
         if ($del -match '^(y|yes)$') {
             Remove-Item -Path $script:APP_HOME -Recurse -Force -ErrorAction SilentlyContinue
-            ok "$(m 'Êı¾İÒÑÉ¾³ı' 'Data removed')"
+            ok "$(m 'æ•°æ®å·²åˆ é™¤' 'Data removed')"
         } else {
-            ok ("$(m 'ÒÑ±£ÁôÊı¾İÄ¿Â¼£º{0}' 'Data directory preserved: {0}')" -f $script:APP_HOME)
+            ok ("$(m 'å·²ä¿ç•™æ•°æ®ç›®å½•ï¼š{0}' 'Data directory preserved: {0}')" -f $script:APP_HOME)
         }
     }
 
-    ok "$(m 'Ğ¶ÔØÍê³É' 'Uninstall complete')"
+    ok "$(m 'å¸è½½å®Œæˆ' 'Uninstall complete')"
 }
 
 function Remove-BinFromPath {
@@ -887,15 +887,15 @@ function Remove-BinFromPath {
             $currentPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
             $newPath = ($currentPath -split ';' | Where-Object { $_ -ne $binDir }) -join ';'
             Set-RawPath 'Machine' $newPath
-            ok "$(m 'ÒÑ´ÓÏµÍ³ PATH ÖĞÒÆ³ı' 'Removed from system PATH')"
+            ok "$(m 'å·²ä»ç³»ç»Ÿ PATH ä¸­ç§»é™¤' 'Removed from system PATH')"
         } else {
             $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
             $newPath = ($currentPath -split ';' | Where-Object { $_ -ne $binDir }) -join ';'
             Set-RawPath 'User' $newPath
-            ok "$(m 'ÒÑ´ÓÓÃ»§ PATH ÖĞÒÆ³ı' 'Removed from user PATH')"
+            ok "$(m 'å·²ä»ç”¨æˆ· PATH ä¸­ç§»é™¤' 'Removed from user PATH')"
         }
     } catch {
-        warn "$(m '´Ó PATH ÒÆ³ıÊ§°Ü' 'Failed to remove from PATH'): $_"
+        warn "$(m 'ä» PATH ç§»é™¤å¤±è´¥' 'Failed to remove from PATH'): $_"
     }
 }
 
@@ -931,7 +931,7 @@ function Main {
     # Warn on a FRESH install if the default port already has a listener.
     $port = $DEFAULT_PORT
     if (-not $script:IS_UPGRADE -and (Test-PortInUse $DEFAULT_PORT)) {
-        warn ("$(m '¶Ë¿Ú {0} ÒÑ±»Õ¼ÓÃ£¬·şÎñ¿ÉÄÜÎŞ·¨¼àÌı£»×°ÍêÇë¸Ä¶Ë¿Ú»òÊÍ·ÅÕ¼ÓÃ¡£' 'Port {0} is already in use; the service may fail to bind. Change the port or free it after install.')" -f $DEFAULT_PORT)
+        warn ("$(m 'ç«¯å£ {0} å·²è¢«å ç”¨ï¼ŒæœåŠ¡å¯èƒ½æ— æ³•ç›‘å¬ï¼›è£…å®Œè¯·æ”¹ç«¯å£æˆ–é‡Šæ”¾å ç”¨ã€‚' 'Port {0} is already in use; the service may fail to bind. Change the port or free it after install.')" -f $DEFAULT_PORT)
     }
 
     Resolve-Version
@@ -948,17 +948,17 @@ function Main {
         if ($script:IS_UPGRADE) { Discard-OldBinary }
         Write-Summary $port
     } else {
-        warn "$(m '·şÎñÎ´ÔÚÔ¤ÆÚÊ±¼äÄÚÍ¨¹ı½¡¿µ¼ì²é¡£' 'The service did not pass the health check in time.')"
+        warn "$(m 'æœåŠ¡æœªåœ¨é¢„æœŸæ—¶é—´å†…é€šè¿‡å¥åº·æ£€æŸ¥ã€‚' 'The service did not pass the health check in time.')"
         if ($script:IS_UPGRADE -and (Rollback-Binary)) {
-            warn "$(m 'ÒÑ»Ø¹öµ½Éı¼¶Ç°µÄ¶ş½øÖÆ²¢ÖØÆô¡£' 'Rolled back to the pre-upgrade binary and restarted.')"
+            warn "$(m 'å·²å›æ»šåˆ°å‡çº§å‰çš„äºŒè¿›åˆ¶å¹¶é‡å¯ã€‚' 'Rolled back to the pre-upgrade binary and restarted.')"
             Stop-ServiceIfRunning
             Setup-Service
             if (Test-Health $port) {
-                warn "$(m '¾É°æ±¾ÒÑ»Ö¸´ÔËĞĞ£»±¾´ÎÉı¼¶Ê§°Ü£¬Çë²éÈÕÖ¾¡£' 'The previous version is running again; the upgrade failed ¡ª check the logs.')"
+                warn "$(m 'æ—§ç‰ˆæœ¬å·²æ¢å¤è¿è¡Œï¼›æœ¬æ¬¡å‡çº§å¤±è´¥ï¼Œè¯·æŸ¥æ—¥å¿—ã€‚' 'The previous version is running again; the upgrade failed â€” check the logs.')"
             } elseif ($script:BACKUP_TAKEN) {
-                warn ("$(m '¾É°æ±¾ÈÔÎ´ÆğÀ´¡ª¡ªĞÂ°æ±¾¿ÉÄÜÒÑÇ¨ÒÆÊı¾İ¿â¡£Éı¼¶Ç°±¸·İÔÚ {0}£¬±ØÒªÊ±Í£·şºó°´ÄãµÄÊı¾İ¿âÀàĞÍ»Ö¸´×î½üÒ»´Î±¸·İ¡£' 'The old version is still down ¡ª the newer one may have migrated the database. A pre-upgrade backup is in {0}; if needed, stop the service and restore the latest one per your database driver.')" -f (Join-Path $script:APP_HOME 'backups'))
+                warn ("$(m 'æ—§ç‰ˆæœ¬ä»æœªèµ·æ¥â€”â€”æ–°ç‰ˆæœ¬å¯èƒ½å·²è¿ç§»æ•°æ®åº“ã€‚å‡çº§å‰å¤‡ä»½åœ¨ {0}ï¼Œå¿…è¦æ—¶åœæœåæŒ‰ä½ çš„æ•°æ®åº“ç±»å‹æ¢å¤æœ€è¿‘ä¸€æ¬¡å¤‡ä»½ã€‚' 'The old version is still down â€” the newer one may have migrated the database. A pre-upgrade backup is in {0}; if needed, stop the service and restore the latest one per your database driver.')" -f (Join-Path $script:APP_HOME 'backups'))
             } else {
-                warn "$(m '¾É°æ±¾ÈÔÎ´ÆğÀ´£¬ÇÒ±¾´ÎÎ´×öÉı¼¶Ç°±¸·İ£¨YOLO_SKIP_BACKUP=1£©£»Çë²éÈÕÖ¾ÊÖ¶¯´¦Àí¡£' 'The old version is still down and no pre-upgrade backup was taken (YOLO_SKIP_BACKUP=1); check the logs and recover manually.')"
+                warn "$(m 'æ—§ç‰ˆæœ¬ä»æœªèµ·æ¥ï¼Œä¸”æœ¬æ¬¡æœªåšå‡çº§å‰å¤‡ä»½ï¼ˆYOLO_SKIP_BACKUP=1ï¼‰ï¼›è¯·æŸ¥æ—¥å¿—æ‰‹åŠ¨å¤„ç†ã€‚' 'The old version is still down and no pre-upgrade backup was taken (YOLO_SKIP_BACKUP=1); check the logs and recover manually.')"
             }
         }
         Write-Host "  $(Get-LogsHint)"
