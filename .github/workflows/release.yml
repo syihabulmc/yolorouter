@@ -60,6 +60,26 @@ jobs:
           version: '~> v2'
           args: check
 
+      # An empty DEFAULT_GITHUB_REPO does not fail the build — it produces a
+      # complete, publishable set of archives whose `update` command and
+      # update-check API are simply dead, and says nothing about it. That is
+      # how v0.1.0 and v0.1.1 both shipped unable to update themselves: the
+      # variable was deliberately left unset while the repository was private,
+      # and nobody set it once it went public. Fail here instead, so a missing
+      # build-time injection can never again be discovered by a user running
+      # `update` and getting "update is disabled".
+      - name: Require the release source to be injected
+        env:
+          DEFAULT_GITHUB_REPO: ${{ vars.DEFAULT_GITHUB_REPO }}
+        run: |
+          if [ -z "$DEFAULT_GITHUB_REPO" ]; then
+            echo "::error::DEFAULT_GITHUB_REPO is empty, so the released binaries would carry no release source and self-update would be dead in them."
+            echo "Set it under Settings -> Secrets and variables -> Actions -> Variables (a variable, not a secret; it is not sensitive)."
+            echo "Value for this repository: yolorouter/yolorouter"
+            exit 1
+          fi
+          echo "release source: $DEFAULT_GITHUB_REPO"
+
       - name: Release
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -71,6 +91,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Set DEFAULT_GITHUB_REPO as a repository VARIABLE (Settings →
           # Secrets and variables → Actions → Variables), not a secret — it's
-          # not sensitive. Empty is allowed before the repo is public; the
-          # update feature then falls back to config.update.github_repo.
+          # not sensitive. It must be non-empty: the step above refuses to
+          # release without it, because binaries built with it empty cannot
+          # update themselves and nothing else would report that.
           DEFAULT_GITHUB_REPO: ${{ vars.DEFAULT_GITHUB_REPO }}
