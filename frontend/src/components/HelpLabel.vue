@@ -6,7 +6,19 @@
 <template>
   <span class="help-label">
     <slot />
-    <NTooltip trigger="hover" placement="top">
+    <!-- Mobile: hover tooltips don't exist on touch, so the "?" becomes a tap
+         target that surfaces the same text as a transient message toast. -->
+    <NIcon
+      v-if="isMobile"
+      :size="13"
+      style="cursor: pointer; opacity: 0.45"
+      role="button"
+      :aria-label="tip"
+      @click="onTap"
+    >
+      <CircleHelp />
+    </NIcon>
+    <NTooltip v-else trigger="hover" placement="top">
       <template #trigger>
         <NIcon :size="13" style="cursor: help; opacity: 0.45" tabindex="0" role="img" :aria-label="tip">
           <CircleHelp />
@@ -21,10 +33,21 @@
 // NTooltip/NIcon are NOT in main.ts's create() components list (only ~28
 // common ones are). Import them explicitly, or they silently render as
 // unknown elements (vue-tsc / vite build stay green).
-import { NTooltip, NIcon } from 'naive-ui'
+import { NTooltip, NIcon, useMessage } from 'naive-ui'
 import { CircleHelp } from '@lucide/vue'
+import { useIsMobile } from '../composables/useIsMobile'
 
-defineProps<{ tip: string }>()
+const props = defineProps<{ tip: string }>()
+
+const message = useMessage()
+
+// On mobile the hover tooltip is swapped for a tap-to-toast, since touch
+// devices have no hover.
+const isMobile = useIsMobile()
+
+function onTap() {
+  message.info(props.tip)
+}
 </script>
 
 <style scoped>

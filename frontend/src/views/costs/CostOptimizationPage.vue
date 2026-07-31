@@ -542,7 +542,7 @@ const skipReasonColumns = computed<DataTableColumns<CompressSkipReasonRow>>(() =
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .metric-row {
     grid-template-columns: 1fr;
   }

@@ -9,7 +9,40 @@
      grouping stay aligned without the frontend needing to know the server's
      timezone. -->
 <template>
-  <div class="time-range">
+  <!-- Mobile: a compact button showing the active preset's label; tapping it
+       raises a bottom sheet of the named presets (custom is excluded — the
+       inline daterange picker doesn't fit a phone filter bar). -->
+  <template v-if="isMobile">
+    <NButton size="small" class="time-range__mobile-trigger" @click="sheetOpen = true">
+      <span class="time-range__mobile-label">{{ currentPresetLabel }}</span>
+      <template #icon><ChevronDown :size="14" /></template>
+    </NButton>
+
+    <!-- Bottom sheet. The rounded top corners come from the scoped
+         :deep(.time-range-sheet) rule below (naive's drawer body is square by
+         default). -->
+    <NDrawer v-model:show="sheetOpen" placement="bottom" :height="sheetHeight" class="time-range-sheet">
+      <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0;">
+        <div class="range-sheet">
+          <div class="range-sheet__handle" />
+          <button
+            v-for="opt in mobilePresetOptions"
+            :key="opt.value"
+            type="button"
+            class="range-sheet__option"
+            :class="{ 'range-sheet__option--active': opt.value === preset }"
+            @click="onSheetSelect(opt.value)"
+          >
+            <span>{{ opt.label }}</span>
+            <NIcon v-if="opt.value === preset" :size="18"><Check /></NIcon>
+          </button>
+        </div>
+      </NDrawerContent>
+    </NDrawer>
+  </template>
+
+  <!-- Desktop: the full select + inline custom daterange picker. -->
+  <div v-else class="time-range">
     <NSelect
       :value="preset"
       :options="presetOptions"
@@ -32,7 +65,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NDatePicker, NSelect, type SelectOption } from 'naive-ui'
+import { NButton, NDatePicker, NDrawer, NDrawerContent, NIcon, NSelect, type SelectOption } from 'naive-ui'
+import { Check, ChevronDown } from '@lucide/vue'
+import { useIsMobile } from '../../composables/useIsMobile'
 
 export type RangePreset = 'today' | 'yesterday' | 'last7d' | 'last30d' | 'custom'
 
@@ -59,6 +94,39 @@ const presetOptions = computed<SelectOption[]>(() => [
   { label: t('analytics.rangeLast30d'), value: 'last30d' },
   { label: t('analytics.rangeCustom'), value: 'custom' },
 ])
+
+// Bottom-sheet open state + a height that fits the four preset rows plus the
+// drag handle without leaving a tall empty gap.
+const sheetOpen = ref(false)
+const sheetHeight = 300
+
+// Below the mobile breakpoint the select+picker pair is replaced by a single
+// dropdown button (see template). Leaving mobile with the sheet still open
+// would strand an invisible overlay over the desktop controls — close it on
+// the way out.
+const isMobile = useIsMobile(() => {
+  sheetOpen.value = false
+})
+
+// The mobile sheet drops "custom" — the inline daterange picker has no room on
+// a phone filter bar. Typed as {label, value} so the template can key/compare
+// on `value` directly (matching RangePreset).
+const mobilePresetOptions = computed(() =>
+  presetOptions.value
+    .filter((o) => o.value !== 'custom')
+    .map((o) => ({ label: o.label as string, value: o.value as RangePreset })),
+)
+
+function onSheetSelect(v: RangePreset) {
+  sheetOpen.value = false
+  onPresetChange(v)
+}
+
+// Label shown on the mobile trigger button. A custom range (drilled in from a
+// detail page) has no named preset, so fall back to the custom label.
+const currentPresetLabel = computed(
+  () => presetOptions.value.find((o) => o.value === props.preset)?.label ?? t('analytics.rangeCustom'),
+)
 
 // Internal custom-range state as [startMs, endMs] (what NDatePicker daterange
 // emits in the browser's local zone). Seeded from modelValue when mounting on
@@ -152,5 +220,65 @@ watch(
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+.time-range__mobile-trigger {
+  min-width: 120px;
+}
+
+.time-range__mobile-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Rounded top corners on the bottom sheet — naive's drawer is square by
+   default. The class is set on <NDrawer> but the rounded surface is the
+   drawer container, so target it via :deep. */
+:deep(.time-range-sheet.n-drawer) {
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-xl);
+  overflow: hidden;
+}
+
+.range-sheet {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-2) var(--space-3) var(--space-4);
+}
+
+/* A short grab handle centered at the top, the usual bottom-sheet affordance. */
+.range-sheet__handle {
+  width: 36px;
+  height: 4px;
+  margin: var(--space-2) auto var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--color-border);
+}
+
+.range-sheet__option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-base);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.range-sheet__option:active {
+  background: var(--color-surface-hover);
+}
+
+.range-sheet__option--active {
+  color: var(--color-accent);
+  font-weight: 600;
 }
 </style>

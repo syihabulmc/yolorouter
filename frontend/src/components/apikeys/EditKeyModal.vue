@@ -251,6 +251,12 @@ async function onSave() {
   column-gap: 16px;
 }
 
+@media (max-width: 768px) {
+  .limit-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .loading-row {
   padding: var(--space-4) 0;
   color: var(--color-text-muted);

@@ -155,7 +155,7 @@ const { t } = useI18n();
   justify-content: center;
   align-items: center;
   background-repeat: no-repeat;
-  background-size: 100% auto;
+  background-size: auto 100%;
   background-position: top center;
   height: 140px;
   margin-bottom: 45px;
@@ -240,7 +240,7 @@ const { t } = useI18n();
     margin: 0 auto;
   }
   .auth-card-logo {
-    height: 100px;
+    height: 140px;
     margin-bottom: 28px;
   }
   .auth-card-body {

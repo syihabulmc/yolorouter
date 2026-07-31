@@ -74,6 +74,7 @@
           :loading="store.loading"
           :bordered="false"
           :single-line="false"
+          :scroll-x="1010"
           :row-key="(row: Provider) => row.id"
           :row-props="rowProps"
           :pagination="pagination"

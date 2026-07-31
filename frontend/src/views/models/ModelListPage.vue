@@ -64,6 +64,7 @@
           :loading="store.loading"
           :bordered="false"
           :single-line="false"
+          :scroll-x="910"
           :row-key="(row: Model) => row.id"
           :row-props="rowProps"
           :pagination="pagination"

@@ -14,6 +14,7 @@
     :loading="loading"
     :bordered="false"
     :single-line="false"
+    :scroll-x="820"
     :row-key="(r: BudgetRow) => r.id"
     :row-class-name="rowClassName"
     size="small"

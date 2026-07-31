@@ -107,7 +107,7 @@ const netCacheSaved = computed(() => netCacheSavedMicros(props.overview))
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .metric-row {
     grid-template-columns: 1fr;
   }

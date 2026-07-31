@@ -62,6 +62,7 @@
         :loading="store.loading"
         :bordered="false"
         :single-line="false"
+        :scroll-x="1040"
         :row-key="(row: APIKey) => row.id"
         :pagination="pagination"
         remote

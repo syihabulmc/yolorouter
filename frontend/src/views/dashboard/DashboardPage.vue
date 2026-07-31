@@ -448,13 +448,6 @@ function goToRequestLog(requestId: string) {
   color: var(--color-text-muted);
 }
 
-@media (max-width: 640px) {
-  .setup-banner {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-}
-
 /* minmax(0, 1fr) rather than 1fr: a bare 1fr track has an auto minimum, so a
    long unbreakable value (token counts reach 8-10 grouped digits) would push
    its column past an equal share and skew the row. */
@@ -755,13 +748,26 @@ function goToRequestLog(requestId: string) {
   }
 }
 
-@media (max-width: 640px) {
-  .kpi-row {
-    grid-template-columns: 1fr;
+@media (max-width: 768px) {
+  .dashboard-page {
+    gap: var(--space-3);
+  }
+
+  .setup-banner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  
+  .kpi-row .kpi{
+   padding: var(--space-3);
   }
 
   .upstream-row {
     grid-template-columns: 1fr;
+  }
+
+  .kpi__value {
+    font-size: 1.25rem;
   }
 }
 </style>

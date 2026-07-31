@@ -116,6 +116,7 @@
         :loading="loading"
         :bordered="false"
         :single-line="false"
+        :scroll-x="1630"
         :row-key="(row: RequestLogRow) => row.request_id"
         :row-props="rowProps"
         :pagination="pagination"

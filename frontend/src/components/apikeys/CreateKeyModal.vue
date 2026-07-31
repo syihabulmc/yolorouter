@@ -294,6 +294,12 @@ function reset() {
   column-gap: 16px;
 }
 
+@media (max-width: 768px) {
+  .limit-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .plaintext-step {
   display: flex;
   flex-direction: column;

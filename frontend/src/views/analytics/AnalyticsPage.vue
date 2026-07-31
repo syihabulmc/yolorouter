@@ -88,6 +88,7 @@
             :loading="loading"
             :bordered="false"
             :single-line="false"
+            :scroll-x="1330"
             :row-key="(r: ModelReportRow) => r.model_name"
             size="small"
           >
@@ -103,6 +104,7 @@
             :loading="loading"
             :bordered="false"
             :single-line="false"
+            :scroll-x="920"
             :row-key="providerRowKey"
             size="small"
           >
@@ -118,6 +120,7 @@
             :loading="loading"
             :bordered="false"
             :single-line="false"
+            :scroll-x="1330"
             :row-key="(r: TimeReportRow) => r.bucket"
             size="small"
           >
@@ -133,6 +136,7 @@
             :loading="loading"
             :bordered="false"
             :single-line="false"
+            :scroll-x="1330"
             :row-key="callerRowKey"
             size="small"
           >
@@ -510,7 +514,7 @@ const timeColumns = computed<DataTableColumns<TimeReportRow>>(() => [
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .metric-row {
     grid-template-columns: 1fr;
   }

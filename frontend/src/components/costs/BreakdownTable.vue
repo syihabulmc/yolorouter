@@ -15,6 +15,7 @@
     :loading="loading"
     :bordered="false"
     :single-line="false"
+    :scroll-x="1200"
     :row-key="rowKey"
     size="small"
     :max-height="420"

@@ -29,8 +29,24 @@ function applyDocumentLang(locale: Locale) {
   document.documentElement.lang = locale
 }
 
+// Reflects the active locale as a class on the #app root (e.g. `zh-CN` / `en`)
+// so styles can key off the language. Strips every known locale class first so
+// switching languages never leaves a stale one behind.
+function applyAppLocaleClass(locale: Locale) {
+  const app = document.getElementById('app')
+  if (!app) return
+  app.classList.remove(...LOCALES.map((l) => l.value))
+  app.classList.add(locale)
+}
+
+/** Returns the currently active locale — the single accessor for reading it. */
+export function getLocale(): Locale {
+  return i18n.global.locale.value as Locale
+}
+
 const initialLocale = normalizeLocale(localStorage.getItem(STORAGE_KEY))
 applyDocumentLang(initialLocale)
+applyAppLocaleClass(initialLocale)
 
 export const i18n = createI18n({
   legacy: false,
@@ -44,6 +60,7 @@ export function setLocale(locale: Locale) {
   i18n.global.locale.value = locale
   localStorage.setItem(STORAGE_KEY, locale)
   applyDocumentLang(locale)
+  applyAppLocaleClass(locale)
 }
 
 export function errcodeMessage(code: number): string {

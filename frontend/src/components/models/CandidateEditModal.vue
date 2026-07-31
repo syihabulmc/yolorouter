@@ -1014,4 +1014,10 @@ async function onSaveAnywayDisabled() {
   grid-template-columns: 1fr 1fr;
   column-gap: 16px;
 }
+
+@media (max-width: 768px) {
+  .price-grid {
+    grid-template-columns: 1fr;
+  }
+}
 </style>

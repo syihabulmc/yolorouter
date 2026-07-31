@@ -32,6 +32,7 @@
           <n-data-table
             :columns="candidateColumns"
             :data="modelData.candidates"
+            :scroll-x="920"
             :row-key="(row: ModelCandidate) => row.id"
             :pagination="candidatePagination"
             @update:page="onCandidatePageChange"

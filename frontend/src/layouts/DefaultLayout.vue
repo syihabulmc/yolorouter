@@ -1,7 +1,11 @@
 <!-- frontend/src/layouts/DefaultLayout.vue -->
 <template>
-  <n-layout has-sider class="app-shell">
+  <n-layout :has-sider="!isMobile" class="app-shell">
+    <!-- Desktop: a persistent collapsible sider. On mobile it's replaced by a
+         top bar + slide-in drawer (below), so the sider is skipped entirely to
+         avoid stealing horizontal space on a phone viewport. -->
     <n-layout-sider
+      v-if="!isMobile"
       :collapsed="collapsed"
       :collapsed-width="64"
       :width="220"
@@ -39,6 +43,18 @@
     </n-layout-sider>
 
     <n-layout class="layout-main">
+      <!-- Mobile top bar: a hamburger opens the nav drawer, since there's no
+           persistent sider at this width. -->
+      <header v-if="isMobile" class="mobile-topbar">
+        <button class="mobile-topbar__menu" type="button" :aria-label="t('nav.overview')" @click="drawerOpen = true">
+          <NIcon :size="22"><Menu /></NIcon>
+        </button>
+        <RouterLink to="/" class="mobile-topbar__brand">
+          <img :src="logo" alt="" width="24" />
+          <span>Yolorouter</span>
+        </RouterLink>
+      </header>
+
       <n-layout-content>
         <div class="layout-content">
           <!-- Bind :key to the full path so Vue remounts the matched component
@@ -51,6 +67,38 @@
         </div>
       </n-layout-content>
     </n-layout>
+
+    <!-- Mobile navigation drawer: hosts the same nav + account footer as the
+         desktop sider. Tapping any link closes it (handled by the route watch
+         below) so navigating doesn't leave the overlay covering the page. -->
+    <n-drawer v-if="isMobile" v-model:show="drawerOpen" :width="260" placement="left">
+      <n-drawer-content :native-scrollbar="false" body-content-style="padding: 0;">
+        <div class="sidebar-inner sidebar-inner--drawer">
+          <RouterLink to="/" class="sidebar-logo">
+            <img :src="logo" alt="" width="26" />
+            <span class="sidebar-logo__title">Yolorouter</span>
+          </RouterLink>
+
+          <div class="sidebar-nav-main">
+            <SidebarNav
+              :items="navItems"
+              :collapsed="false"
+              :soon-label="t('nav.soonBadge')"
+              :soon-tooltip="t('nav.comingSoon')"
+            />
+          </div>
+
+          <div class="sidebar-bottom">
+            <n-dropdown :options="userMenuOptions" placement="top-start" @select="onLogout">
+              <button class="sidebar-user">
+                <span class="sidebar-user__avatar">{{ userInitial }}</span>
+                <span class="sidebar-user__name">{{ authStore.username }}</span>
+              </button>
+            </n-dropdown>
+          </div>
+        </div>
+      </n-drawer-content>
+    </n-drawer>
 
     <n-modal
       v-model:show="showChangePassword"
@@ -108,8 +156,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { NIcon, useDialog, useMessage, type DropdownOption, type FormInst, type FormRules } from 'naive-ui'
 import SidebarNav, { type NavItem } from '../components/SidebarNav.vue'
@@ -122,6 +170,7 @@ import {
   KeyRound,
   Languages,
   LayoutGrid,
+  Menu,
   Receipt,
   ScrollText,
   Server,
@@ -136,9 +185,11 @@ import { APIError, displayMessage } from '../api/client'
 import { ACCOUNT_SESSION_INVALID } from '../api/errcodes'
 import { passwordStrengthRule, confirmPasswordRule } from '../utils/authValidators'
 import HelpLabel from '../components/HelpLabel.vue'
+import { useIsMobile } from '../composables/useIsMobile'
 import logo from '../assets/logo.svg'
 
 const { t } = useI18n()
+const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const dialog = useDialog()
@@ -147,6 +198,18 @@ const localeStore = useLocaleStore()
 
 const collapsed = ref(false)
 const updateStore = useUpdateStore()
+
+// Below the mobile breakpoint the persistent sider is dropped for a top bar +
+// slide-in drawer. Leaving mobile with the drawer still open would strand an
+// invisible overlay over the restored desktop sider — close it on the way out.
+const drawerOpen = ref(false)
+const isMobile = useIsMobile(() => {
+  drawerOpen.value = false
+})
+
+// Navigating from a drawer link must close the drawer; otherwise the overlay
+// stays up covering the page the user just navigated to.
+watch(() => route.fullPath, () => (drawerOpen.value = false))
 
 // Fire the background update check once when the admin shell mounts, so the
 // sidebar badge reflects "new version available" without the user having to
@@ -420,6 +483,60 @@ async function onChangePasswordSubmit() {
   overflow: auto;
 }
 
+/* Mobile top bar: a sticky header carrying the hamburger + brand, shown only
+   below the 640px breakpoint where the persistent sider is dropped. */
+.mobile-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 56px;
+  padding: 0 var(--space-3);
+  background: var(--color-sidebar);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.mobile-topbar__menu {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.mobile-topbar__menu:hover {
+  background: var(--color-surface-hover);
+}
+
+.mobile-topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text);
+  font-weight: 700;
+}
+
+/* The drawer variant of the sidebar shell: the desktop version pins to
+   100dvh inside the sider; inside the drawer it should just fill the drawer
+   body, which naive already sizes. */
+
+/* With the top bar in play the content no longer starts at the viewport top,
+   so its own height must subtract the bar to keep the internal scroll
+   working (the desktop rule above uses the full 100dvh). */
+@media (max-width: 768px) {
+  .layout-content {
+    height: calc(100dvh - 56px);
+  }
+}
+
 /* Language picker rows inside the modal — a check mark on the right marks the
    active language, matching the shared LocaleSwitcher's treatment. */
 .lang-options {
@@ -454,7 +571,7 @@ async function onChangePasswordSubmit() {
   font-weight: 600;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .sidebar-bottom {
     padding: var(--space-3) 6px var(--space-4);
   }
