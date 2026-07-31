@@ -22,7 +22,7 @@ npm run dev      # Vite dev server with hot reload
 
 Point the dev server at a running backend (see
 [`CONTRIBUTING.md`](../CONTRIBUTING.md#getting-started) for the full-stack
-workflow via `./scripts/dev.sh`).
+workflow via `./scripts/dev.sh`, or `.\scripts\dev.ps1` on Windows).
 
 ## Build
 

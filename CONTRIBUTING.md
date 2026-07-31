@@ -21,9 +21,15 @@ cd yolorouter
 ./scripts/dev.sh
 ```
 
-Useful `./scripts/dev.sh` flags: `--backend`, `--frontend`, `--migrate`,
-`--restart`. Run `./scripts/dev.sh --help` for the full list; output language
-follows your locale and can be forced with `YOLO_LANG=zh|en`.
+```powershell
+# Same thing on Windows (PowerShell).
+.\scripts\dev.ps1
+```
+
+Useful flags: `--backend`, `--frontend`, `--migrate`, `--restart` (`-Backend`,
+`-Frontend`, `-Migrate`, `-Restart` on PowerShell). Run the script with `--help`
+(`-Help`) for the full list; output language follows your locale and can be
+forced with `YOLO_LANG=zh|en`.
 
 ### Building and testing
 

@@ -64,26 +64,37 @@ works out of the box, PostgreSQL when you want it.
 
 ## Quick start
 
-Install as a background service that starts on boot (systemd on Linux, launchd on macOS):
+Install as a background service that starts on boot — systemd on Linux, launchd on
+macOS, a scheduled task on Windows:
 
 ```bash
+# Linux / macOS
 curl -fsSL https://get.yolorouter.com/install.sh | bash
 ```
 
-> **🇨🇳 China mirror**: if GitHub is slow or unreachable from your network, use
-> `https://gh.yolorouter.com/install.sh` instead — same installer, routed through a
+```powershell
+# Windows, PowerShell 5.1+
+irm https://get.yolorouter.com/install.ps1 | iex
+```
+
+On Windows, an elevated PowerShell installs a system-wide service that starts at
+boot; a normal one installs under your account and starts at logon.
+
+> **🇨🇳 China mirror**: if GitHub is slow or unreachable from your network, swap
+> `get.yolorouter.com` for `gh.yolorouter.com` — same installers, routed through a
 > Cloudflare proxy, and auto-updates keep using the mirror afterwards.
 
 Re-run the same command to upgrade; configuration and database are preserved and
 the database is backed up first. Prefer a plain binary? Grab a
-[release](https://github.com/yolorouter/yolorouter/releases) and run `./yolorouter serve`.
+[release](https://github.com/yolorouter/yolorouter/releases) and run
+`./yolorouter serve` (`.\yolorouter.exe serve` on Windows).
 
 The first run generates `configs/config.yaml`, applies migrations and starts the
 console on port 8080. Create the first admin account, then follow the guided flow:
 add providers and upstream keys, create models with their provider candidates, and
 issue API keys.
 
-→ **Full installation guide, including Windows and building from source:**
+→ **Full installation guide for every platform, including building from source:**
 [yolorouter.com/docs/self-hosted/installation](https://yolorouter.com/docs/self-hosted/installation?utm_source=oss-readme&utm_medium=repo)
 
 ## Protocols

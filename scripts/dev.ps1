@@ -14,9 +14,9 @@
 #   YOLO_LANG=zh|en   Force output language (default: auto-detect from locale)
 #   NO_COLOR          Disable coloured output when set
 #
-# NOTE: This file is saved as GBK (code page 936) so that Windows PowerShell 5.1
-# (which reads a no-BOM .ps1 using the system ANSI code page) renders the Chinese
-# strings correctly. If you edit it, keep it GBK-encoded.
+# NOTE: This file is saved as UTF-8 with a BOM. Windows PowerShell 5.1 falls back
+# to the system ANSI code page for a BOM-less .ps1, which mangles the Chinese
+# strings below. If you edit it, keep the BOM.
 
 param(
   [switch]$Backend,

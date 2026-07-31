@@ -20,7 +20,8 @@ npm run dev      # 启动带热更新的 Vite 开发服务器
 ```
 
 把开发服务器指向一个正在运行的后端（完整的全栈开发流程见
-[`CONTRIBUTING.md`](../CONTRIBUTING.md#getting-started)，通过 `./scripts/dev.sh` 启动）。
+[`CONTRIBUTING.md`](../CONTRIBUTING.md#getting-started)，通过 `./scripts/dev.sh`
+启动，Windows 上是 `.\scripts\dev.ps1`）。
 
 ## 构建
 

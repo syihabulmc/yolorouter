@@ -60,23 +60,34 @@
 
 ## 快速开始
 
-把 yolorouter 安装成开机自启的后台服务（Linux 用 systemd，macOS 用 launchd）：
+把 yolorouter 安装成开机自启的后台服务——Linux 用 systemd，macOS 用 launchd，
+Windows 用计划任务：
 
 ```bash
+# Linux / macOS
 curl -fsSL https://get.yolorouter.com/install.sh | bash
 ```
 
-> **🇨🇳 国内加速安装**：如果你在国内、直连 GitHub 慢或不通，把地址换成
-> `https://gh.yolorouter.com/install.sh` —— 同一个安装器，经 Cloudflare 代理下载，
-> 装完后的自动升级也会一直走加速通道，无需额外配置。
+```powershell
+# Windows，PowerShell 5.1+
+irm https://get.yolorouter.com/install.ps1 | iex
+```
+
+Windows 上，用管理员身份运行 PowerShell 会装成开机自启的系统级服务；用普通权限运行则装
+在当前用户下，登录时自启。
+
+> **🇨🇳 国内加速安装**：如果你在国内、直连 GitHub 慢或不通，把 `get.yolorouter.com`
+> 换成 `gh.yolorouter.com` —— 同一个安装器，经 Cloudflare 代理下载，装完后的自动升级
+> 也会一直走加速通道，无需额外配置。
 
 重跑同一条命令即可升级，配置和数据库原样保留，升级前会先自动备份数据库。想直接跑二进制？
-从[发布页](https://github.com/yolorouter/yolorouter/releases)下载后执行 `./yolorouter serve`。
+从[发布页](https://github.com/yolorouter/yolorouter/releases)下载后执行 `./yolorouter serve`
+（Windows 上是 `.\yolorouter.exe serve`）。
 
 首次运行会生成 `configs/config.yaml`、执行数据库迁移，并在 8080 端口启动后台。创建首个
 管理员账号后按引导操作：添加供应商和上游 Key，创建模型及其供应商候选，然后签发 API Key。
 
-→ **完整安装说明（含 Windows 与从源码构建）：**
+→ **完整安装说明（全平台，含从源码构建）：**
 [yolorouter.com/docs/zh/self-hosted/installation](https://yolorouter.com/docs/zh/self-hosted/installation?utm_source=oss-readme&utm_medium=repo)
 
 ## 协议
