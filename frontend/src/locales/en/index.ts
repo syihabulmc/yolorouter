@@ -150,6 +150,7 @@ export default {
     moveDown: 'Move Down',
     reorderColumn: 'Reorder',
     needsReentry: 'Please resubmit the key plaintext',
+    notRun: 'Not tested',
     keepCurrentKeyHint: 'Leave blank to keep the current key',
     verificationUntested: 'Untested',
     verificationPassed: 'Passed',
@@ -163,6 +164,7 @@ export default {
     outcomeUnreachable: 'Unreachable',
     outcomeUpstreamError: 'Upstream error',
     outcomeVerificationUnsupported: 'Cannot be verified yet',
+    outcomeTimeout: 'Test timed out',
     // Actionable one-liners shown under a failed connection test, keyed by the
     // same outcome category as the label above (outcomeSuccess has none).
     outcomeAuthFailed_hint: 'Check the key is correct and not expired or revoked',
@@ -173,6 +175,7 @@ export default {
     outcomeUnreachable_hint: 'Cannot reach the base URL — check the spelling and network',
     outcomeUpstreamError_hint: 'The upstream returned an error response — expand for details',
     outcomeVerificationUnsupported_hint: 'This protocol has no response validator yet, so a reply cannot be certified as a pass — the mapping may still work',
+    outcomeTimeout_hint: 'The base URL is reachable but the upstream did not answer within 60s — it may be busy or working through its own fallback chain. Retry shortly',
     confirmDisableProviderTitle: 'Disable Provider',
     confirmDisableProviderContent: 'Disabling this provider removes it from routing. Continue?',
     confirmDisableLastKeyTitle: 'Disable the last available key',
@@ -181,6 +184,7 @@ export default {
     testAllPendingCount: '{count} keys pending',
     testAllRunning: 'Batch testing in progress…',
     testAllSummary: '{passed} passed, {failed} failed, {skipped} skipped',
+    testAllBudgetExhausted: 'This run hit its time limit with {count} key(s) still untested — click "Test all" again to continue.',
     fieldRequired: 'This field is required',
     keyPlaintextTooShort: 'Key plaintext must be at least 8 characters',
     nameLengthHint: 'Name must be 2-50 characters',

@@ -71,6 +71,7 @@
       :provider-id="provider.id"
       :base-url="provider.base_url"
       :provider-type="provider.provider_type"
+      :destination-count="destinationCount"
       @saved="reload"
     />
     <KeyEditModal
@@ -78,6 +79,7 @@
       :provider-id="provider.id"
       :base-url="provider.base_url"
       :provider-type="provider.provider_type"
+      :destination-count="destinationCount"
       :editing-key="editingKey"
       @saved="reload"
     />
@@ -102,6 +104,7 @@ import KeyEditModal from '../../components/providers/KeyEditModal.vue'
 import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { testOutcomeLabel } from '../../utils/testOutcomeDisplay'
+import { verificationDestinationCount } from '../../utils/providerProtocol'
 import { useSingleRowAction } from '../../composables/useSingleRowAction'
 import { useClientPagination } from '../../composables/useClientPagination'
 
@@ -157,8 +160,17 @@ const pendingCount = computed(() => {
   return provider.value.keys.filter((k) => !k.needs_reentry).length
 })
 
+// How many destinations one key test walks server-side. It multiplies the
+// request budget, so a two-endpoint provider is not cut off halfway.
+const destinationCount = computed(() =>
+  provider.value ? verificationDestinationCount(provider.value.provider_type, provider.value.protocol_endpoints) : 1,
+)
+
 function batchResultLabel(result: BatchTestResult): string {
   if (result.needs_reentry) return t('providers.needsReentry')
+  // Must precede the skipped branch: a not-run key is skipped too, and
+  // "test failed" would be a verdict on a credential nothing tried.
+  if (result.not_run) return t('providers.notRun')
   if (result.skipped || result.outcome === null) return t('providers.testFailed')
   return testOutcomeLabel(t, result.outcome) + ` (${result.duration_ms}ms)`
 }
@@ -374,7 +386,7 @@ function onEditKey(key: ProviderKey) {
 async function onTestOneKey(keyId: number) {
   testingKeyId.value = keyId
   try {
-    const updated = await store.testKey(providerId, keyId)
+    const updated = await store.testKey(providerId, keyId, destinationCount.value)
     await reload()
     // Two-tier feedback so the click is never silent: pass (green) vs
     // everything else (yellow) named by its specific outcome reason
@@ -474,10 +486,7 @@ async function onTestAll() {
   batchSummary.value = ''
   batchResultByKeyId.value = {}
   try {
-    // Timeout budget must count every key batch test will hit — that's
-    // exactly pendingCount's scope (all !needs_reentry keys), so reuse it
-    // rather than recomputing the same filter.
-    const { results } = await store.testAll(providerId, pendingCount.value ?? 0)
+    const { results } = await store.testAll(providerId)
     // `skipped` and `outcome === 0` are not mutually exclusive: a result
     // can be both TestSuccess AND skipped (its CAS write was lost to a
     // concurrent edit — the test itself succeeded, but nothing was
@@ -487,6 +496,13 @@ async function onTestAll() {
     const passed = results.filter((r) => !r.skipped && r.outcome === 0).length
     const failed = results.length - passed - skipped
     batchSummary.value = t('providers.testAllSummary', { passed, failed, skipped })
+    // Keys the run's budget never reached are the one case where the operator
+    // has something to do next, so say it outright instead of leaving them to
+    // infer it from the skipped count.
+    const notRun = results.filter((r) => r.not_run).length
+    if (notRun > 0) {
+      batchSummary.value += ' ' + t('providers.testAllBudgetExhausted', { count: notRun })
+    }
     batchResultByKeyId.value = Object.fromEntries(results.map((r) => [r.key_id, r]))
     await reload()
   } catch (err) {

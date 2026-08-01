@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -29,7 +31,7 @@ import (
 	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
-// TestOutcome is one of the 9 test-result categories. Its
+// TestOutcome is one of the 10 test-result categories. Its
 // numeric values are stored verbatim in provider_keys.last_test_result
 // (see model.LastTestResult* constants, which must stay numerically
 // identical to this list).
@@ -51,6 +53,15 @@ const (
 	// returned instead of TestSuccess. classifyTestResult never lets this
 	// outcome mark a key passed/enabled, unlike a real TestSuccess.
 	TestVerificationUnsupported
+	// TestTimeout marks a destination that accepted the connection but did
+	// not answer within providerClientTimeout. It is deliberately separate
+	// from TestUnreachable, which means the opposite: no connection was ever
+	// established. The distinction is what an operator acts on — an
+	// unreachable address is a wrong URL or a blocked network, whereas a
+	// timeout is a reachable address whose upstream is merely slow or is
+	// working through its own failover chain, and pointing that operator at
+	// their URL spelling sends them after the one thing that is not broken.
+	TestTimeout
 )
 
 // TestResult is what ProviderClient returns for one test attempt.
@@ -109,18 +120,28 @@ type ProviderClient interface {
 }
 
 const (
-	providerClientTimeout      = 15 * time.Second
+	// providerClientTimeout caps one whole test call. It is sized for the
+	// FAILURE path, not the success path: a healthy upstream answers this
+	// max_tokens=1 ping in a few seconds, but an upstream that is going to
+	// fail usually walks its entire candidate/key chain first and only then
+	// reports the error, which takes far longer. A budget that expires
+	// between those two — 15s did — discards precisely the responses with
+	// the most diagnostic value, replacing an upstream's own explanation
+	// (e.g. `HTTP 502: All provider attempts failed`) with a bare timeout
+	// that names nothing. 60s clears the failover path while still bounding
+	// an admin who is synchronously watching a spinner.
+	providerClientTimeout      = 60 * time.Second
 	providerClientMaxBodyBytes = 64 * 1024
 	// providerClientConnectTimeout bounds each TCP dial during a provider
 	// connection test. Provider connection tests are an admin-only path with
 	// their own timeout model (providerClientTimeout caps the whole call at
-	// 15s; there is no streaming relay and no failover budget), so the dial
+	// 60s; there is no streaming relay and no failover budget), so the dial
 	// bound belongs to this layer rather than being threaded through
 	// GatewayConfig.ConnectTimeout (which governs only the gateway relay path).
 	providerClientConnectTimeout = 5 * time.Second
 	// providerClientTLSHandshakeTimeout bounds the TLS handshake during a
 	// provider connection test. Like providerClientConnectTimeout it belongs to
-	// this admin-only layer (providerClientTimeout caps the whole call at 15s;
+	// this admin-only layer (providerClientTimeout caps the whole call at 60s;
 	// no streaming relay, no failover budget) rather than being threaded from
 	// GatewayConfig.TLSHandshakeTimeout, which governs only the relay path.
 	providerClientTLSHandshakeTimeout = 10 * time.Second
@@ -148,7 +169,7 @@ type HTTPProviderClient struct {
 // config.SecurityConfig.AllowPrivateUpstreams). The dial bound is
 // providerClientConnectTimeout (not GatewayConfig.ConnectTimeout) because
 // connection tests are an admin-only path with their own timeout model
-// (providerClientTimeout=15s overall cap, no streaming relay, no failover
+// (providerClientTimeout=60s overall cap, no streaming relay, no failover
 // budget), so the dial bound stays at this layer instead of being threaded
 // from the gateway config.
 func NewHTTPProviderClient(allowPrivate bool) *HTTPProviderClient {
@@ -293,17 +314,70 @@ func (c *HTTPProviderClient) runTestRequest(
 	// anthropic-version for anthropic, an API-key header/param for gemini.
 	requestEncoderFor(proto).SetupRequest(req, apiKey)
 
+	watcher := &connectionWatcher{}
+	req = watcher.attach(req)
+
 	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	duration := time.Since(start).Milliseconds()
 	if err != nil {
+		// Separate "connected but never answered in time" from "never
+		// connected". The nested dial/TLS bounds carry deadlines of their own
+		// and expire while this call's budget is still healthy, so neither the
+		// error text nor ctx alone can make this call — hence the watcher.
 		detail := fmt.Sprintf("request failed after %dms: %v", duration, redactErr(err))
 		logger.Warn("provider test: request error", zap.String("url", protocols.RedactURL(url)), zap.Int64("duration_ms", duration), zap.String("error", redactErr(err)))
-		return TestResult{Outcome: TestUnreachable, DurationMs: duration, Detail: detail}, nil
+		return TestResult{Outcome: timeoutOrUnreachable(ctx, watcher), DurationMs: duration, Detail: detail}, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	return handle(resp, duration)
+	res, handleErr := handle(resp, duration)
+	if handleErr != nil {
+		return res, handleErr
+	}
+	// A stall while reading the body or the SSE stream expires the budget
+	// INSIDE handle, where it can only present as a body-shape failure
+	// (unreadable body, incomplete stream) and settles as TestUpstreamError.
+	// That blames the upstream's reply for our own budget running out and
+	// hides the case from the timeout category entirely, so re-check here.
+	// duration only covers time-to-headers; the body read is why we are here,
+	// so the reported figure is re-measured over the whole call.
+	if res.Outcome != TestSuccess && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		total := time.Since(start).Milliseconds()
+		res.Outcome = TestTimeout
+		res.DurationMs = total
+		res.Detail = fmt.Sprintf("response incomplete after %dms: %v", total, ctx.Err())
+	}
+	return res, nil
+}
+
+// connectionWatcher records whether the transport ever handed this client a
+// live connection. It is the evidence TestTimeout requires, and the error
+// value alone cannot supply it: a stalled DNS resolve and a stalled response
+// both surface as context.DeadlineExceeded, yet only the second one proves the
+// address answered at all. Reporting the first as a timeout would tell an
+// operator their base URL is reachable on no evidence whatsoever.
+type connectionWatcher struct{ got atomic.Bool }
+
+func (w *connectionWatcher) trace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { w.got.Store(true) }}
+}
+
+// attach returns req bound to a context carrying this watcher's trace,
+// preserving whatever context req already had (its call budget).
+func (w *connectionWatcher) attach(req *http.Request) *http.Request {
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), w.trace()))
+}
+
+// timeoutOrUnreachable classifies a failed attempt. TestTimeout requires BOTH
+// an expired call budget and a connection that was actually established;
+// anything else is unreachability, including a cancelled call (a disconnected
+// admin), which is not a statement about the upstream at all.
+func timeoutOrUnreachable(ctx context.Context, w *connectionWatcher) TestOutcome {
+	if w.got.Load() && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return TestTimeout
+	}
+	return TestUnreachable
 }
 
 // redactErr returns a log-safe description of err: for *url.Error (returned
@@ -411,6 +485,9 @@ func (c *HTTPProviderClient) ListModels(ctx context.Context, proto protocols.Pro
 	models := make([]string, 0)
 	var nextParam, nextValue string
 	start := time.Now()
+	// One watcher across every page: the question it answers is "did this
+	// destination ever accept a connection", which does not reset per page.
+	watcher := &connectionWatcher{}
 
 	for page := 0; page < providerModelsMaxPages; page++ {
 		pageURL, err := modelsPageURL(baseModelsURL, nextParam, nextValue)
@@ -425,14 +502,19 @@ func (c *HTTPProviderClient) ListModels(ctx context.Context, proto protocols.Pro
 		// openai/responses, x-api-key for anthropic, x-goog-api-key for gemini);
 		// its Content-Type header is harmless on a bodyless GET.
 		requestEncoderFor(proto).SetupRequest(req, apiKey)
+		req = watcher.attach(req)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			// First-page transport failure is a real "can't reach it"; on a
-			// later page keep the models already gathered rather than throwing
-			// away a partial-but-useful catalogue.
+			// First-page transport failure is a real "can't reach it" — unless
+			// the budget expired on an established connection, which is a
+			// timeout and must be reported as one here too, or a stalled
+			// catalogue fetch still sends the operator off to check a URL that
+			// is demonstrably fine. On a later page keep the models already
+			// gathered rather than throwing away a partial-but-useful
+			// catalogue.
 			if page == 0 {
-				return ListModelsResult{Outcome: TestUnreachable, DurationMs: time.Since(start).Milliseconds()}, nil
+				return ListModelsResult{Outcome: timeoutOrUnreachable(ctx, watcher), DurationMs: time.Since(start).Milliseconds()}, nil
 			}
 			break
 		}
@@ -440,6 +522,12 @@ func (c *HTTPProviderClient) ListModels(ctx context.Context, proto protocols.Pro
 		_ = resp.Body.Close()
 		if !ok {
 			if page == 0 {
+				// Same re-check as the credential test's: a body that stalled
+				// past the budget reads as "unreadable body" here, which would
+				// otherwise settle as an upstream error.
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					return ListModelsResult{Outcome: TestTimeout, DurationMs: time.Since(start).Milliseconds()}, nil
+				}
 				return ListModelsResult{Outcome: TestUpstreamError, DurationMs: time.Since(start).Milliseconds(), Detail: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
 			}
 			break

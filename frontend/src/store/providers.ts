@@ -65,11 +65,11 @@ export const useProvidersStore = defineStore('providers', {
     async setStatus(id: number, enabled: boolean) {
       await providersApi.setProviderStatus(id, enabled)
     },
-    async createKey(providerId: number, input: CreateKeyInput) {
-      return providersApi.createProviderKey(providerId, input)
+    async createKey(providerId: number, input: CreateKeyInput, destinationCount: number) {
+      return providersApi.createProviderKey(providerId, input, destinationCount)
     },
-    async updateKey(providerId: number, keyId: number, input: UpdateKeyInput) {
-      return providersApi.updateProviderKey(providerId, keyId, input)
+    async updateKey(providerId: number, keyId: number, input: UpdateKeyInput, destinationCount: number) {
+      return providersApi.updateProviderKey(providerId, keyId, input, destinationCount)
     },
     async reorderKey(providerId: number, keyId: number, direction: 'up' | 'down') {
       await providersApi.reorderProviderKey(providerId, keyId, direction)
@@ -77,11 +77,11 @@ export const useProvidersStore = defineStore('providers', {
     async setKeyStatus(providerId: number, keyId: number, enabled: boolean) {
       await providersApi.setProviderKeyStatus(providerId, keyId, enabled)
     },
-    async testKey(providerId: number, keyId: number) {
-      return providersApi.testProviderKey(providerId, keyId)
+    async testKey(providerId: number, keyId: number, destinationCount: number) {
+      return providersApi.testProviderKey(providerId, keyId, destinationCount)
     },
-    async testAll(providerId: number, enabledKeyCount: number) {
-      return providersApi.testAllProviderKeys(providerId, enabledKeyCount)
+    async testAll(providerId: number) {
+      return providersApi.testAllProviderKeys(providerId)
     },
     async testKeyPreview(baseUrl: string, apiKey: string, model: string, providerType: string): Promise<TestKeyResult> {
       return providersApi.testKeyPreview(baseUrl, apiKey, model, providerType)

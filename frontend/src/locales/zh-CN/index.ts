@@ -150,6 +150,7 @@ export default {
     moveDown: '下移',
     reorderColumn: '排序',
     needsReentry: '需重新提交 Key 明文',
+    notRun: '未测试',
     keepCurrentKeyHint: '留空表示保留当前 Key',
     verificationUntested: '未测试',
     verificationPassed: '通过',
@@ -167,6 +168,7 @@ export default {
     outcomeUnreachable: '无法连接',
     outcomeUpstreamError: '上游错误',
     outcomeVerificationUnsupported: '暂无法验证',
+    outcomeTimeout: '测试超时',
     // Actionable one-liners shown under a failed connection test, keyed by the
     // same outcome category as the label above (outcomeSuccess has none).
     outcomeAuthFailed_hint: '请检查 Key 是否正确、是否已过期或被禁用',
@@ -177,6 +179,7 @@ export default {
     outcomeUnreachable_hint: '无法连接服务地址，请检查地址拼写与网络连通性',
     outcomeUpstreamError_hint: '上游返回了异常响应，可展开查看原始报错',
     outcomeVerificationUnsupported_hint: '该协议暂无响应校验器，返回内容无法被判定为通过——映射本身可能是可用的',
+    outcomeTimeout_hint: '服务地址可以连通，但上游在 60 秒内没有返回；可能是上游繁忙或正在逐个尝试其它渠道，稍后重试即可',
     confirmDisableProviderTitle: '停用供应商',
     confirmDisableProviderContent: '停用后该供应商将不参与路由，确定要继续吗？',
     confirmDisableLastKeyTitle: '停用最后一个可用 Key',
@@ -185,6 +188,7 @@ export default {
     testAllPendingCount: '共 {count} 个待测',
     testAllRunning: '正在批量测试，请稍候…',
     testAllSummary: '成功 {passed} 个，失败 {failed} 个，跳过 {skipped} 个',
+    testAllBudgetExhausted: '本轮时间已用完，还有 {count} 个 Key 未测试，可再次点击「测试全部」继续。',
     fieldRequired: '该字段为必填项',
     keyPlaintextTooShort: 'Key 明文至少需要 8 个字符',
     nameLengthHint: '名称长度需在 2-50 个字符之间',

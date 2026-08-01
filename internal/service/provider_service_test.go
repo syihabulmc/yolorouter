@@ -2026,6 +2026,75 @@ func TestTestAllProviderKeysSkipsWhenDecryptFails(t *testing.T) {
 	}
 }
 
+// A batch test must stop at a budget of its own rather than run for
+// keys × destinations × the per-probe cap. That product has no upper bound, and
+// once it passes the server's own WriteTimeout the handler still finishes its
+// writes but can no longer emit a response — results land in the database while
+// the browser is told the request failed. Keys the budget never reached must
+// come back as not-run: reporting them as a failed test would be a verdict on a
+// credential nothing ever tried.
+func TestTestAllProviderKeysStopsAtBudgetAndReportsNotRun(t *testing.T) {
+	svc, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+		ManagementStatus: model.ProviderStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	if _, err := svc.CreateProviderKey(context.Background(), provider.ID, CreateKeyInput{
+		Label: "k2", Plaintext: "sk-zzzzzzzzzzzzzzzzzzzzzzzzzzzzz9", TestModel: "gpt-4o-mini", ManagementStatus: model.ProviderKeyStatusEnabled,
+	}, now); err != nil {
+		t.Fatalf("CreateProviderKey failed: %v", err)
+	}
+
+	// Snapshot every key's pre-run bookkeeping. test_generation is the telling
+	// one: BeginProviderKeyRetest bumps it the moment a key is claimed for
+	// testing, so an unchanged value proves the key was never even started.
+	generationBefore := map[uint]int{}
+	var before []model.ProviderKey
+	if err := db.Find(&before).Error; err != nil {
+		t.Fatalf("load keys: %v", err)
+	}
+	for _, k := range before {
+		generationBefore[k.ID] = k.TestGeneration
+	}
+
+	originalBudget := providerBatchTestBudget
+	providerBatchTestBudget = 30 * time.Millisecond
+	t.Cleanup(func() { providerBatchTestBudget = originalBudget })
+	client.sideEffect = func() { time.Sleep(60 * time.Millisecond) }
+
+	results, err := svc.TestAllProviderKeys(context.Background(), provider.ID, now)
+	if err != nil {
+		t.Fatalf("TestAllProviderKeys failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected a result row per key, got %d", len(results))
+	}
+
+	last := results[len(results)-1]
+	if !last.NotRun {
+		t.Fatalf("the key the budget never reached must be reported as not-run, got %+v", last)
+	}
+	if !last.Skipped || last.Outcome != nil {
+		t.Fatalf("a not-run key carries no verdict, got %+v", last)
+	}
+
+	// An unreached key must be left completely untouched — not claimed, not
+	// committed — or the budget silently rewrites verification state for a
+	// credential nothing tested.
+	var stored model.ProviderKey
+	if err := db.First(&stored, last.KeyID).Error; err != nil {
+		t.Fatalf("load key: %v", err)
+	}
+	if stored.TestGeneration != generationBefore[last.KeyID] {
+		t.Fatalf("a not-run key must not be claimed for testing: generation %d -> %d",
+			generationBefore[last.KeyID], stored.TestGeneration)
+	}
+}
+
 func TestTestAllProviderKeysSkipsWhenClientCallErrors(t *testing.T) {
 	svc, _, client := newTestProviderService(t)
 	now := time.Now().UTC()
@@ -2408,6 +2477,38 @@ func TestIsUniqueViolationDetectsKnownDatabaseMessages(t *testing.T) {
 	}
 }
 
+// service.TestOutcome and model.LastTestResult* are two hand-maintained lists
+// of one enum: the outcome int is written verbatim into
+// provider_keys.last_test_result, and the frontend indexes its label array by
+// that same int. Nothing but this test stops the lists from drifting when a
+// new outcome is appended to only one of them, and a drift silently mislabels
+// every result stored from that point on.
+func TestLastTestResultConstantsMirrorTestOutcomes(t *testing.T) {
+	cases := []struct {
+		name    string
+		outcome TestOutcome
+		stored  int
+	}{
+		{"success", TestSuccess, model.LastTestResultSuccess},
+		{"auth failed", TestAuthFailed, model.LastTestResultAuthFailed},
+		{"permission denied", TestPermissionDenied, model.LastTestResultPermissionDenied},
+		{"model not found", TestModelNotFound, model.LastTestResultModelNotFound},
+		{"quota unavailable", TestQuotaUnavailable, model.LastTestResultQuotaUnavailable},
+		{"rate limited", TestRateLimited, model.LastTestResultRateLimited},
+		{"unreachable", TestUnreachable, model.LastTestResultUnreachable},
+		{"upstream error", TestUpstreamError, model.LastTestResultUpstreamError},
+		{"verification unsupported", TestVerificationUnsupported, model.LastTestResultVerificationUnsupported},
+		{"timeout", TestTimeout, model.LastTestResultTimeout},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if int(c.outcome) != c.stored {
+				t.Fatalf("outcome %s = %d but its stored constant is %d", c.name, int(c.outcome), c.stored)
+			}
+		})
+	}
+}
+
 func TestClassifyTestResultCoversEveryOutcome(t *testing.T) {
 	outcomeInt := func(o TestOutcome) *int { v := int(o); return &v }
 
@@ -2426,6 +2527,11 @@ func TestClassifyTestResultCoversEveryOutcome(t *testing.T) {
 		{"model not found", TestResult{Outcome: TestModelNotFound}, 0, false, outcomeInt(TestModelNotFound)},
 		{"rate limited", TestResult{Outcome: TestRateLimited}, 0, false, outcomeInt(TestRateLimited)},
 		{"unreachable", TestResult{Outcome: TestUnreachable}, 0, false, outcomeInt(TestUnreachable)},
+		// A timeout says nothing about whether the credential is valid — the
+		// upstream never got far enough to judge it. Inconclusive, exactly
+		// like unreachable: it must never overwrite verification_status, or a
+		// slow upstream would demote a key that is perfectly good.
+		{"timeout", TestResult{Outcome: TestTimeout}, 0, false, outcomeInt(TestTimeout)},
 		{"upstream error", TestResult{Outcome: TestUpstreamError}, 0, false, outcomeInt(TestUpstreamError)},
 		// TestVerificationUnsupported (Finding 2): a gemini/responses
 		// destination's 2xx cannot be certified as a genuine pass, so this

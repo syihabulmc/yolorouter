@@ -1,4 +1,5 @@
 import { apiFetch } from './client'
+import { CANDIDATE_PROBE_BUDGET_MS } from './probeBudget'
 
 export interface ModelCandidate {
   id: number
@@ -122,14 +123,15 @@ export function createCandidate(modelId: number, input: CreateCandidateInput): P
   return apiFetch(`/api/admin/models/${modelId}/candidates`, { method: 'POST', body: JSON.stringify(input) })
 }
 
-// PROBE_TIMEOUT_MS covers a save or retest that probes upstream. The server
-// budget is two sequential rounds — the basic probe, then the two capability
-// probes concurrently — each capped at its own 15s upstream timeout, so a slow
-// but perfectly valid run lands right on apiFetch's 30s default. Aborting there
-// would be the worst possible outcome: the candidate is already stored by then,
-// so the operator sees a timeout and their retry fails on the duplicate-provider
-// constraint. The margin is for that, not for expected latency.
-const PROBE_TIMEOUT_MS = 90_000
+// PROBE_TIMEOUT_MS covers a save or retest that probes upstream. Its value is
+// derived from the server's own per-probe bound rather than written out here,
+// because the two rounds this endpoint runs (basic probe, then the two
+// capability probes concurrently) each get that full bound — so a hardcoded
+// number silently becomes too small the moment the server's changes. Aborting
+// early is the worst possible outcome: the candidate is already stored by
+// then, so the operator sees a timeout and their retry fails on the
+// duplicate-provider constraint.
+const PROBE_TIMEOUT_MS = CANDIDATE_PROBE_BUDGET_MS
 
 // testAndCreateCandidate probes the mapping server-side and stores it only if
 // the result allows what was asked for. Slower than createCandidate (up to two
