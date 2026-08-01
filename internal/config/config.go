@@ -166,16 +166,81 @@ func DefaultGatewayConfig() GatewayConfig {
 	return g
 }
 
-// ResolvePath returns the config file path Load resolves explicitPath to:
-// explicitPath itself when non-empty, otherwise the default
-// "configs/config.yaml" relative to the process cwd. Exported so callers that
-// need to name the file in a message (see bootstrap.Init) can't drift from
-// the path Load actually reads.
-func ResolvePath(explicitPath string) string {
+// resolveDefaultPath returns where Load looks when no --config was given: the
+// process working directory. Deliberately NOT the installed-deployment search
+// that resolveExisting does — every command that can generate a config goes
+// through here, and having them silently retarget an installation would mean
+// `serve` from an admin's shell attaching to the running service's database,
+// `db:reset` wiping it, and `db:migrate` altering its schema, none of which the
+// working-directory rule ever did.
+func resolveDefaultPath() string {
+	return filepath.Join("configs", "config.yaml")
+}
+
+// resolveExisting picks the config file for a command that acts on a deployment
+// that must already exist: explicitPath when given, otherwise the working
+// directory's configs/config.yaml. The same two places Load looks, and
+// deliberately no more.
+//
+// It does not go looking for the installation this executable belongs to.
+// Acting on a deployment nobody named is what made `stop` report "no running
+// instance" against a live server to begin with, and every way of making that
+// safe raises a question the command cannot answer: whose config is this, may
+// this user signal that pid, which of two deployments did the operator mean.
+// The installation is used to *suggest* instead — see installHint — which turns
+// a wrong guess from a silent action into a line the operator reads and decides
+// on.
+func resolveExisting(explicitPath string) string {
 	if explicitPath != "" {
 		return explicitPath
 	}
-	return filepath.Join("configs", "config.yaml")
+	return resolveDefaultPath()
+}
+
+// installHint describes the deployment this executable appears to belong to, in
+// the imperative, for an error message: "try: yolorouter stop --config …".
+// Empty when there is nothing to suggest.
+//
+// Being only a suggestion is what lets this guess liberally. Both layouts in
+// the wild are offered — the installers put the binary in <app-home>/bin with
+// the config in <app-home>/configs, while the machine-wide Windows install and
+// a release binary dropped in a directory keep both together — and a wrong
+// guess costs a line of output, not a signalled process or a dropped table.
+func installHint(executable func() (string, error), command string) string {
+	exe, err := executable()
+	if err != nil {
+		return ""
+	}
+	// A PATH entry may be a symlink into the install directory, and
+	// os.Executable is permitted to return it unresolved. Following it is a
+	// refinement: on failure the unresolved path is still worth guessing from.
+	if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil && resolved != "" {
+		exe = resolved
+	}
+	exeDir := filepath.Dir(exe)
+
+	// One directory up first: <app-home>/bin/<binary> with the config in
+	// <app-home>/configs is the layout every installer produces, so it is the
+	// better guess when both hold a config — running an older binary once from
+	// <app-home>/bin left a stray config there. At the filesystem root the
+	// parent is the directory itself, which would only repeat the other
+	// candidate.
+	var candidates []string
+	if parent := filepath.Dir(exeDir); parent != exeDir {
+		candidates = append(candidates, filepath.Join(parent, "configs", "config.yaml"))
+	}
+	candidates = append(candidates, filepath.Join(exeDir, "configs", "config.yaml"))
+	for _, candidate := range candidates {
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			// The whole value of this line is that it can be pasted verbatim,
+			// so the path is quoted for the shell the operator is holding.
+			// The machine-wide Windows install lives under %ProgramFiles%,
+			// where an unquoted path splits at "Program Files".
+			return fmt.Sprintf("this binary looks installed at %s; try: yolorouter %s --config %s",
+				filepath.Dir(filepath.Dir(candidate)), command, quoteForShell(candidate))
+		}
+	}
+	return ""
 }
 
 // Load resolves the config path (explicitPath wins if non-empty, otherwise
@@ -186,16 +251,75 @@ func ResolvePath(explicitPath string) string {
 //     defaults, generate a random provider_master_key, and atomically write
 //     the effective config out to that path so restarts reuse the same key
 func Load(explicitPath string) (*Config, error) {
-	path := ResolvePath(explicitPath)
-	usingDefaultPath := explicitPath == ""
+	cfg, _, err := LoadWithPath(explicitPath)
+	return cfg, err
+}
 
-	if _, err := os.Stat(path); err != nil {
-		if !usingDefaultPath {
-			return nil, fmt.Errorf("config file not found at explicit path %s: %w", path, err)
-		}
-		return generateDefaultConfig(path)
+// LoadWithPath is Load, additionally returning the absolute path of the file it
+// loaded (or generated), so a caller that has to name the file it acted on
+// takes it from the call that read it rather than resolving a second time.
+func LoadWithPath(explicitPath string) (*Config, string, error) {
+	path := explicitPath
+	if path == "" {
+		path = resolveDefaultPath()
 	}
 
+	if _, err := os.Stat(path); err != nil {
+		if explicitPath != "" {
+			return nil, "", fmt.Errorf("config file not found at explicit path %s: %w", absOrSelf(path), err)
+		}
+		cfg, genErr := generateDefaultConfig(path)
+		if genErr != nil {
+			return nil, "", genErr
+		}
+		return cfg, absOrSelf(path), nil
+	}
+	cfg, err := loadResolved(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return cfg, absOrSelf(path), nil
+}
+
+// absOrSelf makes path absolute, falling back to path itself. Callers print
+// this for a human to act on, and a relative path only resolves in the
+// process's own working directory — which for a service-launched process is
+// nowhere near the install directory. Abs only fails if the working directory
+// is unreadable, in which case the relative form still beats no path at all.
+func absOrSelf(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
+}
+
+// LoadExisting loads a config that must already exist, and never generates one.
+// Commands that act on a deployment someone else created — stop, which signals a
+// running server; db:rollback, which drops schema — use this instead of Load:
+// generating a config would mint a fresh provider_master_key and an empty data
+// directory, then have the command report on, or act on, that empty deployment
+// rather than the real one.
+//
+// command names the subcommand, for the "try: yolorouter <command> --config …"
+// suggestion built when nothing is there.
+//
+// The absolute path of the file it read comes back with the config so callers
+// can name the deployment they acted on.
+func LoadExisting(explicitPath, command string) (*Config, string, error) {
+	path := resolveExisting(explicitPath)
+
+	if _, err := os.Stat(path); err != nil {
+		return nil, "", notFoundError(absOrSelf(path), explicitPath != "", installHint(os.Executable, command), err)
+	}
+	cfg, err := loadResolved(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return cfg, absOrSelf(path), nil
+}
+
+// loadResolved strict-parses an existing config at an already-resolved path.
+func loadResolved(path string) (*Config, error) {
 	cfg, err := loadStrict(path)
 	if err != nil {
 		return nil, err
@@ -386,6 +510,27 @@ func loadStrict(path string) (*Config, error) {
 	if !filepath.IsAbs(cfg.Database.SQLitePath) {
 		cfg.Database.SQLitePath = filepath.Join(absDir, cfg.Database.SQLitePath)
 	}
+	// Follow links only after that join, never before it. The shipped default
+	// walks up out of configs/ to reach data/, and resolving the config
+	// directory first would let the "../" climb out of the link's target
+	// instead of out of the deployment — putting the database somewhere else
+	// entirely, so the next start would open a path that does not exist, create
+	// an empty file there, and leave the real one orphaned. Joining first fixes
+	// which file is meant; canonicalising what is left can only change how that
+	// same file is spelled.
+	//
+	// The spelling is worth fixing because this path is also an identity two
+	// processes have to agree on: serve and stop both derive the instance lock
+	// from it, and on Windows the name of the kernel event stop signals, which
+	// is matched byte for byte. serve resolves its config from the working
+	// directory while stop can resolve the same config through the executable's
+	// installation, and those two routes spell one directory differently as
+	// soon as a link is involved. Best-effort: before a deployment's first
+	// start the data directory does not exist yet, and the unresolved spelling
+	// is what this replaces.
+	if resolvedDir, resolveErr := filepath.EvalSymlinks(filepath.Dir(cfg.Database.SQLitePath)); resolveErr == nil {
+		cfg.Database.SQLitePath = filepath.Join(resolvedDir, filepath.Base(cfg.Database.SQLitePath))
+	}
 
 	return cfg, nil
 }
@@ -529,4 +674,19 @@ func randomMasterKey() (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(buf), nil
+}
+
+// notFoundError explains a missing config in terms of how its path was chosen,
+// and — when the path came from the working directory rather than the operator
+// — appends what to type instead. Telling someone who just passed --config to
+// pass --config is the failure mode this exists to avoid; so is naming a
+// default path without saying where the real one probably is.
+func notFoundError(path string, explicit bool, hint string, err error) error {
+	if explicit {
+		return fmt.Errorf("config file not found at explicit path %s: %w", path, err)
+	}
+	if hint == "" {
+		return fmt.Errorf("config file not found at %s (pass --config with the path to the deployment's config.yaml): %w", path, err)
+	}
+	return fmt.Errorf("config file not found at %s — %s: %w", path, hint, err)
 }

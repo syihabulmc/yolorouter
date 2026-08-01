@@ -14,6 +14,22 @@ import (
 	"github.com/yolorouter/yolorouter/pkg/database"
 )
 
+// describeTarget renders the deployment a destructive maintenance command is
+// about to act on. It names the files rather than just the driver: "driver=
+// sqlite" is identical for a throwaway sandbox and for production, and these
+// commands are routinely typed in the wrong directory. The Postgres form
+// deliberately omits the password — this text is printed for a human and
+// routinely pasted elsewhere.
+func describeTarget(cfg *config.Config, configPath string) string {
+	var target string
+	if cfg.Database.Driver == "postgres" {
+		target = fmt.Sprintf("postgres %s@%s:%d/%s", cfg.Database.User, cfg.Database.Host, cfg.Database.Port, cfg.Database.DBName)
+	} else {
+		target = fmt.Sprintf("%s %s", cfg.Database.Driver, cfg.Database.SQLitePath)
+	}
+	return fmt.Sprintf("target config:   %s\ntarget database: %s\n", configPath, target)
+}
+
 // parseCommandFlags builds a FlagSet named `name` with the shared --config
 // flag (plus whatever extra registers), parses args, and rejects any
 // positional arguments beyond maxPositional — all before any resource
@@ -101,7 +117,39 @@ func runDBRollback(ctx context.Context, args []string) error {
 		}
 	}
 
-	app, err := bootstrap.Init(flagSet.Lookup("config").Value.String())
+	// Load the config before bootstrap.Init: LoadExisting never generates one,
+	// where Load would. A deployment whose config was lost but whose database is
+	// still on disk would otherwise get a fresh config whose default sqlite_path
+	// lands right back on that database, and the rollback would run against real
+	// data nobody pointed it at. Loading first also lets the target be named
+	// before anything opens the database.
+	cfg, cfgPath, err := config.LoadExisting(flagSet.Lookup("config").Value.String(), "db:rollback")
+	if err != nil {
+		return err
+	}
+
+	// Rolling back drops schema and the data in it, so name the deployment
+	// before doing it.
+	fmt.Print(describeTarget(cfg, cfgPath))
+
+	// The down migrations drop tables and columns, which a live server would
+	// keep querying as if they were still there — so take the same lock serve
+	// holds for its lifetime, the one db:reset has always required.
+	unlockInstance, err := database.AcquireInstanceLock(instanceLockPath(cfg.Database.SQLitePath))
+	if err != nil {
+		return fmt.Errorf("cannot roll back: %w", err)
+	}
+	// Registered before the database connection's own deferred close, so LIFO
+	// puts the unlock last: the connection must be fully closed before anything
+	// else can take the lock and start changing the file.
+	defer func() { _ = unlockInstance() }()
+
+	// Initialized from the config already in hand rather than by re-reading
+	// cfgPath: the lock above was taken on the database that config named, and
+	// a second read could return a different one — an atomic replacement, a
+	// retargeted symlink — leaving the migrations to run somewhere the lock
+	// does not cover.
+	app, err := bootstrap.InitWithConfig(cfg, cfgPath)
 	if err != nil {
 		return err
 	}

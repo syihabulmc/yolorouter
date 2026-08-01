@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `stop` reported `no running instance` and exited 0 while the server was running, whenever it was invoked from a directory other than the one the service runs in. It generated a config in the working directory and probed that empty deployment's lock instead of the real one. It no longer generates anything: it reports the path it looked at, and — when the binary belongs to an installation — the `--config` line to use instead. It also prints the config it resolved alongside every result, so an answer about a deployment is never shown without the deployment it is about.
+- `db:rollback` generated a config when none was there, which on a deployment whose config had been lost pointed it straight back at the database still on disk. It now requires the config to exist, and prints the config and database it is about to act on.
+- `db:rollback` ran its down migrations against a live server. It now takes the same instance lock `serve` holds for its lifetime, which `db:reset` has always required, instead of dropping tables and columns out from under a running process.
+- A relative `sqlite_path` now resolves to one spelling however the config was reached. The lock file and, on Windows, the name of the shutdown event `stop` signals are both derived from that string, so two spellings of one deployment could leave `stop` signalling an event nobody listens on and timing out against a healthy server.
+
 ## [0.1.2] - 2026-07-31
 
 A maintenance release on top of 0.1.1: native Windows install and development

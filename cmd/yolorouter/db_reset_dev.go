@@ -5,12 +5,36 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"github.com/yolorouter/yolorouter/pkg/database"
 )
+
+// confirmDestructive prints prompt and requires the exact word "yes" on in.
+// Anything else — a different answer, a closed stdin, a read error — aborts,
+// so a command that ends up connected to a terminal-less context cannot take
+// silence for agreement.
+//
+// io.EOF is the one error that still allows a "yes": it is what an answer typed
+// without a trailing newline looks like. Any other read error means the answer
+// cannot be trusted to be what was typed, even when the bytes read so far spell
+// the word.
+func confirmDestructive(in io.Reader, prompt string) error {
+	fmt.Print(prompt)
+	answer, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("aborted: reading confirmation: %w", err)
+	}
+	if strings.TrimRight(answer, "\r\n") != "yes" {
+		return fmt.Errorf("aborted: confirmation not given")
+	}
+	return nil
+}
 
 func runDBReset(ctx context.Context, args []string) error {
 	var yes *bool
@@ -22,13 +46,10 @@ func runDBReset(ctx context.Context, args []string) error {
 	}
 	defer func() { _ = app.Close() }()
 
-	fmt.Printf("target database: driver=%s\n", app.Config.Database.Driver)
+	fmt.Print(describeTarget(app.Config, app.ConfigPath))
 	if !*yes {
-		fmt.Print("this will delete ALL data and re-migrate. type \"yes\" to continue: ")
-		reader := bufio.NewReader(os.Stdin)
-		answer, _ := reader.ReadString('\n')
-		if answer != "yes\n" {
-			return fmt.Errorf("aborted: confirmation not given")
+		if err := confirmDestructive(os.Stdin, "this will delete ALL data and re-migrate. type \"yes\" to continue: "); err != nil {
+			return err
 		}
 	}
 

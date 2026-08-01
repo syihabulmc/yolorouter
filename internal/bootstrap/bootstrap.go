@@ -24,12 +24,46 @@ import (
 type App struct {
 	Config *config.Config
 	DB     *gorm.DB
+	// ConfigPath is the absolute path of the config file Init loaded. Commands
+	// that have to name the deployment they act on (db:reset's confirmation)
+	// print it: config resolution reaches beyond the process cwd, so the driver
+	// name alone can't tell a throwaway sandbox apart from a real install.
+	ConfigPath string
 }
 
 func Init(explicitConfigPath string) (*App, error) {
-	cfg, err := config.Load(explicitConfigPath)
+	// The path comes back from the same call that read the file, so a caller
+	// that prints it names the file that was actually loaded.
+	cfg, cfgPath, err := config.LoadWithPath(explicitConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
+	}
+	return InitWithConfig(cfg, cfgPath)
+}
+
+// InitWithConfig is Init for a caller that has already loaded a config and
+// committed to what it said — db:rollback, which names a deployment, locks it,
+// and then drops schema from it. Passing the same path to Init instead would
+// read the file a second time, and the answer need not match: an atomic
+// replacement or a retargeted symlink in between leaves the lock held on one
+// database while the migrations run against another, which is precisely the
+// mutual exclusion the lock exists to provide.
+//
+// cfg must have come from the config package's own loaders. Nothing here
+// re-validates it, so a hand-built value would skip the checks Load performs —
+// zero-value gateway timeouts, an unset log level — and fail much later, in the
+// relay.
+func InitWithConfig(cfg *config.Config, cfgPath string) (*App, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("init: no config given")
+	}
+	// Absolute, because every consumer either prints it for a human to act on
+	// or pastes it into a command; an empty or relative one would name whatever
+	// the caller's working directory happens to be. Callers get this from the
+	// loaders, which already return an absolute path, so a violation is a
+	// programming error rather than something an operator can cause.
+	if !filepath.IsAbs(cfgPath) {
+		return nil, fmt.Errorf("init: config path %q is not absolute", cfgPath)
 	}
 
 	// logger.Init has no failure mode (it never returns an error).
@@ -42,19 +76,10 @@ func Init(explicitConfigPath string) (*App, error) {
 	// startup keeps a known gap in the operator's view instead of degrading
 	// silently.
 	if !config.PermEnforcementSupported {
-		// Absolute, not the bare relative default: this warning is read out of
-		// a log file long after startup, and the hints below are meant to be
-		// pasted verbatim. A relative path only resolves in the server's own
-		// working directory — which for a service-launched process is nowhere
-		// near the install dir — so it would either fail outright or, worse,
-		// restrict some unrelated file of the same name while the real
-		// master-key file stays exposed. Abs only fails if the cwd is
-		// unreadable; fall back to the relative form rather than losing the
-		// warning entirely.
-		cfgPath := config.ResolvePath(explicitConfigPath)
-		if abs, absErr := filepath.Abs(cfgPath); absErr == nil {
-			cfgPath = abs
-		}
+		// The hints below are meant to be pasted verbatim, which is why
+		// cfgPath is absolute: a relative path would either fail outright or,
+		// worse, restrict some unrelated file of the same name while the real
+		// master-key file stays exposed.
 		logger.Warn("config file permissions are not enforced on this platform; the file stores the master key that encrypts upstream credentials, so restrict access to it yourself",
 			zap.String("path", cfgPath),
 			zap.String("restrict", restrictFileHint(cfgPath)),
@@ -79,7 +104,7 @@ func Init(explicitConfigPath string) (*App, error) {
 		return nil, fmt.Errorf("init database: %w", err)
 	}
 
-	return &App{Config: cfg, DB: database.DB}, nil
+	return &App{Config: cfg, DB: database.DB, ConfigPath: cfgPath}, nil
 }
 
 // Close releases the database connection and flushes buffered log output.
