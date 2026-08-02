@@ -681,3 +681,90 @@ func TestRoundTrip_ClaudeResponseToResponses(t *testing.T) {
 		t.Errorf("second output type = %v", msg["type"])
 	}
 }
+
+// TestResponsesWireUsage_AnthropicUpstreamEmitsGross guards the cross-protocol
+// combination that used to under-report: the Responses API defines
+// input_tokens_details.cached_tokens as a breakdown OF input_tokens, so an
+// Anthropic upstream's NET input must be converted before being emitted.
+func TestResponsesWireUsage_AnthropicUpstreamEmitsGross(t *testing.T) {
+	usage := responsesWireUsage(protocols.IRUsage{
+		PromptTokens:     2,
+		CompletionTokens: 123,
+		CacheWriteTokens: 906,
+		CacheReadTokens:  36678,
+	})
+
+	if usage["input_tokens"] != 37586 {
+		t.Errorf("input_tokens = %v, want 37586 (net 2 + write 906 + read 36678)", usage["input_tokens"])
+	}
+	if usage["total_tokens"] != 37709 {
+		t.Errorf("total_tokens = %v, want 37709", usage["total_tokens"])
+	}
+	details := usage["input_tokens_details"].(map[string]interface{})
+	if details["cached_tokens"] != 36678 {
+		t.Errorf("cached_tokens = %v, want 36678", details["cached_tokens"])
+	}
+}
+
+// TestResponsesDecoder_NegativeCacheWriteSurvivesForRejection guards the
+// coherence contract: token counts arrive as signed JSON from third-party
+// upstreams, and the gateway's usageIsCoherent is what turns an impossible
+// record into "unknown, not billed".
+//
+// That only works if the impossible value actually reaches it. Gating the
+// assignment on `> 0` made a negative cache-write vanish here, leaving a record
+// that looks sound and gets billed. Both decoders must therefore copy the value
+// through verbatim and let the coherence check reject it.
+func TestResponsesDecoder_NegativeCacheWriteSurvivesForRejection(t *testing.T) {
+	t.Run("non-streaming", func(t *testing.T) {
+		body := json.RawMessage(`{
+			"id": "resp_neg", "model": "gpt-x", "status": "completed", "output": [],
+			"usage": {"input_tokens": 100, "output_tokens": 5, "total_tokens": 105,
+			          "cache_creation_input_tokens": -50}
+		}`)
+
+		resp, err := ResponseDecoder{}.DecodeResponse(body)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.Usage.CacheWriteTokens != -50 {
+			t.Errorf("CacheWriteTokens = %d, want -50 preserved so the coherence check can reject the record",
+				resp.Usage.CacheWriteTokens)
+		}
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		d := NewStreamDecoder()
+		d.collectUsage(&responsesUsage{
+			InputTokens:              100,
+			OutputTokens:             5,
+			TotalTokens:              105,
+			CacheCreationInputTokens: -50,
+		})
+		if d.usage.CacheWriteTokens != -50 {
+			t.Errorf("CacheWriteTokens = %d, want -50 preserved", d.usage.CacheWriteTokens)
+		}
+	})
+}
+
+// TestResponsesWireUsage_RequiredDetailMembersAlwaysPresent pins the schema
+// contract taken from OpenAI's own OpenAPI spec (archived under
+// docs/vendor-reference/openai/): ResponseUsage.input_tokens_details declares
+// required: [cached_tokens, cache_write_tokens]. Both must therefore appear
+// even when zero, or a strict-validating downstream rejects the response.
+//
+// An earlier revision emitted cache_write_tokens only when non-zero, believing
+// it to be this gateway's own extension. It is not — it is OpenAI's field.
+func TestResponsesWireUsage_RequiredDetailMembersAlwaysPresent(t *testing.T) {
+	usage := responsesWireUsage(protocols.IRUsage{PromptTokens: 10, CompletionTokens: 2})
+
+	details, ok := usage["input_tokens_details"].(map[string]interface{})
+	if !ok {
+		t.Fatal("input_tokens_details is required and must always be present")
+	}
+	for _, k := range []string{"cached_tokens", "cache_write_tokens"} {
+		if _, present := details[k]; !present {
+			t.Errorf("%s is in the schema's required list and must be emitted even when zero", k)
+		}
+	}
+}

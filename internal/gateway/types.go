@@ -232,13 +232,24 @@ type Usage struct {
 	// computeCost. Zero when the upstream didn't report them.
 	CacheWriteTokens int `json:"cache_write_tokens"`
 	CacheReadTokens  int `json:"cache_read_tokens"`
-	// CacheIncludedInPrompt marks whether PromptTokens already counts the
-	// cache-READ tokens. OpenAI-shaped upstreams report prompt_tokens inclusive
-	// of cache reads (true); Anthropic's input_tokens is the net non-cached
-	// count (false). Cache WRITE sits outside the prompt total under every
-	// protocol, so it is not covered by this flag. netPromptTokens (log.go) uses it to
-	// derive the billable/logged net input consistently across protocols, so
-	// the value persisted to request_logs.input_tokens is always the net count
+	// CacheIncludedInPrompt marks whether PromptTokens already counts the cache
+	// tokens. OpenAI-shaped upstreams report prompt_tokens inclusive of cache
+	// reads (true); Anthropic's input_tokens is the net non-cached count
+	// (false). It covers the cache WRITE too, which is not the free-standing
+	// count it once was: this gateway both emits and accepts
+	// protocols.CacheWriteAliasField on OpenAI-shaped wires, where the write is
+	// part of the reported prompt.
+	//
+	// As decoded this is only a claim, taken from the wire shape alone — the
+	// OpenAI-compatible upstreams that front an Anthropic model report a net
+	// prompt under an inclusive-looking schema. normalizeCacheConvention
+	// (log.go) settles it once per request, before anything reads a count from
+	// it. netPromptTokens then derives the billable/logged net input, so the
+	// value persisted to request_logs.input_tokens is always the net count
 	// regardless of origin protocol. Not serialized — internal accounting only.
 	CacheIncludedInPrompt bool `json:"-"`
+	// Invalid carries protocols.IRUsage.Invalid across the bridge: an upstream
+	// reported something impossible and no count here may be billed or
+	// persisted. Not serialized — internal accounting only.
+	Invalid bool `json:"-"`
 }

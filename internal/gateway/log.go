@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/pkg/logger"
 	"go.uber.org/zap"
@@ -74,110 +75,55 @@ type costBreakdown struct {
 // go through it, so billing and the persisted count stay consistent across
 // protocols.
 //
-// Cache WRITE is never subtracted: no protocol counts it inside the prompt
-// total. Anthropic reports cache_creation_input_tokens alongside a net
-// input_tokens, and the inclusive-prompt protocols have no cache-write concept
-// at all (OpenAI's prompt_tokens_details only carries cached_tokens, Gemini's
-// promptTokenCount only folds in cachedContentTokenCount). Subtracting it
-// would deduct tokens the prompt never contained, understating both the input
-// line of the bill and the persisted count.
+// Cache WRITE is subtracted only under the inclusive convention, and only
+// because this gateway now puts it there. It is NOT subtracted from a net
+// (Anthropic) count, where cache_creation_input_tokens sits alongside
+// input_tokens rather than inside it — deducting it there would remove tokens
+// the prompt never contained.
+//
+// The inclusive case used to be unconditionally safe to ignore, since no
+// standard protocol has a cache-write concept: OpenAI's prompt_tokens_details
+// carries only cached_tokens and Gemini's promptTokenCount folds in only
+// cachedContentTokenCount. That stopped being true once the gateway began
+// emitting and accepting the cache_creation_input_tokens alias (see
+// protocols.CacheWriteAliasField) on those wires, where the write portion
+// genuinely IS part of the reported prompt total. Leaving it in would count
+// those tokens twice: once as cache write, once as fresh input.
+//
+// Delegates to protocols.IRUsage.NetPromptTokens rather than repeating the
+// subtraction, because the Claude egress encoder derives the same quantity
+// through that method. Two implementations of one definition is how the
+// input_tokens a client is shown and the input_tokens persisted to request_logs
+// come to disagree about the same request.
 func netPromptTokens(usage *Usage) int {
 	if usage == nil {
 		return 0
 	}
-	n := usage.PromptTokens
-	if usage.CacheIncludedInPrompt {
-		n -= usage.CacheReadTokens
-	}
-	if n < 0 {
-		return 0 // defensive: a malformed upstream count can't produce negative input/cost
-	}
-	return n
+	return usage.toIRUsage().NetPromptTokens()
 }
 
 // normalizeCacheConvention settles which cache-accounting convention a usage
 // record actually follows, before anything prices or persists it.
 //
-// Every OpenAI-shaped decoder marks its usage CacheIncludedInPrompt=true,
-// because the OpenAI schema defines cached_tokens as a subset of prompt_tokens.
-// Plenty of OpenAI-compatible upstreams break that rule — anything fronting an
-// Anthropic model especially, since Anthropic's input_tokens is already net of
-// cache. They copy that net figure into prompt_tokens and report the cached
-// portion only under prompt_tokens_details. Read as inclusive, such a record has
-// its cache subtracted from a prompt the cache was never part of: the input line
-// of the bill and request_logs.input_tokens both lose min(prompt, cache) tokens
-// on EVERY request. When the cache happens to exceed the prompt the subtraction
-// also goes negative, at which point the record looks impossible and is rejected
-// whole, discarding the completion and cache figures that were never in doubt.
+// The decision itself lives in protocols.CacheSitsOutsidePrompt, which the
+// egress encoders reach through IRUsage.PromptIncludesCache. Both sides MUST
+// keep asking that one function: this gateway settles the question once per
+// request against the persisted copy of the usage, while an encoder settles it
+// per frame against the IR copy, long before this runs. A second implementation
+// here would let the input_tokens a client is shown and the input_tokens
+// written to request_logs disagree about the same request.
 //
-// Reclassifying requires the inclusive reading to be positively ruled out, and
-// there are exactly two ways to do that. Either is enough on its own; slack in
-// the stated total is not, because slack alone cannot tell the two conventions
-// apart — a net-convention upstream leaves room for the cache read, an inclusive
-// one can leave room for anything the Usage shape does not model, and the two
-// look identical in the numbers.
-//
-//  1. The cache read exceeds the prompt. The inclusive convention defines the
-//     cache read as a SUBSET of the prompt, and a subset cannot outgrow the set
-//     that contains it, so the inclusive reading is not merely unlikely here but
-//     impossible.
-//  2. The stated total accounts for the cache read on a line of its own, exactly:
-//     prompt + completion + cache write + cache read == total. Under the
-//     inclusive convention the cache read is already inside the prompt, so that
-//     sum would overshoot the total by the whole cache read. Requiring equality
-//     rather than "fits inside" is what keeps unexplained slack from passing as
-//     evidence.
-//
-// Both are gated on the net reading fitting inside the stated total at all. A
-// net sum that overshoots the upstream's own total is self-contradictory, and
-// without the gate an absurd or over-reported cache count could talk its way
-// into being billed through rule 1.
-//
-// Every early return errs toward NOT reclassifying, deliberately: a missed
-// reclassification undercounts the input line, while a wrong one bills the gross
-// prompt at the input price AND the cache at the cache price — the same tokens
-// charged twice.
-//
-// Left alone by design: a record with no cache read (nothing to decide), one
-// with no stated total (no evidence available), and negative or absurd counts
-// (genuinely corrupt — usageIsCoherent rejects them).
+// Applied by mutating the flag rather than deferring to the predicate at every
+// read, because the counts are consumed several times below (pricing, the
+// persisted row, the compression denominator) and a partially-normalized record
+// is exactly the inconsistency this exists to prevent.
 func normalizeCacheConvention(u *Usage) {
-	if u == nil || !u.CacheIncludedInPrompt || u.CacheReadTokens <= 0 {
+	if u == nil {
 		return
 	}
-	if u.TotalTokens <= 0 {
-		return
-	}
-	// Cache WRITE belongs to BOTH readings, never to just one: no convention
-	// counts it inside the prompt (the same fact that keeps netPromptTokens from
-	// subtracting it), so an upstream reporting one has it in the total on its
-	// own line either way. Counting it on one side only would tilt every
-	// cache-writing upstream toward that side.
-	netTotal, ok := addTokenCounts(u.PromptTokens, u.CompletionTokens, u.CacheWriteTokens, u.CacheReadTokens)
-	if !ok || netTotal > u.TotalTokens {
-		// !ok means counts so large the sum wrapped; a wrapped sum compares as
-		// though it fits, which would turn an absurd count into a billable one.
-		return
-	}
-	cacheCannotBeASubsetOfPrompt := u.CacheReadTokens > u.PromptTokens
-	totalCountsCacheSeparately := netTotal == u.TotalTokens
-	if cacheCannotBeASubsetOfPrompt || totalCountsCacheSeparately {
+	if protocols.CacheSitsOutsidePrompt(u.toIRUsage()) {
 		u.CacheIncludedInPrompt = false
 	}
-}
-
-// addTokenCounts sums upstream-reported token counts, reporting false if any
-// count is negative or the total would overflow. Both are reachable from the
-// wire: JSON numbers are signed, and nothing bounds their magnitude.
-func addTokenCounts(counts ...int) (int, bool) {
-	sum := 0
-	for _, n := range counts {
-		if n < 0 || n > math.MaxInt-sum {
-			return 0, false
-		}
-		sum += n
-	}
-	return sum, true
 }
 
 // usageIsCoherent reports whether the upstream-reported counts describe a
@@ -192,17 +138,51 @@ func usageIsCoherent(u *Usage) bool {
 	if u == nil {
 		return false
 	}
+	// A decoder already ruled this record impossible — typically a streaming
+	// frame whose bad counts would otherwise have been erased by IRUsage.Merge
+	// before reaching the checks below.
+	if u.Invalid {
+		return false
+	}
 	if u.PromptTokens < 0 || u.CompletionTokens < 0 || u.CacheReadTokens < 0 ||
 		u.CacheWriteTokens < 0 || u.TotalTokens < 0 {
 		return false
 	}
 	// Only meaningful when the prompt total is supposed to contain the cache
-	// read; under Anthropic's convention the two are independent counts. This is
-	// also the sole bound on the cache count, so it has to stay: a record that
+	// lines; under Anthropic's convention they are independent counts. This is
+	// also the sole bound on them, so it has to stay: a record that
 	// normalizeCacheConvention declined to reclassify still claims the cache sits
 	// inside the prompt, and an unbounded cache line prices straight into the
 	// bill and into the key's budget.
-	if u.CacheIncludedInPrompt && u.CacheReadTokens > u.PromptTokens {
+	//
+	// Both lines are bounded together rather than the read alone, because the
+	// inclusive convention can also carry a cache write (see
+	// protocols.CacheWriteAliasField). Bounding only the read would leave the
+	// write free to exceed the prompt, which drives netPromptTokens to its zero
+	// floor — the whole input billed as cache write, at a cache-write count the
+	// request never performed.
+	//
+	// Must run AFTER normalizeCacheConvention, and both callers do. The same
+	// inequality is rule 1 of the reclassification, so on a record carrying a
+	// stated total this is unreachable: an oversized cache proves the record is
+	// net, the flag has already been cleared, and the counts are kept. What
+	// survives to be rejected here is the narrow remainder — an oversized cache
+	// with no stated total to corroborate it, i.e. no evidence either way. That
+	// stays a rejection on purpose: dropping the counts records the request at
+	// cost_known=false, which is visible, whereas guessing net would bill a
+	// cache the request may never have performed.
+	// Gated on a stated total: without one normalizeCacheConvention cannot
+	// adjudicate the convention, so "cache exceeds prompt" is ambiguous rather
+	// than impossible. A full cache hit legitimately reports prompt 0 / total 0
+	// alongside a real cache read.
+	// The exception is narrow on purpose: only when PromptTokens is 0. There the
+	// two readings agree — net input is 0 either way — so accepting costs
+	// nothing, and it is exactly the legitimate full-cache-hit shape
+	// (prompt 0 / total 0 / cache_read N). With a NON-zero prompt the readings
+	// disagree about the bill (net says PromptTokens, inclusive says 0), so the
+	// record is genuinely ambiguous and refusing to bill it is the safe answer.
+	if cacheTotal, ok := protocols.AddTokenCounts(u.CacheReadTokens, u.CacheWriteTokens); u.CacheIncludedInPrompt &&
+		(u.TotalTokens > 0 || u.PromptTokens != 0) && (!ok || cacheTotal > u.PromptTokens) {
 		return false
 	}
 	// When the upstream states a total, the parts have to fit inside it. This
@@ -210,7 +190,8 @@ func usageIsCoherent(u *Usage) bool {
 	// inflated output figure from a genuinely long generation. It bites on the
 	// passthrough path, where the upstream's own total survives; on the IR path
 	// IRUsage.Merge has already raised a too-small total to prompt+completion.
-	if u.TotalTokens > 0 && u.PromptTokens+u.CompletionTokens > u.TotalTokens {
+	parts, ok := protocols.AddTokenCounts(u.PromptTokens, u.CompletionTokens)
+	if !ok || (u.TotalTokens > 0 && parts > u.TotalTokens) {
 		return false
 	}
 	return true

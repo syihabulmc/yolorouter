@@ -515,12 +515,20 @@ func TestNetPromptTokens(t *testing.T) {
 			237, // 17389 - 17152
 		},
 		{
-			// Cache WRITE sits outside the prompt total under every protocol, so
-			// it is never subtracted — only the read portion is. Deducting it
-			// here would understate the input line of the bill.
-			"cache write is not subtracted",
+			// Under the INCLUSIVE convention the prompt total contains both
+			// cache lines, so both come out. This case used to expect 400, on
+			// the premise that no protocol counts a cache write inside the
+			// prompt — true while the only cache-write source was Anthropic,
+			// whose input_tokens is net (the case above still covers that).
+			//
+			// It stopped being true once the gateway started emitting and
+			// accepting the cache_creation_input_tokens alias on OpenAI-shaped
+			// wires, where the gross prompt is net + read + write (the
+			// convention new-api uses). Leaving the write in would count those
+			// tokens twice: once on the cache-write line, once as fresh input.
+			"inclusive prompt has both cache lines subtracted",
 			&Usage{PromptTokens: 1000, CacheReadTokens: 600, CacheWriteTokens: 300, CacheIncludedInPrompt: true},
-			400, // 1000 - 600; the 300 written tokens were never in prompt_tokens
+			100, // 1000 - 600 - 300
 		},
 		{
 			// Anthropic reports a net input_tokens alongside a cache write, so

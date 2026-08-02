@@ -159,14 +159,37 @@ func buildGeminiParts(resp *protocols.IRResponse) []interface{} {
 	return parts
 }
 
+// buildGeminiUsage renders IR usage as Gemini's usageMetadata.
+//
+// Emits GROSS counts: Gemini documents promptTokenCount as the total effective
+// prompt size, with cachedContentTokenCount a breakdown of it. Forwarding the
+// raw IR PromptTokens would be wrong for an Anthropic upstream, whose count
+// excludes cache — the cached portion would silently disappear from the input.
 func buildGeminiUsage(u protocols.IRUsage) map[string]interface{} {
+	// A record the gateway itself refused publishes nothing: emitting sanitized
+	// counts would hand the client — and any downstream gateway billing from
+	// them — numbers we already decided were impossible. null is the wire's
+	// existing word for "unknown", and unknown is not zero.
+	// HasNegativeCount as well as the flag: the non-streaming decoders keep a
+	// bad count without marking it, and IRNonStreamRelay encodes the response
+	// BEFORE the billing gate runs — so without this the client would receive
+	// sanitized-looking usage for a record the gateway then refuses to bill.
+	if u.Invalid || protocols.HasNegativeCount(u) {
+		return nil
+	}
 	meta := map[string]interface{}{
-		"promptTokenCount":     u.PromptTokens,
+		"promptTokenCount":     u.GrossPromptTokens(),
 		"candidatesTokenCount": u.CompletionTokens,
-		"totalTokenCount":      u.TotalTokens,
+		"totalTokenCount":      u.GrossTotalTokens(),
 	}
 	if u.CacheReadTokens > 0 {
 		meta["cachedContentTokenCount"] = u.CacheReadTokens
+	}
+	// Non-standard cache-write breakdown; see protocols.CacheWriteAliasField.
+	// Deliberately snake_case among Gemini's camelCase fields — it is not a
+	// Google field and should not look like one.
+	if u.CacheWriteTokens > 0 {
+		meta[protocols.CacheWriteAliasField] = u.CacheWriteTokens
 	}
 	return meta
 }
@@ -312,7 +335,12 @@ type usageMetadata struct {
 	// at the input rate and must be excluded when deriving output from the
 	// total.
 	ToolUsePromptTokenCount int `json:"toolUsePromptTokenCount,omitempty"`
-	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
+	// Non-standard cache-write breakdown; see protocols.CacheWriteAliasField.
+	// Gemini has no cache-write concept of its own, so this only ever appears
+	// when the upstream is another gateway fronting an Anthropic model. Like
+	// cachedContentTokenCount it sits INSIDE promptTokenCount.
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CachedContentTokenCount  int `json:"cachedContentTokenCount,omitempty"`
 }
 
 // toIRUsage converts the block, reporting false when any count is negative.
@@ -323,7 +351,8 @@ type usageMetadata struct {
 // plausible-looking number derived from garbage.
 func (m *usageMetadata) toIRUsage() (protocols.IRUsage, bool) {
 	if m.PromptTokenCount < 0 || m.CandidatesTokenCount < 0 || m.ThoughtsTokenCount < 0 ||
-		m.TotalTokenCount < 0 || m.CachedContentTokenCount < 0 || m.ToolUsePromptTokenCount < 0 {
+		m.TotalTokenCount < 0 || m.CachedContentTokenCount < 0 || m.ToolUsePromptTokenCount < 0 ||
+		m.CacheCreationInputTokens < 0 {
 		return protocols.IRUsage{}, false
 	}
 	prompt := m.promptTokens()
@@ -340,6 +369,7 @@ func (m *usageMetadata) toIRUsage() (protocols.IRUsage, bool) {
 		ReasoningTokens:       m.ThoughtsTokenCount,
 		TotalTokens:           total,
 		CacheReadTokens:       m.CachedContentTokenCount,
+		CacheWriteTokens:      m.CacheCreationInputTokens,
 		CacheIncludedInPrompt: true,
 	}, true
 }
@@ -463,11 +493,17 @@ func (d *StreamDecoder) parseGeminiChunk(raw json.RawMessage) []protocols.IRStre
 	}
 
 	if chunk.UsageMetadata != nil {
-		// A rejected block emits no DeltaUsage at all, so usage stays unknown
-		// rather than being merged in as a sanitized-looking value.
-		if u, ok := chunk.UsageMetadata.toIRUsage(); ok {
-			deltas = append(deltas, protocols.DeltaUsage{Usage: u})
+		// A rejected block still emits a delta, marked Invalid. Emitting
+		// nothing was the earlier behaviour and it is not enough: this decoder
+		// rejects BEFORE IRUsage.Merge ever sees the frame, so the verdict
+		// never reaches the accumulator — whatever an earlier valid frame
+		// contributed stays in place, and the DeltaDone that follows completes
+		// the stream and bills those stale counts as coherent.
+		u, ok := chunk.UsageMetadata.toIRUsage()
+		if !ok {
+			u = protocols.IRUsage{Invalid: true}
 		}
+		deltas = append(deltas, protocols.DeltaUsage{Usage: u})
 	}
 
 	return deltas

@@ -643,3 +643,113 @@ func TestRoundTrip_ClaudeResponseEncodeDecode(t *testing.T) {
 		t.Errorf("PromptTokens = %d, want %d", decoded.Usage.PromptTokens, original.Usage.PromptTokens)
 	}
 }
+
+// TestClaudeStreamEncoder_MessageDeltaCarriesFullUsage is the regression guard
+// for a real production defect: a Claude Code client relaying through an
+// OpenAI-protocol upstream received message_start with input_tokens 0 and a
+// message_delta carrying only output_tokens, so the client displayed zero input
+// and no cache information even though the gateway had the correct counts.
+//
+// The numbers are the ones from that request. Under the OpenAI convention the
+// upstream reports a gross prompt (2 net + 906 write + 36678 read = 37586) with
+// the cache split alongside, so the encoder must convert back to Anthropic's
+// net convention and emit the cache breakdown.
+func TestClaudeStreamEncoder_MessageDeltaCarriesFullUsage(t *testing.T) {
+	enc := NewStreamEncoder()
+
+	events := enc.EncodeDeltas([]protocols.IRStreamDelta{
+		protocols.DeltaMessageStart{ID: "msg_usage", Model: "claude-opus-4-8"},
+		protocols.DeltaText{Text: "hi"},
+		// The OpenAI include_usage protocol delivers finish_reason and usage in
+		// the same frame, decoded as DeltaDone followed by DeltaUsage.
+		protocols.DeltaDone{StopReason: "stop"},
+		protocols.DeltaUsage{Usage: protocols.IRUsage{
+			PromptTokens:          37586,
+			CompletionTokens:      123,
+			CacheWriteTokens:      906,
+			CacheReadTokens:       36678,
+			CacheIncludedInPrompt: true,
+		}},
+	})
+	events = append(events, enc.EncodeDone()...)
+
+	var deltaEvent *protocols.SSEEvent
+	for i := range events {
+		if events[i].Event == "message_delta" {
+			deltaEvent = &events[i]
+		}
+	}
+	if deltaEvent == nil {
+		t.Fatal("no message_delta emitted")
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(deltaEvent.Data), &payload); err != nil {
+		t.Fatalf("message_delta is not valid JSON: %v", err)
+	}
+	usage, ok := payload["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatal("message_delta has no usage object")
+	}
+
+	for _, want := range []struct {
+		field string
+		value float64
+	}{
+		{"input_tokens", 2},
+		{"output_tokens", 123},
+		{"cache_creation_input_tokens", 906},
+		{"cache_read_input_tokens", 36678},
+	} {
+		got, present := usage[want.field]
+		if !present {
+			t.Errorf("message_delta usage is missing %s — the client cannot recover it from any other event", want.field)
+			continue
+		}
+		if got != want.value {
+			t.Errorf("message_delta usage %s = %v, want %v", want.field, got, want.value)
+		}
+	}
+}
+
+// TestClaudeStreamEncoder_MessageDeltaOmitsZeroCacheFields keeps the cache
+// members optional: a request that touched no cache must not advertise
+// zero-valued cache fields, matching Anthropic's own omission behaviour.
+func TestClaudeStreamEncoder_MessageDeltaOmitsZeroCacheFields(t *testing.T) {
+	enc := NewStreamEncoder()
+
+	events := enc.EncodeDeltas([]protocols.IRStreamDelta{
+		protocols.DeltaMessageStart{ID: "msg_nocache", Model: "claude-opus-4-8"},
+		protocols.DeltaText{Text: "hi"},
+		protocols.DeltaDone{StopReason: "stop"},
+		protocols.DeltaUsage{Usage: protocols.IRUsage{
+			PromptTokens:          40,
+			CompletionTokens:      7,
+			CacheIncludedInPrompt: true,
+		}},
+	})
+	events = append(events, enc.EncodeDone()...)
+
+	var deltaEvent *protocols.SSEEvent
+	for i := range events {
+		if events[i].Event == "message_delta" {
+			deltaEvent = &events[i]
+		}
+	}
+	if deltaEvent == nil {
+		t.Fatal("no message_delta emitted")
+	}
+
+	var payload map[string]interface{}
+	_ = json.Unmarshal([]byte(deltaEvent.Data), &payload)
+	usage := payload["usage"].(map[string]interface{})
+
+	if usage["input_tokens"] != float64(40) {
+		t.Errorf("input_tokens = %v, want 40", usage["input_tokens"])
+	}
+	for _, field := range []string{"cache_creation_input_tokens", "cache_read_input_tokens"} {
+		if _, present := usage[field]; present {
+			t.Errorf("%s must be omitted when zero", field)
+		}
+	}
+}

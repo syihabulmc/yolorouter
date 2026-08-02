@@ -361,16 +361,7 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 		incompleteDetails = map[string]interface{}{"reason": "max_output_tokens"}
 	}
 
-	usage := map[string]interface{}{
-		"input_tokens":  resp.Usage.PromptTokens,
-		"output_tokens": resp.Usage.CompletionTokens,
-		"total_tokens":  resp.Usage.TotalTokens,
-	}
-	if resp.Usage.CacheReadTokens > 0 {
-		usage["input_tokens_details"] = map[string]interface{}{
-			"cached_tokens": resp.Usage.CacheReadTokens,
-		}
-	}
+	usage := responsesWireUsage(resp.Usage)
 
 	result := map[string]interface{}{
 		"id":                 resp.ID,
@@ -714,6 +705,46 @@ func (e *StreamEncoder) closeAllTools() []protocols.SSEEvent {
 	return events
 }
 
+// responsesWireUsage renders IR usage as the Responses API usage object,
+// shared by the streaming response.completed event and the non-streaming
+// response so the two shapes cannot drift apart.
+//
+// Emits GROSS counts: the Responses API documents
+// input_tokens_details.cached_tokens as a breakdown OF input_tokens, so the
+// cached portion must sit inside the input total. Forwarding the raw IR
+// PromptTokens would be wrong for an Anthropic upstream, whose count is net —
+// the cache portion would vanish and the response would claim
+// cached_tokens > input_tokens.
+func responsesWireUsage(u protocols.IRUsage) map[string]interface{} {
+	// A record the gateway itself refused publishes nothing: emitting sanitized
+	// counts would hand the client — and any downstream gateway billing from
+	// them — numbers we already decided were impossible. null is the wire's
+	// existing word for "unknown", and unknown is not zero.
+	// HasNegativeCount as well as the flag: the non-streaming decoders keep a
+	// bad count without marking it, and IRNonStreamRelay encodes the response
+	// BEFORE the billing gate runs — so without this the client would receive
+	// sanitized-looking usage for a record the gateway then refuses to bill.
+	if u.Invalid || protocols.HasNegativeCount(u) {
+		return nil
+	}
+	usage := map[string]interface{}{
+		"input_tokens":  u.GrossPromptTokens(),
+		"output_tokens": u.CompletionTokens,
+		"total_tokens":  u.GrossTotalTokens(),
+	}
+	// BOTH members are in the schema's required list for input_tokens_details
+	// ([cached_tokens, cache_write_tokens]), so the object and both members are
+	// emitted unconditionally — a strict-validating downstream rejects the
+	// response otherwise. An earlier revision gated them on being non-zero, on
+	// the mistaken belief that the write was our own extension rather than
+	// OpenAI's field.
+	usage["input_tokens_details"] = map[string]interface{}{
+		"cached_tokens":                 u.CacheReadTokens,
+		protocols.CacheWriteDetailField: u.CacheWriteTokens,
+	}
+	return usage
+}
+
 func (e *StreamEncoder) makeCompleted(stopReason string) protocols.SSEEvent {
 	status := "completed"
 	var details interface{}
@@ -721,16 +752,7 @@ func (e *StreamEncoder) makeCompleted(stopReason string) protocols.SSEEvent {
 		status = "incomplete"
 		details = map[string]interface{}{"reason": "max_output_tokens"}
 	}
-	usage := map[string]interface{}{
-		"input_tokens":  e.usage.PromptTokens,
-		"output_tokens": e.usage.CompletionTokens,
-		"total_tokens":  e.usage.TotalTokens,
-	}
-	if e.usage.CacheReadTokens > 0 {
-		usage["input_tokens_details"] = map[string]interface{}{
-			"cached_tokens": e.usage.CacheReadTokens,
-		}
-	}
+	usage := responsesWireUsage(e.usage)
 	return e.makeEvent("response.completed", map[string]interface{}{
 		"response": map[string]interface{}{
 			"id":                 e.responseID,

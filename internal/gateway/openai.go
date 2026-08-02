@@ -231,6 +231,10 @@ type wireUsage struct {
 
 type promptTokensDetails struct {
 	CachedTokens *int `json:"cached_tokens"`
+	// OpenRouter documents a cache-WRITE count nested here, beside
+	// cached_tokens. It is the standard spelling and takes precedence over the
+	// top-level CacheCreationInputTokens alias.
+	CacheWriteTokens *int `json:"cache_write_tokens"`
 }
 
 func (w *wireUsage) toUsage() *Usage {
@@ -262,9 +266,15 @@ func (w *wireUsage) toUsage() *Usage {
 	case w.PromptCacheHitTokens != nil:
 		u.CacheReadTokens = *w.PromptCacheHitTokens
 	}
-	// Cache WRITE: only Anthropic exposes this (cache_creation_input_tokens).
+	// Cache WRITE has two spellings and they name the same breakdown of
+	// prompt_tokens, so exactly one is taken — never summed. OpenRouter's
+	// nested cache_write_tokens is the documented contract and wins; the
+	// top-level Anthropic-style alias is the fallback.
 	if w.CacheCreationInputTokens != nil {
 		u.CacheWriteTokens = *w.CacheCreationInputTokens
+	}
+	if w.PromptTokensDetails != nil && w.PromptTokensDetails.CacheWriteTokens != nil {
+		u.CacheWriteTokens = *w.PromptTokensDetails.CacheWriteTokens
 	}
 	return u
 }
