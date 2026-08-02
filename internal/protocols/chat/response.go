@@ -110,6 +110,10 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 		if resp.Usage.PromptTokensDetails != nil && resp.Usage.PromptTokensDetails.CacheWriteTokens != nil {
 			irResp.Usage.CacheWriteTokens = *resp.Usage.PromptTokensDetails.CacheWriteTokens
 		}
+		// Set the verdict at the IR exit so every consumer reads Invalid instead
+		// of re-judging on data the conversion has since distorted. See
+		// IRUsage.IsIncoherent.
+		irResp.Usage.Invalid = irResp.Usage.IsIncoherent()
 	}
 
 	return irResp, nil
@@ -304,14 +308,15 @@ func (d *StreamDecoder) parseChunk(raw json.RawMessage) []protocols.IRStreamDelt
 		if chunk.Usage.PromptTokensDetails != nil && chunk.Usage.PromptTokensDetails.CacheWriteTokens != nil {
 			usage.CacheWriteTokens = *chunk.Usage.PromptTokensDetails.CacheWriteTokens
 		}
-		// A negative count cannot be carried through IRUsage.Merge, which copies
-		// only values greater than zero, so it would silently become 0 and be
+		// An impossible record cannot be carried through IRUsage.Merge, which
+		// copies only values greater than zero, so the negative or oversized cache
+		// that proved it wrong would silently vanish and the remaining counts be
 		// billed as sound. The frame is MARKED rather than dropped: dropping it
 		// would leave whatever an earlier frame merged in place, and a
 		// finish_reason in this same chunk would still complete the stream and
 		// bill those stale counts. Merge propagates Invalid one-way, so the
 		// verdict survives to every consumer.
-		usage.Invalid = protocols.HasNegativeCount(usage)
+		usage.Invalid = usage.IsIncoherent()
 		// Cache counts are enough on their own to make a frame worth emitting;
 		// requiring prompt/completion is what dropped cache-only chunks.
 		if usage.Invalid ||

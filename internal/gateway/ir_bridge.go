@@ -108,6 +108,7 @@ func irUsageToUsage(u *protocols.IRUsage) *Usage {
 		CacheReadTokens:       u.CacheReadTokens,
 		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
 		Invalid:               u.Invalid,
+		ReasoningTokens:       u.ReasoningTokens,
 	}
 }
 
@@ -125,5 +126,6 @@ func (u Usage) toIRUsage() protocols.IRUsage {
 		CacheReadTokens:       u.CacheReadTokens,
 		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
 		Invalid:               u.Invalid,
+		ReasoningTokens:       u.ReasoningTokens,
 	}
 }

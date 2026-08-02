@@ -52,7 +52,15 @@ func (dst *IRUsage) Merge(src IRUsage) {
 	// paths. Every accumulator funnels through Merge, so a decoder cannot
 	// forget it and cannot run it in the wrong order; both mistakes were made
 	// when each decoder checked for itself.
-	if HasNegativeCount(src) {
+	//
+	// src is judged on its OWN shape (its own counts vs its own prompt), before
+	// the copy below mixes it into dst: a frame that is impossible on its own
+	// is impossible no matter what later frames contribute, and the verdict
+	// propagates one-way like Invalid itself. IsIncoherent (not HasNegativeCount)
+	// so the cache-exceeds-prompt impossibility is caught here too — otherwise a
+	// frame carrying prompt=100 alongside cache_write=1000000 would merge its
+	// counts through and the accumulated record would look perfectly ordinary.
+	if src.IsIncoherent() {
 		dst.Invalid = true
 	}
 	if src.PromptTokens > 0 {
@@ -183,17 +191,66 @@ func AddTokenCounts(counts ...int) (int, bool) {
 // HasNegativeCount reports whether any token count is negative, i.e. the record
 // is impossible and must not be trusted.
 //
-// Streaming decoders use this to drop a bad usage frame rather than emit it.
-// They cannot rely on the gateway's coherence check the way the non-streaming
-// path does: every relay accumulator merges frames through IRUsage.Merge, which
-// copies only values greater than zero, so a negative would be quietly rounded
-// up to 0 and the surrounding counts billed as though nothing were wrong.
-// Dropping the frame leaves usage unknown, which is the outcome the coherence
-// check would have produced.
+// Used internally by IsIncoherent (the single verdict point at the IR boundary).
+// Direct callers should prefer IsIncoherent, which also covers the
+// inclusive-convention cache-exceeds-prompt shape; this helper checks negatives
+// only. Kept as a named function because the negative-count rule is independently
+// meaningful and IsIncoherent composes it.
 func HasNegativeCount(u IRUsage) bool {
 	return u.PromptTokens < 0 || u.CompletionTokens < 0 || u.TotalTokens < 0 ||
 		u.CacheReadTokens < 0 || u.CacheWriteTokens < 0 ||
 		u.ReasoningTokens < 0 || u.WebSearchCount < 0
+}
+
+// IsIncoherent reports whether this usage describes a physically impossible
+// request — a negative count in ANY field (including ReasoningTokens and
+// WebSearchCount), or, under the inclusive convention, cache counts that exceed
+// the prompt they are supposedly a subset of.
+//
+// This is the SINGLE verdict point at the IR boundary: each decoder sets
+// Invalid = IsIncoherent() once on the way out, and every consumer downstream —
+// the wire encoders, the billing gate, persistence — reads Invalid and nothing
+// else, instead of re-judging on data the conversion has since distorted.
+// IRUsage.Merge copies only values greater than zero (erasing the very negative
+// that proved a record wrong), and irUsageToUsage passes the upstream total
+// through verbatim; running the verdict before either of those, and carrying it
+// on Invalid, is what stops encoder and billing from disagreeing about the same
+// record.
+//
+// Deliberately NOT checking parts > total: a stated total that the parts
+// overflow is "attribution unknown", not "impossible" — the tokens were really
+// consumed, just not split between prompt and completion. Every gateway surveyed
+// (new-api, litellm, llmgateway) recomputes total = prompt + completion and
+// bills on; this gateway's own usage-cross-protocol-matrix doc (§三) records
+// "billing uses max(GrossTotal, upstream)" as intentional for the same reason.
+func (u IRUsage) IsIncoherent() bool {
+	if u.Invalid {
+		return true
+	}
+	if HasNegativeCount(u) {
+		return true
+	}
+	// Inclusive convention: both cache lines are subsets OF the prompt, so
+	// exceeding it is impossible. PromptIncludesCache, not the raw flag, because
+	// a record already reclassified as net states its cache alongside the prompt
+	// where exceeding it is normal. See CacheSitsOutsidePrompt for the full
+	// rationale; this is its impossibility ruling expressed as a verdict.
+	//
+	// Gated on a stated total OR a non-zero prompt: a full cache hit legitimately
+	// reports prompt 0 / total 0 alongside a real cache read, and without the
+	// gate "cache exceeds prompt" would reject exactly that shape (500 > 0). The
+	// narrow exception is when PromptTokens is 0: there the inclusive and net
+	// readings agree (net input is 0 either way), so accepting costs nothing and
+	// keeps the legitimate full-cache-hit record billable.
+	if u.PromptIncludesCache() && (u.TotalTokens > 0 || u.PromptTokens != 0) {
+		// !ok is an overflow (e.g. both counts near MaxInt) — treat it as
+		// impossible rather than billable, matching AddTokenCounts's contract
+		// ("callers must treat false as 'these counts cannot be trusted'").
+		if ct, ok := AddTokenCounts(u.CacheReadTokens, u.CacheWriteTokens); !ok || ct > u.PromptTokens {
+			return true
+		}
+	}
+	return false
 }
 
 // CacheSitsOutsidePrompt reports whether a record that CLAIMS the inclusive

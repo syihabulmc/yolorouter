@@ -252,4 +252,11 @@ type Usage struct {
 	// reported something impossible and no count here may be billed or
 	// persisted. Not serialized — internal accounting only.
 	Invalid bool `json:"-"`
+	// ReasoningTokens carries the IR reasoning-token count across the bridge so
+	// the coherence verdict (run via toIRUsage) can see a negative one. Without
+	// it a record the wire encoder refused (HasNegativeCount sees the negative
+	// reasoning count and emits null) would still bill here, since the bridge
+	// used to drop the field and the billing gate could not re-derive the
+	// verdict. Not serialized — internal accounting only.
+	ReasoningTokens int `json:"-"`
 }

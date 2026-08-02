@@ -180,6 +180,10 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 		if wire.Usage.OutputTokensDetails != nil {
 			resp.Usage.ReasoningTokens = wire.Usage.OutputTokensDetails.ReasoningTokens
 		}
+		// Set the verdict at the IR exit so every consumer reads Invalid instead
+		// of re-judging on data the conversion has since distorted. See
+		// IRUsage.IsIncoherent.
+		resp.Usage.Invalid = resp.Usage.IsIncoherent()
 	}
 
 	// Infer stop reason: when status is "incomplete", prefer incomplete_details.reason;

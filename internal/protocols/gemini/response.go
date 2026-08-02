@@ -170,11 +170,10 @@ func buildGeminiUsage(u protocols.IRUsage) map[string]interface{} {
 	// counts would hand the client — and any downstream gateway billing from
 	// them — numbers we already decided were impossible. null is the wire's
 	// existing word for "unknown", and unknown is not zero.
-	// HasNegativeCount as well as the flag: the non-streaming decoders keep a
-	// bad count without marking it, and IRNonStreamRelay encodes the response
-	// BEFORE the billing gate runs — so without this the client would receive
-	// sanitized-looking usage for a record the gateway then refuses to bill.
-	if u.Invalid || protocols.HasNegativeCount(u) {
+	// Invalid alone: the verdict is settled once at the decoder exit (see
+	// IRUsage.IsIncoherent), so this reads the same answer the billing gate
+	// reads, instead of re-judging with a narrower predicate and disagreeing.
+	if u.Invalid {
 		return nil
 	}
 	meta := map[string]interface{}{
@@ -581,6 +580,9 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 		// Leaves the zero-value usage (unknown, not zero-cost) when the block
 		// is rejected — same treatment the streaming path gives it.
 		if u, ok := resp.UsageMetadata.toIRUsage(); ok {
+			// Set the verdict at the IR exit so every consumer reads Invalid
+			// instead of re-judging. See IRUsage.IsIncoherent.
+			u.Invalid = u.IsIncoherent()
 			irResp.Usage = u
 		}
 	}

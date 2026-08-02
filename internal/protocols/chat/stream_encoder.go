@@ -140,11 +140,10 @@ func openAIWireUsage(u protocols.IRUsage) map[string]interface{} {
 	// counts would hand the client — and any downstream gateway billing from
 	// them — numbers we already decided were impossible. null is the wire's
 	// existing word for "unknown", and unknown is not zero.
-	// HasNegativeCount as well as the flag: the non-streaming decoders keep a
-	// bad count without marking it, and IRNonStreamRelay encodes the response
-	// BEFORE the billing gate runs — so without this the client would receive
-	// sanitized-looking usage for a record the gateway then refuses to bill.
-	if u.Invalid || protocols.HasNegativeCount(u) {
+	// Invalid alone: the verdict is settled once at the decoder exit (see
+	// IRUsage.IsIncoherent), so this reads the same answer the billing gate
+	// reads, instead of re-judging with a narrower predicate and disagreeing.
+	if u.Invalid {
 		return nil
 	}
 	usage := map[string]interface{}{

@@ -158,7 +158,13 @@ func (d *StreamDecoder) DecodeChunk(raw string) ([]protocols.IRStreamDelta, erro
 			// an earlier frame merged in place, and the DeltaDone appended just
 			// below would still complete the stream and bill those stale counts.
 			// Merge propagates Invalid one-way, so the verdict survives.
-			if protocols.HasNegativeCount(d.usage) {
+			//
+			// IsIncoherent, not HasNegativeCount: Merge judges each incoming
+			// src frame on its own, but the ACCUMULATED record can still be
+			// impossible once frames combine (one frame's prompt, another's
+			// oversized cache). Re-weighing the merged result here is what
+			// catches that — and the cache-exceeds-prompt shape alongside it.
+			if d.usage.IsIncoherent() {
 				d.usage.Invalid = true
 			}
 			out = append(out, protocols.DeltaUsage{Usage: d.usage})

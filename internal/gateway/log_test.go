@@ -561,11 +561,18 @@ func TestNetPromptTokens(t *testing.T) {
 }
 
 // TestComputeCostRejectsIncoherentUsage: token counts come off the wire from
-// third-party upstreams, so a buggy or hostile provider can report negatives, a
-// cache read larger than the inclusive prompt it was read from, or parts that
-// overflow the total it stated itself. All must be treated as unknown usage —
-// Known=false keeps the cost off the bill and, because finalize gates budget
-// accumulation on Known, off the API key's budget too.
+// third-party upstreams, so a buggy or hostile provider can report negatives, or
+// a cache read larger than the inclusive prompt it was read from. Both are
+// physically impossible and must be treated as unknown usage — Known=false
+// keeps the cost off the bill and, because finalize gates budget accumulation
+// on Known, off the API key's budget too.
+//
+// Note on what is NOT here: "parts exceed stated total" is deliberately absent.
+// A stated total that the parts overflow is "attribution unknown", not
+// impossible — the tokens were really consumed. Every gateway surveyed
+// (new-api, litellm, llmgateway) recomputes total = prompt + completion and
+// bills on; this gateway follows that convention (see usage-cross-protocol-
+// matrix §三). See TestComputeCostAcceptsContradictoryTotal for the positive case.
 func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
 	readPrice := 0.02
 	cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0, CacheReadPrice: &readPrice}
@@ -593,10 +600,12 @@ func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
 		{"negative cache write", &Usage{PromptTokens: 100, CompletionTokens: 10, CacheWriteTokens: -1}},
 		{"negative total", &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: -1}},
 		{
-			// An inflated completion count is otherwise indistinguishable from a
-			// long generation; the upstream's own total is what contradicts it.
-			"parts exceed stated total",
-			&Usage{PromptTokens: 100, CompletionTokens: 1_000_000, TotalTokens: 110},
+			// P2-4 regression: a negative reasoning count must reach the verdict.
+			// It arrives on IRUsage.ReasoningTokens; the bridge carries it across
+			// so the wire encoder (which refuses via HasNegativeCount) and this
+			// billing gate agree on rejecting it.
+			"negative reasoning tokens",
+			&Usage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, ReasoningTokens: -10},
 		},
 	}
 	for _, tc := range cases {
@@ -646,6 +655,14 @@ func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
 	exact := &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110}
 	if got := computeCost(cand, exact, 0); !got.Known {
 		t.Error("prompt+completion == total is the normal case")
+	}
+	// A contradictory total (parts overflow it) is NOT rejected: the tokens were
+	// really consumed, just not split between prompt/completion, and every gateway
+	// surveyed recomputes the total as the parts-sum and bills on. This locks the
+	// industry-convention behavior decided after surveying new-api/litellm/llmgateway.
+	contradictory := &Usage{PromptTokens: 100, CompletionTokens: 1_000_000, TotalTokens: 110}
+	if got := computeCost(cand, contradictory, 0); !got.Known {
+		t.Error("a contradictory total must still bill (industry convention: recompute, don't reject)")
 	}
 }
 
@@ -841,8 +858,13 @@ func TestFinalizeNormalizesCacheExclusivePrompt(t *testing.T) {
 			usage: &Usage{PromptTokens: 100, CompletionTokens: 10, CacheReadTokens: -1000, CacheIncludedInPrompt: true},
 		},
 		{
-			name:  "parts exceeding the stated total are still rejected",
-			usage: &Usage{PromptTokens: 100, CompletionTokens: 1_000_000, TotalTokens: 110},
+			// A contradictory total (parts overflow it) is NOT rejected: every
+			// gateway surveyed recomputes the total as the parts-sum and bills on,
+			// and so does this one. The upstream's stated total of 110 is ignored;
+			// billing reads the parts directly. 100×1.0 + 1000000×2.0 = 2000100.
+			name:      "parts exceeding the stated total still bill (industry convention)",
+			usage:     &Usage{PromptTokens: 100, CompletionTokens: 1_000_000, TotalTokens: 110},
+			wantInput: 100, wantOutput: 1_000_000, wantRead: 0, wantKnown: true, wantMicros: 2_000_100,
 		},
 		{
 			// Absent usage stays unknown — never a free request.

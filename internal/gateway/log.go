@@ -134,67 +134,20 @@ func normalizeCacheConvention(u *Usage) {
 // negative line item, and an oversized one bills cache reads the request never
 // performed. Incoherent usage is treated exactly like absent usage — unknown,
 // never zero and never billed.
+//
+// Delegates to the single IR-level verdict (protocols.IRUsage.IsIncoherent) so
+// the wire encoders and this billing gate read the SAME answer instead of each
+// re-judging with its own predicate. The verdict was already computed at the
+// decoder exit and carried on Invalid; round-tripping through toIRUsage lets
+// this function evaluate the same predicate the encoder effectively used,
+// catching the records where Merge erased the evidence before the mark was set.
+// Both callers run normalizeCacheConvention first, so PromptIncludesCache (which
+// IsIncoherent relies on) has the settled convention to read.
 func usageIsCoherent(u *Usage) bool {
 	if u == nil {
 		return false
 	}
-	// A decoder already ruled this record impossible — typically a streaming
-	// frame whose bad counts would otherwise have been erased by IRUsage.Merge
-	// before reaching the checks below.
-	if u.Invalid {
-		return false
-	}
-	if u.PromptTokens < 0 || u.CompletionTokens < 0 || u.CacheReadTokens < 0 ||
-		u.CacheWriteTokens < 0 || u.TotalTokens < 0 {
-		return false
-	}
-	// Only meaningful when the prompt total is supposed to contain the cache
-	// lines; under Anthropic's convention they are independent counts. This is
-	// also the sole bound on them, so it has to stay: a record that
-	// normalizeCacheConvention declined to reclassify still claims the cache sits
-	// inside the prompt, and an unbounded cache line prices straight into the
-	// bill and into the key's budget.
-	//
-	// Both lines are bounded together rather than the read alone, because the
-	// inclusive convention can also carry a cache write (see
-	// protocols.CacheWriteAliasField). Bounding only the read would leave the
-	// write free to exceed the prompt, which drives netPromptTokens to its zero
-	// floor — the whole input billed as cache write, at a cache-write count the
-	// request never performed.
-	//
-	// Must run AFTER normalizeCacheConvention, and both callers do. The same
-	// inequality is rule 1 of the reclassification, so on a record carrying a
-	// stated total this is unreachable: an oversized cache proves the record is
-	// net, the flag has already been cleared, and the counts are kept. What
-	// survives to be rejected here is the narrow remainder — an oversized cache
-	// with no stated total to corroborate it, i.e. no evidence either way. That
-	// stays a rejection on purpose: dropping the counts records the request at
-	// cost_known=false, which is visible, whereas guessing net would bill a
-	// cache the request may never have performed.
-	// Gated on a stated total: without one normalizeCacheConvention cannot
-	// adjudicate the convention, so "cache exceeds prompt" is ambiguous rather
-	// than impossible. A full cache hit legitimately reports prompt 0 / total 0
-	// alongside a real cache read.
-	// The exception is narrow on purpose: only when PromptTokens is 0. There the
-	// two readings agree — net input is 0 either way — so accepting costs
-	// nothing, and it is exactly the legitimate full-cache-hit shape
-	// (prompt 0 / total 0 / cache_read N). With a NON-zero prompt the readings
-	// disagree about the bill (net says PromptTokens, inclusive says 0), so the
-	// record is genuinely ambiguous and refusing to bill it is the safe answer.
-	if cacheTotal, ok := protocols.AddTokenCounts(u.CacheReadTokens, u.CacheWriteTokens); u.CacheIncludedInPrompt &&
-		(u.TotalTokens > 0 || u.PromptTokens != 0) && (!ok || cacheTotal > u.PromptTokens) {
-		return false
-	}
-	// When the upstream states a total, the parts have to fit inside it. This
-	// is the only bound on the completion count — nothing else can tell an
-	// inflated output figure from a genuinely long generation. It bites on the
-	// passthrough path, where the upstream's own total survives; on the IR path
-	// IRUsage.Merge has already raised a too-small total to prompt+completion.
-	parts, ok := protocols.AddTokenCounts(u.PromptTokens, u.CompletionTokens)
-	if !ok || (u.TotalTokens > 0 && parts > u.TotalTokens) {
-		return false
-	}
-	return true
+	return !u.toIRUsage().IsIncoherent()
 }
 
 func computeCost(cand *model.ModelCandidate, usage *Usage, compressTokensSaved int) costBreakdown {
