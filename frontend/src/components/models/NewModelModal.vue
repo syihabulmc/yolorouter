@@ -1,13 +1,12 @@
 <!-- frontend/src/components/models/NewModelModal.vue -->
 <template>
-  <n-modal
-    :show="show"
-    preset="card"
+  <ModalDrawer
+    v-model:show="showModel"
     :title="t('models.createButton')"
-    style="max-width: 560px"
+    max-width="560px"
     :mask-closable="false"
     :close-on-esc="false"
-    @update:show="onUpdateShow"
+    :back-label="t('common.back')"
   >
     <!-- Preset catalogue: pick common model IDs by vendor and batch-add them.
          Already-existing names are shown disabled with an "added" badge; the
@@ -56,11 +55,11 @@
         <span v-if="selected.size > 0" class="selected-count">
           {{ t('models.presetSelectedCount', { count: selected.size }) }}
         </span>
-        <n-button @click="onUpdateShow(false)">{{ t('models.cancel') }}</n-button>
+        <n-button @click="showModel = false">{{ t('models.cancel') }}</n-button>
         <n-button type="primary" :loading="submitting" @click="onSubmit">{{ t('models.save') }}</n-button>
       </n-space>
     </template>
-  </n-modal>
+  </ModalDrawer>
 </template>
 
 <script setup lang="ts">
@@ -69,6 +68,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NCheckbox, useMessage, type FormInst, type FormItemRule, type FormRules } from 'naive-ui'
 import HelpLabel from '../HelpLabel.vue'
+import ModalDrawer from '../common/ModalDrawer.vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import { modelNameFormatRule } from '../../utils/modelValidators'
@@ -76,6 +76,13 @@ import { MODEL_PRESET_GROUPS, type ModelPresetGroup } from '../../config/modelPr
 
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ 'update:show': [boolean] }>()
+
+// ModalDrawer owns a v-model:show; bridge it to this component's existing
+// :show / @update:show contract so the parent doesn't have to change.
+const showModel = computed({
+  get: () => props.show,
+  set: (v) => emit('update:show', v),
+})
 
 const { t } = useI18n()
 const message = useMessage()
@@ -150,10 +157,6 @@ watch(
   },
 )
 
-function onUpdateShow(value: boolean) {
-  emit('update:show', value)
-}
-
 async function onSubmit() {
   try {
     await formRef.value?.validate()
@@ -168,7 +171,7 @@ async function onSubmit() {
     submitting.value = true
     try {
       const created = await store.create(manual)
-      onUpdateShow(false)
+      showModel.value = false
       router.push(`/models/${created.id}`)
     } catch (err) {
       message.error(displayMessage(err, t))
@@ -193,7 +196,7 @@ async function onSubmit() {
     } else {
       message.warning(t('models.batchSummaryWithSkip', { created, skipped }))
     }
-    onUpdateShow(false)
+    showModel.value = false
   } catch (err) {
     message.error(displayMessage(err, t))
   } finally {

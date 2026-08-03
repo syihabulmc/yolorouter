@@ -68,18 +68,14 @@
       </div>
 
       <div class="data-table-wrapper">
-        <n-data-table
+        <ResponsiveDataTable
           :columns="columns"
           :data="filteredProviders"
           :loading="store.loading"
-          :bordered="false"
-          :single-line="false"
           :scroll-x="1010"
           :row-key="(row: Provider) => row.id"
           :row-props="rowProps"
           :pagination="pagination"
-          @update:page="onPageChange"
-          @update:page-size="onPageSizeChange"
         />
       </div>
     </template>
@@ -95,8 +91,8 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
-import { Plus, Search, Server } from '@lucide/vue'
+import { NButton, NDropdown, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { MoreHorizontal, Plus, Search, Server } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
 import type { Provider } from '../../api/providers'
@@ -104,6 +100,7 @@ import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import NewProviderModal from '../../components/providers/NewProviderModal.vue'
 import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
+import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import { columnTitle } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { ALL_PROTOCOLS, enabledProtocolEndpoints } from '../../utils/providerProtocol'
@@ -170,7 +167,7 @@ const filteredProviders = computed(() => {
 // Client-side pagination: providers are few (admin-configured), so the full
 // list is fetched once and sliced in the table rather than adding a
 // server-side paged endpoint.
-const { pagination, onPageChange, onPageSizeChange } = useClientPagination()
+const { pagination } = useClientPagination()
 
 // Applying a narrowed filter can leave the current page past the end of the
 // results, so reset to the first page.
@@ -311,6 +308,7 @@ const columns = computed<DataTableColumns<Provider>>(() => [
   {
     title: t('common.actions'),
     key: 'actions',
+    align: 'center',
     width: 90,
     render: (row) =>
       h(
@@ -318,9 +316,27 @@ const columns = computed<DataTableColumns<Provider>>(() => [
         { onClick: (e: MouseEvent) => e.stopPropagation() },
         [
           h(
-            NButton,
-            { size: 'small', quaternary: true, onClick: () => openEditProvider(row) },
-            { default: () => t('providers.editProvider') },
+            NDropdown,
+            {
+              trigger: 'click',
+              placement: 'bottom-end',
+              options: [
+                { label: t('providers.editProvider'), key: 'edit' },
+                { label: t('costs.detail.viewCost'), key: 'viewCost' },
+              ],
+              onSelect: (key: string) => {
+                if (key === 'edit') openEditProvider(row)
+                else if (key === 'viewCost') router.push(`/costs/providers/${row.id}`)
+              },
+            },
+            {
+              default: () =>
+                h(
+                  NButton,
+                  { size: 'small', quaternary: true, circle: true },
+                  { icon: () => h(MoreHorizontal, { size: 16 }) },
+                ),
+            },
           ),
         ],
       ),

@@ -1,13 +1,12 @@
 <!-- frontend/src/components/models/CandidateEditModal.vue -->
 <template>
-  <n-modal
-    :show="show"
-    preset="card"
+  <ModalDrawer
+    v-model:show="showModel"
     :title="editingCandidate ? t('models.editCandidate') : t('models.addCandidate')"
-    style="max-width: 520px"
+    max-width="520px"
     :mask-closable="false"
     :close-on-esc="false"
-    @update:show="onUpdateShow"
+    :back-label="t('models.cancel')"
   >
     <div v-if="modelName" class="outward-model">
       <span class="outward-model__label">{{ t('models.name') }}</span>
@@ -181,7 +180,7 @@
         </template>
       </n-space>
     </template>
-  </n-modal>
+  </ModalDrawer>
 
   <NewProviderModal v-model:show="showNewProviderModal" />
 </template>
@@ -208,6 +207,7 @@ import { providerModelNameRule, nonNegativePriceRule } from '../../utils/modelVa
 import { capabilityState } from '../../utils/modelStatusDisplay'
 import { testOutcomeI18nKey, TEST_OUTCOME_VERIFICATION_UNSUPPORTED } from '../../utils/testOutcomeDisplay'
 import HelpLabel from '../HelpLabel.vue'
+import ModalDrawer from '../common/ModalDrawer.vue'
 import NewProviderModal from '../providers/NewProviderModal.vue'
 import type { CandidateTestReport, ModelCandidate, ProbeReport, SuggestedPrice } from '../../api/models'
 import { suggestCandidatePrice } from '../../api/models'
@@ -225,6 +225,17 @@ const props = defineProps<{
   editingCandidate?: ModelCandidate | null
 }>()
 const emit = defineEmits<{ 'update:show': [boolean]; saved: []; retest: [number] }>()
+
+// ModalDrawer owns a v-model:show; bridge it to this component's existing
+// :show / @update:show contract. The footer still calls onUpdateShow directly
+// for its explicit buttons; this only handles the drawer's own dismiss paths
+// (back arrow / mask), routing them through the same emit.
+const showModel = computed({
+  get: () => props.show,
+  set: (v) => {
+    if (!v) onUpdateShow(false)
+  },
+})
 
 const { t } = useI18n()
 const message = useMessage()

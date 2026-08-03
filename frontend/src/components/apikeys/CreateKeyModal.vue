@@ -4,14 +4,13 @@
      custom-system-prompt and compression are configured post-creation via the
      optimization modal. -->
 <template>
-  <n-modal
-    :show="show"
-    preset="card"
+  <ModalDrawer
+    v-model:show="showModel"
     :title="step === 'form' ? t('apiKeys.createTitle') : t('apiKeys.plaintextTitle')"
-    style="max-width: 520px"
+    max-width="520px"
     :mask-closable="false"
     :close-on-esc="false"
-    @update:show="onUpdateShow"
+    :back-label="t('common.back')"
     @after-leave="reset"
   >
     <n-form
@@ -108,7 +107,7 @@
         <n-button v-else type="primary" @click="copyAndClose">{{ t('apiKeys.confirmClose') }}</n-button>
       </n-space>
     </template>
-  </n-modal>
+  </ModalDrawer>
 </template>
 
 <script setup lang="ts">
@@ -122,9 +121,20 @@ import type { CreateAPIKeyInput } from '../../api/apiKeys'
 import { toMicros } from '../../utils/money'
 import { modelIdsRule } from '../../utils/apiKeyValidators'
 import HelpLabel from '../HelpLabel.vue'
+import ModalDrawer from '../common/ModalDrawer.vue'
 
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ (e: 'update:show', v: boolean): void; (e: 'created'): void }>()
+
+// ModalDrawer owns a v-model:show; bridge it to this component's :show /
+// @update:show contract. Closing (drawer back arrow, modal ×) routes through
+// onUpdateShow so the plaintext step's unsaved-key confirm guard still fires.
+const showModel = computed({
+  get: () => props.show,
+  set: (v) => {
+    if (!v) onUpdateShow(false)
+  },
+})
 
 const { t } = useI18n()
 const dialog = useDialog()

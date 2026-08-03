@@ -6,14 +6,13 @@
      and save independently. Emits "saved" after a successful PUT so the page
      can refresh its CTA banner without re-reading. -->
 <template>
-  <NModal
-    :show="show"
-    preset="card"
+  <ModalDrawer
+    v-model:show="showModel"
     :title="t('costOptimization.modalTitle')"
-    style="max-width: 640px"
+    max-width="640px"
     :mask-closable="false"
     :close-on-esc="false"
-    @update:show="(v: boolean) => emit('update:show', v)"
+    :back-label="t('common.back')"
   >
     <!-- Custom system prompt -->
     <section class="setting-block">
@@ -63,14 +62,20 @@
         </NForm>
       </template>
     </section>
-  </NModal>
+
+    <!-- No footer: each switch auto-saves on toggle, so there's nothing to
+         confirm. Dismissal is the desktop card's × / mobile drawer's back
+         arrow. The empty slot overrides ModalDrawer's built-in footer. -->
+    <template #footer><span /></template>
+  </ModalDrawer>
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NModal, NForm, NFormItem, NSwitch, NButton, useMessage } from 'naive-ui'
+import { NForm, NFormItem, NSwitch, NButton, useMessage } from 'naive-ui'
 import HelpLabel from '../HelpLabel.vue'
+import ModalDrawer from '../common/ModalDrawer.vue'
 import { APIError, displayMessage } from '../../api/client'
 import {
   getCustomSystemPrompt,
@@ -87,6 +92,13 @@ const emit = defineEmits<{
   'update:show': [value: boolean]
   saved: []
 }>()
+
+// ModalDrawer owns a v-model:show; bridge it to this component's existing
+// :show / @update:show contract so the parent doesn't have to change.
+const showModel = computed({
+  get: () => props.show,
+  set: (v) => emit('update:show', v),
+})
 
 const { t } = useI18n()
 const message = useMessage()

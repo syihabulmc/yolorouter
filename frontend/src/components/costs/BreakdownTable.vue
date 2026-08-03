@@ -9,29 +9,26 @@
      NULL api_key_id — the "unrouted" / "no caller" buckets) render as plain
      non-clickable text. -->
 <template>
-  <NDataTable
+  <ResponsiveDataTable
     :columns="columns"
     :data="dataRows"
     :loading="loading"
-    :bordered="false"
-    :single-line="false"
     :scroll-x="1200"
     :row-key="rowKey"
-    size="small"
-    :max-height="420"
   >
     <template #empty>
       <EmptyState :icon="TableIcon" :title="t('costs.noData')" />
     </template>
-  </NDataTable>
+  </ResponsiveDataTable>
 </template>
 
 <script setup lang="ts">
 import { computed, h } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NDataTable, type DataTableColumns } from 'naive-ui'
+import { type DataTableColumns } from 'naive-ui'
 import { Table as TableIcon } from '@lucide/vue'
 import EmptyState from '../EmptyState.vue'
+import ResponsiveDataTable from '../common/ResponsiveDataTable.vue'
 import { columnTitle } from '../../utils/columnTitle'
 import {
   avgDurationColumn,

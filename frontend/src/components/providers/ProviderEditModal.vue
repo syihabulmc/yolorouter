@@ -5,14 +5,17 @@
      `provider` prop. Structure (NModal card preset, v-model:show,
      @updated) mirrors KeyEditModal.vue's own show/save/emit pattern. -->
 <template>
-  <n-modal
-    :show="show"
-    preset="card"
+  <ModalDrawer
+    v-model:show="showModel"
     :title="t('providers.editProvider')"
-    style="max-width: 520px"
+    max-width="520px"
     :mask-closable="false"
     :close-on-esc="false"
-    @update:show="onUpdateShow"
+    :confirm-text="t('providers.save')"
+    :cancel-text="t('providers.cancel')"
+    :loading="submitting"
+    :back-label="t('common.back')"
+    @confirm="onSubmit"
   >
     <n-alert type="warning" class="reverify-warning">
       {{ t('providers.editProtocolReverifyWarning') }}
@@ -47,23 +50,18 @@
         <n-input v-model:value="form.note" type="textarea" />
       </n-form-item>
     </n-form>
-    <template #footer>
-      <n-space justify="end">
-        <n-button @click="onUpdateShow(false)">{{ t('providers.cancel') }}</n-button>
-        <n-button type="primary" :loading="submitting" @click="onSubmit">{{ t('providers.save') }}</n-button>
-      </n-space>
-    </template>
-  </n-modal>
+  </ModalDrawer>
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessage, type FormInst, type FormRules } from 'naive-ui'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
 import type { Provider } from '../../api/providers'
 import HelpLabel from '../HelpLabel.vue'
+import ModalDrawer from '../common/ModalDrawer.vue'
 import ProtocolConfigFields from './ProtocolConfigFields.vue'
 import { providerNameRule, baseUrlRule, noteRule } from '../../utils/providerValidators'
 import {
@@ -76,6 +74,13 @@ import {
 
 const props = defineProps<{ show: boolean; provider: Provider | null }>()
 const emit = defineEmits<{ 'update:show': [boolean]; updated: [] }>()
+
+// ModalDrawer owns a v-model:show; bridge it to this component's existing
+// :show / @update:show contract so parents don't have to change.
+const showModel = computed({
+  get: () => props.show,
+  set: (v) => emit('update:show', v),
+})
 
 const { t } = useI18n()
 const message = useMessage()
@@ -104,10 +109,6 @@ watch(
   },
 )
 
-function onUpdateShow(value: boolean) {
-  emit('update:show', value)
-}
-
 async function onSubmit() {
   if (!props.provider) return
   try {
@@ -129,7 +130,7 @@ async function onSubmit() {
     })
     message.success(t('providers.saveSuccess'))
     emit('updated')
-    onUpdateShow(false)
+    showModel.value = false
   } catch (err) {
     message.error(displayMessage(err, t))
   } finally {

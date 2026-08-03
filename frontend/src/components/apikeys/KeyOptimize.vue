@@ -1,12 +1,15 @@
 <template>
-  <n-modal
-    :show="show"
-    preset="card"
+  <ModalDrawer
+    v-model:show="showModel"
     :title="t('costOptimization.title')"
-    style="max-width: 520px"
+    max-width="520px"
     :mask-closable="false"
     :close-on-esc="false"
-    @update:show="(v: boolean) => emit('update:show', v)"
+    :confirm-text="t('apiKeys.save')"
+    :cancel-text="t('apiKeys.cancel')"
+    :loading="saving"
+    :back-label="t('common.back')"
+    @confirm="onSave"
   >
     <div v-if="loading" class="loading-row">{{ t('common.loading') }}</div>
     <n-form
@@ -45,14 +48,7 @@
       </n-form-item>
 
     </n-form>
-
-    <template #footer>
-      <n-space justify="end">
-        <n-button @click="emit('update:show', false)">{{ t('apiKeys.cancel') }}</n-button>
-        <n-button type="primary" :loading="saving" :disabled="loading" @click="onSave">{{ t('apiKeys.save') }}</n-button>
-      </n-space>
-    </template>
-  </n-modal>
+  </ModalDrawer>
 </template>
 
 <script setup lang="ts">
@@ -65,6 +61,7 @@ import { getAPIKey, type APIKey } from '../../api/apiKeys'
 import { API_KEY_CONFLICT } from '../../api/errcodes'
 import { customSystemPromptRule } from '../../utils/apiKeyValidators'
 import HelpLabel from '../HelpLabel.vue'
+import ModalDrawer from '../common/ModalDrawer.vue'
 
 // The parent passes only the key id and remounts via :key="apiKeyId" on each
 // open, so onMounted fires once per open and performs the authoritative GET
@@ -75,6 +72,13 @@ const props = defineProps<{
   apiKeyId: number
 }>()
 const emit = defineEmits<{ (e: 'update:show', v: boolean): void; (e: 'saved'): void }>()
+
+// ModalDrawer owns a v-model:show; bridge it to this component's existing
+// :show / @update:show contract so the parent doesn't have to change.
+const showModel = computed({
+  get: () => props.show,
+  set: (v) => emit('update:show', v),
+})
 
 const { t } = useI18n()
 const message = useMessage()

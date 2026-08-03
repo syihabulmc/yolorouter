@@ -1,13 +1,16 @@
 <!-- frontend/src/components/providers/KeyEditModal.vue -->
 <template>
-  <n-modal
-    :show="show"
-    preset="card"
+  <ModalDrawer
+    v-model:show="showModel"
     :title="editingKey ? t('providers.editKey') : t('providers.addKey')"
-    style="max-width: 520px"
+    max-width="520px"
     :mask-closable="false"
     :close-on-esc="false"
-    @update:show="onUpdateShow"
+    :confirm-text="t('providers.save')"
+    :cancel-text="t('providers.cancel')"
+    :loading="submitting"
+    :back-label="t('common.back')"
+    @confirm="onSubmit"
   >
     <n-form
       require-mark-placement="left"
@@ -45,13 +48,7 @@
         <n-switch v-model:value="form.enabled" />
       </n-form-item>
     </n-form>
-    <template #footer>
-      <n-space justify="end">
-        <n-button @click="onUpdateShow(false)">{{ t('providers.cancel') }}</n-button>
-        <n-button type="primary" :loading="submitting" @click="onSubmit">{{ t('providers.save') }}</n-button>
-      </n-space>
-    </template>
-  </n-modal>
+  </ModalDrawer>
 </template>
 
 <script setup lang="ts">
@@ -63,6 +60,7 @@ import { displayMessage } from '../../api/client'
 import type { ProviderKey } from '../../api/providers'
 import { keyLabelRule, keyPlaintextRule } from '../../utils/providerValidators'
 import HelpLabel from '../HelpLabel.vue'
+import ModalDrawer from '../common/ModalDrawer.vue'
 import ProviderModelTester from './ProviderModelTester.vue'
 
 const props = defineProps<{
@@ -76,6 +74,13 @@ const props = defineProps<{
   editingKey?: ProviderKey | null
 }>()
 const emit = defineEmits<{ 'update:show': [boolean]; saved: [] }>()
+
+// ModalDrawer owns a v-model:show; bridge it to this component's existing
+// :show / @update:show contract so the parent doesn't have to change.
+const showModel = computed({
+  get: () => props.show,
+  set: (v) => emit('update:show', v),
+})
 
 const { t } = useI18n()
 const message = useMessage()
@@ -154,7 +159,7 @@ async function onSubmit() {
       }, props.destinationCount)
     }
     emit('saved')
-    onUpdateShow(false)
+    showModel.value = false
   } catch (err) {
     message.error(displayMessage(err, t))
   } finally {

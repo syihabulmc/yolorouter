@@ -1,7 +1,7 @@
 <!-- frontend/src/views/models/ModelDetailPage.vue -->
 <template>
   <div class="common-page" v-if="modelData">
-    <PageHeader :eyebrow="t('models.eyebrow')" :title="modelData.name" :description="`${t('models.runningStatusColumn')}: ${t(`models.running${runningStatusKey}`)}`">
+    <PageHeader  class="new-line"  :eyebrow="t('models.eyebrow')" :title="modelData.name" :description="`${t('models.runningStatusColumn')}: ${t(`models.running${runningStatusKey}`)}`">
       <template #actions>
         <n-button size="small" @click="showEditModel = true">{{ t('models.editModel') }}</n-button>
         <n-button quaternary @click="router.push(modelCostDetailLocation(modelData.name))">
@@ -29,14 +29,12 @@
         </EmptyState>
 
         <div v-else class="data-table-wrapper">
-          <n-data-table
+          <ResponsiveDataTable
             :columns="candidateColumns"
             :data="modelData.candidates"
             :scroll-x="920"
             :row-key="(row: ModelCandidate) => row.id"
             :pagination="candidatePagination"
-            @update:page="onCandidatePageChange"
-            @update:page-size="onCandidatePageSizeChange"
           />
         </div>
       </n-tab-pane>
@@ -78,6 +76,7 @@ import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import CandidateEditModal from '../../components/models/CandidateEditModal.vue'
 import ModelEditModal from '../../components/models/ModelEditModal.vue'
+import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { useSingleRowAction } from '../../composables/useSingleRowAction'
@@ -101,8 +100,6 @@ const showEditModel = ref(false)
 // server-side.
 const {
   pagination: candidatePagination,
-  onPageChange: onCandidatePageChange,
-  onPageSizeChange: onCandidatePageSizeChange,
 } = useClientPagination()
 const editingCandidate = ref<ModelCandidate | null>(null)
 // Tracks the single candidate currently running its own capability test so

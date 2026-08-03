@@ -3,14 +3,17 @@
      Structure (NModal card preset, v-model:show, @updated) mirrors
      ProviderEditModal.vue's show/save/emit pattern. -->
 <template>
-  <n-modal
-    :show="show"
-    preset="card"
+  <ModalDrawer
+    v-model:show="showModel"
     :title="t('models.editModel')"
-    style="max-width: 520px"
+    max-width="520px"
     :mask-closable="false"
     :close-on-esc="false"
-    @update:show="onUpdateShow"
+    :confirm-text="t('models.save')"
+    :cancel-text="t('models.cancel')"
+    :loading="submitting"
+    :back-label="t('common.back')"
+    @confirm="onSubmit"
   >
     <n-form require-mark-placement="left" ref="formRef" :model="form" :rules="rules">
       <n-form-item path="name">
@@ -20,20 +23,15 @@
         <n-input v-model:value="form.name" :placeholder="t('models.nameHint')" />
       </n-form-item>
     </n-form>
-    <template #footer>
-      <n-space justify="end">
-        <n-button @click="onUpdateShow(false)">{{ t('models.cancel') }}</n-button>
-        <n-button type="primary" :loading="submitting" @click="onSubmit">{{ t('models.save') }}</n-button>
-      </n-space>
-    </template>
-  </n-modal>
+  </ModalDrawer>
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessage, type FormInst, type FormRules } from 'naive-ui'
 import HelpLabel from '../HelpLabel.vue'
+import ModalDrawer from '../common/ModalDrawer.vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import type { Model } from '../../api/models'
@@ -41,6 +39,13 @@ import { modelNameRule } from '../../utils/modelValidators'
 
 const props = defineProps<{ show: boolean; model: Model | null }>()
 const emit = defineEmits<{ 'update:show': [boolean]; updated: [] }>()
+
+// ModalDrawer owns a v-model:show; bridge it to this component's existing
+// :show / @update:show contract so the parent doesn't have to change.
+const showModel = computed({
+  get: () => props.show,
+  set: (v) => emit('update:show', v),
+})
 
 const { t } = useI18n()
 const message = useMessage()
@@ -59,10 +64,6 @@ watch(
   },
 )
 
-function onUpdateShow(value: boolean) {
-  emit('update:show', value)
-}
-
 async function onSubmit() {
   if (!props.model) return
   try {
@@ -75,7 +76,7 @@ async function onSubmit() {
     await store.update(props.model.id, form.name)
     message.success(t('models.saveSuccess'))
     emit('updated')
-    onUpdateShow(false)
+    showModel.value = false
   } catch (err) {
     message.error(displayMessage(err, t))
   } finally {

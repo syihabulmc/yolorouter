@@ -7,7 +7,7 @@
      the entity itself). -->
 <template>
   <div class="common-page">
-    <PageHeader :title="title" :description="t('costs.detail.modelDesc')">
+    <PageHeader class="new-line" :title="title" :description="t('costs.detail.modelDesc')">
       <template #actions>
         <NButton size="small" @click="goLogs">{{ t('costs.detail.viewLogs') }}</NButton>
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPreset" />
@@ -39,7 +39,7 @@
         <CostTrendChart :rows="trendRows" />
       </div>
 
-      <div class="section-card">
+      <div class="section-card  table-card">
         <div class="section-card__head">{{ t('costs.detail.byCaller') }}</div>
         <BreakdownTable
           :rows="stats?.callerRows ?? []"
@@ -47,7 +47,7 @@
           @select="onSelect"
         />
       </div>
-      <div class="section-card">
+      <div class="section-card  table-card">
         <div class="section-card__head">{{ t('costs.detail.byProvider') }}</div>
         <BreakdownTable
           :rows="stats?.providerRows ?? []"
@@ -191,5 +191,17 @@ watch(timeRange, () => { void reload() }, { deep: true })
   align-items: center;
   justify-content: center;
   min-height: 240px;
+}
+@media (max-width: 768px) {
+  .section-card {
+    padding: var(--space-3);
+  }
+  .section-card.table-card {
+    padding: 0;
+  }
+  .section-card.table-card .section-card__head{
+    padding: var(--space-3);
+  }
+  
 }
 </style>

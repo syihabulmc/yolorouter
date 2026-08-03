@@ -5,7 +5,7 @@
      states so an API failure never reads as zero spend. -->
 <template>
   <div class="common-page">
-    <PageHeader :title="title" :description="t('costs.detail.keyDesc')">
+    <PageHeader class="new-line"  :title="title" :description="t('costs.detail.keyDesc')">
       <template #actions>
         <NButton size="small" @click="goLogs">{{ t('costs.detail.viewLogs') }}</NButton>
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPreset" />
@@ -57,7 +57,7 @@
         <CostTrendChart :rows="trendRows" />
       </div>
 
-      <div class="section-card">
+      <div class="section-card table-card">
         <div class="section-card__head">{{ t('costs.detail.byModel') }}</div>
         <BreakdownTable
           :rows="stats?.modelRows ?? []"
@@ -65,7 +65,7 @@
           @select="onSelect"
         />
       </div>
-      <div class="section-card">
+      <div class="section-card table-card">
         <div class="section-card__head">{{ t('costs.detail.byProvider') }}</div>
         <BreakdownTable
           :rows="stats?.providerRows ?? []"
@@ -244,5 +244,17 @@ watch(timeRange, () => { void reload() }, { deep: true })
   flex-wrap: wrap;
   gap: var(--space-4);
   color: var(--color-text);
+}
+@media (max-width: 768px) {
+  .section-card {
+    padding: var(--space-3);
+  }
+  .section-card.table-card {
+    padding: 0;
+  }
+  .section-card.table-card .section-card__head{
+    padding: var(--space-3);
+  }
+  
 }
 </style>

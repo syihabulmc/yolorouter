@@ -9,28 +9,23 @@
      grouping stay aligned without the frontend needing to know the server's
      timezone. -->
 <template>
-  <!-- Mobile: a compact button showing the active preset's label; tapping it
-       raises a bottom sheet of the named presets (custom is excluded — the
-       inline daterange picker doesn't fit a phone filter bar). -->
   <template v-if="isMobile">
-    <NButton size="small" class="time-range__mobile-trigger" @click="sheetOpen = true" icon-placement="right">
-      <span class="time-range__mobile-label">{{ currentPresetLabel }}</span>
+    <NButton size="small" class="filter-select__trigger" @click="sheetOpen = true" icon-placement="right">
+      <span class="filter-select__trigger-label">{{ currentPresetLabel }}</span>
       <template #icon><ChevronDown :size="14" /></template>
     </NButton>
-
-    <!-- Bottom sheet. The rounded top corners come from the scoped
-         :deep(.time-range-sheet) rule below (naive's drawer body is square by
-         default). -->
-    <NDrawer v-model:show="sheetOpen" placement="bottom" :height="sheetHeight" class="time-range-sheet">
+    <NDrawer v-model:show="sheetOpen" placement="bottom" :height="sheetHeight" class="filter-select-sheet">
       <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0;">
-        <div class="range-sheet">
-          <div class="range-sheet__handle" />
+        <div class="filter-sheet">
+          <div class="filter-sheet__handle" />
+            <div class="filter-sheet__title">{{ t('analytics.timeRange') }}</div>
+
           <button
             v-for="opt in mobilePresetOptions"
             :key="opt.value"
             type="button"
-            class="range-sheet__option"
-            :class="{ 'range-sheet__option--active': opt.value === preset }"
+            class="filter-sheet__option"
+            :class="{ 'filter-sheet__option--active': opt.value === preset }"
             @click="onSheetSelect(opt.value)"
           >
             <span>{{ opt.label }}</span>
@@ -40,7 +35,6 @@
       </NDrawerContent>
     </NDrawer>
   </template>
-
   <!-- Desktop: the full select + inline custom daterange picker. -->
   <div v-else class="time-range">
     <NSelect
@@ -222,12 +216,12 @@ watch(
   gap: var(--space-2);
 }
 
-.time-range__mobile-trigger {
+.filter-select__trigger {
   min-width: 120px;
   justify-content: space-between;
 }
 
-.time-range__mobile-label {
+.filter-select__trigger-label {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -236,28 +230,38 @@ watch(
 /* Rounded top corners on the bottom sheet — naive's drawer is square by
    default. The class is set on <NDrawer> but the rounded surface is the
    drawer container, so target it via :deep. */
-:deep(.time-range-sheet.n-drawer) {
+:deep(.filter-select-sheet.n-drawer) {
   border-top-left-radius: var(--radius-xl);
   border-top-right-radius: var(--radius-xl);
   overflow: hidden;
 }
 
-.range-sheet {
+.filter-sheet {
   display: flex;
   flex-direction: column;
+  min-height: 0;
   padding: var(--space-2) var(--space-3) var(--space-4);
 }
 
-/* A short grab handle centered at the top, the usual bottom-sheet affordance. */
-.range-sheet__handle {
+.filter-sheet__handle {
   width: 36px;
   height: 4px;
-  margin: var(--space-2) auto var(--space-3);
+  margin: var(--space-2) auto var(--space-2);
   border-radius: var(--radius-full);
   background: var(--color-border);
 }
 
-.range-sheet__option {
+.filter-sheet__title {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding: 0 var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.filter-sheet__option {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -274,12 +278,13 @@ watch(
   transition: background var(--duration-fast) var(--ease-out);
 }
 
-.range-sheet__option:active {
+.filter-sheet__option:active {
   background: var(--color-surface-hover);
 }
 
-.range-sheet__option--active {
+.filter-sheet__option--active {
   color: var(--color-accent);
   font-weight: 600;
 }
+
 </style>

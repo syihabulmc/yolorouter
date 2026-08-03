@@ -63,7 +63,7 @@
       <!-- Server-side paging still needs to be reachable on mobile — the
            desktop pager lives inside NDataTable, so render a standalone one
            here driven by the same pagination object. -->
-      <div v-if="pagination" class="rdt-cards__pager">
+      <div v-if="pagination && pagination.itemCount > 10" class="rdt-cards__pager">
         <NPagination
           :page="pagination.page"
           :page-size="pagination.pageSize"
@@ -182,10 +182,9 @@ function onMobilePageSize(ps: number) {
   flex-direction: column;
   gap: var(--space-2);
   background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border-subtle);
 }
 .rdt-card + .rdt-card {
-  border-bottom: 1px solid var(--color-border-subtle);
+  border-top: 1px solid var(--color-border-subtle);
 }
 
 .rdt-card__header {
@@ -233,4 +232,12 @@ function onMobilePageSize(ps: number) {
   font-weight: 600;
   color: var(--color-text);
 }
+  @media (max-width: 768px) {
+    .rdt-cards__pager {
+      display: flex;
+      justify-content: center;
+      padding: var(--space-3) 0 ;
+    }
+  }
+
 </style>

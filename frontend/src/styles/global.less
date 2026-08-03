@@ -90,6 +90,9 @@ a {
   font-size: var(--text-2xl);
   font-weight: 780;
   line-height: 1.14;
+  white-space: nowrap;    
+  overflow: hidden;      
+  text-overflow: ellipsis; 
 }
 
 .page-header__description {
@@ -386,12 +389,25 @@ a {
   //  common header
   .page-header {
     position: relative;
+    gap: var(--space-3);
+      &.new-line{
+      display: black; 
+      .page-header__actions {
+        position: static;
+      }
+    }
   }
   .page-header__actions {
     position: absolute;
     top: 0px;
     right: 0px;
   }
+  .page-header__actions {
+    position: absolute;
+    top: 0px;
+    right: 0px;
+  }
+
   // common filter
   @media (max-width: 768px) {
     .filter-panel {

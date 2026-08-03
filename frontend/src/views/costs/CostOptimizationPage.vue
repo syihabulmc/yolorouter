@@ -13,6 +13,7 @@
 <template>
   <div class="common-page">
     <PageHeader
+      class="new-line" 
       :eyebrow="t('costOptimization.eyebrow')"
       :title="t('costOptimization.title')"
       :description="t('costOptimization.pageDescription')"
@@ -50,7 +51,6 @@
         </NButton>
       </div>
     </div>
-
     <!-- KPI metric tiles. All cost figures are ESTIMATED (see tips). -->
     <div class="metric-row">
       <div class="metric">
@@ -84,7 +84,7 @@
         <div class="metric__value">{{ formatNumber(avgSaved) }}</div>
       </div>
     </div>
-
+123
     <!-- Dimension cards: four line charts (daily / API key / model / provider)
          in a 2x2 grid. All four breakdowns come from one stats call, so every
          card renders from the same stats ref without per-card reload. -->
@@ -135,10 +135,9 @@
         />
       </div>
     </div>
-
     <!-- Breakdown: compressor hits + skip reasons side by side. -->
     <div class="breakdown-row">
-      <div class="section-card">
+      <div class="section-card table-card">
         <div class="section-card__head">
           <HelpLabel :tip="t('costOptimization.compressorsTitle_tip')">{{ t('costOptimization.compressorsTitle') }}</HelpLabel>
         </div>
@@ -156,7 +155,7 @@
           </template>
         </NDataTable>
       </div>
-      <div class="section-card">
+      <div class="section-card table-card">
         <div class="section-card__head">
           <HelpLabel :tip="t('costOptimization.skipReasonTitle_tip')">{{ t('costOptimization.skipReasonTitle') }}</HelpLabel>
         </div>
@@ -377,12 +376,11 @@ const compressorColumns = computed<DataTableColumns<CompressorHitRow>>(() => [
     title: () => t('costOptimization.colCompressor'),
     key: 'name',
     minWidth: 200,
-    render: (r) => h('span', { class: 'mono-cell' }, r.name),
+    render: (r) => h('div', { class: 'mono-cell' }, r.name),
   },
   {
     title: () => h(HelpLabel, { tip: t('costOptimization.colHits_tip') }, { default: () => t('costOptimization.colHits') }),
     key: 'hits',
-    width: 140,
     align: 'right',
     render: (r) => formatNumber(r.hits),
   },
@@ -413,7 +411,6 @@ const skipReasonColumns = computed<DataTableColumns<CompressSkipReasonRow>>(() =
   {
     title: () => t('costOptimization.colCalls'),
     key: 'calls',
-    width: 140,
     align: 'right',
     render: (r) => formatNumber(r.calls),
   },
@@ -537,8 +534,19 @@ const skipReasonColumns = computed<DataTableColumns<CompressSkipReasonRow>>(() =
 }
 
 @media (max-width: 768px) {
-  .metric-row {
-    grid-template-columns: 1fr;
+  .section-card,
+  .cta-banner {
+    padding: var(--space-3);
+  }
+  .section-card {
+    padding: var(--space-3);
+  }
+  .section-card.table-card {
+    padding: 0;
+  }
+  .section-card.table-card .section-card__head{
+    padding: var(--space-3);
+    margin-bottom: 0;
   }
 }
 </style>

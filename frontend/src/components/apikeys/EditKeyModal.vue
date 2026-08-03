@@ -6,14 +6,17 @@
      to remove an expiry, revoke and re-create. Per-key custom-system-prompt
      and compression are edited in the dedicated optimization modal. -->
 <template>
-  <n-modal
-    :show="show"
-    preset="card"
+  <ModalDrawer
+    v-model:show="showModel"
     :title="t('apiKeys.editTitle')"
-    style="max-width: 520px"
+    max-width="520px"
     :mask-closable="false"
     :close-on-esc="false"
-    @update:show="(v: boolean) => emit('update:show', v)"
+    :confirm-text="t('apiKeys.save')"
+    :cancel-text="t('apiKeys.cancel')"
+    :loading="saving"
+    :back-label="t('common.back')"
+    @confirm="onSave"
   >
     <div v-if="loading" class="loading-row">{{ t('common.loading') }}</div>
     <n-form
@@ -91,14 +94,7 @@
         </div>
       </div>
     </n-form>
-
-    <template #footer>
-      <n-space justify="end">
-        <n-button @click="emit('update:show', false)">{{ t('apiKeys.cancel') }}</n-button>
-        <n-button type="primary" :loading="saving" :disabled="loading" @click="onSave">{{ t('apiKeys.save') }}</n-button>
-      </n-space>
-    </template>
-  </n-modal>
+  </ModalDrawer>
 </template>
 
 <script setup lang="ts">
@@ -112,9 +108,17 @@ import { getAPIKey, type APIKey, type UpdateAPIKeyInput } from '../../api/apiKey
 import { fromMicros, toMicros } from '../../utils/money'
 import { modelIdsRule } from '../../utils/apiKeyValidators'
 import HelpLabel from '../HelpLabel.vue'
+import ModalDrawer from '../common/ModalDrawer.vue'
 
 const props = defineProps<{ show: boolean; apiKeyId: number }>()
 const emit = defineEmits<{ (e: 'update:show', v: boolean): void; (e: 'saved'): void }>()
+
+// ModalDrawer owns a v-model:show; bridge it to this component's existing
+// :show / @update:show contract so the parent doesn't have to change.
+const showModel = computed({
+  get: () => props.show,
+  set: (v) => emit('update:show', v),
+})
 
 const { t } = useI18n()
 const message = useMessage()
@@ -184,6 +188,7 @@ onMounted(async () => {
 })
 
 async function onSave() {
+  if (loading.value) return
   try {
     await formRef.value?.validate()
   } catch {
@@ -260,5 +265,6 @@ async function onSave() {
 .loading-row {
   padding: var(--space-4) 0;
   color: var(--color-text-muted);
+  min-height: 510px;
 }
 </style>

@@ -6,12 +6,19 @@ export interface ClientPagination {
   pageSize: number
   showSizePicker: boolean
   pageSizes: number[]
+  onChange: (page: number) => void
+  onUpdatePageSize: (pageSize: number) => void
 }
 
 /**
- * Reactive pagination object + the two change handlers naive-ui's NDataTable
- * expects (@update:page / @update:page-size) for client-side paging. The data
- * is sliced in-page, so changing page size resets to page 1.
+ * Reactive pagination object for client-side paging. The data is sliced
+ * in-page, so changing page size resets to page 1.
+ *
+ * The change handlers live ON the pagination object (onChange /
+ * onUpdatePageSize) rather than being wired as @update:page /
+ * @update:page-size events, so the object works both with a raw NDataTable and
+ * with ResponsiveDataTable (which drives a standalone mobile pager from the
+ * same handlers instead of re-emitting table events).
  *
  * Shared by the small admin-configured lists (providers / models / model
  * candidates) that are fetched in full. The server-paged ApiKeyListPage
@@ -24,13 +31,13 @@ export function useClientPagination(defaultPageSize = 20) {
     pageSize: defaultPageSize,
     showSizePicker: true,
     pageSizes: [10, 20, 50],
+    onChange(page: number) {
+      pagination.page = page
+    },
+    onUpdatePageSize(pageSize: number) {
+      pagination.pageSize = pageSize
+      pagination.page = 1
+    },
   })
-  function onPageChange(page: number) {
-    pagination.page = page
-  }
-  function onPageSizeChange(pageSize: number) {
-    pagination.pageSize = pageSize
-    pagination.page = 1
-  }
-  return { pagination, onPageChange, onPageSizeChange }
+  return { pagination }
 }

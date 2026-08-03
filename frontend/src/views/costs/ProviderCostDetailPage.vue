@@ -7,7 +7,7 @@
      (that would be a single row — the entity itself). -->
 <template>
   <div class="common-page">
-    <PageHeader :title="title" :description="t('costs.detail.providerDesc')">
+    <PageHeader class="new-line" :title="title" :description="t('costs.detail.providerDesc')">
       <template #actions>
         <NButton size="small" @click="goLogs">{{ t('costs.detail.viewLogs') }}</NButton>
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPreset" />
@@ -45,7 +45,7 @@
       <!-- Model + caller splits. The provider split is intentionally absent:
            a single-provider window has only one provider row, so it carries no
            information beyond the overview cards already shown. -->
-      <div class="section-card">
+      <div class="section-card table-card">
         <div class="section-card__head">{{ t('costs.detail.byModel') }}</div>
         <BreakdownTable
           :rows="stats?.modelRows ?? []"
@@ -53,7 +53,7 @@
           @select="onSelect"
         />
       </div>
-      <div class="section-card">
+      <div class="section-card table-card">
         <div class="section-card__head">{{ t('costs.detail.byCaller') }}</div>
         <BreakdownTable
           :rows="stats?.callerRows ?? []"
@@ -220,5 +220,18 @@ watch(timeRange, () => { void reload() }, { deep: true })
   align-items: center;
   justify-content: center;
   min-height: 240px;
+}
+
+@media (max-width: 768px) {
+  .section-card {
+    padding: var(--space-3);
+  }
+  .section-card.table-card {
+    padding: 0;
+  }
+  .section-card.table-card .section-card__head{
+    padding: var(--space-3);
+  }
+  
 }
 </style>

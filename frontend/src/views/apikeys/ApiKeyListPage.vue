@@ -56,12 +56,10 @@
     </EmptyState>
 
     <div v-else class="data-table-wrapper">
-      <n-data-table
+      <ResponsiveDataTable
         :columns="columns"
         :data="store.list"
         :loading="store.loading"
-        :bordered="false"
-        :single-line="false"
         :scroll-x="1040"
         :row-key="(row: APIKey) => row.id"
         :pagination="pagination"
@@ -99,6 +97,7 @@ import EmptyState from '../../components/EmptyState.vue'
 import CreateKeyModal from '../../components/apikeys/CreateKeyModal.vue'
 import EditKeyModal from '../../components/apikeys/EditKeyModal.vue'
 import KeyOptimize from '../../components/apikeys/KeyOptimize.vue'
+import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 
 const { t } = useI18n()
 const router = useRouter()

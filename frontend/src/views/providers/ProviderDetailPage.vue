@@ -1,7 +1,7 @@
 <!-- frontend/src/views/providers/ProviderDetailPage.vue -->
 <template>
   <div class="common-page" v-if="provider">
-    <PageHeader :eyebrow="t('providers.eyebrow')" :title="provider.name" :description="provider.base_url">
+    <PageHeader class="new-line" :eyebrow="t('providers.eyebrow')" :title="provider.name" :description="provider.base_url">
       <template #actions>
         <n-button size="small" @click="showEditProvider = true">{{ t('providers.editProvider') }}</n-button>
         <n-button quaternary @click="router.push(`/costs/providers/${provider.id}`)">
@@ -32,17 +32,13 @@
         </div>
 
         <div class="data-table-wrapper">
-          <n-data-table
+          <ResponsiveDataTable
             :columns="keyColumns"
             :data="provider.keys"
             :loading="testingAll"
-            :bordered="false"
-            :single-line="false"
             :scroll-x="930"
             :row-key="(row: ProviderKey) => row.id"
             :pagination="keysPagination"
-            @update:page="onKeysPageChange"
-            @update:page-size="onKeysPageSizeChange"
           />
         </div>
 
@@ -53,16 +49,13 @@
         <EmptyState v-if="modelsStore.error" :title="t('common.networkError')" />
         <EmptyState v-else-if="!modelsStore.loading && linkedModelRows.length === 0" :title="t('providers.modelsEmpty')" />
         <div v-else class="data-table-wrapper">
-          <n-data-table
+          <ResponsiveDataTable
             :columns="modelColumns"
             :data="linkedModelRows"
             :loading="modelsStore.loading"
-            :bordered="false"
             :scroll-x="480"
             :row-key="(row: LinkedModelRow) => row.candidateId"
             :pagination="modelsPagination"
-            @update:page="onModelsPageChange"
-            @update:page-size="onModelsPageSizeChange"
           />
         </div>
       </n-tab-pane>
@@ -104,6 +97,7 @@ import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import KeyEditModal from '../../components/providers/KeyEditModal.vue'
 import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
+import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { testOutcomeLabel } from '../../utils/testOutcomeDisplay'
 import { verificationDestinationCount } from '../../utils/providerProtocol'
@@ -123,13 +117,9 @@ const modelsStore = useModelsStore()
 // mapped to one provider).
 const {
   pagination: keysPagination,
-  onPageChange: onKeysPageChange,
-  onPageSizeChange: onKeysPageSizeChange,
 } = useClientPagination()
 const {
   pagination: modelsPagination,
-  onPageChange: onModelsPageChange,
-  onPageSizeChange: onModelsPageSizeChange,
 } = useClientPagination()
 
 const providerId = Number(route.params.id)

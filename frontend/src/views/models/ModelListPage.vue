@@ -58,18 +58,14 @@
       </div>
 
       <div class="data-table-wrapper">
-        <n-data-table
+        <ResponsiveDataTable
           :columns="columns"
           :data="filteredModels"
           :loading="store.loading"
-          :bordered="false"
-          :single-line="false"
           :scroll-x="910"
           :row-key="(row: Model) => row.id"
           :row-props="rowProps"
           :pagination="pagination"
-          @update:page="onPageChange"
-          @update:page-size="onPageSizeChange"
         />
       </div>
     </template>
@@ -97,6 +93,7 @@ import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import NewModelModal from '../../components/models/NewModelModal.vue'
 import ModelEditModal from '../../components/models/ModelEditModal.vue'
+import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
 
 const { t } = useI18n()
@@ -158,7 +155,7 @@ const filteredModels = computed(() => {
 // Client-side pagination: models are few (admin-configured), so the full list
 // is fetched once and sliced in the table rather than adding a server-side
 // paged endpoint.
-const { pagination, onPageChange, onPageSizeChange } = useClientPagination()
+const { pagination } = useClientPagination()
 
 // A narrowed filter can leave the current page past the end of the results —
 // reset to the first page whenever a filter is applied.

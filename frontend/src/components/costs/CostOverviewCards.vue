@@ -9,7 +9,7 @@
      from the shared global stylesheet. -->
 <template>
   <div class="metric-row">
-    <div class="metric">
+    <div class="metric one-line">
       <div class="metric__label">
         <HelpLabel :tip="t('costs.overview.spend_tip')">{{ t('costs.overview.spend') }}</HelpLabel>
       </div>
@@ -39,7 +39,7 @@
       </div>
     </div>
 
-    <div class="metric">
+    <div class="metric one-line">
       <div class="metric__label">
         <HelpLabel :tip="t('costs.overview.cacheSaved_tip')">{{ t('costs.overview.cacheSaved') }}</HelpLabel>
       </div>
@@ -108,8 +108,8 @@ const netCacheSaved = computed(() => netCacheSavedMicros(props.overview))
 }
 
 @media (max-width: 768px) {
-  .metric-row {
-    grid-template-columns: 1fr;
+  .metric-row .metric.one-line{
+     grid-column: 1 / -1;
   }
 }
 </style>
