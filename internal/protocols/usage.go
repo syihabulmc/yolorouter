@@ -56,11 +56,21 @@ func (dst *IRUsage) Merge(src IRUsage) {
 	// src is judged on its OWN shape (its own counts vs its own prompt), before
 	// the copy below mixes it into dst: a frame that is impossible on its own
 	// is impossible no matter what later frames contribute, and the verdict
-	// propagates one-way like Invalid itself. IsIncoherent (not HasNegativeCount)
-	// so the cache-exceeds-prompt impossibility is caught here too — otherwise a
-	// frame carrying prompt=100 alongside cache_write=1000000 would merge its
-	// counts through and the accumulated record would look perfectly ordinary.
-	if src.IsIncoherent() {
+	// propagates one-way like Invalid itself. Not HasNegativeCount, so the
+	// cache-exceeds-prompt impossibility is caught here too — otherwise a frame
+	// carrying prompt=100 alongside cache_write=1000000 would merge its counts
+	// through and the accumulated record would look perfectly ordinary.
+	//
+	// IsIncoherentMidStream rather than the full verdict, because src is not
+	// always a raw frame: the Claude and Responses stream decoders accumulate
+	// internally and hand their RUNNING TOTAL to every DeltaUsage they emit, so
+	// what arrives here is frequently a stitched record whose fields come from
+	// different moments. Applying the growth-sensitive rule to it would latch a
+	// verdict on an intermediate state — permanently, since Invalid is one-way —
+	// and discard usage whose final counts are coherent. Decoders holding a
+	// genuine single snapshot apply the full verdict themselves at their exit
+	// and hand it over on src.Invalid, which propagates below.
+	if src.IsIncoherentMidStream() {
 		dst.Invalid = true
 	}
 	if src.PromptTokens > 0 {
@@ -97,6 +107,21 @@ func (dst *IRUsage) Merge(src IRUsage) {
 	if dst.TotalTokens == 0 || dst.TotalTokens < dst.PromptTokens+dst.CompletionTokens {
 		dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
 	}
+	// Deliberately NO verdict on the accumulated dst here. Judging src is sound
+	// because a frame states its counts from one upstream snapshot; judging dst
+	// is not, because dst is stitched from several and its fields can belong to
+	// different moments in the response. Between two frames the accumulated
+	// record legitimately passes through shapes no single snapshot would ever
+	// report — a reasoning count that has advanced past a completion count still
+	// waiting to be revised, most of all. Invalid is one-way, so condemning such
+	// an intermediate state would permanently reject a request whose final
+	// counts are perfectly coherent, and the encoders would publish nothing.
+	//
+	// The cost of leaving it out is narrow: a contradiction that exists ONLY
+	// across frames and survives to the end of the stream goes unbilled-on
+	// rather than refused. Every contradiction a single upstream snapshot
+	// asserts is still caught, by the src verdict above and at each decoder's
+	// exit.
 }
 
 // The four protocols this gateway speaks split into two camps over whether the
@@ -219,11 +244,33 @@ func HasNegativeCount(u IRUsage) bool {
 //
 // Deliberately NOT checking parts > total: a stated total that the parts
 // overflow is "attribution unknown", not "impossible" — the tokens were really
-// consumed, just not split between prompt and completion. Every gateway surveyed
-// (new-api, litellm, llmgateway) recomputes total = prompt + completion and
-// bills on; this gateway's own usage-cross-protocol-matrix doc (§三) records
-// "billing uses max(GrossTotal, upstream)" as intentional for the same reason.
+// consumed, just not split between prompt and completion. Other gateways
+// (new-api, litellm, llmgateway) recompute total = prompt + completion and bill
+// on, and so does this one: billing takes max(GrossTotalTokens, upstream total),
+// which already absorbs the overflow without discarding the record.
+// Composed of two tiers because they are not equally safe to apply. See
+// IsIncoherentMidStream for the rules that survive a half-finished stream, and
+// reasoningExceedsCompletion for the one that does not.
 func (u IRUsage) IsIncoherent() bool {
+	return u.IsIncoherentMidStream() || u.reasoningExceedsCompletion()
+}
+
+// IsIncoherentMidStream is IsIncoherent minus the rules that can only be
+// trusted once the counts have stopped moving. Callers holding a record
+// STITCHED from several frames must use this one; callers holding a single
+// upstream snapshot should use IsIncoherent.
+//
+// The split exists because the two rules compare different kinds of counts. The
+// cache rule weighs cache against the prompt, and both are fixed for the whole
+// request — an upstream states them once and never revises them, so no sequence
+// of frames can make a coherent request look impossible. The reasoning rule
+// weighs reasoning against the completion, and BOTH grow as the response is
+// produced. A stream that reports them from different snapshots therefore
+// passes through states where the newer reasoning count exceeds the older
+// completion count, without anything being wrong: the completion simply has not
+// caught up yet. Since Invalid is one-way, judging that intermediate state
+// would condemn a request whose final counts are perfectly coherent.
+func (u IRUsage) IsIncoherentMidStream() bool {
 	if u.Invalid {
 		return true
 	}
@@ -250,7 +297,39 @@ func (u IRUsage) IsIncoherent() bool {
 			return true
 		}
 	}
+	// The reasoning-vs-completion rule is NOT applied here: both counts grow as
+	// the stream progresses, so judging an intermediate snapshot could condemn a
+	// request whose final counts are coherent. See reasoningExceedsCompletion
+	// for the rule, its breakdown rationale, and its wire impact.
+	//
 	return false
+}
+
+// reasoningExceedsCompletion reports the subset violation that only IsIncoherent
+// applies — never IsIncoherentMidStream, whose doc explains why.
+//
+// Reasoning is a breakdown OF the completion count in every protocol decoded
+// here: OpenAI counts completion_tokens_details.reasoning_tokens inside
+// completion_tokens, Responses does the same under output_tokens_details, and
+// the Gemini decoder folds thoughtsTokenCount into CompletionTokens before the
+// record reaches this point. A subset cannot outgrow the set containing it.
+//
+// Left unjudged the contradiction survives all the way to the wire: the Gemini
+// encoder splits reasoning back out of the completion, clamps the remaining
+// candidates at 0, and still publishes the reasoning line against a total
+// derived from the smaller completion — emitting a usageMetadata whose parts do
+// not add up to its own stated total.
+//
+// Gated on the completion count EXISTING. A zero completion cannot be read as
+// "the model produced no output"; on any accumulating path it is equally "the
+// completion has not been reported yet", and the two are indistinguishable from
+// here. A record that genuinely ENDS that way is therefore conceded — refusing
+// it would drop billing for what may be a valid request, while accepting it only
+// under-bills, since reasoning is a breakdown and is never billed on its own.
+// The cache rule concedes the mirror-image case for the same reason: a full
+// cache hit legitimately reports a zero prompt.
+func (u IRUsage) reasoningExceedsCompletion() bool {
+	return u.CompletionTokens > 0 && u.ReasoningTokens > u.CompletionTokens
 }
 
 // CacheSitsOutsidePrompt reports whether a record that CLAIMS the inclusive
@@ -413,4 +492,67 @@ func (u IRUsage) GrossTotalTokens() int {
 		return 0
 	}
 	return t
+}
+
+// IRStopReasonIsAbnormal reports whether an IR stop reason denotes a
+// termination that must never be masked by a tool-call inference.
+//
+// Truncation and content filtering both mean the emitted tool-call arguments
+// may be incomplete — possibly not even valid JSON — so reporting them as a
+// clean "tool_calls" finish would tell the client they are ready to execute.
+// Shared by every egress encoder and by the relay's finish_reason normaliser so
+// the rule cannot drift between them.
+//
+// Unknown upstream values are deliberately NOT listed here. They pass through
+// verbatim, matching new-api's reasonmap (whose default is `return stopReason`):
+// minting a synthetic IR value for them would force every egress encoder to
+// invent a representation, and OpenAI's finish_reason enum has none — the only
+// options there are a lossy mapping or an illegal value.
+func IRStopReasonIsAbnormal(reason string) bool {
+	switch reason {
+	case "length", "content_filter":
+		return true
+	}
+	return false
+}
+
+// HasBillableUsage reports whether the counts that BILLING consumes have
+// arrived: prompt, completion, total and the cache counters.
+//
+// Used to decide whether a request may be settled as a success — specifically
+// whether a benign post-DONE read error can be excused. Reasoning and
+// web-search counters are deliberately excluded: pricing is computed from the
+// token counts above, so a partial usage frame carrying only
+// reasoning_tokens proves nothing about whether the billable numbers ever
+// arrived. Treating it as "usage received" would settle the request as a
+// success while silently under-charging it.
+//
+// A fully cache-hit request legitimately reports zero prompt/completion tokens
+// while having consumed real, billable cache reads — hence the cache counters
+// are in.
+func HasBillableUsage(u IRUsage) bool {
+	// A record a decoder marked impossible carries no billable counts, no
+	// matter what numbers survived in its fields.
+	if u.Invalid {
+		return false
+	}
+	return u.PromptTokens > 0 || u.CompletionTokens > 0 || u.TotalTokens > 0 ||
+		u.CacheReadTokens > 0 || u.CacheWriteTokens > 0
+}
+
+// HasAnyUsage reports whether usage carries ANY non-zero count, billable or
+// merely informational.
+//
+// Used to decide whether there is anything worth putting on the wire in a
+// usage frame — a different question from "may this be billed as a success",
+// which is HasBillableUsage. The two are kept as one definition plus an
+// extension rather than two parallel field lists, so they cannot drift apart
+// while still answering their own question.
+func HasAnyUsage(u IRUsage) bool {
+	// Guarded separately from HasBillableUsage: the reasoning and web-search
+	// counters below would otherwise put an impossible record back on the wire.
+	if u.Invalid {
+		return false
+	}
+	return HasBillableUsage(u) || u.ReasoningTokens > 0 || u.WebSearchCount > 0
 }

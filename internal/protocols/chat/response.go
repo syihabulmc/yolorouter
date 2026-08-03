@@ -36,22 +36,21 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 				// the top-level alias below.
 				//
 				// A pointer so "field absent" is distinguishable from "field
-				// present and 0". An explicit zero asserts there was no cache
-				// write and must win over a stale non-zero alias — an int would
-				// read it as absent and bill the alias instead.
+				// present and 0". An explicit zero is an assertion that there
+				// was no cache write, and it must win over a stale non-zero
+				// alias — an int would read it as absent and bill the alias.
 				CacheWriteTokens *int `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details,omitempty"`
-			// DeepSeek splits prompt_tokens into hit + miss. Only the hit half is
-			// read: it is the cache-read count. The miss half is the non-cached
-			// remainder, which netPromptTokens already derives as
-			// prompt_tokens - cache_read; it is NOT a cache write (DeepSeek's
-			// cache is implicit and has no separate write line).
-			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens,omitempty"`
-			// Non-standard: OpenAI has no cache-write field. Gateways fronting
-			// an Anthropic model (this one included, see openAIWireUsage) carry
-			// the count under Anthropic's own name so it survives the hop.
-			// Like cached_tokens it is a breakdown OF prompt_tokens, so it is
-			// recorded, never added.
+			CompletionTokensDetails *struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details,omitempty"`
+			PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
+			PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+			// Non-standard cache-write breakdown; see
+			// protocols.CacheWriteAliasField. Set by gateways fronting an
+			// Anthropic model (this one included, see openAIWireUsage). Like
+			// cached_tokens it sits INSIDE prompt_tokens, so it is recorded,
+			// never added.
 			CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 		} `json:"usage,omitempty"`
 	}
@@ -66,7 +65,7 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 		choice := resp.Choices[0]
 		irResp.Content = choice.Message.Content
 		irResp.ReasoningContent = choice.Message.ReasoningContent
-		irResp.StopReason = choice.FinishReason
+		irResp.StopReason = mapToIRStopReason(choice.FinishReason)
 
 		for _, tc := range choice.Message.ToolCalls {
 			fn, _ := tc["function"].(map[string]interface{})
@@ -92,20 +91,34 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 		if resp.Usage.PromptTokensDetails != nil && resp.Usage.PromptTokensDetails.CachedTokens > 0 {
 			irResp.Usage.CacheReadTokens = resp.Usage.PromptTokensDetails.CachedTokens
 		}
+		// reasoning_tokens is a breakdown OF completion_tokens (OpenAI counts
+		// reasoning inside the output total), so it is recorded but NOT added.
+		if resp.Usage.CompletionTokensDetails != nil {
+			irResp.Usage.ReasoningTokens = resp.Usage.CompletionTokensDetails.ReasoningTokens
+		}
 		if resp.Usage.PromptCacheHitTokens > 0 {
 			// DeepSeek uses prompt_cache_hit_tokens instead of prompt_tokens_details.cached_tokens
 			irResp.Usage.CacheReadTokens = resp.Usage.PromptCacheHitTokens
 		}
-		// Cache WRITE has two spellings in the wild and they name the same
+		// prompt_cache_miss_tokens is deliberately NOT mapped to CacheWriteTokens.
+		// DeepSeek splits the prompt into hit + miss (hit + miss == prompt_tokens);
+		// "miss" is the part that was NOT served from cache, not a cache-creation
+		// charge — DeepSeek has no cache-write concept. Mapping it made
+		// NetPromptTokens compute prompt - hit - miss == 0 for every DeepSeek
+		// request, so the entire input was billed at cache-write price (unset, i.e.
+		// free, on most non-Anthropic models). The miss portion is already covered
+		// by PromptTokens - CacheReadTokens.
+		//
+		// Cache WRITE has two spellings in the wild and they mean the same
 		// breakdown of prompt_tokens, so exactly one is taken — never summed.
 		// OpenRouter's nested cache_write_tokens is the documented contract and
 		// wins; the top-level alias is what new-api-style gateways (including
-		// this one's own Gemini egress) emit and serves as the fallback.
+		// this one's own egress) emit and serves as the fallback.
 		//
 		// Precedence is by field PRESENCE, not by value: an explicitly reported
 		// 0 asserts "no cache write" and must beat a stale non-zero alias. A
-		// negative value likewise survives rather than being masked, so the
-		// gateway's coherence check can refuse the whole record.
+		// negative value is likewise carried through rather than masked, so the
+		// billing gate can refuse the whole record.
 		irResp.Usage.CacheWriteTokens = resp.Usage.CacheCreationInputTokens
 		if resp.Usage.PromptTokensDetails != nil && resp.Usage.PromptTokensDetails.CacheWriteTokens != nil {
 			irResp.Usage.CacheWriteTokens = *resp.Usage.PromptTokensDetails.CacheWriteTokens
@@ -201,22 +214,21 @@ func (d *StreamDecoder) parseChunk(raw json.RawMessage) []protocols.IRStreamDelt
 				// the top-level alias below.
 				//
 				// A pointer so "field absent" is distinguishable from "field
-				// present and 0". An explicit zero asserts there was no cache
-				// write and must win over a stale non-zero alias — an int would
-				// read it as absent and bill the alias instead.
+				// present and 0". An explicit zero is an assertion that there
+				// was no cache write, and it must win over a stale non-zero
+				// alias — an int would read it as absent and bill the alias.
 				CacheWriteTokens *int `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details,omitempty"`
-			// DeepSeek splits prompt_tokens into hit + miss. Only the hit half is
-			// read: it is the cache-read count. The miss half is the non-cached
-			// remainder, which netPromptTokens already derives as
-			// prompt_tokens - cache_read; it is NOT a cache write (DeepSeek's
-			// cache is implicit and has no separate write line).
-			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens,omitempty"`
-			// Non-standard: OpenAI has no cache-write field. Gateways fronting
-			// an Anthropic model (this one included, see openAIWireUsage) carry
-			// the count under Anthropic's own name so it survives the hop.
-			// Like cached_tokens it is a breakdown OF prompt_tokens, so it is
-			// recorded, never added.
+			CompletionTokensDetails *struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details,omitempty"`
+			PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
+			PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+			// Non-standard cache-write breakdown; see
+			// protocols.CacheWriteAliasField. Set by gateways fronting an
+			// Anthropic model (this one included, see openAIWireUsage). Like
+			// cached_tokens it sits INSIDE prompt_tokens, so it is recorded,
+			// never added.
 			CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 		} `json:"usage,omitempty"`
 	}
@@ -277,17 +289,18 @@ func (d *StreamDecoder) parseChunk(raw json.RawMessage) []protocols.IRStreamDelt
 
 		if choice.FinishReason != nil && *choice.FinishReason != "" && !d.done {
 			d.done = true
-			deltas = append(deltas, protocols.DeltaDone{StopReason: *choice.FinishReason})
+			deltas = append(deltas, protocols.DeltaDone{StopReason: mapToIRStopReason(*choice.FinishReason)})
 		}
 	}
 
-	// Usage
-	// Gated on presence alone. Keying the gate on prompt/completion being
-	// non-zero dropped a usage chunk that carried ONLY cache counts — a shape
-	// some upstreams send when they split usage across frames — so the cache
-	// write stayed at whatever an earlier frame had merged and its tokens were
-	// billed as fresh input. Whether the assembled record is worth emitting is
-	// decided below, after every field has been read.
+	// Usage.
+	//
+	// The gate deliberately does NOT require prompt/completion to be non-zero: a
+	// fully cache-hit request legitimately reports prompt_tokens:0 with
+	// prompt_cache_hit_tokens:N, and some gateways report only total_tokens.
+	// Dropping those chunks left encoder.Usage() at zero — nothing billed, the
+	// client's include_usage frame suppressed, and a benign post-DONE read error
+	// no longer excused, turning a complete response into a 502.
 	if chunk.Usage != nil {
 		usage := protocols.IRUsage{
 			PromptTokens:          chunk.Usage.PromptTokens,
@@ -298,33 +311,60 @@ func (d *StreamDecoder) parseChunk(raw json.RawMessage) []protocols.IRStreamDelt
 		if chunk.Usage.PromptTokensDetails != nil {
 			usage.CacheReadTokens = chunk.Usage.PromptTokensDetails.CachedTokens
 		}
+		// Breakdown of completion_tokens, not an addition — see the
+		// non-streaming decoder above.
+		if chunk.Usage.CompletionTokensDetails != nil {
+			usage.ReasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
+		}
 		if chunk.Usage.PromptCacheHitTokens > 0 {
 			// DeepSeek uses prompt_cache_hit_tokens instead of prompt_tokens_details.cached_tokens
 			usage.CacheReadTokens = chunk.Usage.PromptCacheHitTokens
 		}
-		// Nested cache_write_tokens wins over the top-level alias; exactly one
-		// is taken, never summed. See the non-streaming decoder above.
+		// prompt_cache_miss_tokens is deliberately NOT mapped to CacheWriteTokens
+		// — see the non-streaming decoder above for the full rationale. The
+		// cache_creation_input_tokens alias, by contrast, IS a genuine
+		// cache-write count. OpenRouter's nested cache_write_tokens is the
+		// documented spelling and wins over the top-level alias; exactly one is
+		// taken, never summed. See the non-streaming decoder above.
 		usage.CacheWriteTokens = chunk.Usage.CacheCreationInputTokens
 		if chunk.Usage.PromptTokensDetails != nil && chunk.Usage.PromptTokensDetails.CacheWriteTokens != nil {
 			usage.CacheWriteTokens = *chunk.Usage.PromptTokensDetails.CacheWriteTokens
 		}
-		// An impossible record cannot be carried through IRUsage.Merge, which
-		// copies only values greater than zero, so the negative or oversized cache
-		// that proved it wrong would silently vanish and the remaining counts be
-		// billed as sound. The frame is MARKED rather than dropped: dropping it
-		// would leave whatever an earlier frame merged in place, and a
-		// finish_reason in this same chunk would still complete the stream and
-		// bill those stale counts. Merge propagates Invalid one-way, so the
-		// verdict survives to every consumer.
+		// Marked rather than dropped: IRUsage.Merge folds frames into one
+		// accumulated record, so dropping this one would leave the previous
+		// frame's counts standing and a finish_reason in the same chunk would
+		// still complete the stream and bill them. Merge propagates Invalid
+		// one-way, so the verdict travels with the record. IsIncoherent (not
+		// HasNegativeCount) so the cache-exceeds-prompt impossibility is caught
+		// here too, matching what the billing gate decides.
 		usage.Invalid = usage.IsIncoherent()
-		// Cache counts are enough on their own to make a frame worth emitting;
-		// requiring prompt/completion is what dropped cache-only chunks.
-		if usage.Invalid ||
-			usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.TotalTokens != 0 ||
-			usage.CacheReadTokens != 0 || usage.CacheWriteTokens != 0 {
-			deltas = append(deltas, protocols.DeltaUsage{Usage: usage})
-		}
+		deltas = append(deltas, protocols.DeltaUsage{Usage: usage})
 	}
 
 	return deltas
+}
+
+// mapToIRStopReason normalises OpenAI's finish_reason onto the IR vocabulary
+// (stop | length | tool_calls | content_filter).
+func mapToIRStopReason(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "function_call":
+		// Deprecated alias of tool_calls, still legal in OpenAI's enum and
+		// emitted by some compatible upstreams.
+		return "tool_calls"
+	case "max_tokens", "model_length", "max_output_tokens":
+		// OpenAI's own word is "length", but compat gateways routinely echo the
+		// Anthropic / vendor spelling. These are KNOWN synonyms, so folding them
+		// in is what new-api's reasonmap does too — and it matters: leaving them
+		// verbatim kept IRStopReasonIsAbnormal from recognising a truncation, so
+		// a run cut off mid-tool-call was re-encoded as a clean "tool_calls" and
+		// the client was told the partial arguments were safe to execute.
+		return "length"
+	case "safety", "recitation":
+		return "content_filter"
+	}
+	// Genuinely unknown values still pass through verbatim: minting a synthetic
+	// marker would oblige every egress encoder to invent a representation, and
+	// OpenAI's enum has none. Only established synonyms are normalised.
+	return reason
 }

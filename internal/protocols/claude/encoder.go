@@ -68,11 +68,11 @@ func (RequestEncoder) EncodeRequest(irReq *protocols.IRRequest) (json.RawMessage
 		if irReq.Reasoning.BudgetTokens != nil {
 			budget = *irReq.Reasoning.BudgetTokens
 		}
-		// Anthropic requires max_tokens > thinking.budget_tokens. The reference
-		// project reconciles this in OptimizeBody (a post-encode pass not wired
-		// into dispatch in this version) by clamping the thinking budget under
-		// max_tokens rather than raising the caller's requested output ceiling.
-		// Mirror that rule: floor the budget at 1024 (Anthropic's minimum for a
+		// Anthropic requires max_tokens > thinking.budget_tokens. OptimizeBody
+		// applies the same rule (a post-encode pass not wired into dispatch in
+		// this version) by clamping the thinking budget under max_tokens rather
+		// than raising the caller's requested output ceiling. Mirror it: floor
+		// the budget at 1024 (Anthropic's minimum for a
 		// usable thinking budget), then clamp it to max_tokens - 1 so the
 		// caller's max_tokens cap is always respected.
 		maxTokens := 4096

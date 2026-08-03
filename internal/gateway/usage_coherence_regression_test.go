@@ -7,12 +7,11 @@ import (
 	"github.com/yolorouter/yolorouter/internal/protocols/responses"
 )
 
-// These tests guard the two real bugs fixed by the verdict-convergence work
-// (P1-1 and P2-4 in docs/protocols/usage-coherence-open-issues.md). Both were
-// symptoms of one root cause: the wire encoder and the billing gate judged
-// "is this usage impossible?" with DIFFERENT predicates, so a record could be
-// emitted on the wire while billing refused it (P1-1), or refused on the wire
-// while billing accepted it (P2-4).
+// These tests guard the two real bugs fixed by the verdict-convergence work.
+// Both were symptoms of one root cause: the wire encoder and the billing gate
+// judged "is this usage impossible?" with DIFFERENT predicates, so a record
+// could be emitted on the wire while billing refused it, or refused on the
+// wire while billing accepted it.
 //
 // The fix routes both through a single IR-level verdict (IRUsage.IsIncoherent),
 // set once at the decoder exit and carried on Invalid. These tests exercise the
@@ -72,11 +71,11 @@ func TestP1_1_WireAndBillingAgreeOnAbsurdCacheCount(t *testing.T) {
 	// other rejecting. Agreement is the regression; the direction (refuse) is the
 	// fix for this shape.
 	if encodeRefuses(u) != billRefuses(u) {
-		t.Errorf("P1-1 disagreement: encoder refuses=%v, billing refuses=%v — wire and billing must agree on %+v",
+		t.Errorf("disagreement: encoder refuses=%v, billing refuses=%v — wire and billing must agree on %+v",
 			encodeRefuses(u), billRefuses(u), u)
 	}
 	if !encodeRefuses(u) {
-		t.Errorf("P1-1: an absurd cache count (cache_write=1000000 on a 100-token prompt) must be refused on the wire, got %+v", u)
+		t.Errorf("an absurd cache count (cache_write=1000000 on a 100-token prompt) must be refused on the wire, got %+v", u)
 	}
 }
 
@@ -102,11 +101,11 @@ func TestP2_4_WireAndBillingAgreeOnNegativeReasoning(t *testing.T) {
 		t.Fatalf("precondition: decoder must surface the negative reasoning count, got ReasoningTokens=%d", u.ReasoningTokens)
 	}
 	if encodeRefuses(u) != billRefuses(u) {
-		t.Errorf("P2-4 disagreement: encoder refuses=%v, billing refuses=%v — wire and billing must agree on %+v",
+		t.Errorf("disagreement: encoder refuses=%v, billing refuses=%v — wire and billing must agree on %+v",
 			encodeRefuses(u), billRefuses(u), u)
 	}
 	if !billRefuses(u) {
-		t.Errorf("P2-4: a negative reasoning count must reach billing and be refused; the bridge must carry ReasoningTokens. got %+v", u)
+		t.Errorf("a negative reasoning count must reach billing and be refused; the bridge must carry ReasoningTokens. got %+v", u)
 	}
 }
 

@@ -1,10 +1,9 @@
 package protocols_test
 
 import (
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"strings"
 	"testing"
-
-	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
 func TestRedactURLStripsUserInfoCredentials(t *testing.T) {

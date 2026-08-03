@@ -159,12 +159,15 @@ func buildGeminiParts(resp *protocols.IRResponse) []interface{} {
 	return parts
 }
 
-// buildGeminiUsage renders IR usage as Gemini's usageMetadata.
+// buildGeminiUsage builds the Gemini usageMetadata object.
 //
-// Emits GROSS counts: Gemini documents promptTokenCount as the total effective
-// prompt size, with cachedContentTokenCount a breakdown of it. Forwarding the
-// raw IR PromptTokens would be wrong for an Anthropic upstream, whose count
-// excludes cache — the cached portion would silently disappear from the input.
+// promptTokenCount is the GROSS input (cache included). When cachedContent is
+// set, promptTokenCount still includes every token in the cached content.
+// Emitting the IR's raw PromptTokens would drop the whole cache portion for
+// Anthropic upstreams, whose input count is net.
+//
+// Gemini has no cache-WRITE field of its own, so CacheWriteTokens is carried in
+// the non-standard protocols.CacheWriteAliasField below.
 func buildGeminiUsage(u protocols.IRUsage) map[string]interface{} {
 	// A record the gateway itself refused publishes nothing: emitting sanitized
 	// counts would hand the client — and any downstream gateway billing from
@@ -176,10 +179,22 @@ func buildGeminiUsage(u protocols.IRUsage) map[string]interface{} {
 	if u.Invalid {
 		return nil
 	}
+	// The IR keeps a gross CompletionTokens (reasoning included, OpenAI's
+	// convention). Gemini splits them: totalTokenCount is documented as
+	// "prompt + thoughts + response candidates", so candidatesTokenCount must
+	// exclude thinking. Split them back apart here, keeping the sum intact so
+	// totalTokenCount still equals prompt + thoughts + candidates.
+	candidates := u.CompletionTokens - u.ReasoningTokens
+	if candidates < 0 {
+		candidates = 0
+	}
 	meta := map[string]interface{}{
 		"promptTokenCount":     u.GrossPromptTokens(),
-		"candidatesTokenCount": u.CompletionTokens,
+		"candidatesTokenCount": candidates,
 		"totalTokenCount":      u.GrossTotalTokens(),
+	}
+	if u.ReasoningTokens > 0 {
+		meta["thoughtsTokenCount"] = u.ReasoningTokens
 	}
 	if u.CacheReadTokens > 0 {
 		meta["cachedContentTokenCount"] = u.CacheReadTokens
@@ -245,6 +260,15 @@ func geminiToolCallChunk(name string, args map[string]interface{}) protocols.SSE
 }
 
 func mapToGeminiFinishReason(reason string, hasToolCalls bool) string {
+	// Abnormal terminations outrank the tool-call inference: returning "STOP"
+	// for a run that was actually truncated (or filtered) would present partial,
+	// possibly invalid tool-call arguments as a clean finish.
+	if protocols.IRStopReasonIsAbnormal(reason) {
+		if reason == "content_filter" {
+			return "SAFETY"
+		}
+		return "MAX_TOKENS"
+	}
 	if hasToolCalls {
 		return "STOP"
 	}
@@ -256,11 +280,11 @@ func mapToGeminiFinishReason(reason string, hasToolCalls bool) string {
 	case "content_filter":
 		return "SAFETY"
 	case "error":
-		// Explicit upstream stream failure (ResponsesStreamDecoder already emits
-		// protocols.DeltaDone{stop_reason="error"}): the Gemini wire protocol has no
-		// standard "error" finishReason, but OTHER conveys an abnormal termination
-		// far more honestly than misreporting STOP, which would let the client
-		// believe it received a complete response.
+		// Explicit upstream stream failure (the ResponsesStreamDecoder has
+		// already emitted protocols.DeltaDone{stop_reason="error"}): the Gemini
+		// wire protocol has no standard "error" finishReason, but OTHER conveys
+		// an abnormal termination far more honestly than misreporting STOP,
+		// which would let the client believe it received a complete response.
 		return "OTHER"
 	default:
 		return "STOP"
@@ -400,9 +424,25 @@ func (m *usageMetadata) promptTokens() int {
 //
 // The sum is the fallback for responses that omit the total (or report one at
 // or below the input, which can't be right).
+//
+// The subtraction is additionally floored at candidatesTokenCount, because a
+// positive result is not by itself proof that the total was current. Some
+// OpenAI-compatible fronts fill totalTokenCount from a stale snapshot while the
+// per-part counts in the SAME payload are up to date — prompt=100,
+// candidates=100, thoughts=0, total=150 subtracts to 50 even though the
+// response already accounts for 100 generated tokens. Nothing downstream can
+// notice: the record is coherent by every rule and simply bills half the output.
+//
+// The floor is candidatesTokenCount ALONE, never candidates + thoughts. Adding
+// them is exactly the double-count the subtraction exists to avoid: on the
+// Google AI endpoint thinking is already inside candidatesTokenCount, so the sum
+// would charge it twice, and no field says which convention is in force.
+// Candidates on its own is safe under both — it equals the whole output there,
+// and is a strict part of it on Vertex — so it can only ever raise a
+// short-changed result back to something the payload itself vouches for.
 func (m *usageMetadata) completionTokens() int {
 	if prompt := m.promptTokens(); m.TotalTokenCount > prompt {
-		return m.TotalTokenCount - prompt
+		return max(m.TotalTokenCount-prompt, m.CandidatesTokenCount)
 	}
 	return m.CandidatesTokenCount + m.ThoughtsTokenCount
 }
@@ -478,16 +518,10 @@ func (d *StreamDecoder) parseGeminiChunk(raw json.RawMessage) []protocols.IRStre
 		}
 
 		if cand.FinishReason != "" {
-			var reason string
-			switch cand.FinishReason {
-			case "MAX_TOKENS":
-				reason = "length"
-			case "STOP":
-				reason = "stop"
-			default:
-				reason = strings.ToLower(cand.FinishReason)
-			}
-			deltas = append(deltas, protocols.DeltaDone{StopReason: reason})
+			// Shared with the non-streaming decoder so the two paths can never
+			// drift: SAFETY family normalised to content_filter, others
+			// lower-cased. See mapFromGeminiFinishReason.
+			deltas = append(deltas, protocols.DeltaDone{StopReason: mapFromGeminiFinishReason(cand.FinishReason)})
 		}
 	}
 
@@ -501,6 +535,14 @@ func (d *StreamDecoder) parseGeminiChunk(raw json.RawMessage) []protocols.IRStre
 		u, ok := chunk.UsageMetadata.toIRUsage()
 		if !ok {
 			u = protocols.IRUsage{Invalid: true}
+		} else {
+			// Same full verdict the non-streaming path applies at its exit
+			// (and chat's streaming decoder applies per frame): a Gemini
+			// frame is a genuine single snapshot, so the growth-sensitive
+			// reasoning-subset rule is safe here — without it, a stale-total
+			// shape slips through streaming while the identical payload is
+			// refused on the non-streaming path.
+			u.Invalid = u.IsIncoherent()
 		}
 		deltas = append(deltas, protocols.DeltaUsage{Usage: u})
 	}
@@ -577,26 +619,51 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 	}
 
 	if resp.UsageMetadata != nil {
-		// Leaves the zero-value usage (unknown, not zero-cost) when the block
-		// is rejected — same treatment the streaming path gives it.
-		if u, ok := resp.UsageMetadata.toIRUsage(); ok {
-			// Set the verdict at the IR exit so every consumer reads Invalid
-			// instead of re-judging. See IRUsage.IsIncoherent.
+		// Set the verdict at the IR exit so every consumer reads Invalid
+		// instead of re-judging. See IRUsage.IsIncoherent.
+		u, ok := resp.UsageMetadata.toIRUsage()
+		if !ok {
+			// A rejected block is unknown usage, not zero-cost usage, and it
+			// has to say so: a bare zero value reads as a coherent "0 tokens"
+			// downstream, which the wire encoders serialise as an all-zero
+			// object instead of null and the billing gate treats as free but
+			// measured. Marking it matches what the streaming path emits for
+			// the same rejection.
+			u = protocols.IRUsage{Invalid: true}
+		} else {
 			u.Invalid = u.IsIncoherent()
-			irResp.Usage = u
 		}
+		irResp.Usage = u
 	}
 
 	return irResp, nil
 }
 
+// mapFromGeminiFinishReason normalises Gemini's finishReason onto the IR
+// vocabulary (stop | length | tool_calls | content_filter | error).
+//
+// Gemini has several distinct safety terminations. Lower-casing them instead of
+// mapping them let "safety" / "recitation" reach the IR verbatim, where no
+// egress encoder recognises them: the abnormal-termination guard did not fire,
+// so a blocked response could be reported as a clean tool-call finish, and the
+// Chat/Claude encoders emitted values outside their own enums.
 func mapFromGeminiFinishReason(reason string) string {
 	switch reason {
 	case "STOP":
 		return "stop"
 	case "MAX_TOKENS":
 		return "length"
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+		"IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION", "MODEL_ARMOR":
+		return "content_filter"
+	case "":
+		return ""
 	default:
+		// MALFORMED_FUNCTION_CALL, UNEXPECTED_TOOL_CALL, OTHER, and anything
+		// Google adds later. Passed through lower-cased rather than folded into
+		// a synthetic value — same as new-api's reasonmap default. The safety
+		// terminations above are mapped because they have a real equivalent in
+		// every target protocol; these do not.
 		return strings.ToLower(reason)
 	}
 }

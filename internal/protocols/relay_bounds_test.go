@@ -27,7 +27,8 @@ func (fakeResponseEncoder) EncodeResponse(*IRResponse) json.RawMessage {
 	return json.RawMessage(`{}`)
 }
 
-// TestIRNonStreamRelay_BoundsResponseBody is a regression test for FIX 4: an
+// TestIRNonStreamRelay_BoundsResponseBody is a regression test for the
+// bounded-body fix: an
 // unbounded io.ReadAll(resp.Body) let a hostile/buggy upstream exhaust
 // gateway memory before the request timeout fires. maxIRResponseBytes is a
 // package var precisely so a test can shrink it instead of buffering a real
@@ -74,7 +75,8 @@ func (fakeStreamEncoder) EncodeDone() []SSEEvent                  { return nil }
 func (fakeStreamEncoder) Usage() IRUsage                          { return IRUsage{} }
 
 // TestIRStreamRelayJSONLines_CapsIncompleteLineBuffer is a regression test
-// for FIX 5: lineBuf grew unboundedly when the upstream sent bytes without
+// for the unbounded-lineBuf fix: lineBuf grew unboundedly when the upstream
+// sent bytes without
 // ever emitting a newline. maxJSONLineBytes is a package var precisely so a
 // test can shrink it instead of sending a real 1 MiB line. With the cap
 // shrunk to a small value, an upstream that never emits a newline must make

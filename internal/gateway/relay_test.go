@@ -286,7 +286,7 @@ func TestRelayNonStreamSuccess(t *testing.T) {
 	}
 }
 
-// TestRelayNonStreamScalarStopNotRejected is a regression test for the P1 fix
+// TestRelayNonStreamScalarStopNotRejected is a regression test for the fix
 // to the OpenAI chat decoder's "stop" field: OpenAI documents "stop" as
 // EITHER a single string OR an array of strings, but the decoder previously
 // only accepted the array form, so a scalar "stop" failed the top-level JSON

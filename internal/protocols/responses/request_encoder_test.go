@@ -2,10 +2,9 @@ package responses
 
 import (
 	"encoding/json"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"strings"
 	"testing"
-
-	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
 // TestEncodeResponsesInput_MultipleToolResults locks in a regression fix:

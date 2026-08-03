@@ -2,7 +2,6 @@ package claude
 
 import (
 	"encoding/json"
-
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
@@ -19,8 +18,8 @@ type StreamEncoder struct {
 	blockType           string // "text", "thinking", "tool_use"
 	toolCallIDs         map[int]string
 	stopped             bool
-	pendingStopReason   string // stop reason received via DeltaDone, deferred until EncodeDone emits it
-	pendingStopSequence string // stop_sequence received via DeltaDone; non-empty only when stop_reason==stop_sequence
+	pendingStopReason   string // stop reason received from DeltaDone, emitted only at EncodeDone
+	pendingStopSequence string // stop_sequence received from DeltaDone, non-empty only when stop_reason==stop_sequence
 }
 
 func NewStreamEncoder() *StreamEncoder {
@@ -78,30 +77,28 @@ func (e *StreamEncoder) EncodeDeltas(deltas []protocols.IRStreamDelta) []protoco
 			})
 
 		case protocols.DeltaUsage:
-			// Field-level merge (IRUsage.Merge only overwrites non-zero fields):
-			// an upstream provider may split usage across multiple partial chunks
-			// (e.g. some Azure/LiteLLM deployments send prompt usage and completion
-			// usage in separate frames for reasoning models). A whole-struct
-			// last-wins merge would let a completion-only chunk zero out the
-			// PromptTokens/Cache fields that were already collected, under-reporting
-			// input_tokens both in the client SSE stream and for billing.
+			// Field-level merge (IRUsage.Merge overwrites only non-zero fields): an upstream may send
+			// partial usage chunks across multiple frames (e.g. some azure / litellm deployments split
+			// prompt usage and completion usage into two frames on reasoning models). A whole-struct
+			// last-wins assignment would let a later completion-only chunk clobber the collected
+			// PromptTokens / cache fields to 0, under-reporting input_tokens in both the client SSE
+			// and the billing layer.
 			e.usage.Merge(d.Usage)
 
 		case protocols.DeltaDone:
 			events = append(events, e.closeBlock()...)
 			reason := d.StopReason
 			e.pendingStopSequence = d.StopSequence
-			if len(e.toolCallIDs) > 0 {
+			if len(e.toolCallIDs) > 0 && !protocols.IRStopReasonIsAbnormal(reason) {
 				reason = "tool_calls"
 				e.pendingStopSequence = ""
 			}
-			// Don't emit message_delta + message_stop immediately -- under the OpenAI
-			// include_usage protocol, finish_reason and usage often arrive in the same
-			// SSE frame (decoder emit order: DeltaDone first, then DeltaUsage). Emitting
-			// right away would leave e.usage.CompletionTokens at 0, so the client would
-			// receive a message_delta with usage:{output_tokens:0}. Deferring to
-			// EncodeDone (called by the caller once the stream has truly ended)
-			// guarantees DeltaUsage has already been applied.
+			// Do not emit message_delta + message_stop immediately: under the OpenAI include_usage
+			// protocol, finish_reason and usage often arrive in the same SSE frame (the decoder emits
+			// DeltaDone first, DeltaUsage after), so emitting right away would leave
+			// e.usage.CompletionTokens at 0 and hand the client a message_delta with
+			// usage:{output_tokens:0}. Deferring to EncodeDone (called by the caller when the stream
+			// truly ends) guarantees DeltaUsage has been applied.
 			e.pendingStopReason = reason
 
 		case protocols.DeltaUnknown:
@@ -116,9 +113,9 @@ func (e *StreamEncoder) EncodeDeltas(deltas []protocols.IRStreamDelta) []protoco
 }
 
 func (e *StreamEncoder) EncodeDone() []protocols.SSEEvent {
-	// Only called when the caller considers the stream to have truly ended
-	// (finishErr == nil). At this point all DeltaUsage deltas have already been
-	// applied to e.usage, so message_delta's output_tokens is accurate.
+	// Only called when the caller considers the stream truly complete (finishErr == nil).
+	// By then every DeltaUsage has been applied to e.usage, so the message_delta
+	// output_tokens are accurate.
 	if e.stopped || e.pendingStopReason == "" {
 		return nil
 	}
@@ -194,30 +191,34 @@ func (e *StreamEncoder) emitMessageDelta(stopReason string) []protocols.SSEEvent
 		stopSeqVal = e.pendingStopSequence
 	}
 
+	var reasonVal interface{}
+	if reason != "" {
+		reasonVal = reason
+	}
 	deltaData := map[string]interface{}{
 		"type": "message_delta",
 		"delta": map[string]interface{}{
-			"stop_reason":   reason,
+			"stop_reason":   reasonVal,
 			"stop_sequence": stopSeqVal,
 		},
-		// Full usage (input + cache), not just output_tokens. For OpenAI/Gemini/
-		// Responses upstreams the input usage only arrives at stream end — long
-		// after message_start went out with input_tokens 0 — so this terminal
-		// message_delta is the ONLY event that can carry the real input and cache
-		// breakdown to the client. Anthropic's spec documents only output_tokens
-		// here, but its own web-search example ships input_tokens and the cache
-		// fields on message_delta, so the extra members are compatible.
+		// Full usage (input+cache) — for OpenAI/Gemini/Responses upstreams the
+		// input usage only arrives at stream end (after message_start was sent
+		// with input=0), so the terminal message_delta is the only event that
+		// can carry the real input_tokens + cache breakdown downstream.
+		// Standard message_delta usage contains only output_tokens; the extra
+		// fields are a practical extension (new-api does the same).
 		"usage": claudeUsageMap(e.usage),
 	}
 	d, _ := json.Marshal(deltaData)
 	return []protocols.SSEEvent{{Event: "message_delta", Data: string(d)}}
 }
 
-// claudeUsageMap builds Anthropic's usage object from an IRUsage: net input
-// (NetPromptTokens, since Anthropic's input_tokens excludes cache), output, and
-// the cache breakdown when non-zero. Shared by the streaming terminal
-// message_delta and the non-streaming ResponseEncoder so the two output paths
-// cannot drift apart.
+// claudeUsageMap builds the Anthropic usage object from an IRUsage:
+// net input_tokens (excludes cache) + output_tokens + conditional cache
+// breakdown. Shared by the streaming terminal message_delta and the
+// non-streaming ResponseEncoder.EncodeResponse to keep both output paths'
+// usage construction identical. See IRUsage.NetPromptTokens for the net
+// input calculation.
 func claudeUsageMap(u protocols.IRUsage) map[string]interface{} {
 	// A record the gateway itself refused publishes nothing: emitting sanitized
 	// counts would hand the client — and any downstream gateway billing from
@@ -251,10 +252,6 @@ func (e *StreamEncoder) marshalMessageStart(id, model string) string {
 		"model":         model,
 		"stop_reason":   nil,
 		"stop_sequence": nil,
-		// Net input per Anthropic's convention. Usually still 0 here: only an
-		// Anthropic upstream reports usage early enough for message_start to
-		// carry it; the other three protocols report at stream end, which is
-		// why emitMessageDelta carries the authoritative counts.
 		"usage": map[string]interface{}{
 			"input_tokens":  e.usage.NetPromptTokens(),
 			"output_tokens": 0,
@@ -322,8 +319,17 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 	}
 
 	stopReason := irToClaudeStopReason(resp.StopReason)
-	if len(resp.ToolCalls) > 0 {
+	// An explicit abnormal termination outranks the tool-call inference: a run
+	// cut off by max tokens may carry partial, unparseable tool-call arguments,
+	// and reporting "tool_use" would present them as ready to execute.
+	if len(resp.ToolCalls) > 0 && !protocols.IRStopReasonIsAbnormal(resp.StopReason) {
 		stopReason = "tool_use"
+	}
+	// Anthropic's stop_reason is nullable and has a closed enum; "" is in neither.
+	// Emit JSON null when the IR carried no stop reason at all.
+	var stopReasonVal interface{}
+	if stopReason != "" {
+		stopReasonVal = stopReason
 	}
 
 	var stopSeqVal interface{}
@@ -337,7 +343,7 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 		"role":          "assistant",
 		"content":       blocks,
 		"model":         resp.Model,
-		"stop_reason":   stopReason,
+		"stop_reason":   stopReasonVal,
 		"stop_sequence": stopSeqVal,
 		"usage":         claudeUsageMap(resp.Usage),
 	}

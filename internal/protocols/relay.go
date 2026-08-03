@@ -14,9 +14,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
-
-	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
 // maxStreamBufSize caps how much upstream data a stream relay buffer retains,
@@ -196,15 +193,6 @@ type UpstreamBuffer interface {
 // A package var so tests can shrink it to keep the suite sub-second.
 var streamWriteWindow = 60 * time.Second
 
-// streamWriteDeadlineWarnedKey is the gin.Context key used to ensure
-// ApplyStreamWriteDeadline's failure warning is logged at most once per
-// request. A writer that does not support SetWriteDeadline (or a middleware
-// wrapper that forgot to implement Unwrap) fails identically on every
-// subsequent chunk of a stream — without this guard, one unsupported writer
-// would flood the log with one warning per chunk for the entire lifetime of
-// the stream.
-const streamWriteDeadlineWarnedKey = "protocols_stream_write_deadline_warned"
-
 // ApplyStreamWriteDeadline sets a sliding write deadline of now +
 // streamWriteWindow on the response writer. Streaming relay loops call this
 // before each Write/Flush batch so a slow-reading client is bounded by
@@ -212,24 +200,9 @@ const streamWriteDeadlineWarnedKey = "protocols_stream_write_deadline_warned"
 // (e.g. httptest.ResponseRecorder), the error is non-nil but benign in
 // production (*http.response always supports it) — the caller still gets the
 // error back so tests can assert on it.
-//
-// The first failure for a given request is also logged as a warning carrying
-// the request ID: now that the global http.Server.WriteTimeout is left in
-// place for streaming requests (this sliding deadline is what keeps a slow
-// client from being cut early), a persistently unsupported writer silently
-// disables that protection — an operationally meaningful regression (e.g. a
-// response-writer wrapper that forgot to implement Unwrap) that must not
-// degrade invisibly. Only the first failure per request is logged to avoid
-// flooding the log for the rest of the stream.
 func ApplyStreamWriteDeadline(c *gin.Context) error {
 	rc := http.NewResponseController(c.Writer)
-	err := rc.SetWriteDeadline(time.Now().Add(streamWriteWindow))
-	if err != nil && !c.GetBool(streamWriteDeadlineWarnedKey) {
-		c.Set(streamWriteDeadlineWarnedKey, true)
-		logger.Warn("protocols: apply stream write deadline failed",
-			zap.String("request_id", c.GetString("request_id")), zap.Error(err))
-	}
-	return err
+	return rc.SetWriteDeadline(time.Now().Add(streamWriteWindow))
 }
 
 // StreamWriteWindow returns the current streamWriteWindow value. Exported
@@ -255,15 +228,6 @@ type responseWriterUnwrapper interface {
 	Unwrap() http.ResponseWriter
 }
 
-// flushErrorWarnedKey is the gin.Context key used to ensure
-// FlushAndCheckError's "writer does not support FlushError" warning is
-// logged at most once per request — mirrors streamWriteDeadlineWarnedKey's
-// rationale (see ApplyStreamWriteDeadline): a writer/middleware wrapper that
-// never reaches FlushError fails identically on every subsequent chunk of a
-// stream, so without this guard one such writer would flood the log with one
-// warning per chunk for the stream's whole lifetime.
-const flushErrorWarnedKey = "protocols_flush_error_warned"
-
 // FlushAndCheckError flushes the response writer and returns any deferred
 // write error. It walks the Unwrap chain past gin's responseWriter (which
 // implements http.Flusher and thus stops http.NewResponseController from
@@ -276,10 +240,7 @@ const flushErrorWarnedKey = "protocols_flush_error_warned"
 // exercised — gin's responseWriter always unwraps to *http.response, which
 // implements FlushError — but a future middleware wrapper that forgets to
 // implement Unwrap would silently degrade to this no-error fallback,
-// disabling the flush-error-based slow/dead-client detection with zero
-// operational signal. So, mirroring ApplyStreamWriteDeadline's identical
-// guard, the first such fallback per request is logged as a warning (only
-// once, not per chunk, via flushErrorWarnedKey).
+// disabling the flush-error-based slow/dead-client detection.
 //
 // Exported so both the IR streaming relay loops (this package) and the
 // same-protocol passthrough stream pumps (internal/gateway) share one
@@ -302,11 +263,6 @@ func FlushAndCheckError(c *gin.Context) error {
 	// No FlushError in the chain — fall back to the standard Flusher.
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
-	}
-	if !c.GetBool(flushErrorWarnedKey) {
-		c.Set(flushErrorWarnedKey, true)
-		logger.Warn("protocols: flush writer does not support FlushError, falling back to Flush() (flush-error slow-client detection disabled for this request)",
-			zap.String("request_id", c.GetString("request_id")))
 	}
 	return nil
 }

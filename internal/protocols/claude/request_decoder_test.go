@@ -2,12 +2,11 @@ package claude
 
 import (
 	"encoding/json"
-	"strings"
-	"testing"
-
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/protocols/chat"
 	"github.com/yolorouter/yolorouter/internal/protocols/responses"
+	"strings"
+	"testing"
 )
 
 // TestDecodeToolResult_ProducesBlockToolResult locks in a regression fix:
