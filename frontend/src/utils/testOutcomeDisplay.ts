@@ -18,6 +18,12 @@ export const OUTCOME_I18N_KEYS = [
   // fallback below and was mislabelled "upstream error", pointing operators at
   // a network problem that does not exist.
   'outcomeVerificationUnsupported',
+  // The Go enum's tenth entry (TestTimeout). It is split out from
+  // outcomeUnreachable because the two point an operator in opposite
+  // directions: unreachable means the address never connected, a timeout
+  // means it did and the upstream simply took too long, so repeating
+  // "check the URL spelling" here would be actively misleading.
+  'outcomeTimeout',
 ] as const
 
 // Resolves an outcome int to its `providers.*` i18n key, falling back to

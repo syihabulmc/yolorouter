@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"fmt"
+	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -513,12 +515,20 @@ func TestNetPromptTokens(t *testing.T) {
 			237, // 17389 - 17152
 		},
 		{
-			// Cache WRITE sits outside the prompt total under every protocol, so
-			// it is never subtracted — only the read portion is. Deducting it
-			// here would understate the input line of the bill.
-			"cache write is not subtracted",
+			// Under the INCLUSIVE convention the prompt total contains both
+			// cache lines, so both come out. This case used to expect 400, on
+			// the premise that no protocol counts a cache write inside the
+			// prompt — true while the only cache-write source was Anthropic,
+			// whose input_tokens is net (the case above still covers that).
+			//
+			// It stopped being true once the gateway started emitting and
+			// accepting the cache_creation_input_tokens alias on OpenAI-shaped
+			// wires, where the gross prompt is net + read + write (the
+			// convention new-api uses). Leaving the write in would count those
+			// tokens twice: once on the cache-write line, once as fresh input.
+			"inclusive prompt has both cache lines subtracted",
 			&Usage{PromptTokens: 1000, CacheReadTokens: 600, CacheWriteTokens: 300, CacheIncludedInPrompt: true},
-			400, // 1000 - 600; the 300 written tokens were never in prompt_tokens
+			100, // 1000 - 600 - 300
 		},
 		{
 			// Anthropic reports a net input_tokens alongside a cache write, so
@@ -551,10 +561,18 @@ func TestNetPromptTokens(t *testing.T) {
 }
 
 // TestComputeCostRejectsIncoherentUsage: token counts come off the wire from
-// third-party upstreams, so a buggy or hostile provider can report negatives or
-// a cache read larger than the prompt it was read from. Both must be treated as
-// unknown usage — Known=false keeps the cost off the bill and, because finalize
-// gates budget accumulation on Known, off the API key's budget too.
+// third-party upstreams, so a buggy or hostile provider can report negatives, or
+// a cache read larger than the inclusive prompt it was read from. Both are
+// physically impossible and must be treated as unknown usage — Known=false
+// keeps the cost off the bill and, because finalize gates budget accumulation
+// on Known, off the API key's budget too.
+//
+// Note on what is NOT here: "parts exceed stated total" is deliberately absent.
+// A stated total that the parts overflow is "attribution unknown", not
+// impossible — the tokens were really consumed. Every gateway surveyed
+// (new-api, litellm, llmgateway) recomputes total = prompt + completion and
+// bills on; this gateway follows that convention (see usage-cross-protocol-
+// matrix §三). See TestComputeCostAcceptsContradictoryTotal for the positive case.
 func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
 	readPrice := 0.02
 	cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0, CacheReadPrice: &readPrice}
@@ -564,7 +582,10 @@ func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
 		usage *Usage
 	}{
 		{
-			// Would have billed 500 cache reads on a 100-token prompt.
+			// Would have billed 500 cache reads on a 100-token prompt. This is the
+			// sole bound on the cache count, so it holds for any record that
+			// normalizeCacheConvention has not reclassified — see the end of this
+			// test for the reclassified counterpart.
 			"cache read exceeds inclusive prompt",
 			&Usage{PromptTokens: 100, CompletionTokens: 10, CacheReadTokens: 500, CacheIncludedInPrompt: true},
 		},
@@ -579,10 +600,12 @@ func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
 		{"negative cache write", &Usage{PromptTokens: 100, CompletionTokens: 10, CacheWriteTokens: -1}},
 		{"negative total", &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: -1}},
 		{
-			// An inflated completion count is otherwise indistinguishable from a
-			// long generation; the upstream's own total is what contradicts it.
-			"parts exceed stated total",
-			&Usage{PromptTokens: 100, CompletionTokens: 1_000_000, TotalTokens: 110},
+			// P2-4 regression: a negative reasoning count must reach the verdict.
+			// It arrives on IRUsage.ReasoningTokens; the bridge carries it across
+			// so the wire encoder (which refuses via HasNegativeCount) and this
+			// billing gate agree on rejecting it.
+			"negative reasoning tokens",
+			&Usage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, ReasoningTokens: -10},
 		},
 	}
 	for _, tc := range cases {
@@ -609,6 +632,19 @@ func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
 	if got := computeCost(cand, netInput, 0); !got.Known {
 		t.Error("cache read may exceed a net (non-inclusive) input")
 	}
+	// The cache bound above is a bound on the INCLUSIVE convention only, so it
+	// must not survive normalizeCacheConvention reclassifying a record: a stated
+	// total of 610 corroborates the net reading (100+10+500), after which the
+	// prompt is billed as net input rather than floored to zero by a subtraction
+	// that no longer applies.
+	exclusive := &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 610, CacheReadTokens: 500, CacheIncludedInPrompt: true}
+	normalizeCacheConvention(exclusive)
+	if got := computeCost(cand, exclusive, 0); !got.Known {
+		t.Error("a net-prompt upstream must bill once its convention is normalized")
+	}
+	if n := netPromptTokens(exclusive); n != 100 {
+		t.Errorf("netPromptTokens after normalization = %d, want 100", n)
+	}
 	// An upstream that omits total_tokens leaves it at 0; the bound only
 	// applies when a total was actually stated.
 	noTotal := &Usage{PromptTokens: 100, CompletionTokens: 10}
@@ -619,6 +655,14 @@ func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
 	exact := &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110}
 	if got := computeCost(cand, exact, 0); !got.Known {
 		t.Error("prompt+completion == total is the normal case")
+	}
+	// A contradictory total (parts overflow it) is NOT rejected: the tokens were
+	// really consumed, just not split between prompt/completion, and every gateway
+	// surveyed recomputes the total as the parts-sum and bills on. This locks the
+	// industry-convention behavior decided after surveying new-api/litellm/llmgateway.
+	contradictory := &Usage{PromptTokens: 100, CompletionTokens: 1_000_000, TotalTokens: 110}
+	if got := computeCost(cand, contradictory, 0); !got.Known {
+		t.Error("a contradictory total must still bill (industry convention: recompute, don't reject)")
 	}
 }
 
@@ -652,5 +696,223 @@ func TestComputeCostUsesNetInputAcrossProtocols(t *testing.T) {
 	}
 	if c := computeCost(cand, openai, 0); c.CostMicros != wantMicros {
 		t.Errorf("openai cost = %d micros, want %d", c.CostMicros, wantMicros)
+	}
+}
+
+// TestFinalizeNormalizesCacheExclusivePrompt: an OpenAI-compatible upstream
+// fronting an Anthropic model reports the NET input as prompt_tokens and puts
+// the cached portion only in prompt_tokens_details, so the cache-read count can
+// exceed the prompt. finalize must read that as "this upstream uses the net
+// convention" and log the request in full, rather than discarding every count —
+// which used to zero the completion and cache columns too, making a perfectly
+// successful request look like it consumed nothing.
+//
+// Asserted through the persisted row (and the key's budget), because that is
+// what the operator actually sees.
+func TestFinalizeNormalizesCacheExclusivePrompt(t *testing.T) {
+	readPrice := 0.02
+	cases := []struct {
+		name       string
+		usage      *Usage
+		wantInput  int
+		wantOutput int
+		wantRead   int
+		wantKnown  bool
+		wantMicros int64
+	}{
+		{
+			// A whole prompt served from cache, reported behind an OpenAI-shaped
+			// usage object: prompt_tokens carries the net 0, and the stated total
+			// counts the cache on its own line (0+30+6855) — the net convention's
+			// identity, nothing like the inclusive one's (30).
+			// 6855×0.02 + 30×2.0 = 137.1 + 60 = 197.1 -> 197 micros.
+			name:      "net prompt with cache read is logged in full",
+			usage:     &Usage{PromptTokens: 0, CompletionTokens: 30, TotalTokens: 6885, CacheReadTokens: 6855, CacheIncludedInPrompt: true},
+			wantInput: 0, wantOutput: 30, wantRead: 6855, wantKnown: true, wantMicros: 197,
+		},
+		{
+			// A non-zero net prompt must survive intact: subtracting the cache
+			// and flooring at 0 would silently drop these 100 real input tokens.
+			// 100×1.0 + 6855×0.02 + 10×2.0 = 257.1 -> 257 micros.
+			name:      "net prompt is not swallowed by the cache read",
+			usage:     &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 6965, CacheReadTokens: 6855, CacheIncludedInPrompt: true},
+			wantInput: 100, wantOutput: 10, wantRead: 6855, wantKnown: true, wantMicros: 257,
+		},
+		{
+			// The subset rule stands on its own, so slack in the total cannot block
+			// it: the stated total falls short of the net identity here because the
+			// upstream folded a count into it that the OpenAI usage shape cannot
+			// carry (a cache write), yet a 6521-token cache read still cannot be a
+			// subset of a zero-token prompt.
+			// 6521×0.02 + 30×2.0 = 130.42 + 60 = 190.42 -> 190 micros.
+			name:      "the subset rule holds when the total carries slack",
+			usage:     &Usage{PromptTokens: 0, CompletionTokens: 30, TotalTokens: 6885, CacheReadTokens: 6521, CacheIncludedInPrompt: true},
+			wantInput: 0, wantOutput: 30, wantRead: 6521, wantKnown: true, wantMicros: 190,
+		},
+		{
+			// An upstream that really is inclusive and merely over-reports its
+			// cached count states a total that says so (100000+100). Reclassifying
+			// on the inequality alone would bill the gross prompt at the input price
+			// AND the cache at the cache price — the same tokens charged twice.
+			name:  "inclusive upstream over-reporting its cache is not reclassified",
+			usage: &Usage{PromptTokens: 100_000, CompletionTokens: 100, TotalTokens: 100_100, CacheReadTokens: 100_001, CacheIncludedInPrompt: true},
+		},
+		{
+			// No stated total means no corroboration, and guessing here can only
+			// overcharge — so the record stays inclusive and is rejected.
+			name:  "cache exceeding prompt without a stated total is rejected",
+			usage: &Usage{PromptTokens: 100, CompletionTokens: 10, CacheReadTokens: 6855, CacheIncludedInPrompt: true},
+		},
+		{
+			// An absurd cache count cannot buy itself a reclassification: the stated
+			// total refutes the net reading, so the cache bound still applies and
+			// nothing reaches the bill or the key's budget.
+			name:  "an absurd cache count is still rejected",
+			usage: &Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15, CacheReadTokens: 2_000_000_000, CacheIncludedInPrompt: true},
+		},
+		{
+			// The net parts (610) do not fit inside the stated total (400), so the
+			// net reading is self-contradictory. Billing 600 tokens against a total
+			// the upstream capped at 400 would be worse than recording nothing.
+			name:  "net parts that overflow the stated total are rejected",
+			usage: &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 400, CacheReadTokens: 500, CacheIncludedInPrompt: true},
+		},
+		{
+			// A cache write belongs to both readings. Here the stated total is
+			// exactly the inclusive account (100+10+1000), and the net parts (1211)
+			// do not fit — counting the write on the net side only would have tipped
+			// this the other way and double-billed the gross prompt.
+			name:  "a cache write does not tip an inclusive upstream into net",
+			usage: &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 1110, CacheReadTokens: 101, CacheWriteTokens: 1000, CacheIncludedInPrompt: true},
+		},
+		{
+			// A count near MaxInt wraps the net sum negative, and a wrapped sum
+			// compares as though it fits inside any total.
+			name:  "a count large enough to overflow the sum is rejected",
+			usage: &Usage{PromptTokens: 1, CompletionTokens: 0, TotalTokens: 2, CacheReadTokens: math.MaxInt, CacheIncludedInPrompt: true},
+		},
+		{
+			// A net-convention upstream reports cache < prompt on any request that
+			// is not almost entirely cached, which is the common case rather than
+			// the exotic one. The stated total (1000+10+500) still says net, and
+			// reading it as inclusive would subtract the cache from a prompt that
+			// never contained it. 1000×1.0 + 500×0.02 + 10×2.0 = 1030 micros.
+			name:      "net convention is detected when the cache is smaller than the prompt",
+			usage:     &Usage{PromptTokens: 1000, CompletionTokens: 10, TotalTokens: 1510, CacheReadTokens: 500, CacheIncludedInPrompt: true},
+			wantInput: 1000, wantOutput: 10, wantRead: 500, wantKnown: true, wantMicros: 1030,
+		},
+		{
+			// Cache EQUAL to prompt is ambiguous on its face, and the stated total
+			// is what settles it. Here 210 leaves room for the cache on its own
+			// line: net. 100×1.0 + 100×0.02 + 10×2.0 = 122 micros.
+			name:      "cache equal to prompt reads as net when the total says so",
+			usage:     &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 210, CacheReadTokens: 100, CacheIncludedInPrompt: true},
+			wantInput: 100, wantOutput: 10, wantRead: 100, wantKnown: true, wantMicros: 122,
+		},
+		{
+			// The same counts as the case above with a total of 110 instead: no
+			// room for the cache outside the prompt, so it is an ordinary fully
+			// cached prompt and the subtraction stands.
+			// 100×0.02 + 10×2.0 = 22 -> 22 micros.
+			name:      "fully cached inclusive prompt is unchanged",
+			usage:     &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110, CacheReadTokens: 100, CacheIncludedInPrompt: true},
+			wantInput: 0, wantOutput: 10, wantRead: 100, wantKnown: true, wantMicros: 22,
+		},
+		{
+			// A spec-compliant inclusive upstream states total = prompt + completion,
+			// so the net reading never fits — the classification is decided by that
+			// identity, not by luck.
+			// 237×1.0 + 17152×0.02 + 10×2.0 = 600.04 -> 600 micros.
+			name:      "inclusive upstream stating its total is not reclassified",
+			usage:     &Usage{PromptTokens: 17389, CompletionTokens: 10, TotalTokens: 17399, CacheReadTokens: 17152, CacheIncludedInPrompt: true},
+			wantInput: 237, wantOutput: 10, wantRead: 17152, wantKnown: true, wantMicros: 600,
+		},
+		{
+			// Slack in the stated total is not evidence: the 90 tokens here are
+			// unaccounted for under either reading, so they say nothing about where
+			// the cache read sits. The cache is still a plausible subset of the
+			// prompt and the total does not single it out, so the subtraction
+			// stands. 50×1.0 + 50×0.02 + 10×2.0 = 71 micros.
+			name:      "unexplained slack in the total is not read as net accounting",
+			usage:     &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 200, CacheReadTokens: 50, CacheIncludedInPrompt: true},
+			wantInput: 50, wantOutput: 10, wantRead: 50, wantKnown: true, wantMicros: 71,
+		},
+		{
+			// A spec-compliant OpenAI upstream still has its cache subtracted.
+			// 237×1.0 + 17152×0.02 + 10×2.0 = 600.04 -> 600 micros.
+			name:      "inclusive prompt still has cache subtracted",
+			usage:     &Usage{PromptTokens: 17389, CompletionTokens: 10, CacheReadTokens: 17152, CacheIncludedInPrompt: true},
+			wantInput: 237, wantOutput: 10, wantRead: 17152, wantKnown: true, wantMicros: 600,
+		},
+		{
+			// Anthropic's own endpoint: input_tokens is already net. Same request,
+			// same bill as the row above.
+			name:      "anthropic net input is unchanged",
+			usage:     &Usage{PromptTokens: 237, CompletionTokens: 10, CacheReadTokens: 17152, CacheIncludedInPrompt: false},
+			wantInput: 237, wantOutput: 10, wantRead: 17152, wantKnown: true, wantMicros: 600,
+		},
+		{
+			// Genuinely corrupt counts are still dropped whole: a negative cache
+			// read would produce a negative line item.
+			name:  "negative cache read is still rejected",
+			usage: &Usage{PromptTokens: 100, CompletionTokens: 10, CacheReadTokens: -1000, CacheIncludedInPrompt: true},
+		},
+		{
+			// A contradictory total (parts overflow it) is NOT rejected: every
+			// gateway surveyed recomputes the total as the parts-sum and bills on,
+			// and so does this one. The upstream's stated total of 110 is ignored;
+			// billing reads the parts directly. 100×1.0 + 1000000×2.0 = 2000100.
+			name:      "parts exceeding the stated total still bill (industry convention)",
+			usage:     &Usage{PromptTokens: 100, CompletionTokens: 1_000_000, TotalTokens: 110},
+			wantInput: 100, wantOutput: 1_000_000, wantRead: 0, wantKnown: true, wantMicros: 2_000_100,
+		},
+		{
+			// Absent usage stays unknown — never a free request.
+			name:  "missing usage stays unknown",
+			usage: nil,
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.NewSQLiteDB(t)
+			svc := newRelaySvc(t, db)
+			apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
+			cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0, CacheReadPrice: &readPrice}
+
+			reqID := fmt.Sprintf("req-cacheconv-%d", i)
+			rc := &RelayContext{RequestID: reqID, APIKeyID: apiKey.ID, Candidate: cand, Usage: tc.usage}
+			svc.finalize(rc, 200, "", time.Now())
+
+			row, err := repository.GetRequestLogByRequestID(db, reqID)
+			if err != nil || row == nil {
+				t.Fatalf("GetRequestLogByRequestID: %v (row=%v)", err, row)
+			}
+			if row.InputTokens != tc.wantInput {
+				t.Errorf("InputTokens = %d, want %d", row.InputTokens, tc.wantInput)
+			}
+			if row.OutputTokens != tc.wantOutput {
+				t.Errorf("OutputTokens = %d, want %d", row.OutputTokens, tc.wantOutput)
+			}
+			if row.CacheReadTokens != tc.wantRead {
+				t.Errorf("CacheReadTokens = %d, want %d", row.CacheReadTokens, tc.wantRead)
+			}
+			if row.CostKnown != tc.wantKnown {
+				t.Errorf("CostKnown = %v, want %v", row.CostKnown, tc.wantKnown)
+			}
+			if row.CostMicros != tc.wantMicros {
+				t.Errorf("CostMicros = %d, want %d", row.CostMicros, tc.wantMicros)
+			}
+
+			// A billed request must reach the key's budget, or a limit set on it
+			// would never bite.
+			var updated model.APIKey
+			if err := db.First(&updated, apiKey.ID).Error; err != nil {
+				t.Fatalf("reload api key: %v", err)
+			}
+			if updated.BudgetSpentMicros != tc.wantMicros {
+				t.Errorf("BudgetSpentMicros = %d, want %d", updated.BudgetSpentMicros, tc.wantMicros)
+			}
+		})
 	}
 }

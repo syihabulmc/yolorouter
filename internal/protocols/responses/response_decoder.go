@@ -54,10 +54,24 @@ type responsesUsage struct {
 	TotalTokens         int                     `json:"total_tokens"`
 	InputTokensDetails  *responsesInputDetails  `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails *responsesOutputDetails `json:"output_tokens_details,omitempty"`
+	// Non-standard cache-write breakdown; see protocols.CacheWriteAliasField.
+	// Like cached_tokens it sits INSIDE input_tokens, so it is recorded rather
+	// than added.
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 type responsesInputDetails struct {
 	CachedTokens int `json:"cached_tokens,omitempty"`
+	// Cache WRITE, nested beside cached_tokens. This is OpenAI's OWN field, not
+	// an extension: the official OpenAPI spec declares
+	// ResponseUsage.input_tokens_details.cache_write_tokens and lists it as
+	// REQUIRED. An earlier revision of this comment called it an extension —
+	// that was wrong, and the mistake came from checking a third party's
+	// rendition of the schema instead of the vendor spec itself.
+	//
+	// A pointer so "field absent" is distinguishable from "field present and
+	// 0"; precedence over the top-level alias is by presence, not by value.
+	CacheWriteTokens *int `json:"cache_write_tokens"`
 }
 
 type responsesOutputDetails struct {
@@ -144,9 +158,32 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 			resp.Usage.CacheReadTokens = wire.Usage.InputTokensDetails.CachedTokens
 			resp.Usage.CacheIncludedInPrompt = true
 		}
+		// Exactly one cache-write spelling is taken, never summed: the nested
+		// breakdown is the standard one and wins, the top-level alias is the
+		// fallback for new-api-style peers. Precedence is by field PRESENCE, so
+		// an explicit 0 beats a stale non-zero alias.
+		//
+		// Neither is gated on being positive: a negative count from a buggy or
+		// hostile upstream has to reach the gateway's coherence check, which
+		// rejects the whole record as unknown. Masking it to 0 instead would
+		// let the remaining counts be billed as though nothing were wrong.
+		resp.Usage.CacheWriteTokens = wire.Usage.CacheCreationInputTokens
+		if wire.Usage.InputTokensDetails != nil && wire.Usage.InputTokensDetails.CacheWriteTokens != nil {
+			resp.Usage.CacheWriteTokens = *wire.Usage.InputTokensDetails.CacheWriteTokens
+		}
+		// The flag, by contrast, is only meaningful for a real count. The write
+		// sits inside input_tokens, so without it NetPromptTokens would skip
+		// the subtraction on a write-only request and over-report fresh input.
+		if resp.Usage.CacheWriteTokens > 0 {
+			resp.Usage.CacheIncludedInPrompt = true
+		}
 		if wire.Usage.OutputTokensDetails != nil {
 			resp.Usage.ReasoningTokens = wire.Usage.OutputTokensDetails.ReasoningTokens
 		}
+		// Set the verdict at the IR exit so every consumer reads Invalid instead
+		// of re-judging on data the conversion has since distorted. See
+		// IRUsage.IsIncoherent.
+		resp.Usage.Invalid = resp.Usage.IsIncoherent()
 	}
 
 	// Infer stop reason: when status is "incomplete", prefer incomplete_details.reason;

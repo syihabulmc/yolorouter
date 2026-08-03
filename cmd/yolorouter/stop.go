@@ -12,15 +12,25 @@ import (
 
 // runStop stops the local running server. It resolves the data location from
 // config only (no database connection), then hands off to stopInstance.
+//
+// The config must already exist (LoadExisting, not Load): stop only ever acts on
+// a deployment someone else started, so generating one would point stop at a
+// brand-new empty data directory whose lock nobody holds, and it would report
+// "no running instance" while the real server kept running.
 func runStop(ctx context.Context, args []string) error {
 	flagSet, err := parseCommandFlags("stop", args, 0, nil)
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(flagSet.Lookup("config").Value.String())
+	cfg, configPath, err := config.LoadExisting(flagSet.Lookup("config").Value.String(), "stop")
 	if err != nil {
 		return err
 	}
+	// Name the config before reporting anything: a working directory with its
+	// own configs/config.yaml takes precedence over the installed deployment,
+	// so "no running instance" is only interpretable alongside the file that
+	// answer was decided from.
+	fmt.Printf("config: %s\n", configPath)
 	return stopInstance(cfg.Database.SQLitePath)
 }
 

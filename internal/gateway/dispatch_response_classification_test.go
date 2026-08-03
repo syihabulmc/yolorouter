@@ -181,9 +181,16 @@ func TestNon2xxErrorBodySlowTrickle503_BoundedByShortBudget(t *testing.T) {
 	elapsed := time.Since(start)
 
 	// Must complete well within the attempt timeout (20m). The error body
-	// budget is 300ms so the whole thing should finish in ~2s.
-	if elapsed > 5*time.Second {
-		t.Errorf("slow-trickle 503 took %v, expected < 5s (short total budget)", elapsed)
+	// budget is 300ms, so a healthy run finishes in well under a second.
+	//
+	// The ceiling is nonetheless generous, because the regression it guards
+	// against is a 20-MINUTE hang: anything in seconds already proves the total
+	// budget bounded the read. A tight bound instead measures how loaded the
+	// machine is — this assertion tripped at 5.8s on a contended two-core CI
+	// runner where merely creating the test database took over three seconds,
+	// while the same code takes ~0.3s on an idle host.
+	if elapsed > 30*time.Second {
+		t.Errorf("slow-trickle 503 took %v, expected < 30s (short total budget)", elapsed)
 	}
 	// The gateway should fail over and eventually return 502 (all candidates
 	// failed) — NOT hang.

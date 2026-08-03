@@ -154,6 +154,19 @@ func (d *StreamDecoder) DecodeChunk(raw string) ([]protocols.IRStreamDelta, erro
 	case "response.completed":
 		if evt.Response != nil && evt.Response.Usage != nil {
 			d.collectUsage(evt.Response.Usage)
+			// Marked rather than dropped: a dropped frame would leave whatever
+			// an earlier frame merged in place, and the DeltaDone appended just
+			// below would still complete the stream and bill those stale counts.
+			// Merge propagates Invalid one-way, so the verdict survives.
+			//
+			// IsIncoherent, not HasNegativeCount: Merge judges each incoming
+			// src frame on its own, but the ACCUMULATED record can still be
+			// impossible once frames combine (one frame's prompt, another's
+			// oversized cache). Re-weighing the merged result here is what
+			// catches that — and the cache-exceeds-prompt shape alongside it.
+			if d.usage.IsIncoherent() {
+				d.usage.Invalid = true
+			}
 			out = append(out, protocols.DeltaUsage{Usage: d.usage})
 		}
 		out = append(out, protocols.DeltaDone{StopReason: "stop"})
@@ -198,6 +211,24 @@ func (d *StreamDecoder) collectUsage(u *responsesUsage) {
 	d.usage.TotalTokens = u.TotalTokens
 	if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens > 0 {
 		d.usage.CacheReadTokens = u.InputTokensDetails.CachedTokens
+		d.usage.CacheIncludedInPrompt = true
+	}
+	// Assigned unconditionally, matching the chat and gemini decoders: a
+	// negative count from a buggy or hostile upstream has to reach the
+	// gateway's coherence check, which rejects the whole record as unknown.
+	// Gating the assignment on > 0 instead swallows the negative and lets the
+	// remaining counts be billed as though nothing were wrong.
+	// Exactly one cache-write spelling is taken, never summed: the nested
+	// breakdown is the standard one and wins, the top-level alias is the
+	// fallback for new-api-style peers.
+	d.usage.CacheWriteTokens = u.CacheCreationInputTokens
+	if u.InputTokensDetails != nil && u.InputTokensDetails.CacheWriteTokens != nil {
+		d.usage.CacheWriteTokens = *u.InputTokensDetails.CacheWriteTokens
+	}
+	// The flag, by contrast, is only meaningful for a real count. The write
+	// sits inside input_tokens, so without it NetPromptTokens would skip the
+	// subtraction on a write-only request and over-report fresh input.
+	if d.usage.CacheWriteTokens > 0 {
 		d.usage.CacheIncludedInPrompt = true
 	}
 	if u.OutputTokensDetails != nil {

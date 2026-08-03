@@ -625,7 +625,7 @@ func (s *ProviderService) CreateProviderKey(ctx context.Context, providerID uint
 //     TestPermissionDenied). On a retest this must DEMOTE the key.
 //   - 1: an inconclusive result — classifyTestResult leaves verification_status
 //     untouched (TestModelNotFound / TestRateLimited / TestUnreachable /
-//     TestUpstreamError / model-scoped TestPermissionDenied /
+//     TestTimeout / TestUpstreamError / model-scoped TestPermissionDenied /
 //     TestVerificationUnsupported).
 func verificationSeverity(r TestResult) int {
 	if r.Outcome == TestSuccess {
@@ -743,7 +743,10 @@ func classifyTestResult(result TestResult) (verificationStatus int, overwrite bo
 		return 0, false, &outcomeInt
 	case TestModelNotFound, TestRateLimited:
 		return 0, false, &outcomeInt
-	case TestUnreachable, TestUpstreamError:
+	case TestUnreachable, TestUpstreamError, TestTimeout:
+		// TestTimeout belongs with these, not with the decisive failures: the
+		// upstream never got far enough to judge the credential, so a slow
+		// destination must not demote a key that is perfectly good.
 		return 0, false, &outcomeInt
 	case TestVerificationUnsupported:
 		// The destination's protocol (gemini/responses) has no real
@@ -1130,10 +1133,35 @@ type BatchTestResult struct {
 	KeyID        uint   `json:"key_id"`
 	Label        string `json:"label"`
 	NeedsReentry bool   `json:"needs_reentry"`
-	Skipped      bool   `json:"skipped"` // true for needs_reentry or a lost CAS race
-	Outcome      *int   `json:"outcome"`
-	DurationMs   int64  `json:"duration_ms"`
+	Skipped      bool   `json:"skipped"` // true for needs_reentry, a lost CAS race, or not_run
+	// NotRun marks a key the run's budget never reached, or whose probe the
+	// budget cut short. It is reported separately from the other Skipped cases
+	// because it is not a statement about the key at all: nothing was tested,
+	// so the UI must not present it as a failure, and the operator needs to
+	// know a second run will pick up where this one stopped.
+	NotRun     bool  `json:"not_run"`
+	Outcome    *int  `json:"outcome"`
+	DurationMs int64 `json:"duration_ms"`
 }
+
+// providerBatchTestBudget caps ONE batch-test request end to end. Without it
+// the run costs keys × destinations × providerClientTimeout, a product with no
+// upper bound that silently outgrows every deadline stacked around it — the
+// browser's request budget and, past roughly half an hour, the server's own
+// http.Server.WriteTimeout, at which point the handler still commits its
+// results but can no longer send them, leaving the operator staring at a
+// network error over work that actually happened.
+//
+// Bounding the run instead of widening those deadlines keeps the cost
+// independent of how many keys and endpoints a provider has: whatever the
+// budget does not reach comes back marked NotRun, and a second click resumes
+// from there. Five minutes is chosen as the ceiling on how long an admin will
+// sit watching a synchronous button, not as a figure any healthy run
+// approaches — a working provider answers every key in seconds.
+//
+// A variable rather than a constant only so tests can shorten it; nothing at
+// runtime writes to it.
+var providerBatchTestBudget = 5 * time.Minute
 
 // TestAllProviderKeys sequentially tests every key in sort_order —
 // synchronous and blocking by deliberate design decision (not a background
@@ -1156,10 +1184,20 @@ func (s *ProviderService) TestAllProviderKeys(ctx context.Context, providerID ui
 		return nil, err
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, providerBatchTestBudget)
+	defer cancel()
+
 	results := make([]BatchTestResult, 0, len(keys))
 	for _, key := range keys {
 		if key.AuthorizedDestinationVersion != provider.DestinationVersion {
 			results = append(results, BatchTestResult{KeyID: key.ID, Label: key.Label, NeedsReentry: true, Skipped: true})
+			continue
+		}
+		// Budget spent — report the rest without touching them. Checked before
+		// claiming a test generation so an unreached key's bookkeeping stays
+		// exactly as it was.
+		if ctx.Err() != nil {
+			results = append(results, BatchTestResult{KeyID: key.ID, Label: key.Label, NotRun: true, Skipped: true})
 			continue
 		}
 
@@ -1185,6 +1223,14 @@ func (s *ProviderService) TestAllProviderKeys(ctx context.Context, providerID ui
 			// zero value, so silently classifying an error+zero-value
 			// TestResult would incorrectly report success).
 			results = append(results, BatchTestResult{KeyID: key.ID, Label: key.Label, Skipped: true})
+			continue
+		}
+		// The budget expiring mid-probe cancels the request underneath, so the
+		// result describes our own deadline rather than the key. Committing it
+		// would record an unreachable/timeout verdict against a credential that
+		// was never actually judged.
+		if ctx.Err() != nil {
+			results = append(results, BatchTestResult{KeyID: key.ID, Label: key.Label, NotRun: true, Skipped: true})
 			continue
 		}
 		verificationStatus, overwrite, lastTestResult := classifyTestResult(result)

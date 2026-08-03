@@ -29,6 +29,17 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 			TotalTokens         int `json:"total_tokens"`
 			PromptTokensDetails *struct {
 				CachedTokens int `json:"cached_tokens"`
+				// OpenRouter documents a cache-WRITE count nested here, beside
+				// cached_tokens: "Number of tokens written to the cache. This
+				// appears on the first request when establishing a new cache
+				// entry." It is the standard spelling and takes precedence over
+				// the top-level alias below.
+				//
+				// A pointer so "field absent" is distinguishable from "field
+				// present and 0". An explicit zero asserts there was no cache
+				// write and must win over a stale non-zero alias — an int would
+				// read it as absent and bill the alias instead.
+				CacheWriteTokens *int `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details,omitempty"`
 			// DeepSeek splits prompt_tokens into hit + miss. Only the hit half is
 			// read: it is the cache-read count. The miss half is the non-cached
@@ -36,6 +47,12 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 			// prompt_tokens - cache_read; it is NOT a cache write (DeepSeek's
 			// cache is implicit and has no separate write line).
 			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens,omitempty"`
+			// Non-standard: OpenAI has no cache-write field. Gateways fronting
+			// an Anthropic model (this one included, see openAIWireUsage) carry
+			// the count under Anthropic's own name so it survives the hop.
+			// Like cached_tokens it is a breakdown OF prompt_tokens, so it is
+			// recorded, never added.
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 		} `json:"usage,omitempty"`
 	}
 
@@ -79,6 +96,24 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 			// DeepSeek uses prompt_cache_hit_tokens instead of prompt_tokens_details.cached_tokens
 			irResp.Usage.CacheReadTokens = resp.Usage.PromptCacheHitTokens
 		}
+		// Cache WRITE has two spellings in the wild and they name the same
+		// breakdown of prompt_tokens, so exactly one is taken — never summed.
+		// OpenRouter's nested cache_write_tokens is the documented contract and
+		// wins; the top-level alias is what new-api-style gateways (including
+		// this one's own Gemini egress) emit and serves as the fallback.
+		//
+		// Precedence is by field PRESENCE, not by value: an explicitly reported
+		// 0 asserts "no cache write" and must beat a stale non-zero alias. A
+		// negative value likewise survives rather than being masked, so the
+		// gateway's coherence check can refuse the whole record.
+		irResp.Usage.CacheWriteTokens = resp.Usage.CacheCreationInputTokens
+		if resp.Usage.PromptTokensDetails != nil && resp.Usage.PromptTokensDetails.CacheWriteTokens != nil {
+			irResp.Usage.CacheWriteTokens = *resp.Usage.PromptTokensDetails.CacheWriteTokens
+		}
+		// Set the verdict at the IR exit so every consumer reads Invalid instead
+		// of re-judging on data the conversion has since distorted. See
+		// IRUsage.IsIncoherent.
+		irResp.Usage.Invalid = irResp.Usage.IsIncoherent()
 	}
 
 	return irResp, nil
@@ -159,6 +194,17 @@ func (d *StreamDecoder) parseChunk(raw json.RawMessage) []protocols.IRStreamDelt
 			TotalTokens         int `json:"total_tokens"`
 			PromptTokensDetails *struct {
 				CachedTokens int `json:"cached_tokens"`
+				// OpenRouter documents a cache-WRITE count nested here, beside
+				// cached_tokens: "Number of tokens written to the cache. This
+				// appears on the first request when establishing a new cache
+				// entry." It is the standard spelling and takes precedence over
+				// the top-level alias below.
+				//
+				// A pointer so "field absent" is distinguishable from "field
+				// present and 0". An explicit zero asserts there was no cache
+				// write and must win over a stale non-zero alias — an int would
+				// read it as absent and bill the alias instead.
+				CacheWriteTokens *int `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details,omitempty"`
 			// DeepSeek splits prompt_tokens into hit + miss. Only the hit half is
 			// read: it is the cache-read count. The miss half is the non-cached
@@ -166,6 +212,12 @@ func (d *StreamDecoder) parseChunk(raw json.RawMessage) []protocols.IRStreamDelt
 			// prompt_tokens - cache_read; it is NOT a cache write (DeepSeek's
 			// cache is implicit and has no separate write line).
 			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens,omitempty"`
+			// Non-standard: OpenAI has no cache-write field. Gateways fronting
+			// an Anthropic model (this one included, see openAIWireUsage) carry
+			// the count under Anthropic's own name so it survives the hop.
+			// Like cached_tokens it is a breakdown OF prompt_tokens, so it is
+			// recorded, never added.
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 		} `json:"usage,omitempty"`
 	}
 
@@ -230,7 +282,13 @@ func (d *StreamDecoder) parseChunk(raw json.RawMessage) []protocols.IRStreamDelt
 	}
 
 	// Usage
-	if chunk.Usage != nil && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
+	// Gated on presence alone. Keying the gate on prompt/completion being
+	// non-zero dropped a usage chunk that carried ONLY cache counts — a shape
+	// some upstreams send when they split usage across frames — so the cache
+	// write stayed at whatever an earlier frame had merged and its tokens were
+	// billed as fresh input. Whether the assembled record is worth emitting is
+	// decided below, after every field has been read.
+	if chunk.Usage != nil {
 		usage := protocols.IRUsage{
 			PromptTokens:          chunk.Usage.PromptTokens,
 			CompletionTokens:      chunk.Usage.CompletionTokens,
@@ -244,7 +302,28 @@ func (d *StreamDecoder) parseChunk(raw json.RawMessage) []protocols.IRStreamDelt
 			// DeepSeek uses prompt_cache_hit_tokens instead of prompt_tokens_details.cached_tokens
 			usage.CacheReadTokens = chunk.Usage.PromptCacheHitTokens
 		}
-		deltas = append(deltas, protocols.DeltaUsage{Usage: usage})
+		// Nested cache_write_tokens wins over the top-level alias; exactly one
+		// is taken, never summed. See the non-streaming decoder above.
+		usage.CacheWriteTokens = chunk.Usage.CacheCreationInputTokens
+		if chunk.Usage.PromptTokensDetails != nil && chunk.Usage.PromptTokensDetails.CacheWriteTokens != nil {
+			usage.CacheWriteTokens = *chunk.Usage.PromptTokensDetails.CacheWriteTokens
+		}
+		// An impossible record cannot be carried through IRUsage.Merge, which
+		// copies only values greater than zero, so the negative or oversized cache
+		// that proved it wrong would silently vanish and the remaining counts be
+		// billed as sound. The frame is MARKED rather than dropped: dropping it
+		// would leave whatever an earlier frame merged in place, and a
+		// finish_reason in this same chunk would still complete the stream and
+		// bill those stale counts. Merge propagates Invalid one-way, so the
+		// verdict survives to every consumer.
+		usage.Invalid = usage.IsIncoherent()
+		// Cache counts are enough on their own to make a frame worth emitting;
+		// requiring prompt/completion is what dropped cache-only chunks.
+		if usage.Invalid ||
+			usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.TotalTokens != 0 ||
+			usage.CacheReadTokens != 0 || usage.CacheWriteTokens != 0 {
+			deltas = append(deltas, protocols.DeltaUsage{Usage: usage})
+		}
 	}
 
 	return deltas

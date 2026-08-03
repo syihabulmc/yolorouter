@@ -71,6 +71,19 @@ export function parseProtocolConfig(providerType: string, protocolEndpointsJson:
   return model
 }
 
+// verificationDestinationCount mirrors VerificationTargets in
+// internal/service/provider_protocol.go: verifying a key hits the primary
+// protocol plus every ADDITIONAL protocol declared in protocol_endpoints, one
+// after another. Callers need the count because it is the multiplier that
+// turns the server's per-call probe budget into a key test's real wall-clock
+// cost — a browser budget sized for a single destination aborts a two-endpoint
+// provider halfway through.
+export function verificationDestinationCount(providerType: string, protocolEndpointsJson: string): number {
+  const model = parseProtocolConfig(providerType, protocolEndpointsJson)
+  const extras = ALL_PROTOCOLS.filter((p) => p !== model.providerType && model.endpoints[p].enabled)
+  return 1 + extras.length
+}
+
 // Single-URL predicate mirroring the backend's own ValidateProtocolEndpoints
 // (internal/service/provider_protocol.go): an empty string is valid (means
 // "reuse the provider's base_url"), otherwise the value must parse as an

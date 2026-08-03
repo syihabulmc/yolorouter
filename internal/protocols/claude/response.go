@@ -48,6 +48,13 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 		},
 	}
 
+	// Set the verdict at the IR exit so every consumer reads Invalid instead of
+	// re-judging. Claude is the net-convention protocol (input_tokens excludes
+	// cache), so IsIncoherent here effectively checks negatives — but routing it
+	// through the single predicate keeps this decoder in step with the others.
+	// See IRUsage.IsIncoherent.
+	irResp.Usage.Invalid = irResp.Usage.IsIncoherent()
+
 	irResp.StopReason = claudeMapStopReason(resp.StopReason)
 
 	for _, block := range resp.Content {

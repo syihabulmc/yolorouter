@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yolorouter/yolorouter/internal/config"
+	"github.com/yolorouter/yolorouter/pkg/database"
 )
 
 // TestBootstrapCommandRejectsExtraArgsBeforeInit guards the ordering fix:
@@ -39,6 +42,8 @@ func TestBootstrapCommandRejectsExtraArgsBeforeInit(t *testing.T) {
 		t.Fatalf("expected 'unexpected extra arguments' in error, got: %v", err)
 	}
 
+	// db:migrate still resolves through the generating loader, so an absent
+	// config here really does mean bootstrap.Init never ran.
 	if _, statErr := os.Stat(filepath.Join(dir, "configs", "config.yaml")); statErr == nil {
 		t.Fatalf("bootstrap.Init must not have run — configs/config.yaml should not have been generated")
 	}
@@ -82,6 +87,7 @@ func TestRunDBRollbackRejectsFlagAfterPositionalVersion(t *testing.T) {
 // should exist afterward.
 func TestRunDBRollbackRejectsInvalidVersionBeforeInit(t *testing.T) {
 	dir := t.TempDir()
+	sqlitePath := writeDeploymentConfig(t, dir)
 	oldWd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -103,8 +109,13 @@ func TestRunDBRollbackRejectsInvalidVersionBeforeInit(t *testing.T) {
 		t.Fatalf("expected 'invalid version argument' in error, got: %v", err)
 	}
 
-	if _, statErr := os.Stat(filepath.Join(dir, "configs", "config.yaml")); statErr == nil {
-		t.Fatalf("bootstrap.Init must not have run — configs/config.yaml should not have been generated")
+	// The database is the observable now: db:rollback resolves an existing
+	// config rather than generating one, so "no config was written" would hold
+	// even if the version guard were deleted. bootstrap.Init opening the
+	// deployment is what has to not happen, and for SQLite that creates the
+	// file.
+	if _, statErr := os.Stat(sqlitePath); !os.IsNotExist(statErr) {
+		t.Fatalf("bootstrap.Init must not have run — no database may be opened, stat err = %v", statErr)
 	}
 }
 
@@ -123,6 +134,7 @@ func TestRunDBRollbackRejectsInvalidVersionBeforeInit(t *testing.T) {
 // different error message than the one this test is targeting).
 func TestRunDBRollbackRejectsNegativeVersionBeforeInit(t *testing.T) {
 	dir := t.TempDir()
+	sqlitePath := writeDeploymentConfig(t, dir)
 	oldWd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -144,8 +156,13 @@ func TestRunDBRollbackRejectsNegativeVersionBeforeInit(t *testing.T) {
 		t.Fatalf("expected 'cannot be negative' in error, got: %v", err)
 	}
 
-	if _, statErr := os.Stat(filepath.Join(dir, "configs", "config.yaml")); statErr == nil {
-		t.Fatalf("bootstrap.Init must not have run — configs/config.yaml should not have been generated")
+	// The database is the observable now: db:rollback resolves an existing
+	// config rather than generating one, so "no config was written" would hold
+	// even if the version guard were deleted. bootstrap.Init opening the
+	// deployment is what has to not happen, and for SQLite that creates the
+	// file.
+	if _, statErr := os.Stat(sqlitePath); !os.IsNotExist(statErr) {
+		t.Fatalf("bootstrap.Init must not have run — no database may be opened, stat err = %v", statErr)
 	}
 }
 
@@ -182,4 +199,106 @@ func TestRunDBBackupFailsForMissingSQLiteSourceWithoutCreatingIt(t *testing.T) {
 	if _, statErr := os.Stat(dbPath); statErr == nil {
 		t.Fatalf("db:backup must not have created the missing source database file")
 	}
+}
+
+// TestDescribeTargetNamesSQLiteDeployment: db:reset and db:rollback act on
+// whichever deployment the config resolved to, and resolution now reaches
+// beyond the process cwd (an installed deployment is found from any directory).
+// The line they print therefore has to name the config and database files, not
+// just the driver — "driver=sqlite" alone cannot tell a throwaway sandbox apart
+// from the production install.
+func TestDescribeTargetNamesSQLiteDeployment(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.SQLitePath = "/opt/yolorouter/data/yolorouter.db"
+
+	got := describeTarget(cfg, "/opt/yolorouter/configs/config.yaml")
+
+	for _, want := range []string{"/opt/yolorouter/configs/config.yaml", "/opt/yolorouter/data/yolorouter.db", "sqlite"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("describeTarget() = %q, want it to mention %q", got, want)
+		}
+	}
+}
+
+// TestDescribeTargetRedactsPostgresPassword: the description is printed to the
+// terminal and routinely pasted into tickets, so it names the server and
+// database but must never carry the password.
+func TestDescribeTargetRedactsPostgresPassword(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Database.Driver = "postgres"
+	cfg.Database.Host = "db.internal"
+	cfg.Database.Port = 5432
+	cfg.Database.User = "yolo"
+	cfg.Database.Password = "sup3r-s3cret"
+	cfg.Database.DBName = "yolorouter"
+
+	got := describeTarget(cfg, "/etc/yolorouter/config.yaml")
+
+	if strings.Contains(got, "sup3r-s3cret") {
+		t.Fatalf("describeTarget() leaked the password: %q", got)
+	}
+	for _, want := range []string{"postgres", "db.internal", "5432", "yolorouter", "yolo"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("describeTarget() = %q, want it to mention %q", got, want)
+		}
+	}
+}
+
+// TestRunDBRollbackRefusesWhileAnInstanceHoldsTheLock: rolling back runs the
+// down migrations, which drop tables and columns. A running serve holds the
+// instance lock for its whole lifetime precisely so destructive maintenance
+// cannot land underneath it — db:reset has always honoured that, db:rollback
+// did not, and would happily drop columns out from under a live server until
+// the requests started failing on a schema that no longer matched.
+//
+// Failing before bootstrap.Init is part of the contract: no database file may
+// be opened or created on the way to this error.
+func TestRunDBRollbackRefusesWhileAnInstanceHoldsTheLock(t *testing.T) {
+	dir := t.TempDir()
+	sqlitePath := filepath.Join(dir, "data", "yolorouter.db")
+	configPath := filepath.Join(dir, "configs", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir configs: %v", err)
+	}
+	body := "server:\n    port: 8080\ndatabase:\n    driver: sqlite\n    sqlite_path: " + sqlitePath +
+		"\nsecurity:\n    provider_master_key: dGVzdC1rZXktZm9yLWxvYWQtZXhpc3RpbmctdGVzdHM=\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	// Stand in for a running serve.
+	unlock, err := database.AcquireInstanceLock(instanceLockPath(sqlitePath))
+	if err != nil {
+		t.Fatalf("test setup: acquire instance lock: %v", err)
+	}
+	defer func() { _ = unlock() }()
+
+	err = runDBRollback(context.Background(), []string{"--config", configPath})
+	if err == nil {
+		t.Fatal("expected db:rollback to refuse while an instance holds the lock")
+	}
+	if !strings.Contains(err.Error(), "running") {
+		t.Fatalf("error should say another instance is running, got: %v", err)
+	}
+	if _, statErr := os.Stat(sqlitePath); !os.IsNotExist(statErr) {
+		t.Fatalf("no database may be opened before the lock check, stat err = %v", statErr)
+	}
+}
+
+// writeDeploymentConfig lays a loadable config into dir and returns the sqlite
+// path it names. Nothing creates the database itself: its absence afterwards is
+// what proves a command stopped before opening the deployment.
+func writeDeploymentConfig(t *testing.T, dir string) string {
+	t.Helper()
+	sqlitePath := filepath.Join(dir, "data", "yolorouter.db")
+	if err := os.MkdirAll(filepath.Join(dir, "configs"), 0o755); err != nil {
+		t.Fatalf("mkdir configs: %v", err)
+	}
+	body := "server:\n    port: 8080\ndatabase:\n    driver: sqlite\n    sqlite_path: " + sqlitePath +
+		"\nsecurity:\n    provider_master_key: dGVzdC1rZXktZm9yLWxvYWQtZXhpc3RpbmctdGVzdHM=\n"
+	if err := os.WriteFile(filepath.Join(dir, "configs", "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return sqlitePath
 }

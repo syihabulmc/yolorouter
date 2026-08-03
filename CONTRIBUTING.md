@@ -21,9 +21,31 @@ cd yolorouter
 ./scripts/dev.sh
 ```
 
-Useful `./scripts/dev.sh` flags: `--backend`, `--frontend`, `--migrate`,
-`--restart`. Run `./scripts/dev.sh --help` for the full list; output language
-follows your locale and can be forced with `YOLO_LANG=zh|en`.
+```powershell
+# Same thing on Windows (PowerShell).
+.\scripts\dev.ps1
+```
+
+Useful flags: `--backend`, `--frontend`, `--migrate`, `--restart` (`-Backend`,
+`-Frontend`, `-Migrate`, `-Restart` on PowerShell). Run the script with `--help`
+(`-Help`) for the full list; output language follows your locale and can be
+forced with `YOLO_LANG=zh|en`.
+
+### Building and testing
+
+```bash
+make build          # backend only -> ./bin/yolorouter
+make build-embed    # full binary with the console embedded
+
+# Cross-compilation (frontend embedded)
+make build-macos            # -> ./bin/yolorouter-darwin-{amd64,arm64}
+make build-windows          # -> ./bin/yolorouter-windows-{amd64,arm64}.exe
+make build-windows-check    # fast compile check, no frontend build, no binary
+
+make test           # go test ./...
+make test-embed     # tests with the embedded-frontend build tag
+make vet            # go vet (plain and -tags release)
+```
 
 ## Project layout
 

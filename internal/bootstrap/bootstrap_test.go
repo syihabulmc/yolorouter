@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -139,4 +140,61 @@ func TestEscapeDSNValueQuotesVerticalTabAndFormFeed(t *testing.T) {
 	if got, want := escapeDSNValue("a\fb"), "'a\fb'"; got != want {
 		t.Fatalf("expected form feed to be wrapped in quotes, got %q, want %q", got, want)
 	}
+}
+
+// TestInitRecordsAbsoluteConfigPath: commands that name the deployment they are
+// about to act on (db:reset's confirmation) read App.ConfigPath, so it must be
+// the absolute path Init actually loaded — a relative one would read as the
+// caller's cwd, which for a service-launched process is nowhere near the
+// install directory.
+func TestInitRecordsAbsoluteConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	app, err := Init("")
+	if err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	if !filepath.IsAbs(app.ConfigPath) {
+		t.Fatalf("ConfigPath = %q, want an absolute path", app.ConfigPath)
+	}
+	want := filepath.Join("configs", "config.yaml")
+	if filepath.Base(app.ConfigPath) != "config.yaml" || !strings.HasSuffix(app.ConfigPath, want) {
+		t.Fatalf("ConfigPath = %q, want it to end in %q", app.ConfigPath, want)
+	}
+	// "absolute and readable" alone would also pass for some other config file
+	// on disk. The loaded master key is unique to the file Init actually read,
+	// so finding it in the named file is what proves the two are the same one.
+	body, readErr := os.ReadFile(app.ConfigPath)
+	if readErr != nil {
+		t.Fatalf("ConfigPath does not point at a readable file: %v", readErr)
+	}
+	if !strings.Contains(string(body), app.Config.Security.ProviderMasterKey) {
+		t.Fatalf("ConfigPath %q is not the file the loaded config came from", app.ConfigPath)
+	}
+}
+
+// TestInitWithConfigRejectsAnUnusableConfig: this entry point skips the loaders
+// and so skips their validation, which is the point — db:rollback locks a
+// deployment and then drops schema from it, and re-reading the file in between
+// could name a different one. What it must not do is accept a value no loader
+// would have produced, and then fail somewhere far from the cause.
+func TestInitWithConfigRejectsAnUnusableConfig(t *testing.T) {
+	t.Run("no config", func(t *testing.T) {
+		if _, err := InitWithConfig(nil, "/somewhere/configs/config.yaml"); err == nil {
+			t.Fatal("expected an error for a nil config")
+		}
+	})
+	t.Run("relative path", func(t *testing.T) {
+		if _, err := InitWithConfig(&config.Config{}, "configs/config.yaml"); err == nil {
+			t.Fatal("expected an error for a relative config path")
+		}
+	})
+	t.Run("empty path", func(t *testing.T) {
+		if _, err := InitWithConfig(&config.Config{}, ""); err == nil {
+			t.Fatal("expected an error for an empty config path")
+		}
+	})
 }

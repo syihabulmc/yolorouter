@@ -1,4 +1,6 @@
 import { apiFetch } from './client'
+import { BATCH_TEST_BUDGET_MS, SINGLE_PROBE_BUDGET_MS, keyTestBudgetMs } from './probeBudget'
+import { verificationDestinationCount } from '../utils/providerProtocol'
 
 export interface ProviderKey {
   id: number
@@ -33,6 +35,9 @@ export interface BatchTestResult {
   label: string
   needs_reentry: boolean
   skipped: boolean
+  // The run's budget never reached this key (or cut its probe short). Nothing
+  // was tested, so it is not a verdict — a second run resumes from here.
+  not_run: boolean
   outcome: number | null
   duration_ms: number
 }
@@ -94,8 +99,17 @@ export function getProvider(id: number): Promise<Provider> {
   return apiFetch(`/api/admin/providers/${id}`)
 }
 
+// Creating a provider verifies its first key against every destination before
+// returning, so this write inherits the same per-destination budget as a key
+// test. The destination count comes straight off the input rather than from a
+// caller argument — it is exactly what the server will parse out of the same
+// two fields.
 export function createProvider(input: CreateProviderInput): Promise<Provider> {
-  return apiFetch('/api/admin/providers', { method: 'POST', body: JSON.stringify(input) })
+  return apiFetch('/api/admin/providers', {
+    method: 'POST',
+    body: JSON.stringify(input),
+    timeoutMs: keyTestBudgetMs(verificationDestinationCount(input.provider_type ?? '', input.protocol_endpoints ?? '')),
+  })
 }
 
 export function updateProvider(id: number, input: UpdateProviderInput): Promise<Provider> {
@@ -115,6 +129,7 @@ export function testKeyPreview(baseUrl: string, apiKey: string, model: string, p
   return apiFetch('/api/admin/providers/test-key', {
     method: 'POST',
     body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model, provider_type: providerType }),
+    timeoutMs: SINGLE_PROBE_BUDGET_MS,
   })
 }
 
@@ -128,6 +143,7 @@ export function listModelsPreview(baseUrl: string, apiKey: string, providerType:
   return apiFetch('/api/admin/providers/list-models', {
     method: 'POST',
     body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, provider_type: providerType }),
+    timeoutMs: SINGLE_PROBE_BUDGET_MS,
   })
 }
 
@@ -137,15 +153,37 @@ export function listModelsPreview(baseUrl: string, apiKey: string, providerType:
 // hold). A non-success outcome (including "no usable key") returns an empty
 // list; the caller falls back to manual model entry.
 export function listModelsForProvider(id: number): Promise<ListModelsResult> {
-  return apiFetch(`/api/admin/providers/${id}/models`)
+  return apiFetch(`/api/admin/providers/${id}/models`, { timeoutMs: SINGLE_PROBE_BUDGET_MS })
 }
 
-export function createProviderKey(providerId: number, input: CreateKeyInput): Promise<ProviderKey> {
-  return apiFetch(`/api/admin/providers/${providerId}/keys`, { method: 'POST', body: JSON.stringify(input) })
+// Both key writes below verify the new plaintext against every destination
+// before returning, so they carry the per-destination budget too. Getting this
+// wrong is worse here than on a read: the key row is written first and the
+// verdict committed after, so a browser that gives up early reports failure
+// for a key that may be moments from passing.
+export function createProviderKey(
+  providerId: number,
+  input: CreateKeyInput,
+  destinationCount: number,
+): Promise<ProviderKey> {
+  return apiFetch(`/api/admin/providers/${providerId}/keys`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+    timeoutMs: keyTestBudgetMs(destinationCount),
+  })
 }
 
-export function updateProviderKey(providerId: number, keyId: number, input: UpdateKeyInput): Promise<ProviderKey> {
-  return apiFetch(`/api/admin/providers/${providerId}/keys/${keyId}`, { method: 'PATCH', body: JSON.stringify(input) })
+export function updateProviderKey(
+  providerId: number,
+  keyId: number,
+  input: UpdateKeyInput,
+  destinationCount: number,
+): Promise<ProviderKey> {
+  return apiFetch(`/api/admin/providers/${providerId}/keys/${keyId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+    timeoutMs: keyTestBudgetMs(destinationCount),
+  })
 }
 
 export function reorderProviderKey(providerId: number, keyId: number, direction: 'up' | 'down'): Promise<void> {
@@ -162,8 +200,15 @@ export function setProviderKeyStatus(providerId: number, keyId: number, enabled:
   })
 }
 
-export function testProviderKey(providerId: number, keyId: number): Promise<ProviderKey> {
-  return apiFetch(`/api/admin/providers/${providerId}/keys/${keyId}/test`, { method: 'POST' })
+// destinationCount is the provider's verification destination count (see
+// verificationDestinationCount): the server tests this key against each one in
+// turn, so it multiplies the budget. It is not derivable from providerId
+// alone here, which is why the caller supplies it.
+export function testProviderKey(providerId: number, keyId: number, destinationCount: number): Promise<ProviderKey> {
+  return apiFetch(`/api/admin/providers/${providerId}/keys/${keyId}/test`, {
+    method: 'POST',
+    timeoutMs: keyTestBudgetMs(destinationCount),
+  })
 }
 
 // Batch test can legitimately exceed apiFetch's default
@@ -172,13 +217,12 @@ export function testProviderKey(providerId: number, keyId: number): Promise<Prov
 // with an extra AbortController instead — that only added a SECOND, later abort signal
 // on top of apiFetch's own hardcoded 30s internal timer, which still fired
 // first regardless, so slow multi-key batches kept failing at 30s anyway.
-export function testAllProviderKeys(
-  providerId: number,
-  enabledKeyCount: number,
-): Promise<{ results: BatchTestResult[] }> {
-  const timeoutMs = 60_000 + enabledKeyCount * 16_000
+//
+// The budget is flat rather than scaled by key/destination count because the
+// server bounds the run itself; keys it could not reach come back as not_run.
+export function testAllProviderKeys(providerId: number): Promise<{ results: BatchTestResult[] }> {
   return apiFetch<{ results: BatchTestResult[] }>(`/api/admin/providers/${providerId}/keys/test-all`, {
     method: 'POST',
-    timeoutMs,
+    timeoutMs: BATCH_TEST_BUDGET_MS,
   })
 }

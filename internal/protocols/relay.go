@@ -86,6 +86,11 @@ var allowedUpstreamHeaders = map[string]bool{
 // in that window even though the usage chunk never arrived, undercharging the
 // caller.
 func hasMeaningfulUsage(u IRUsage) bool {
+	// An impossible record proves nothing about whether real usage arrived, so
+	// it must not buy the request the benign-post-DONE exemption below.
+	if u.Invalid {
+		return false
+	}
 	return u.PromptTokens > 0 || u.CompletionTokens > 0 || u.TotalTokens > 0
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/pkg/logger"
 	"go.uber.org/zap"
@@ -74,25 +75,55 @@ type costBreakdown struct {
 // go through it, so billing and the persisted count stay consistent across
 // protocols.
 //
-// Cache WRITE is never subtracted: no protocol counts it inside the prompt
-// total. Anthropic reports cache_creation_input_tokens alongside a net
-// input_tokens, and the inclusive-prompt protocols have no cache-write concept
-// at all (OpenAI's prompt_tokens_details only carries cached_tokens, Gemini's
-// promptTokenCount only folds in cachedContentTokenCount). Subtracting it
-// would deduct tokens the prompt never contained, understating both the input
-// line of the bill and the persisted count.
+// Cache WRITE is subtracted only under the inclusive convention, and only
+// because this gateway now puts it there. It is NOT subtracted from a net
+// (Anthropic) count, where cache_creation_input_tokens sits alongside
+// input_tokens rather than inside it — deducting it there would remove tokens
+// the prompt never contained.
+//
+// The inclusive case used to be unconditionally safe to ignore, since no
+// standard protocol has a cache-write concept: OpenAI's prompt_tokens_details
+// carries only cached_tokens and Gemini's promptTokenCount folds in only
+// cachedContentTokenCount. That stopped being true once the gateway began
+// emitting and accepting the cache_creation_input_tokens alias (see
+// protocols.CacheWriteAliasField) on those wires, where the write portion
+// genuinely IS part of the reported prompt total. Leaving it in would count
+// those tokens twice: once as cache write, once as fresh input.
+//
+// Delegates to protocols.IRUsage.NetPromptTokens rather than repeating the
+// subtraction, because the Claude egress encoder derives the same quantity
+// through that method. Two implementations of one definition is how the
+// input_tokens a client is shown and the input_tokens persisted to request_logs
+// come to disagree about the same request.
 func netPromptTokens(usage *Usage) int {
 	if usage == nil {
 		return 0
 	}
-	n := usage.PromptTokens
-	if usage.CacheIncludedInPrompt {
-		n -= usage.CacheReadTokens
+	return usage.toIRUsage().NetPromptTokens()
+}
+
+// normalizeCacheConvention settles which cache-accounting convention a usage
+// record actually follows, before anything prices or persists it.
+//
+// The decision itself lives in protocols.CacheSitsOutsidePrompt, which the
+// egress encoders reach through IRUsage.PromptIncludesCache. Both sides MUST
+// keep asking that one function: this gateway settles the question once per
+// request against the persisted copy of the usage, while an encoder settles it
+// per frame against the IR copy, long before this runs. A second implementation
+// here would let the input_tokens a client is shown and the input_tokens
+// written to request_logs disagree about the same request.
+//
+// Applied by mutating the flag rather than deferring to the predicate at every
+// read, because the counts are consumed several times below (pricing, the
+// persisted row, the compression denominator) and a partially-normalized record
+// is exactly the inconsistency this exists to prevent.
+func normalizeCacheConvention(u *Usage) {
+	if u == nil {
+		return
 	}
-	if n < 0 {
-		return 0 // defensive: a malformed upstream count can't produce negative input/cost
+	if protocols.CacheSitsOutsidePrompt(u.toIRUsage()) {
+		u.CacheIncludedInPrompt = false
 	}
-	return n
 }
 
 // usageIsCoherent reports whether the upstream-reported counts describe a
@@ -103,28 +134,20 @@ func netPromptTokens(usage *Usage) int {
 // negative line item, and an oversized one bills cache reads the request never
 // performed. Incoherent usage is treated exactly like absent usage — unknown,
 // never zero and never billed.
+//
+// Delegates to the single IR-level verdict (protocols.IRUsage.IsIncoherent) so
+// the wire encoders and this billing gate read the SAME answer instead of each
+// re-judging with its own predicate. The verdict was already computed at the
+// decoder exit and carried on Invalid; round-tripping through toIRUsage lets
+// this function evaluate the same predicate the encoder effectively used,
+// catching the records where Merge erased the evidence before the mark was set.
+// Both callers run normalizeCacheConvention first, so PromptIncludesCache (which
+// IsIncoherent relies on) has the settled convention to read.
 func usageIsCoherent(u *Usage) bool {
 	if u == nil {
 		return false
 	}
-	if u.PromptTokens < 0 || u.CompletionTokens < 0 || u.CacheReadTokens < 0 ||
-		u.CacheWriteTokens < 0 || u.TotalTokens < 0 {
-		return false
-	}
-	// Only meaningful when the prompt total is supposed to contain the cache
-	// read; under Anthropic's convention the two are independent counts.
-	if u.CacheIncludedInPrompt && u.CacheReadTokens > u.PromptTokens {
-		return false
-	}
-	// When the upstream states a total, the parts have to fit inside it. This
-	// is the only bound on the completion count — nothing else can tell an
-	// inflated output figure from a genuinely long generation. It bites on the
-	// passthrough path, where the upstream's own total survives; on the IR path
-	// IRUsage.Merge has already raised a too-small total to prompt+completion.
-	if u.TotalTokens > 0 && u.PromptTokens+u.CompletionTokens > u.TotalTokens {
-		return false
-	}
-	return true
+	return !u.toIRUsage().IsIncoherent()
 }
 
 func computeCost(cand *model.ModelCandidate, usage *Usage, compressTokensSaved int) costBreakdown {
@@ -217,6 +240,18 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 	}
 	rc.StatusCode = statusCode
 	durationMs := time.Since(start).Milliseconds()
+	// Settle the cache convention once, here, before either consumer of the
+	// usage reads it: pricing below and the persisted counts further down must
+	// not be able to disagree about whether the prompt includes the cache. One
+	// normalization point covers every ingress protocol and both the streaming
+	// and non-streaming paths.
+	//
+	// A truncated stream can reach this with a partial record (the pumps keep
+	// whatever usage arrived before the cut, deliberately), so the reclassification
+	// must not depend on the record being complete — it doesn't: a partial record
+	// whose stated total no longer corroborates the net reading simply stays
+	// inclusive and is rejected as incoherent, exactly as it was before.
+	normalizeCacheConvention(rc.Usage)
 	cost := computeCost(rc.Candidate, rc.Usage, rc.CompressEstimatedTokensSaved)
 
 	var providerID *uint

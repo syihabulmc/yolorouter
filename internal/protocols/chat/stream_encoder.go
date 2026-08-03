@@ -101,6 +101,11 @@ func (e *StreamEncoder) EncodeDone() []protocols.SSEEvent {
 // token count, guarding against emitting an empty (all-zero) usage chunk
 // when the upstream never actually reported usage.
 func hasMeaningfulChatUsage(u protocols.IRUsage) bool {
+	// Never put an impossible record on the wire: the client would read it as
+	// authoritative, and a downstream gateway would bill it.
+	if u.Invalid {
+		return false
+	}
 	return u.PromptTokens > 0 || u.CompletionTokens > 0 || u.TotalTokens > 0
 }
 
@@ -110,25 +115,54 @@ func hasMeaningfulChatUsage(u protocols.IRUsage) bool {
 // non-stream usage block (including the cached_tokens detail) so the
 // stream and non-stream shapes stay consistent.
 func openaiUsageChunk(id, model string, usage protocols.IRUsage) protocols.SSEEvent {
-	usageObj := map[string]interface{}{
-		"prompt_tokens":     usage.PromptTokens,
-		"completion_tokens": usage.CompletionTokens,
-		"total_tokens":      usage.TotalTokens,
-	}
-	if usage.CacheReadTokens > 0 {
-		usageObj["prompt_tokens_details"] = map[string]interface{}{
-			"cached_tokens": usage.CacheReadTokens,
-		}
-	}
 	chunk := map[string]interface{}{
 		"id":      id,
 		"object":  "chat.completion.chunk",
 		"model":   model,
 		"choices": []interface{}{},
-		"usage":   usageObj,
+		"usage":   openAIWireUsage(usage),
 	}
 	data, _ := json.Marshal(chunk)
 	return protocols.SSEEvent{Data: string(data)}
+}
+
+// openAIWireUsage builds the OpenAI-spec usage object, shared by the streaming
+// usage-only chunk and the non-streaming response so the two shapes cannot
+// drift apart.
+//
+// Emits GROSS counts: OpenAI documents cached_tokens as a breakdown OF
+// prompt_tokens, so the cached portion must be inside the prompt total.
+// Forwarding the raw IR PromptTokens would be wrong for an Anthropic upstream,
+// whose count is net — the whole cache portion would vanish and the response
+// would claim cached_tokens > prompt_tokens.
+func openAIWireUsage(u protocols.IRUsage) map[string]interface{} {
+	// A record the gateway itself refused publishes nothing: emitting sanitized
+	// counts would hand the client — and any downstream gateway billing from
+	// them — numbers we already decided were impossible. null is the wire's
+	// existing word for "unknown", and unknown is not zero.
+	// Invalid alone: the verdict is settled once at the decoder exit (see
+	// IRUsage.IsIncoherent), so this reads the same answer the billing gate
+	// reads, instead of re-judging with a narrower predicate and disagreeing.
+	if u.Invalid {
+		return nil
+	}
+	usage := map[string]interface{}{
+		"prompt_tokens":     u.GrossPromptTokens(),
+		"completion_tokens": u.CompletionTokens,
+		"total_tokens":      u.GrossTotalTokens(),
+	}
+	if u.CacheReadTokens > 0 || u.CacheWriteTokens > 0 {
+		details := map[string]interface{}{}
+		if u.CacheReadTokens > 0 {
+			details["cached_tokens"] = u.CacheReadTokens
+		}
+		// Nested, not top-level; see protocols.CacheWriteDetailField.
+		if u.CacheWriteTokens > 0 {
+			details[protocols.CacheWriteDetailField] = u.CacheWriteTokens
+		}
+		usage["prompt_tokens_details"] = details
+	}
+	return usage
 }
 
 func (e *StreamEncoder) Usage() protocols.IRUsage {
@@ -183,17 +217,7 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 		"object":  "chat.completion",
 		"model":   resp.Model,
 		"choices": []interface{}{choice},
-		"usage": map[string]interface{}{
-			"prompt_tokens":     resp.Usage.PromptTokens,
-			"completion_tokens": resp.Usage.CompletionTokens,
-			"total_tokens":      resp.Usage.TotalTokens,
-		},
-	}
-
-	if resp.Usage.CacheReadTokens > 0 {
-		result["usage"].(map[string]interface{})["prompt_tokens_details"] = map[string]interface{}{
-			"cached_tokens": resp.Usage.CacheReadTokens,
-		}
+		"usage":   openAIWireUsage(resp.Usage),
 	}
 
 	data, _ := json.Marshal(result)

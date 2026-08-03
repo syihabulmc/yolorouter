@@ -70,6 +70,9 @@ const props = defineProps<{
   providerId: number
   baseUrl: string
   providerType: string
+  // How many destinations the server verifies a new plaintext against. Saving
+  // waits for that whole walk, so the request budget scales with it.
+  destinationCount: number
   editingKey?: ProviderKey | null
 }>()
 const emit = defineEmits<{ 'update:show': [boolean]; saved: [] }>()
@@ -141,14 +144,14 @@ async function onSubmit() {
         plaintext: form.plaintext || undefined,
         test_model: form.testModel,
         management_status: managementStatus,
-      })
+      }, props.destinationCount)
     } else {
       await store.createKey(props.providerId, {
         label: form.label,
         plaintext: form.plaintext,
         test_model: form.testModel,
         management_status: form.enabled ? 1 : 2,
-      })
+      }, props.destinationCount)
     }
     emit('saved')
     onUpdateShow(false)

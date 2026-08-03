@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,5 +168,34 @@ func TestHelperHoldsLock(t *testing.T) {
 	select {
 	case <-stopCh:
 	case <-time.After(60 * time.Second):
+	}
+}
+
+// TestRunStopWithoutConfigFailsLoudly is the regression test for stop reporting
+// "no running instance" while the server was running: run from a directory with
+// no configs/config.yaml, stop used to generate a fresh config there and then
+// probe that new, empty deployment's lock — which nobody held. It must now fail
+// with a message naming the path instead, and leave nothing behind.
+func TestRunStopWithoutConfigFailsLoudly(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	// --config, not the default resolution: with no flag, runStop consults the
+	// executable's installation, so on a machine that has one this test would
+	// probe — and could signal — the operator's live server. Which file the
+	// default path resolves to is covered in internal/config, where the
+	// executable lookup is injectable.
+	err := runStop(context.Background(), []string{"--config", filepath.Join(dir, "configs", "config.yaml")})
+	if err == nil {
+		t.Fatal("expected an error when the config does not exist")
+	}
+	if !strings.Contains(err.Error(), "config file not found") {
+		t.Fatalf("error should name the missing config, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Fatalf("error should name the path it tried, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "configs", "config.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("stop must not generate a config, stat err = %v", statErr)
 	}
 }

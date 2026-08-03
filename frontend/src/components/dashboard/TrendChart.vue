@@ -106,6 +106,7 @@ const option = computed(() => {
       {
         type: 'value',
         name: t('analytics.callsColumn'),
+        min: 0,
         nameTextStyle: { color: TEXT_MUTED, fontSize: 11 },
         axisLabel: { fontSize: 11, color: TEXT_MUTED },
         splitLine: { lineStyle: { color: GRID_LINE } },
@@ -113,6 +114,11 @@ const option = computed(() => {
       {
         type: 'value',
         name: t('analytics.costColumn'),
+        min: 0,
+        // Without this the two axes pick their own tick counts (e.g. 0..180 in
+        // 6 steps vs 0..0.25 in 5), so the right-hand ¥ labels land between
+        // grid lines and the cost line can't be read against any reference.
+        alignTicks: true,
         nameTextStyle: { color: TEXT_MUTED, fontSize: 11 },
         axisLabel: {
           fontSize: 11,
@@ -137,7 +143,10 @@ const option = computed(() => {
         type: 'line',
         yAxisIndex: 1,
         data: costs,
-        smooth: true,
+        // Straight segments on purpose: daily buckets are discrete, and spline
+        // smoothing overshoots around a zero-to-peak jump, drawing cost on days
+        // that had none and putting the apex between two data points.
+        smooth: false,
         showSymbol: true,
         symbolSize: 6,
         lineStyle: { color: PURPLE, width: 2 },

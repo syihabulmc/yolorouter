@@ -818,13 +818,36 @@ func TestGeminiNegativeUsageRejected(t *testing.T) {
 				t.Errorf("expected usage left unset, got %+v", irResp.Usage)
 			}
 
+			// The streaming path emits a MARKED delta rather than nothing.
+			// Emitting nothing was the earlier contract and it lost the
+			// verdict: this decoder rejects before IRUsage.Merge ever sees the
+			// frame, so an earlier valid frame's counts stayed in the
+			// accumulator and the following DeltaDone billed them as coherent.
 			dec := NewStreamDecoder()
 			chunk := "data: {\"usageMetadata\":" + um + ",\"candidates\":[]}\n\n"
 			deltas, _ := dec.DecodeChunk(chunk)
+			var sawUsage bool
 			for _, d := range deltas {
-				if u, ok := d.(protocols.DeltaUsage); ok {
-					t.Errorf("stream emitted usage for a rejected block: %+v", u.Usage)
+				u, ok := d.(protocols.DeltaUsage)
+				if !ok {
+					continue
 				}
+				sawUsage = true
+				if !u.Usage.Invalid {
+					t.Errorf("rejected block must be marked Invalid, got %+v", u.Usage)
+				}
+				if u.Usage.PromptTokens != 0 || u.Usage.CompletionTokens != 0 || u.Usage.TotalTokens != 0 {
+					t.Errorf("a rejected block must carry no counts, got %+v", u.Usage)
+				}
+				// The mark has to survive the accumulation every relay performs.
+				acc := protocols.IRUsage{PromptTokens: 500, CompletionTokens: 5}
+				acc.Merge(u.Usage)
+				if !acc.Invalid {
+					t.Error("Invalid must propagate through Merge, or earlier counts stay billable")
+				}
+			}
+			if !sawUsage {
+				t.Error("expected a marked usage delta so the rejection reaches the accumulator")
 			}
 		})
 	}
@@ -882,5 +905,28 @@ func TestMapToGeminiFinishReason(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("mapToGeminiFinishReason(%q, %v) = %q, want %q", tt.reason, tt.hasToolCalls, got, tt.want)
 		}
+	}
+}
+
+// TestBuildGeminiUsage_AnthropicUpstreamEmitsGross guards the cross-protocol
+// combination that used to under-report: Gemini's promptTokenCount is the total
+// effective prompt size with cachedContentTokenCount a breakdown of it, so an
+// Anthropic upstream's NET input must be converted before being emitted.
+func TestBuildGeminiUsage_AnthropicUpstreamEmitsGross(t *testing.T) {
+	meta := buildGeminiUsage(protocols.IRUsage{
+		PromptTokens:     2,
+		CompletionTokens: 123,
+		CacheWriteTokens: 906,
+		CacheReadTokens:  36678,
+	})
+
+	if meta["promptTokenCount"] != 37586 {
+		t.Errorf("promptTokenCount = %v, want 37586 (net 2 + write 906 + read 36678)", meta["promptTokenCount"])
+	}
+	if meta["totalTokenCount"] != 37709 {
+		t.Errorf("totalTokenCount = %v, want 37709", meta["totalTokenCount"])
+	}
+	if meta["cachedContentTokenCount"] != 36678 {
+		t.Errorf("cachedContentTokenCount = %v, want 36678", meta["cachedContentTokenCount"])
 	}
 }

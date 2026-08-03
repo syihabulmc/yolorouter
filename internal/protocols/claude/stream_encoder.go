@@ -200,12 +200,46 @@ func (e *StreamEncoder) emitMessageDelta(stopReason string) []protocols.SSEEvent
 			"stop_reason":   reason,
 			"stop_sequence": stopSeqVal,
 		},
-		"usage": map[string]interface{}{
-			"output_tokens": e.usage.CompletionTokens,
-		},
+		// Full usage (input + cache), not just output_tokens. For OpenAI/Gemini/
+		// Responses upstreams the input usage only arrives at stream end — long
+		// after message_start went out with input_tokens 0 — so this terminal
+		// message_delta is the ONLY event that can carry the real input and cache
+		// breakdown to the client. Anthropic's spec documents only output_tokens
+		// here, but its own web-search example ships input_tokens and the cache
+		// fields on message_delta, so the extra members are compatible.
+		"usage": claudeUsageMap(e.usage),
 	}
 	d, _ := json.Marshal(deltaData)
 	return []protocols.SSEEvent{{Event: "message_delta", Data: string(d)}}
+}
+
+// claudeUsageMap builds Anthropic's usage object from an IRUsage: net input
+// (NetPromptTokens, since Anthropic's input_tokens excludes cache), output, and
+// the cache breakdown when non-zero. Shared by the streaming terminal
+// message_delta and the non-streaming ResponseEncoder so the two output paths
+// cannot drift apart.
+func claudeUsageMap(u protocols.IRUsage) map[string]interface{} {
+	// A record the gateway itself refused publishes nothing: emitting sanitized
+	// counts would hand the client — and any downstream gateway billing from
+	// them — numbers we already decided were impossible. null is the wire's
+	// existing word for "unknown", and unknown is not zero.
+	// Invalid alone: the verdict is settled once at the decoder exit (see
+	// IRUsage.IsIncoherent), so this reads the same answer the billing gate
+	// reads, instead of re-judging with a narrower predicate and disagreeing.
+	if u.Invalid {
+		return nil
+	}
+	m := map[string]interface{}{
+		"input_tokens":  u.NetPromptTokens(),
+		"output_tokens": u.CompletionTokens,
+	}
+	if u.CacheWriteTokens > 0 {
+		m["cache_creation_input_tokens"] = u.CacheWriteTokens
+	}
+	if u.CacheReadTokens > 0 {
+		m["cache_read_input_tokens"] = u.CacheReadTokens
+	}
+	return m
 }
 
 func (e *StreamEncoder) marshalMessageStart(id, model string) string {
@@ -217,8 +251,12 @@ func (e *StreamEncoder) marshalMessageStart(id, model string) string {
 		"model":         model,
 		"stop_reason":   nil,
 		"stop_sequence": nil,
+		// Net input per Anthropic's convention. Usually still 0 here: only an
+		// Anthropic upstream reports usage early enough for message_start to
+		// carry it; the other three protocols report at stream end, which is
+		// why emitMessageDelta carries the authoritative counts.
 		"usage": map[string]interface{}{
-			"input_tokens":  e.usage.PromptTokens,
+			"input_tokens":  e.usage.NetPromptTokens(),
 			"output_tokens": 0,
 		},
 	}
@@ -301,20 +339,7 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 		"model":         resp.Model,
 		"stop_reason":   stopReason,
 		"stop_sequence": stopSeqVal,
-		"usage": map[string]interface{}{
-			"input_tokens":  resp.Usage.PromptTokens,
-			"output_tokens": resp.Usage.CompletionTokens,
-		},
-	}
-
-	if resp.Usage.CacheWriteTokens > 0 || resp.Usage.CacheReadTokens > 0 {
-		usage := result["usage"].(map[string]interface{})
-		if resp.Usage.CacheWriteTokens > 0 {
-			usage["cache_creation_input_tokens"] = resp.Usage.CacheWriteTokens
-		}
-		if resp.Usage.CacheReadTokens > 0 {
-			usage["cache_read_input_tokens"] = resp.Usage.CacheReadTokens
-		}
+		"usage":         claudeUsageMap(resp.Usage),
 	}
 
 	data, _ := json.Marshal(result)

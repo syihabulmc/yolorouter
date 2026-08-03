@@ -21,11 +21,34 @@ export interface ProviderPreset {
   id: string
   baseUrl: string
   protocol: ProtocolId
+  // Additional protocols the provider also serves at the same baseUrl, on top
+  // of `protocol`. Each is filled in as an endpoint with an empty URL, which
+  // means "reuse base_url". Leave undefined for providers that only speak
+  // their primary protocol — declaring one they don't serve turns a working
+  // cross-protocol translation into an upstream 404.
+  extraProtocols?: ProtocolId[]
   defaultTestModel: string
   websiteUrl: string
 }
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
+  // YoloRouter Cloud is this project's own hosted service, not a third-party
+  // vendor, so it leads the list, its localized name says so explicitly, and
+  // the create dialog opens with it preselected. It is an ordinary preset in
+  // every other respect: no key ships with it, every field it prefills stays
+  // editable, and any other card (including "custom") replaces it in one click.
+  {
+    id: 'yolorouter',
+    baseUrl: 'https://api.yolorouter.com/v1',
+    protocol: 'openai',
+    // The hosted service runs this same gateway, so it serves all four
+    // protocols off one base URL. Declaring the other three keeps native
+    // passthrough for Anthropic/Gemini/Responses callers instead of falling
+    // back to a lossy cross-protocol translation.
+    extraProtocols: ['anthropic', 'gemini', 'responses'],
+    defaultTestModel: 'glm-5.2',
+    websiteUrl: 'https://yolorouter.com/pricing?utm_source=oss-console&utm_medium=preset',
+  },
   {
     id: 'deepseek',
     baseUrl: 'https://api.deepseek.com/v1',

@@ -43,6 +43,12 @@ const (
 	// (gemini/responses) has no real success-body validator yet, so a 2xx
 	// response from it cannot be certified as a genuine pass.
 	LastTestResultVerificationUnsupported = 8
+	// LastTestResultTimeout mirrors service.TestTimeout: the destination
+	// accepted the connection but did not answer within the test budget.
+	// Stored apart from LastTestResultUnreachable because the two send an
+	// operator to opposite places — a timed-out address is reachable and its
+	// URL is fine.
+	LastTestResultTimeout = 9
 )
 
 // Provider is one upstream connection target. Deleting a

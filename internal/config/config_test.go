@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -679,5 +680,336 @@ func TestLoadGatewayPartialBlockKeepsDefaultsForOmittedFields(t *testing.T) {
 	}
 	if cfg.Gateway.TLSHandshakeTimeout != want.TLSHandshakeTimeout {
 		t.Errorf("TLSHandshakeTimeout = %v, want default %v", cfg.Gateway.TLSHandshakeTimeout, want.TLSHandshakeTimeout)
+	}
+}
+
+// writeInstallLayout builds the directory layout the installer produces —
+// <app-home>/bin/<binary> plus <app-home>/configs/config.yaml — and returns the
+// app-home and the path of the binary inside it.
+func writeInstallLayout(t *testing.T, configBody string) (appHome, exe string) {
+	t.Helper()
+	appHome = t.TempDir()
+	binDir := filepath.Join(appHome, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	exe = filepath.Join(binDir, "yolorouter")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(appHome, "configs"), 0o755); err != nil {
+		t.Fatalf("mkdir configs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(appHome, "configs", "config.yaml"), []byte(configBody), 0o600); err != nil {
+		t.Fatalf("write install config: %v", err)
+	}
+	return appHome, exe
+}
+
+// evalSymlinks resolves path for comparison against a resolvePath result, which
+// follows the executable symlink and so returns a fully resolved path.
+func evalSymlinks(t *testing.T, path string) string {
+	t.Helper()
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
+// TestLoadExistingNeverGenerates: commands that act on an already-running
+// deployment must fail loudly when no config can be found, not silently
+// generate one (a fresh provider_master_key and an empty data directory) and
+// then report on that empty deployment.
+func TestLoadExistingNeverGenerates(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	if _, _, err := LoadExisting("", "stop"); err == nil {
+		t.Fatal("LoadExisting should fail when no config exists")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "configs", "config.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("LoadExisting must not generate a config, stat err = %v", err)
+	}
+}
+
+// TestLoadExistingReadsResolvedConfig proves LoadExisting goes through the same
+// resolution as Load, so an installed deployment is found from any cwd.
+func TestLoadExistingReadsResolvedConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "configs"), 0o755); err != nil {
+		t.Fatalf("mkdir configs: %v", err)
+	}
+	path := filepath.Join(dir, "configs", "config.yaml")
+	body := "server:\n    port: 9123\ndatabase:\n    driver: sqlite\n    sqlite_path: ../data/yolorouter.db\nsecurity:\n    provider_master_key: dGVzdC1rZXktZm9yLWxvYWQtZXhpc3RpbmctdGVzdHM=\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, gotPath, err := LoadExisting(path, "stop")
+	if err != nil {
+		t.Fatalf("LoadExisting: %v", err)
+	}
+	if cfg.Server.Port != 9123 {
+		t.Fatalf("Server.Port = %d, want 9123", cfg.Server.Port)
+	}
+	if evalSymlinks(t, gotPath) != evalSymlinks(t, path) {
+		t.Fatalf("returned path = %q, want the file that was read %q", gotPath, path)
+	}
+}
+
+// TestLoadWithPathReturnsTheFileItRead: callers record the returned path and
+// later print it as the deployment they acted on (db:reset's confirmation,
+// db:rollback's target line). Resolving a second time to recover it could name
+// a different file than the one loaded, since resolution prefers paths that
+// exist and one can appear between the two calls.
+func TestLoadWithPathReturnsTheFileItRead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "configs"), 0o755); err != nil {
+		t.Fatalf("mkdir configs: %v", err)
+	}
+	path := filepath.Join(dir, "configs", "config.yaml")
+	body := "server:\n    port: 9124\nsecurity:\n    provider_master_key: dGVzdC1rZXktZm9yLWxvYWQtZXhpc3RpbmctdGVzdHM=\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, got, err := LoadWithPath(path)
+	if err != nil {
+		t.Fatalf("LoadWithPath: %v", err)
+	}
+	if cfg.Server.Port != 9124 {
+		t.Fatalf("Server.Port = %d, want 9124 (config not actually read)", cfg.Server.Port)
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("returned path %q is not absolute", got)
+	}
+	if evalSymlinks(t, got) != evalSymlinks(t, path) {
+		t.Fatalf("returned path = %q, want the file that was read %q", got, path)
+	}
+}
+
+// TestLoadWithPathReturnsGeneratedPath: the first-run path generates the file,
+// and the caller still needs to be told which one.
+func TestLoadWithPathReturnsGeneratedPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	_, got, err := LoadWithPath("")
+	if err != nil {
+		t.Fatalf("LoadWithPath: %v", err)
+	}
+	want := filepath.Join(dir, "configs", "config.yaml")
+	if evalSymlinks(t, got) != evalSymlinks(t, want) {
+		t.Fatalf("returned path = %q, want the generated config %q", got, want)
+	}
+}
+
+// TestLoadDerivesTheSameDatabasePathThroughEveryRouteToTheConfig: the database
+// path is not only used to open a file. It is the identity two processes agree
+// on — serve and stop derive the lock file from it, and on Windows the name of
+// the kernel event stop signals, which is matched byte for byte. serve resolves
+// its config from the working directory while stop can resolve the same config
+// through the executable's installation, and those two routes produce different
+// spellings of one directory whenever a symlink is involved. Anchoring on the
+// config directory's resolved form is what makes both arrive at one string.
+func TestLoadDerivesTheSameDatabasePathThroughEveryRouteToTheConfig(t *testing.T) {
+	real := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(real, "configs"), 0o755); err != nil {
+		t.Fatalf("mkdir configs: %v", err)
+	}
+	body := "server:\n    port: 8080\ndatabase:\n    driver: sqlite\n    sqlite_path: ../data/yolorouter.db\n" +
+		"security:\n    provider_master_key: dGVzdC1rZXktZm9yLWxvYWQtZXhpc3RpbmctdGVzdHM=\n"
+	if err := os.WriteFile(filepath.Join(real, "configs", "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(real, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "app")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	viaReal, err := Load(filepath.Join(real, "configs", "config.yaml"))
+	if err != nil {
+		t.Fatalf("load via the real path: %v", err)
+	}
+	viaLink, err := Load(filepath.Join(link, "configs", "config.yaml"))
+	if err != nil {
+		t.Fatalf("load via the symlinked path: %v", err)
+	}
+
+	if viaReal.Database.SQLitePath != viaLink.Database.SQLitePath {
+		t.Fatalf("database path differs by route to the same config:\n  via real path: %s\n  via symlink:   %s",
+			viaReal.Database.SQLitePath, viaLink.Database.SQLitePath)
+	}
+}
+
+// TestLoadKeepsTheDatabaseInsideTheDeploymentWhenConfigsIsASymlink: sqlite_path
+// is relative to the deployment, and the shipped default walks up out of
+// configs/ to reach data/. Resolving the config directory before that join
+// would let the "../" escape the link target's parent instead — moving the
+// database out of the deployment entirely, so the next start opens a path that
+// does not exist, creates an empty file there and leaves the real one orphaned.
+func TestLoadKeepsTheDatabaseInsideTheDeploymentWhenConfigsIsASymlink(t *testing.T) {
+	root := t.TempDir()
+	app := filepath.Join(root, "app")
+	elsewhere := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(app, 0o755); err != nil {
+		t.Fatalf("mkdir app: %v", err)
+	}
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatalf("mkdir elsewhere: %v", err)
+	}
+	body := "server:\n    port: 8080\ndatabase:\n    driver: sqlite\n    sqlite_path: ../data/yolorouter.db\n" +
+		"security:\n    provider_master_key: dGVzdC1rZXktZm9yLWxvYWQtZXhpc3RpbmctdGVzdHM=\n"
+	if err := os.WriteFile(filepath.Join(elsewhere, "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(app, "configs")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// A deployment that has been started has this; without it the path is left
+	// in its unresolved spelling, which is a separate property covered below.
+	if err := os.MkdirAll(filepath.Join(app, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+
+	cfg, err := Load(filepath.Join(app, "configs", "config.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	want := filepath.Join(evalSymlinks(t, app), "data", "yolorouter.db")
+	if cfg.Database.SQLitePath != want {
+		t.Fatalf("database placed at %q, want it inside the deployment at %q", cfg.Database.SQLitePath, want)
+	}
+}
+
+// TestLoadLeavesTheDatabasePathUnresolvedBeforeTheDataDirectoryExists pins the
+// edge of the identity guarantee rather than pretending it has none. Canonical
+// spelling needs the directory to exist, which it does for any deployment that
+// has been started once — but between writing a config and the first start it
+// does not, and the path is then left exactly as it was joined. That is the
+// pre-existing behaviour, and both processes only disagree if one of them ran
+// in that window.
+func TestLoadLeavesTheDatabasePathUnresolvedBeforeTheDataDirectoryExists(t *testing.T) {
+	root := t.TempDir()
+	app := filepath.Join(root, "app")
+	if err := os.MkdirAll(filepath.Join(app, "configs"), 0o755); err != nil {
+		t.Fatalf("mkdir configs: %v", err)
+	}
+	body := "server:\n    port: 8080\ndatabase:\n    driver: sqlite\n    sqlite_path: ../data/yolorouter.db\n" +
+		"security:\n    provider_master_key: dGVzdC1rZXktZm9yLWxvYWQtZXhpc3RpbmctdGVzdHM=\n"
+	if err := os.WriteFile(filepath.Join(app, "configs", "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(filepath.Join(app, "configs", "config.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if want := filepath.Join(app, "data", "yolorouter.db"); cfg.Database.SQLitePath != want {
+		t.Fatalf("database path = %q, want the plain join %q", cfg.Database.SQLitePath, want)
+	}
+}
+
+// TestInstallHintPointsAtTheInstallationWithoutActingOnIt covers what replaced
+// the installation search. The executable's location is a good guess at which
+// deployment someone meant, and a bad basis for acting: a guess that turns into
+// a signalled process or a dropped table has to be right every time, while a
+// guess printed as "try this" costs a line when it is wrong.
+func TestInstallHintPointsAtTheInstallationWithoutActingOnIt(t *testing.T) {
+	appHome, exe := writeInstallLayout(t, "server:\n    port: 8080\n")
+
+	hint := installHint(func() (string, error) { return exe, nil }, "stop")
+
+	installed := filepath.Join(appHome, "configs", "config.yaml")
+	if !strings.Contains(hint, evalSymlinks(t, installed)) {
+		t.Fatalf("hint = %q, want it to name the installation's config %q", hint, installed)
+	}
+	for _, want := range []string{"--config", "yolorouter stop"} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("hint = %q, want it to contain %q", hint, want)
+		}
+	}
+}
+
+// TestLoadExistingReportsThePathItTriedAndChangesNothing: with no config in the
+// working directory and no suggestion to offer, the error still has to name
+// where it looked — and the command must leave the directory as it found it,
+// which is the whole difference from the generating loader.
+func TestLoadExistingReportsThePathItTriedAndChangesNothing(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	_, _, err := LoadExisting("", "stop")
+	if err == nil {
+		t.Fatal("expected an error: the working directory holds no config")
+	}
+	if !strings.Contains(err.Error(), filepath.Join("configs", "config.yaml")) {
+		t.Fatalf("error should name the path it tried, got: %v", err)
+	}
+	if entries, readErr := os.ReadDir(dir); readErr != nil || len(entries) != 0 {
+		t.Fatalf("working directory should be untouched, got %v (err %v)", entries, readErr)
+	}
+}
+
+// TestInstallHintIsSilentForABinaryThatBelongsToNoInstallation: a bare binary
+// in a temporary directory has nothing to suggest, and the error then just
+// names the path it looked at.
+func TestInstallHintIsSilentForABinaryThatBelongsToNoInstallation(t *testing.T) {
+	bare := filepath.Join(t.TempDir(), "yolorouter")
+	if err := os.WriteFile(bare, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+
+	if hint := installHint(func() (string, error) { return bare, nil }, "stop"); hint != "" {
+		t.Fatalf("installHint = %q, want no suggestion", hint)
+	}
+}
+
+// TestInstallHintSurvivesAnUnlocatableExecutable: os.Executable does not work
+// in a chroot with no /proc. That costs the suggestion, nothing else — the
+// command still reports the path it tried.
+func TestInstallHintSurvivesAnUnlocatableExecutable(t *testing.T) {
+	if hint := installHint(func() (string, error) { return "", os.ErrNotExist }, "stop"); hint != "" {
+		t.Fatalf("installHint = %q, want no suggestion", hint)
+	}
+}
+
+// TestInstallHintQuotesThePathForPasting: the line exists to be pasted, and the
+// machine-wide Windows install puts the deployment under %ProgramFiles%, so an
+// unquoted path splits at the space in "Program Files" and the pasted command
+// fails to parse instead of reaching the deployment.
+func TestInstallHintQuotesThePathForPasting(t *testing.T) {
+	root := t.TempDir()
+	appHome := filepath.Join(root, "Program Files", "yolorouter")
+	if err := os.MkdirAll(filepath.Join(appHome, "bin"), 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(appHome, "configs"), 0o755); err != nil {
+		t.Fatalf("mkdir configs: %v", err)
+	}
+	exe := filepath.Join(appHome, "bin", "yolorouter")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+	installed := filepath.Join(appHome, "configs", "config.yaml")
+	if err := os.WriteFile(installed, []byte("server:\n    port: 8080\n"), 0o600); err != nil {
+		t.Fatalf("write install config: %v", err)
+	}
+
+	hint := installHint(func() (string, error) { return exe, nil }, "stop")
+
+	quoted := quoteForShell(evalSymlinks(t, installed))
+	if !strings.Contains(hint, quoted) {
+		t.Fatalf("hint = %q, want the path quoted as %q", hint, quoted)
+	}
+	// The point of the quoting is that the argument survives as one word.
+	after := hint[strings.Index(hint, "--config ")+len("--config "):]
+	if strings.Contains(strings.TrimSuffix(after, "\n"), " ") && !strings.HasPrefix(after, quoted) {
+		t.Fatalf("path is not a single shell word in %q", hint)
 	}
 }

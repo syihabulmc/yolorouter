@@ -164,11 +164,19 @@ func TestExtractUsageCacheReadDialects(t *testing.T) {
 	}
 }
 
-// TestExtractUsageCacheWriteNotDeductedFromPrompt: an upstream that reports an
+// TestExtractUsageCacheWriteIsInsideGrossPrompt: an upstream reporting an
 // OpenAI-shaped prompt_tokens alongside Anthropic's cache_creation_input_tokens
-// must not have the written tokens deducted — the prompt total never counted
-// them, so subtracting would understate both the bill and the logged input.
-func TestExtractUsageCacheWriteNotDeductedFromPrompt(t *testing.T) {
+// is stating a GROSS prompt — net input plus both cache lines — with the alias
+// as a breakdown of it, exactly as this gateway's own openAIWireUsage emits and
+// as new-api does. So the written tokens must come back out to leave the net
+// input; leaving them in would bill them twice, once as cache write and once as
+// fresh input.
+//
+// This expectation was previously the opposite (net == prompt_tokens, i.e. the
+// write treated as sitting outside the prompt). That reading under-reports the
+// input to any plain OpenAI client, which ignores the unknown alias and would
+// see a prompt_tokens smaller than the request's real input.
+func TestExtractUsageCacheWriteIsInsideGrossPrompt(t *testing.T) {
 	u := extractUsage([]byte(`{"usage":{"prompt_tokens":1000,"completion_tokens":10,"cache_creation_input_tokens":500}}`))
 	if u == nil {
 		t.Fatal("expected usage, got nil")
@@ -176,8 +184,8 @@ func TestExtractUsageCacheWriteNotDeductedFromPrompt(t *testing.T) {
 	if u.CacheWriteTokens != 500 {
 		t.Fatalf("CacheWriteTokens = %d, want 500", u.CacheWriteTokens)
 	}
-	if got := netPromptTokens(u); got != 1000 {
-		t.Errorf("netPromptTokens = %d, want 1000 (cache write is outside the prompt total)", got)
+	if got := netPromptTokens(u); got != 500 {
+		t.Errorf("netPromptTokens = %d, want 500 (1000 gross - 500 cache write)", got)
 	}
 }
 

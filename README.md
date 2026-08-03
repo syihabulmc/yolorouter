@@ -12,7 +12,7 @@
 
 English · [简体中文](README_zh.md)
 
-[Quick start](#quick-start) · [Protocols](#protocols) · [Cost optimization](#cost-optimization) · [Configuration](#configuration) · [Architecture](#architecture) · [Contributing](#contributing)
+[Quick start](#quick-start) · [Protocols](#protocols) · [Cost optimization](#cost-optimization) · [Documentation](#documentation) · [Contributing](#contributing)
 
 ⚡ **Low-overhead streaming proxy** · 🔀 **Any protocol in, any protocol out** · 🆓 **Free & open-source** · 📦 **Single binary, zero external deps** · 🔁 **Automatic failover + key rotation** · 💰 **Cost analytics & optimization**
 
@@ -33,135 +33,75 @@ Code; an Anthropic-only provider can serve the OpenAI SDK. Streaming, tool
 calling, and reasoning/thinking blocks all survive the trip, as does image
 content on every ingress except Responses (see [Protocols](#protocols)).
 
-Everything ships as a **single binary** with the web console embedded. No
-Node runtime, no separate frontend deploy, no external services required —
-SQLite works out of the box, PostgreSQL when you want it.
+Everything ships as a **single binary** with the web console embedded. No Node
+runtime, no separate frontend deploy, no external services required — SQLite
+works out of the box, PostgreSQL when you want it.
 
 ## Why Yolorouter
 
 **Routing**
 
 - **Multi-provider failover** — map one public model name (e.g. `smart`) to an ordered list of provider candidates. When one is down, requests fail over to the next — transparently, without the caller ever seeing a different model name.
-- **Upstream key rotation** — give each provider a pool of upstream keys. Rate-limited, unauthorized, or quota-exhausted keys are skipped automatically; the request retries the next key before failing over.
+- **Upstream key rotation** — give each provider a pool of upstream keys. Rate-limited, unauthorized, or quota-exhausted keys are skipped automatically.
 - **Model aliasing** — callers request a stable public name; each provider candidate maps it to whatever model id that provider actually expects. Candidate mappings are probed against the real upstream when you save them, so a typo is caught at configuration time, not at 3 a.m.
 - **Streaming done right** — key rotation and failover happen *before* the first byte reaches the client; once streaming starts, the provider is locked in. Content from two providers is never stitched into one response.
-- **Timeouts tuned for reasoning models** — seven independent, configurable phases (connect, TLS handshake, headers, first byte, inter-chunk idle, per-attempt, whole-request) instead of one wall clock, so a model that thinks for eight minutes before emitting a token isn't killed mid-thought.
-
-**Protocol translation**
-
-- **Four ingress endpoints, four egress protocols** — see [Protocols](#protocols). When the caller's protocol matches the provider's, the body passes through with only the model name rewritten. When it doesn't, the request is decoded into a protocol-agnostic intermediate representation and re-encoded for the provider — including the streaming event grammar of both sides.
-- **Model discovery** — `GET /v1/models` returns the models the presenting key may call, in the OpenAI shape or the Anthropic shape depending on the client.
+- **Timeouts tuned for reasoning models** — seven independent, configurable phases instead of one wall clock, so a model that thinks for eight minutes before emitting a token isn't killed mid-thought.
 
 **Control & cost**
 
-- **Per-key access control** — every issued key carries either an explicit model allowlist or an all-models scope, plus request-rate / concurrency limits, a cumulative budget cap, and an optional expiry. Revoke instantly.
-- **Cost optimization** — inject a custom system prompt globally or per key, and compress bulky tool output (build logs, git diffs, grep results) before it reaches the upstream. The console reports what each feature actually saved.
-- **Observability built in** — a dashboard with token and cost KPIs over any time range, usage & cost analytics (by model / provider / time / caller), per-model / per-provider / per-key cost detail pages, and full request logs with the complete per-attempt routing trace and captured bodies. Export any view to CSV.
-- **Bilingual admin console** — English and 简体中文, switchable anywhere, before or after login. Timezone follows the browser.
-- **Self-updating** — the binary can check for and apply new releases.
+- **Per-key access control** — model allowlists, rate and concurrency limits, cumulative budget caps, optional expiry, instant revocation.
+- **Cost optimization** — inject a custom system prompt globally or per key; compress bulky tool output before it reaches the upstream. The console reports what each actually saved.
+- **Built-in observability** — token and cost KPIs, usage by model / provider / time / caller, and request logs with the full per-attempt routing chain. Any view exports to CSV.
+- **Bilingual console** — English and 简体中文, switchable anywhere; timezone follows the browser.
+- **Self-update** — the binary can check for and apply new releases.
 
 ## Screenshots
 
-<p align="center">
-  <img src="docs/screenshots/dashboard.png" width="49%" alt="Dashboard" />
-  <img src="docs/screenshots/analytics.png" width="49%" alt="Usage & cost analytics" />
-</p>
+<div align="center">
+  <img src="docs/screenshots/dashboard.png" alt="Dashboard" width="49%" />
+  <img src="docs/screenshots/analytics.png" alt="Analytics" width="49%" />
+</div>
 
 ## Quick start
 
-### Install as a service (one command)
-
-Install yolorouter as a boot-persistent background service (systemd on Linux,
-launchd on macOS):
+Install as a background service that starts on boot — systemd on Linux, launchd on
+macOS, a scheduled task on Windows:
 
 ```bash
+# Linux / macOS
 curl -fsSL https://get.yolorouter.com/install.sh | bash
-# or straight from GitHub:
-# curl -fsSL https://raw.githubusercontent.com/yolorouter/yolorouter/main/scripts/install.sh | bash
 ```
 
-> **In mainland China** (or any network where GitHub is slow or blocked), use
-> the accelerated mirror — same installer, routed through a Cloudflare proxy,
-> and self-update stays on the mirror automatically:
-> ```bash
-> curl -fsSL https://gh.yolorouter.com/install.sh | bash
-> ```
-
-The installer picks a UI language, detects your OS/arch, downloads and
-sha256-verifies the matching release, sets up a self-contained app-home
-directory, then starts and health-checks the service. Re-run the same command
-to upgrade (config and database are preserved, and the database is backed up
-first). Uninstall by replacing the trailing `bash` with `bash -s -- --uninstall`:
-
-```bash
-curl -fsSL https://get.yolorouter.com/install.sh | bash -s -- --uninstall
-# China mirror:
-# curl -fsSL https://gh.yolorouter.com/install.sh | bash -s -- --uninstall
+```powershell
+# Windows, PowerShell 5.1+
+irm https://get.yolorouter.com/install.ps1 | iex
 ```
 
-Optional environment overrides: `YOLO_LANG=zh|en`, `YOLO_SCOPE=system|user`,
-`YOLO_VERSION=vX.Y.Z`, `YOLO_REPO=owner/repo`, `YOLO_MIRROR=https://host/`. A
-system install needs root/sudo; without them the installer falls back to a
-user-level service.
+On Windows, an elevated PowerShell installs a system-wide service that starts at
+boot; a normal one installs under your account and starts at logon.
 
-### Run a release binary
+> **🇨🇳 China mirror**: if GitHub is slow or unreachable from your network, swap
+> `get.yolorouter.com` for `gh.yolorouter.com` — same installers, routed through a
+> Cloudflare proxy, and auto-updates keep using the mirror afterwards.
 
-Download the archive for your platform from the
-[latest release](https://github.com/yolorouter/yolorouter/releases), extract it, then:
+Re-run the same command to upgrade; configuration and database are preserved and
+the database is backed up first. Prefer a plain binary? Grab a
+[release](https://github.com/yolorouter/yolorouter/releases) and run
+`./yolorouter serve` (`.\yolorouter.exe serve` on Windows).
 
-```bash
-./yolorouter serve
-```
+The first run generates `configs/config.yaml`, applies migrations and starts the
+console on port 8080. Create the first admin account, then follow the guided flow:
+add providers and upstream keys, create models with their provider candidates, and
+issue API keys.
 
-Release archives cover Linux, macOS, and Windows on both amd64 and arm64
-(Windows as a `.zip`, the rest as `.tar.gz`). The one-command installer above
-is Linux and macOS only — on Windows, extract the archive and run
-`yolorouter.exe serve` from the directory you want `configs\` and `data\`
-created in (both are resolved relative to the working directory, not the
-executable).
-
-> On Windows, config file permissions cannot be enforced — access there is
-> governed by ACLs, and the permission bits Go reports are synthesized, not
-> real. The server logs a warning at startup with a ready-to-run `icacls`
-> command for the current account, then continues. To restrict the file
-> manually:
->
-> ```powershell
-> icacls "configs\config.yaml" /inheritance:r `
->   /remove:g *S-1-1-0 /remove:g *S-1-5-32-545 /remove:g *S-1-5-11 `
->   /grant:r "${env:USERNAME}:F"
-> icacls "configs\config.yaml"   # confirm only your account is listed
-> ```
->
-> `/inheritance:r` drops inherited entries and `/grant:r` replaces the grant
-> only for the account it names, so the `/remove:g` entries are what clear the
-> broad principals (Everyone, Users, Authenticated Users — removed by SID
-> because their display names are localized). That covers the realistic cases
-> but cannot guarantee an empty ACL for an arbitrary principal, which is why
-> the second command is worth running. To rebuild the ACL from scratch instead,
-> use PowerShell's `Set-Acl` with `SetAccessRuleProtection($true, $false)`.
->
-> In `cmd.exe`, use `"%USERNAME%:F"` and `^` for line continuation instead of
-> the backtick — `${env:...}` is PowerShell-only syntax and `%...%` is
-> cmd-only, so the two are not interchangeable.
-
-On first run it generates `configs/config.yaml` (including a random AES-256
-master key used to encrypt stored upstream keys), applies database migrations,
-and serves the console on <http://localhost:8080> — the startup log prints both
-the localhost URL and the LAN URL so you can open it from another machine.
-Create the first admin account, then follow the setup flow: add a provider and
-an upstream key, create a model with its provider candidates, and issue an API
-key.
-
-Provider setup is preset-driven: pick a known provider from the catalogue to
-get its base URL and protocol filled in, paste a key, and let Yolorouter fetch
-the provider's live model list instead of typing model ids by hand.
+→ **Full installation guide for every platform, including building from source:**
+[yolorouter.com/help?p=self-hosted/installation](https://yolorouter.com/help?p=self-hosted/installation&utm_source=oss-readme&utm_medium=repo)
 
 ## Protocols
 
-Every ingress route below is authenticated with the **same** Yolorouter API
-key, accepts streaming, and can be served by **any** configured provider
-regardless of the protocol that provider speaks natively.
+Every ingress below authenticates with the **same** Yolorouter API key, supports
+streaming, and can be served by **any** configured provider — no matter which
+protocol that provider natively speaks.
 
 | Ingress route | Protocol | Accepted auth headers |
 | --- | --- | --- |
@@ -169,117 +109,21 @@ regardless of the protocol that provider speaks natively.
 | `POST /v1/responses` | OpenAI Responses | `Authorization: Bearer`, `X-Api-Key` |
 | `POST /v1/messages` | Anthropic Messages | `Authorization: Bearer`, `X-Api-Key` |
 | `POST /v1beta/models/{model}:generateContent`<br>`POST /v1beta/models/{model}:streamGenerateContent` | Gemini | `x-goog-api-key`, `?key=`, `Authorization: Bearer`, `X-Api-Key` |
-| `GET /v1/models`, `GET /v1/models/{model}` | model discovery | `Authorization: Bearer`, `X-Api-Key` |
+| `GET /v1/models`, `GET /v1/models/{model}` | Model discovery | `Authorization: Bearer`, `X-Api-Key` |
 
-In every example below, `model` is the **public name you configured** in the
-console. Yolorouter picks a provider candidate, substitutes the real upstream
-model id, and returns a response with your public name preserved.
+The `model` in every request is the **public name** you configured. Yolorouter picks
+a provider candidate, swaps in the real upstream model id, and keeps your public
+name in the response.
 
-> **Known limitation.** On the Responses ingress, `input_image` items are
-> dropped when the request has to be translated to a different egress protocol
-> — only text is carried across. Same-protocol passthrough (a Responses caller
-> on a Responses provider) preserves them. The other three ingresses translate
-> image content correctly.
-
-### OpenAI Chat Completions
-
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer sk-yr-your-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "smart",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": true
-  }'
-```
-
-With tool calling:
-
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer sk-yr-your-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "smart",
-    "messages": [{"role": "user", "content": "What is the weather in Shanghai?"}],
-    "tools": [{
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "description": "Get the current weather for a city",
-        "parameters": {
-          "type": "object",
-          "properties": {"city": {"type": "string"}},
-          "required": ["city"]
-        }
-      }
-    }],
-    "tool_choice": "auto"
-  }'
-```
-
-### Anthropic Messages
-
-```bash
-curl http://localhost:8080/v1/messages \
-  -H "x-api-key: sk-yr-your-key" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "smart",
-    "max_tokens": 1024,
-    "system": "You are concise.",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": true
-  }'
-```
-
-### OpenAI Responses
-
-```bash
-curl http://localhost:8080/v1/responses \
-  -H "Authorization: Bearer sk-yr-your-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "smart",
-    "instructions": "You are concise.",
-    "input": "Hello!"
-  }'
-```
-
-### Gemini
-
-```bash
-curl "http://localhost:8080/v1beta/models/smart:generateContent" \
-  -H "x-goog-api-key: sk-yr-your-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contents": [{"role": "user", "parts": [{"text": "Hello!"}]}]
-  }'
-
-# Streaming, key in the query string (what the Google SDKs do):
-curl "http://localhost:8080/v1beta/models/smart:streamGenerateContent?key=sk-yr-your-key" \
-  -H "Content-Type: application/json" \
-  -d '{"contents": [{"role": "user", "parts": [{"text": "Hello!"}]}]}'
-```
-
-### Model discovery
-
-```bash
-# OpenAI shape
-curl http://localhost:8080/v1/models -H "Authorization: Bearer sk-yr-your-key"
-
-# Anthropic shape — selected by the anthropic-version header
-curl http://localhost:8080/v1/models \
-  -H "x-api-key: sk-yr-your-key" \
-  -H "anthropic-version: 2023-06-01"
-```
+> **Known limitation**: `input_image` entries on the Responses ingress are dropped
+> when the request has to be translated to a different egress protocol; only text is
+> forwarded. Same-protocol passthrough is unaffected, and image content translates
+> correctly on the other three ingresses.
 
 ### Point existing SDKs and tools at it
 
-Because the ingress protocols are the real thing, official SDKs and
-agent tools work by changing two settings — no shims.
+Because the ingresses are the real native protocols, official SDKs and agent tools
+need two settings changed and no adapter layer:
 
 ```python
 # OpenAI Python SDK
@@ -292,181 +136,71 @@ print(client.chat.completions.create(
 ).choices[0].message.content)
 ```
 
-```python
-# Anthropic Python SDK — same gateway, same key
-from anthropic import Anthropic
-
-client = Anthropic(base_url="http://localhost:8080", api_key="sk-yr-your-key")
-print(client.messages.create(
-    model="smart",
-    max_tokens=1024,
-    messages=[{"role": "user", "content": "Hello!"}],
-).content[0].text)
-```
-
 ```bash
-# Claude Code — routes through Yolorouter to whatever provider you configured
+# Claude Code — routed through Yolorouter to whichever provider you configured
 export ANTHROPIC_BASE_URL=http://localhost:8080
 export ANTHROPIC_AUTH_TOKEN=sk-yr-your-key
 claude
 ```
 
+→ **Per-protocol request examples and setup guides for 19 agent tools**
+(Claude Code, Cursor, Codex CLI, Cherry Studio, Gemini CLI, opencode …):
+[yolorouter.com/help](https://yolorouter.com/help?utm_source=oss-readme&utm_medium=repo)
+
 ## Cost optimization
 
-Both features are off by default, set globally in the console, and can be
-overridden per API key.
+Both features are off by default, configured globally in the console, and
+overridable per API key.
 
-**Custom system prompt injection.** Append house rules to every request's
-system prompt without touching client code. The text is appended to the
-existing system block in the caller's own protocol shape (OpenAI `messages`,
-Anthropic `system`, Responses `instructions`, Gemini `systemInstruction`), and
-a new system block is created when the request has none. Injection is
-deterministic, so the resulting system content is byte-identical across
-requests and stays eligible for upstream prompt caching. Malformed request
-bodies are forwarded untouched rather than silently rewritten.
+**Custom system prompt injection.** Append house rules to every request's system
+prompt without touching client code. The injection follows the caller's own protocol
+shape and is deterministic, so repeated requests produce byte-identical system
+content and still hit upstream prompt caches.
 
-**Input compression.** Coding agents send back huge, highly redundant tool
-output. Yolorouter detects the content type of each block in the request and
-rewrites the noise out of it, keeping the signal intact:
+**Input compression.** Coding agents send back huge, highly redundant tool output.
+Yolorouter recognizes what each content block is — `go test` output, git diffs,
+grep results, plain logs — and strips the noise while keeping every signal: failures,
+stack traces, and each distinct match are preserved. It never touches the active edit
+region at the tail of the conversation, and only replaces a block when the compressed
+form is actually shorter.
 
-| Detected content | What gets removed |
+Cache-read and cache-write tokens are metered and priced separately throughout the
+dashboard, so prompt-cache savings are a number you can see rather than a feeling.
+
+→ **Details and tuning:**
+[yolorouter.com/help?p=self-hosted/configuration](https://yolorouter.com/help?p=self-hosted/configuration&utm_source=oss-readme&utm_medium=repo)
+
+## Documentation
+
+| Topic | Link |
 | --- | --- |
-| `go test` / build logs | passing-test boilerplate (`=== RUN`, `--- PASS`, `=== CONT`) — failures, skips, panics, stacks and summary lines are all kept, and fenced code blocks are emitted verbatim |
-| git diffs | `index abc..def` blob-hash headers and ANSI escapes — hunks are never truncated |
-| grep / ripgrep results | runs of identical match lines folded into one line plus a repeat count; every distinct `path:line:match` survives |
-| generic logs | ANSI escapes, runs of identical lines, runs of blank lines |
+| Installation (all platforms, from source) | [Installation](https://yolorouter.com/help?p=self-hosted/installation&utm_source=oss-readme&utm_medium=repo) |
+| Every `config.yaml` field and the CLI | [Configuration](https://yolorouter.com/help?p=self-hosted/configuration&utm_source=oss-readme&utm_medium=repo) |
+| Upgrading, rolling back, uninstalling | [Updating](https://yolorouter.com/help?p=self-hosted/updating&utm_source=oss-readme&utm_medium=repo) |
+| Layering, protocol IR, storage | [Architecture](https://yolorouter.com/help?p=self-hosted/architecture&utm_source=oss-readme&utm_medium=repo) |
+| API reference and model catalogue | [Docs home](https://yolorouter.com/help?utm_source=oss-readme&utm_medium=repo) |
 
-Compression never touches the live edit zone at the tail of the conversation,
-and a block is only rewritten when the result is actually shorter. The console
-shows tokens saved over time and, per request log, which blocks were compressed
-or why they were skipped.
-
-Cache-read and cache-write tokens are tracked and priced separately throughout
-the dashboard, analytics, and cost pages, so prompt-caching savings show up as
-a number rather than a vibe.
-
-## Configuration
-
-Configuration lives in `configs/config.yaml`, auto-generated on first run. You
-rarely need to edit it by hand.
-
-```yaml
-server:
-  port: 8080
-database:
-  driver: sqlite            # sqlite | postgres
-  sqlite_path: ../data/yolorouter.db
-  # host/port/user/password/dbname/sslmode apply when driver: postgres
-log:
-  level: info
-security:
-  provider_master_key: ""   # base64 AES-256 key; auto-generated when blank
-  allow_private_upstreams: false  # allow loopback/private upstreams (local Ollama, vLLM, ...)
-update:
-  enabled: true             # set false to disable the update-check API and CLI
-  github_repo: ""           # "owner/repo" override for update checks
-  github_proxy: ""          # e.g. https://gh.yolorouter.com/ to route updates via a mirror
-gateway:                    # upstream relay timeouts; the whole block is optional
-  connect_timeout: 5s       # TCP dial
-  header_timeout: 600s      # request sent -> response headers
-  first_byte_timeout: 600s  # headers -> first body chunk (the "thinking" gap)
-  body_idle_timeout: 60s    # max gap between two streamed chunks
-  attempt_timeout: 20m      # hard wall for one key on one candidate
-  request_timeout: 30m      # total budget across all failover candidates
-  tls_handshake_timeout: 10s
-```
-
-Notes worth knowing:
-
-- Relative `sqlite_path` resolves against the config file's directory, not the process CWD.
-- If the config file already exists, `provider_master_key` must be a real key — it is only auto-filled on the initial generate path.
-- A hand-copied config must be `chmod 600` or it is refused.
-- `allow_private_upstreams` exists so you can point a provider at a local Ollama / vLLM / LM Studio. It is off by default as SSRF defense — never enable it on an internet-exposed or multi-tenant deployment.
-- Timeout ordering is validated at startup: `header_timeout` and `first_byte_timeout` must be ≤ `attempt_timeout`, and `attempt_timeout` < `request_timeout`.
-
-See [`configs/config.example.yaml`](configs/config.example.yaml) for the full
-annotated reference.
-
-### CLI
-
-Every subcommand accepts `--config <path>`.
-
-```bash
-./yolorouter serve            # start the HTTP server and background supervisor
-./yolorouter stop             # stop the running server
-./yolorouter update           # self-update to the latest GitHub release
-./yolorouter db:migrate       # apply pending migrations
-./yolorouter db:status        # show the current migration version
-./yolorouter db:rollback [v]  # roll back one migration, or down to version v
-./yolorouter db:backup --output-dir backups
-./yolorouter db:reset         # drop all tables and re-migrate; development
-                              # builds only, disabled in release binaries
-./yolorouter --version
-./yolorouter --help
-```
+Self-hosting means bringing your own upstream API keys. If you would rather not sign
+up with every provider separately, **YoloRouter Cloud** ships in the console's provider
+preset list as one more upstream you can select — see
+[the hosted option](https://yolorouter.com/pricing?utm_source=oss-readme&utm_medium=repo).
 
 ## Build from source
 
-Requirements: **Go 1.25.7+** and **Node.js 22.12+**.
+Requires **Go 1.25.7+** and **Node.js 22.12+**.
 
 ```bash
-# Backend only — serves a placeholder page instead of the console
-make build          # -> ./bin/yolorouter
-
-# Full binary with the web console embedded
-make build-embed    # -> ./bin/yolorouter (frontend built + embedded)
-
-# Cross-compile (frontend embedded)
-make build-macos          # -> ./bin/yolorouter-darwin-{amd64,arm64}
-make build-windows        # -> ./bin/yolorouter-windows-{amd64,arm64}.exe
-
-# Fast compile-only check for windows — no frontend build, no artifact
-make build-windows-check
+make build          # backend only -> ./bin/yolorouter
+make build-embed    # full binary with the console embedded
 ```
 
-## Development
-
-```bash
-./scripts/dev.sh              # rebuild frontend + backend, migrate, (re)start
-./scripts/dev.sh --backend    # backend only
-./scripts/dev.sh --frontend   # frontend only
-./scripts/dev.sh --help       # all modes + env vars (YOLO_LANG, NO_COLOR)
-
-make test                     # go test ./...
-make test-embed               # tests with the embedded frontend build tag
-make vet                      # go vet (plain + -tags release)
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow and coding standards.
-
-## Architecture
-
-```
-  OpenAI Chat Completions ─┐                                        ┌─ OpenAI-native provider
-  OpenAI Responses ────────┤                                        ├─ Anthropic-native provider
-  Anthropic Messages ──────┼──▶ ┌──────────────────────────────┐ ──▶├─ Gemini-native provider
-  Gemini generateContent ──┘    │          Yolorouter          │    └─ local Ollama / vLLM / ...
-                                │                              │
-                                │  auth · limits · budget      │
-  ┌────────────┐   admin UI     │  protocol negotiation + IR   │
-  │  operator  │ ─────────────▶ │  model alias · candidates    │
-  └────────────┘  embedded Vue  │  key rotation · failover     │
-                                │  compression · logging       │
-                                └──────────────┬───────────────┘
-                                               │
-                                        SQLite / PostgreSQL
-```
-
-- **Backend** — Go ([Gin](https://gin-gonic.com/) + [GORM](https://gorm.io/)), migrations via [goose](https://github.com/pressly/goose). Layered handler → service → repository, with the gateway relay and protocol codecs as separate packages.
-- **Protocol layer** — one intermediate representation plus a codec per protocol (decode request, encode request, decode response, encode response, and a streaming decoder/encoder pair each). Same-protocol requests skip the IR entirely.
-- **Frontend** — Vue 3 + TypeScript + [naive-ui](https://www.naiveui.com/), built with Vite and embedded into the binary via `go:embed`.
-- **Storage** — SQLite (pure-Go, zero-config) or PostgreSQL. Upstream keys are encrypted at rest with AES-256.
+Cross-compilation targets, the test commands and the local development workflow
+are documented in [CONTRIBUTING.md](CONTRIBUTING.md#building-and-testing).
 
 ## Contributing
 
-Issues and pull requests are welcome. Please read
-[CONTRIBUTING.md](CONTRIBUTING.md) and our
-[Code of Conduct](CODE_OF_CONDUCT.md) first. To report a security issue, see
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md)
+and the [Code of Conduct](CODE_OF_CONDUCT.md) first. For security reports see
 [SECURITY.md](SECURITY.md).
 
 ## License

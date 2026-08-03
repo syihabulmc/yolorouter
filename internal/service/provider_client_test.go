@@ -318,6 +318,149 @@ func TestTestChatCompletionConnectionRefusedIsUnreachable(t *testing.T) {
 	}
 }
 
+// An expired call budget must classify as TestTimeout, never TestUnreachable.
+// The two are diagnostically opposite: unreachable means the address never
+// accepted a connection at all, while a timeout means it did — the upstream
+// just took longer to answer than the budget allowed. Collapsing both into
+// "unreachable" tells an operator whose address is perfectly fine to go check
+// their URL spelling and network, which is the one thing that is not wrong.
+func TestTestChatCompletionExpiredBudgetIsTimeoutNotUnreachable(t *testing.T) {
+	release := make(chan struct{})
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		<-release // hold the response open past the caller's budget
+	})
+	defer srv.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := c.TestChatCompletion(ctx, protocols.ProtocolOpenAI, srv.URL, "sk-test", "gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("TestChatCompletion should not return a Go error for a timeout, got: %v", err)
+	}
+	if result.Outcome != TestTimeout {
+		t.Fatalf("expected TestTimeout, got %v", result.Outcome)
+	}
+	if result.Detail == "" {
+		t.Fatal("expected a timeout to still carry a diagnostic Detail")
+	}
+}
+
+// hangingRoundTripper never establishes a connection: it blocks until the
+// caller's budget expires. This is the shape of a resolution/dial stall — the
+// budget runs out with no connection ever made — which must NOT be reported as
+// a timeout, because "the address answered too slowly" is a claim we have no
+// evidence for.
+type hangingRoundTripper struct{}
+
+func (hangingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+func TestTestChatCompletionBudgetExpiryWithoutConnectionIsUnreachable(t *testing.T) {
+	c := NewHTTPProviderClient(false)
+	c.httpClient = &http.Client{Transport: hangingRoundTripper{}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := c.TestChatCompletion(ctx, protocols.ProtocolOpenAI, "https://example.invalid/v1", "sk-test", "gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("TestChatCompletion should not return a Go error, got: %v", err)
+	}
+	if result.Outcome != TestUnreachable {
+		t.Fatalf("a budget expiry with no connection established must stay TestUnreachable, got %v", result.Outcome)
+	}
+}
+
+// A stall AFTER the response header arrives happens inside the body-reading
+// handler, not at http.Client.Do. Without an explicit re-check it settles as
+// TestUpstreamError — blaming the upstream's reply for what is really our own
+// budget running out, and hiding it from the timeout category entirely.
+func TestTestChatCompletionBodyStallAfterHeadersIsTimeout(t *testing.T) {
+	release := make(chan struct{})
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush() // headers land; the body never finishes
+		<-release
+	})
+	defer srv.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	result, err := c.TestChatCompletion(ctx, protocols.ProtocolOpenAI, srv.URL, "sk-test", "gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("TestChatCompletion should not return a Go error, got: %v", err)
+	}
+	if result.Outcome != TestTimeout {
+		t.Fatalf("a body stall past the budget must be TestTimeout, got %v", result.Outcome)
+	}
+}
+
+// ListModels has its own transport-error path, so the timeout distinction has
+// to be made there too — otherwise a stalled catalogue fetch still sends the
+// operator off to check a URL that is demonstrably fine.
+func TestListModelsStallIsTimeoutNotUnreachable(t *testing.T) {
+	release := make(chan struct{})
+	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	})
+	defer srv.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	result, err := c.ListModels(ctx, protocols.ProtocolOpenAI, srv.URL, "sk-test")
+	if err != nil {
+		t.Fatalf("ListModels should not return a Go error, got: %v", err)
+	}
+	if result.Outcome != TestTimeout {
+		t.Fatalf("a stalled catalogue fetch must be TestTimeout, got %v", result.Outcome)
+	}
+}
+
+func TestListModelsBudgetExpiryWithoutConnectionIsUnreachable(t *testing.T) {
+	c := NewHTTPProviderClient(false)
+	c.httpClient = &http.Client{Transport: hangingRoundTripper{}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := c.ListModels(ctx, protocols.ProtocolOpenAI, "https://example.invalid/v1", "sk-test")
+	if err != nil {
+		t.Fatalf("ListModels should not return a Go error, got: %v", err)
+	}
+	if result.Outcome != TestUnreachable {
+		t.Fatalf("a budget expiry with no connection established must stay TestUnreachable, got %v", result.Outcome)
+	}
+}
+
+// The dial bound is a phase-level bound nested INSIDE the call budget, so a
+// dial that gives up while the call budget is still healthy is a genuine
+// "can't reach it" — it must stay TestUnreachable rather than being swept up
+// by the new timeout branch.
+func TestTestChatCompletionDialFailureStaysUnreachableWithLiveBudget(t *testing.T) {
+	c := NewHTTPProviderClient(false)
+	c.httpClient = &http.Client{Transport: http.DefaultTransport, Timeout: 2 * time.Second}
+
+	ctx, cancel := context.WithTimeout(context.Background(), providerClientTimeout)
+	defer cancel()
+
+	result, err := c.TestChatCompletion(ctx, protocols.ProtocolOpenAI, "http://127.0.0.1:1", "sk-test", "gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("TestChatCompletion should not return a Go error for connection failures, got: %v", err)
+	}
+	if result.Outcome != TestUnreachable {
+		t.Fatalf("expected TestUnreachable while the call budget is still live, got %v", result.Outcome)
+	}
+}
+
 func TestTestChatCompletionOversizedBodyIsUpstreamError(t *testing.T) {
 	c, srv := newTestClient(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

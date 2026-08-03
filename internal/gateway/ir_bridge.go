@@ -107,5 +107,25 @@ func irUsageToUsage(u *protocols.IRUsage) *Usage {
 		CacheWriteTokens:      u.CacheWriteTokens,
 		CacheReadTokens:       u.CacheReadTokens,
 		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
+		Invalid:               u.Invalid,
+		ReasoningTokens:       u.ReasoningTokens,
+	}
+}
+
+// toIRUsage is the inverse of irUsageToUsage, letting this package reuse the
+// cache-convention rules that live on protocols.IRUsage instead of restating
+// them. A plain field copy: the two types model the same counts, and the whole
+// point of borrowing the IR methods is that neither side gets its own reading
+// of them.
+func (u Usage) toIRUsage() protocols.IRUsage {
+	return protocols.IRUsage{
+		PromptTokens:          u.PromptTokens,
+		CompletionTokens:      u.CompletionTokens,
+		TotalTokens:           u.TotalTokens,
+		CacheWriteTokens:      u.CacheWriteTokens,
+		CacheReadTokens:       u.CacheReadTokens,
+		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
+		Invalid:               u.Invalid,
+		ReasoningTokens:       u.ReasoningTokens,
 	}
 }

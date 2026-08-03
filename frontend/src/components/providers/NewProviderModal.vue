@@ -18,7 +18,7 @@
           type="button"
           class="preset-card"
           :class="{ active: selectedPresetId === card.id }"
-          @click="applyPreset(card)"
+          @click="selectPreset(card)"
         >
           {{ card.name }}
         </button>
@@ -26,11 +26,20 @@
           type="button"
           class="preset-card"
           :class="{ active: selectedPresetId === '' }"
-          @click="selectedPresetId = ''"
+          @click="selectPreset(null)"
         >
           {{ t('providers.presetCustom') }}
         </button>
       </div>
+      <a
+        v-if="selectedPreset?.websiteUrl"
+        class="preset-key-hint"
+        :href="selectedPreset.websiteUrl"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        {{ t('providers.presetGetKey', { provider: selectedPreset.name }) }}
+      </a>
     </div>
 
     <div class="section-divider" />
@@ -125,6 +134,18 @@ type PresetCard = (typeof presetCards.value)[number]
 // filled remain freely editable afterwards.
 const selectedPresetId = ref('')
 
+// The dialog opens with this preset already applied, so the common case is
+// "paste a key and save". Picking any other card (including "custom") clears
+// the prefilled fields as usual.
+const DEFAULT_PRESET_ID = 'yolorouter'
+
+// Once a preset is picked the only thing left to supply is a key, so surface
+// where to get one. Every preset already carries the provider's own console URL;
+// this applies to all of them equally rather than singling any one out.
+const selectedPreset = computed(() =>
+  presetCards.value.find((c) => c.id === selectedPresetId.value),
+)
+
 const formRef = ref<FormInst | null>(null)
 const submitting = ref(false)
 const form = reactive({
@@ -149,27 +170,36 @@ const rules: FormRules = {
 
 // A picked card fills the form with its localized name (so the saved provider
 // name matches the card) plus its address/protocol/default test model; the
-// fields stay freely editable afterwards.
-function applyPreset(card: PresetCard) {
-  selectedPresetId.value = card.id
-  form.name = card.name
-  form.baseUrl = card.baseUrl
-  form.protocol = emptyProtocolConfig(card.protocol)
-  form.testModel = card.defaultTestModel
+// fields stay freely editable afterwards. A preset listing extraProtocols also
+// gets those endpoints enabled with an empty URL, i.e. served off base_url.
+//
+// `null` is the "custom" card, which blanks those same four fields — switching
+// cards always replaces what the previous card filled, so custom must clear
+// rather than silently keep another provider's name, URL and protocol set. The
+// key and note are never preset-owned, so whatever was typed there survives.
+function selectPreset(card: PresetCard | null) {
+  selectedPresetId.value = card?.id ?? ''
+  form.name = card?.name ?? ''
+  form.baseUrl = card?.baseUrl ?? ''
+  form.testModel = card?.defaultTestModel ?? ''
+  const protocol = emptyProtocolConfig(card?.protocol ?? 'openai')
+  for (const extra of card?.extraProtocols ?? []) {
+    if (extra === card?.protocol) continue
+    protocol.endpoints[extra] = { enabled: true, url: '' }
+  }
+  form.protocol = protocol
 }
 
 watch(
   () => props.show,
   (visible) => {
     if (!visible) return
-    selectedPresetId.value = ''
-    form.name = ''
-    form.baseUrl = ''
     form.note = ''
-    form.protocol = emptyProtocolConfig('openai')
     form.label = ''
     form.plaintext = ''
-    form.testModel = ''
+    // Clears the preset-owned fields too, then fills them from the default card
+    // when it resolves (a missing id leaves the dialog on "custom", blank).
+    selectPreset(presetCards.value.find((c) => c.id === DEFAULT_PRESET_ID) ?? null)
   },
 )
 
@@ -223,6 +253,18 @@ async function onSubmit() {
   flex-wrap: wrap;
   gap: 8px;
 }
+.preset-key-hint {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-primary, #6467f2);
+  text-decoration: none;
+}
+
+.preset-key-hint:hover {
+  text-decoration: underline;
+}
+
 .preset-card {
   padding: 5px 12px;
   border: 1px solid var(--color-border);
