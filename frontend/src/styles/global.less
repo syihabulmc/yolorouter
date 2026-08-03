@@ -165,6 +165,9 @@ a {
 .filter-item {
   width: 180px;
 }
+.w-auto {
+  width: auto;
+}
 
 .filter-item--grow {
   flex: 1 1 200px;
@@ -370,7 +373,17 @@ a {
   color: var(--color-text-muted);
 }
 
+.common-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
 @media (max-width: 768px) {
+  .common-page {
+    gap: var(--space-3);
+  }
+  //  common header
   .page-header {
     position: relative;
   }
@@ -378,5 +391,22 @@ a {
     position: absolute;
     top: 0px;
     right: 0px;
+  }
+  // common filter
+  @media (max-width: 768px) {
+    .filter-panel {
+      padding: var(--space-3) !important; 
+    }
+    .filter-item--grow {
+      flex: none;
+      min-width: 0 !important;
+    }
+    .filter-item {
+      .n-button {
+          width: 100% !important;
+          font-weight: 400 !important;
+          background-color: #fff !important;
+        }
+    }
   }
 }

@@ -1,13 +1,16 @@
 <!-- frontend/src/components/providers/NewProviderModal.vue -->
 <template>
-  <n-modal
-    :show="show"
-    preset="card"
+  <ModalDrawer
+    v-model:show="showModel"
     :title="t('providers.createButton')"
-    style="max-width: 560px"
+    max-width="560px"
     :mask-closable="false"
     :close-on-esc="false"
-    @update:show="onUpdateShow"
+    :confirm-text="t('providers.save')"
+    :cancel-text="t('providers.cancel')"
+    :loading="submitting"
+    :back-label="t('common.back')"
+    @confirm="onSubmit"
   >
     <div class="preset-section">
       <HelpLabel :tip="t('providers.presetHint')" class="preset-label">{{ t('providers.presetTitle') }}</HelpLabel>
@@ -92,14 +95,7 @@
         <n-input v-model:value="form.note" type="textarea" />
       </n-form-item>
     </n-form>
-
-    <template #footer>
-      <n-space justify="end">
-        <n-button @click="onUpdateShow(false)">{{ t('providers.cancel') }}</n-button>
-        <n-button type="primary" :loading="submitting" @click="onSubmit">{{ t('providers.save') }}</n-button>
-      </n-space>
-    </template>
-  </n-modal>
+  </ModalDrawer>
 </template>
 
 <script setup lang="ts">
@@ -109,6 +105,7 @@ import { useMessage, type FormInst, type FormRules } from 'naive-ui'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
 import HelpLabel from '../HelpLabel.vue'
+import ModalDrawer from '../common/ModalDrawer.vue'
 import ProtocolConfigFields from './ProtocolConfigFields.vue'
 import ProviderModelTester from './ProviderModelTester.vue'
 import { providerNameRule, baseUrlRule, noteRule, keyLabelRule, keyPlaintextRule } from '../../utils/providerValidators'
@@ -117,6 +114,14 @@ import { PROVIDER_PRESETS } from '../../config/providerPresets'
 
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ 'update:show': [boolean] }>()
+
+// ModalDrawer owns a v-model:show; bridge it to this component's existing
+// :show / @update:show contract so parents (ProviderListPage, CandidateEditModal)
+// don't have to change.
+const showModel = computed({
+  get: () => props.show,
+  set: (v) => emit('update:show', v),
+})
 
 const { t } = useI18n()
 const message = useMessage()

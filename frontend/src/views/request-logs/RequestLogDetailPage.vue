@@ -12,7 +12,7 @@
      / fail_reason / index), which doesn't fit a timeline node cleanly and
      benefits from column-level tooltips. -->
 <template>
-  <div class="request-log-detail-page">
+  <div class="common-page">
     <PageHeader :eyebrow="t('requestLogs.detailEyebrow')" :title="t('requestLogs.detailTitle')" :description="detail?.request_id">
       <template #actions>
         <NButton quaternary size="small" @click="onBack">{{ t('requestLogs.backToList') }}</NButton>
@@ -31,9 +31,9 @@
       <!-- Basic info -->
       <section class="section-card">
         <h2 class="section-title">{{ t('requestLogs.sectionBasic') }}</h2>
-        <NDescriptions :column="2" label-placement="left" bordered>
+        <NDescriptions :column="isMobile ? 1 : 2" label-placement="left" bordered>
           <NDescriptionsItem :label="t('requestLogs.fieldRequestId')">
-            <span class="mono-cell">{{ detail.request_id }}</span>
+            <div class="mono-cell">{{ detail.request_id }}</div>
           </NDescriptionsItem>
           <NDescriptionsItem :label="t('requestLogs.fieldCreatedAt')">
             {{ formatTimeFull(detail.created_at) }}
@@ -59,13 +59,13 @@
             {{ detail.status_code }}
           </NDescriptionsItem>
           <NDescriptionsItem :label="t('requestLogs.fieldRequestEndpoint')" :span="2">
-            <span class="mono-cell">{{ detail.request_path || '—' }}</span>
+            <div class="mono-cell">{{ detail.request_path || '—' }}</div>
           </NDescriptionsItem>
-          <NDescriptionsItem :label="t('requestLogs.fieldUpstreamEndpoint')" :span="2">
-            <span class="mono-cell">{{ detail.upstream_url || '—' }}</span>
+           <NDescriptionsItem :label="t('requestLogs.fieldUpstreamEndpoint')" :span="2">
+            <div class="mono-cell">{{ detail.upstream_url || '—' }}</div>
           </NDescriptionsItem>
-          <NDescriptionsItem v-if="detail.fail_reason" :label="t('requestLogs.fieldFailReason')" :span="2">
-            <span class="fail-reason-cell">{{ formatFailReason(detail.fail_reason, t) }}</span>
+          <NDescriptionsItem v-if="detail.fail_reason" :label="t('requestLogs.fieldFailReason')" >
+            <div class="fail-reason-cell">{{ formatFailReason(detail.fail_reason, t) }}</div>
           </NDescriptionsItem>
         </NDescriptions>
       </section>
@@ -73,7 +73,7 @@
       <!-- Model info -->
       <section class="section-card">
         <h2 class="section-title">{{ t('requestLogs.sectionModel') }}</h2>
-        <NDescriptions :column="2" label-placement="left" bordered>
+        <NDescriptions :column="isMobile ? 1 : 2" label-placement="left" bordered>
           <NDescriptionsItem :label="t('requestLogs.fieldExternalModel')">
             <span class="model-cell">{{ detail.model_name }}</span>
           </NDescriptionsItem>
@@ -96,13 +96,13 @@
         <h2 class="section-title">{{ t('requestLogs.sectionAttempts') }}</h2>
         <EmptyState v-if="detail.attempts_detail.length === 0" :icon="ListChecks" :title="t('requestLogs.attemptsEmpty')" />
         <div v-else class="data-table-wrapper">
-          <NDataTable
+          <ResponsiveDataTable
             :columns="attemptColumns"
             :data="detail.attempts_detail"
-            :bordered="false"
-            :single-line="false"
+            :scroll-x="1180"
             :row-key="(row: AttemptRecord) => `${row.candidate_id}-${row.key_id}`"
-          />
+          >
+          </ResponsiveDataTable>
         </div>
       </section>
 
@@ -245,7 +245,6 @@ import {
   NCard,
   NCollapse,
   NCollapseItem,
-  NDataTable,
   NDescriptions,
   NDescriptionsItem,
   NSpin,
@@ -266,10 +265,12 @@ import { columnTitle } from '../../utils/columnTitle'
 import { SKIP_REASON_KEYS } from '../../utils/compressSkipReason'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
+import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import StatusClassTag from '../../components/request-logs/StatusClassTag.vue'
 import AttemptOutcomeTag from '../../components/request-logs/AttemptOutcomeTag.vue'
 import BodyViewer from '../../components/request-logs/BodyViewer.vue'
 import { formatFailReason } from '../../utils/failReason'
+import { useIsMobile } from '../../composables/useIsMobile'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -279,6 +280,7 @@ const message = useMessage()
 const detail = ref<RequestLogDetail | null>(null)
 const loading = ref(false)
 const notFound = ref(false)
+const isMobile = useIsMobile()
 
 // requestId comes from the URL. Computed (not const) so a future in-place
 // navigation between detail pages re-runs the loader via watch — kept
@@ -478,12 +480,6 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
 </script>
 
 <style scoped>
-.request-log-detail-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 .loading-state {
   color: var(--color-text-secondary);
   padding: var(--space-8);
@@ -509,9 +505,9 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
 
 :deep(.mono-cell) {
   font-family: var(--font-mono, monospace);
-  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
   color: var(--color-text);
+  word-break: break-word;
 }
 
 :deep(.model-cell) {
@@ -580,6 +576,19 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
 @media (max-width: 768px) {
   .compress-body-grid {
     grid-template-columns: 1fr;
+  }
+  .section-card {
+    padding: 0;
+    gap: 0;
+    border-radius: 0;
+    border: 0;
+  }
+  .section-card .section-title {
+    padding: var(--space-4) var(--space-4);
+    border-top: 1px solid #efeff5;
+    border-left: 1px solid #efeff5;
+    border-right: 1px solid #efeff5;
+    border-radius: var(--radius-lg, 8px) var(--radius-lg, 8px) 0 0 ;
   }
 }
 </style>

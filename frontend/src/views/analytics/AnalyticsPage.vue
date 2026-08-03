@@ -10,7 +10,7 @@
      reload of both /overview and /report in parallel — they're independent
      given the same filter, so a single error message covers both. -->
 <template>
-  <div class="analytics-page">
+  <div class="common-page">
     <PageHeader :eyebrow="t('analytics.eyebrow')" :title="t('analytics.pageTitle')" :description="t('analytics.pageDescription')">
       <template #actions>
         <NButton :loading="exporting" :disabled="!reportRows.length" @click="onExport">
@@ -20,15 +20,60 @@
       </template>
     </PageHeader>
 
-    <AnalyticsFilterBar
-      :filter="filter"
-      :time-range="timeRange"
-      :preset="preset"
-      @update:filter="onFilterChange"
-      @update:time-range="onTimeRangeChange"
-      @update:preset="onPresetChange"
-    />
+    <!-- Filter bar (inlined). The page owns filter/time-range/preset state, so
+         the controls bind straight to it instead of routing through a wrapper
+         component's events. -->
+    <div class="filter-panel">
+      <div class="filter-grid">
+        <div class="filter-item w-auto">
+          <TimeRangeSelect
+            :model-value="timeRange"
+            :preset="preset"
+            @update:model-value="onTimeRange"
+            @update:preset="onPreset"
+          />
+        </div>
 
+        <FilterSelectField
+          :label="t('analytics.apiKey')"
+          :value="filter.api_key_id ?? null"
+          :options="apiKeyOptions"
+          :placeholder="t('analytics.allApiKey')"
+          filterable
+          width="100%"
+          @update:value="(v) => update('api_key_id', v)"
+        />
+
+        <FilterSelectField
+          :label="t('analytics.model')"
+          :value="filter.model_name ?? null"
+          :options="modelOptions"
+          :placeholder="t('analytics.allModel')"
+          filterable
+          width="100%"
+          @update:value="(v) => update('model_name', v)"
+        />
+
+        <FilterSelectField
+          :label="t('analytics.provider')"
+          :value="filter.provider_id ?? null"
+          :options="providerOptions"
+          :placeholder="t('analytics.allProvider')"
+          filterable
+          width="100%"
+          @update:value="(v) => update('provider_id', v)"
+        />
+
+        <FilterSelectField
+          :label="t('analytics.status')"
+          :value="filter.status ?? null"
+          :options="statusOptions"
+          :placeholder="t('analytics.allStatus')"
+          width="100%"
+          @update:value="(v) => update('status', (v as string) || null)"
+        />
+      </div>
+    </div>
     <div v-if="dimension === 'time'" class="bucket-bar">
       <span class="bucket-label">{{ t('analytics.bucketLabel') }}</span>
       <NSelect
@@ -82,68 +127,56 @@
     <div class="section-card">
       <NTabs :value="dimension" type="line" @update:value="onDimensionChange">
         <NTabPane :name="'model'" :tab="t('analytics.dimensionModel')">
-          <NDataTable
+          <ResponsiveDataTable
             :columns="modelColumns"
             :data="modelRows"
             :loading="loading"
-            :bordered="false"
-            :single-line="false"
             :scroll-x="1330"
             :row-key="(r: ModelReportRow) => r.model_name"
-            size="small"
           >
             <template #empty>
               <EmptyState :icon="BarChart3" :title="t('analytics.noData')" />
             </template>
-          </NDataTable>
+          </ResponsiveDataTable>
         </NTabPane>
         <NTabPane :name="'provider'" :tab="t('analytics.dimensionProvider')">
-          <NDataTable
+          <ResponsiveDataTable
             :columns="providerColumns"
             :data="providerRows"
             :loading="loading"
-            :bordered="false"
-            :single-line="false"
             :scroll-x="920"
             :row-key="providerRowKey"
-            size="small"
           >
             <template #empty>
               <EmptyState :icon="BarChart3" :title="t('analytics.noData')" />
             </template>
-          </NDataTable>
+          </ResponsiveDataTable>
         </NTabPane>
         <NTabPane :name="'time'" :tab="t('analytics.dimensionTime')">
-          <NDataTable
+          <ResponsiveDataTable
             :columns="timeColumns"
             :data="timeRows"
             :loading="loading"
-            :bordered="false"
-            :single-line="false"
             :scroll-x="1330"
             :row-key="(r: TimeReportRow) => r.bucket"
-            size="small"
           >
             <template #empty>
               <EmptyState :icon="BarChart3" :title="t('analytics.noData')" />
             </template>
-          </NDataTable>
+          </ResponsiveDataTable>
         </NTabPane>
         <NTabPane :name="'caller'" :tab="t('analytics.dimensionCaller')">
-          <NDataTable
+          <ResponsiveDataTable
             :columns="callerColumns"
             :data="callerRows"
             :loading="loading"
-            :bordered="false"
-            :single-line="false"
             :scroll-x="1330"
             :row-key="callerRowKey"
-            size="small"
           >
             <template #empty>
               <EmptyState :icon="BarChart3" :title="t('analytics.noData')" />
             </template>
-          </NDataTable>
+          </ResponsiveDataTable>
         </NTabPane>
       </NTabs>
     </div>
@@ -153,13 +186,17 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NButton, NDataTable, NTabPane, NTabs, useMessage, type DataTableColumns, type SelectOption } from 'naive-ui'
+import { NButton, NSelect, NTabPane, NTabs, useMessage, type DataTableColumns, type SelectOption } from 'naive-ui'
 import { BarChart3, Download } from '@lucide/vue'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
-import AnalyticsFilterBar from '../../components/analytics/AnalyticsFilterBar.vue'
-import { type RangePreset, type TimeRange } from '../../components/analytics/TimeRangeSelect.vue'
+import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
+import FilterSelectField from '../../components/common/FilterSelectField.vue'
+import TimeRangeSelect, { type RangePreset, type TimeRange } from '../../components/analytics/TimeRangeSelect.vue'
+import { listProviders } from '../../api/providers'
+import { listModels } from '../../api/models'
+import { listAPIKeys, toAPIKeyOptions } from '../../api/apiKeys'
 import { initialLast7DaysRange } from '../../utils/timeRange'
 import { columnTitle } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
@@ -205,6 +242,23 @@ const bucket = ref<AnalyticsBucket>('day')
 const bucketOptions = computed<SelectOption[]>(() => [
   { label: t('analytics.bucketDay'), value: 'day' },
   { label: t('analytics.bucketHour'), value: 'hour' },
+])
+
+// === Filter option lists ==================================================
+//
+// Inlined from the former AnalyticsFilterBar. These are admin-configured
+// catalogs (not request-derived), so the lists are small and change
+// infrequently — fetched once on mount, in parallel.
+const apiKeyOptions = ref<SelectOption[]>([])
+const providerOptions = ref<SelectOption[]>([])
+const modelOptions = ref<SelectOption[]>([])
+
+const statusOptions = computed<SelectOption[]>(() => [
+  { label: t('analytics.statusSuccess'), value: 'success' },
+  { label: t('analytics.statusFailed'), value: 'failed' },
+  { label: t('analytics.statusPartial'), value: 'partial' },
+  { label: t('analytics.statusCancelled'), value: 'cancelled' },
+  { label: t('analytics.statusRejected'), value: 'rejected' },
 ])
 
 // === Result state =========================================================
@@ -301,26 +355,48 @@ async function reload() {
 
 onMounted(() => {
   void reload()
+  void loadFilterOptions()
 })
+
+// Fetch the filter selectors' option lists once. Failure is degraded, not
+// broken — the user can still type a model name; show the error inline but
+// don't block the page.
+async function loadFilterOptions() {
+  try {
+    const [providerPage, modelPage, apiKeyPage] = await Promise.all([
+      listProviders(),
+      listModels(),
+      listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: 200 }),
+    ])
+    providerOptions.value = providerPage.list.map((p) => ({ label: p.name, value: p.id }))
+    modelOptions.value = modelPage.list.map((m) => ({ label: m.name, value: m.name }))
+    apiKeyOptions.value = toAPIKeyOptions(apiKeyPage.list)
+  } catch (err) {
+    message.error(displayMessage(err, t))
+  }
+}
 
 // Reload whenever the dimension / bucket / filter changes. The watch is
 // deep on `filter` because filter changes always emit a new object (see
-// AnalyticsFilterBar.update).
+// update()).
 watch([dimension, bucket, filter], () => {
   void reload()
 }, { deep: true })
 
 // === Event handlers =======================================================
 
-function onFilterChange(v: AnalyticsFilter) {
-  filter.value = v
+// Merge a single filter field, always emitting a new object so the deep
+// watch fires and reloads.
+function update<K extends keyof AnalyticsFilter>(key: K, value: AnalyticsFilter[K]) {
+  filter.value = { ...filter.value, [key]: value }
 }
 
-function onTimeRangeChange(v: TimeRange) {
+function onTimeRange(v: TimeRange) {
   timeRange.value = v
+  filter.value = { ...filter.value, start: v.start, end: v.end }
 }
 
-function onPresetChange(v: RangePreset) {
+function onPreset(v: RangePreset) {
   preset.value = v
 }
 
@@ -438,12 +514,6 @@ const timeColumns = computed<DataTableColumns<TimeReportRow>>(() => [
 </script>
 
 <style scoped>
-.analytics-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 .bucket-bar {
   display: flex;
   align-items: center;
@@ -513,10 +583,12 @@ const timeColumns = computed<DataTableColumns<TimeReportRow>>(() => [
     grid-template-columns: repeat(2, 1fr);
   }
 }
-
-@media (max-width: 768px) {
-  .metric-row {
-    grid-template-columns: 1fr;
+@media (max-width: 1100px) {
+  .section-card {
+    padding: 0;
+  }
+  :deep(.n-tabs-nav-scroll-wrapper) {
+    padding: 0 20px;
   }
 }
 </style>

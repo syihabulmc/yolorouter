@@ -100,11 +100,13 @@
       </n-drawer-content>
     </n-drawer>
 
-    <n-modal
+    <ModalDrawer
       v-model:show="showChangePassword"
-      preset="card"
       :title="t('auth.changePasswordTitle')"
-      style="max-width: 400px"
+      :confirm-text="t('auth.changePasswordButton')"
+      :loading="changingPassword"
+      :back-label="t('common.back')"
+      @confirm="onChangePasswordSubmit"
       @after-leave="resetChangePasswordForm"
     >
       <n-form require-mark-placement="left" ref="changePasswordFormRef" :model="changePasswordForm" :rules="changePasswordRules">
@@ -127,17 +129,12 @@
           <n-input v-model:value="changePasswordForm.confirmNewPassword" type="password" show-password-on="click" />
         </n-form-item>
       </n-form>
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showChangePassword = false">{{ t('common.cancel') }}</n-button>
-          <n-button type="primary" :loading="changingPassword" @click="onChangePasswordSubmit">
-            {{ t('auth.changePasswordButton') }}
-          </n-button>
-        </n-space>
-      </template>
-    </n-modal>
+    </ModalDrawer>
 
-    <n-modal v-model:show="showLanguage" preset="card" :title="t('nav.language')" style="max-width: 340px">
+    <!-- Language picker. Desktop keeps the centered modal; on a phone it reads
+         better as a bottom sheet (shared OptionSheet), matching the rest of the
+         mobile option pickers. -->
+    <n-modal v-if="!isMobile" v-model:show="showLanguage" preset="card" :title="t('nav.language')" style="max-width: 340px">
       <div class="lang-options">
         <button
           v-for="lang in LOCALES"
@@ -152,6 +149,15 @@
         </button>
       </div>
     </n-modal>
+
+    <OptionSheet
+      v-else
+      v-model:show="showLanguage"
+      :title="t('nav.language')"
+      :options="languageOptions"
+      :value="localeStore.locale"
+      @select="onSelectLanguage"
+    />
   </n-layout>
 </template>
 
@@ -185,6 +191,8 @@ import { APIError, displayMessage } from '../api/client'
 import { ACCOUNT_SESSION_INVALID } from '../api/errcodes'
 import { passwordStrengthRule, confirmPasswordRule } from '../utils/authValidators'
 import HelpLabel from '../components/HelpLabel.vue'
+import OptionSheet from '../components/common/OptionSheet.vue'
+import ModalDrawer from '../components/common/ModalDrawer.vue'
 import { useIsMobile } from '../composables/useIsMobile'
 import logo from '../assets/logo.svg'
 
@@ -297,6 +305,11 @@ function onLogout() {
 // entry in the System Settings group, which opens this modal. The option list
 // (LOCALES) and check-mark treatment are shared with the LocaleSwitcher.
 const showLanguage = ref(false)
+
+// The mobile OptionSheet takes a flat {label, value} list; LOCALES is already
+// in that shape (label/value), so this just narrows it to what the sheet wants.
+const languageOptions = computed(() => LOCALES.map((l) => ({ label: l.label, value: l.value })))
+
 function onSelectLanguage(value: Locale) {
   localeStore.setLocale(value)
   showLanguage.value = false

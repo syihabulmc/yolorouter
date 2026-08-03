@@ -14,7 +14,7 @@
       style="cursor: pointer; opacity: 0.45"
       role="button"
       :aria-label="tip"
-      @click="onTap"
+      @click.stop="onTap"
     >
       <CircleHelp />
     </NIcon>

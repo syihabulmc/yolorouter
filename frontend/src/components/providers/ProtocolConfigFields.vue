@@ -11,7 +11,15 @@
       <template #label>
         <HelpLabel :tip="t('providers.protocolPrimary_tip')">{{ t('providers.protocolPrimary') }}</HelpLabel>
       </template>
-      <n-select :value="modelValue.providerType" :options="primaryOptions" @update:value="onPrimaryChange" />
+      <FilterSelectField
+        :label="t('providers.protocolPrimary')"
+        :value="modelValue.providerType"
+        :options="primaryOptions"
+        :clearable="false"
+        width="100%"
+        size="medium"
+        @update:value="onPrimaryChange"
+      />
     </n-form-item>
 
     <NCollapse class="multi-protocol-collapse">
@@ -43,6 +51,7 @@ import { NCollapse, NCollapseItem, NCheckbox } from 'naive-ui'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import HelpLabel from '../HelpLabel.vue'
+import FilterSelectField from '../common/FilterSelectField.vue'
 import { ALL_PROTOCOLS, type ProtocolId, type ProtocolConfigModel, type ProtocolEndpointEntry } from '../../utils/providerProtocol'
 import { protocolEndpointUrlRule } from '../../utils/providerValidators'
 
@@ -67,7 +76,10 @@ function cloneModel(model: ProtocolConfigModel): ProtocolConfigModel {
   }
 }
 
-function onPrimaryChange(value: ProtocolId) {
+function onPrimaryChange(value: ProtocolId | null) {
+  // clearable is off on the select, so null shouldn't arrive; guard anyway so
+  // a stray clear can't blank the required primary protocol.
+  if (value == null) return
   const next = cloneModel(props.modelValue)
   next.providerType = value
   // The primary protocol is always supported — it can never also be listed

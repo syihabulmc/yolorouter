@@ -13,7 +13,7 @@
        raises a bottom sheet of the named presets (custom is excluded — the
        inline daterange picker doesn't fit a phone filter bar). -->
   <template v-if="isMobile">
-    <NButton size="small" class="time-range__mobile-trigger" @click="sheetOpen = true">
+    <NButton size="small" class="time-range__mobile-trigger" @click="sheetOpen = true" icon-placement="right">
       <span class="time-range__mobile-label">{{ currentPresetLabel }}</span>
       <template #icon><ChevronDown :size="14" /></template>
     </NButton>
@@ -224,6 +224,7 @@ watch(
 
 .time-range__mobile-trigger {
   min-width: 120px;
+  justify-content: space-between;
 }
 
 .time-range__mobile-label {

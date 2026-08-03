@@ -11,7 +11,7 @@
      Click row → /request-logs/:requestId detail page. Export CSV streams
      the current filter via the same params. -->
 <template>
-  <div class="request-logs-page">
+  <div class="common-page">
     <PageHeader :eyebrow="t('requestLogs.eyebrow')" :title="t('requestLogs.pageTitle')" :description="t('requestLogs.pageDescription')">
       <template #actions>
         <NButton :loading="exporting" :disabled="exporting || loading" @click="onExport">
@@ -49,47 +49,40 @@
             @update:value="onModelNameInput"
           />
         </div>
-        <div class="filter-item">
-          <NSelect
-            v-model:value="filter.api_key_id"
-            :options="callerOptions"
-            :placeholder="t('requestLogs.filterCaller')"
-            clearable
-            filterable
-            size="small"
-            @update:value="onSearch"
-          />
-        </div>
-        <div class="filter-item">
-          <NSelect
-            v-model:value="filter.provider_id"
-            :options="providerOptions"
-            :placeholder="t('requestLogs.filterProvider')"
-            clearable
-            size="small"
-            @update:value="onSearch"
-          />
-        </div>
-        <div class="filter-item">
-          <NSelect
-            v-model:value="filter.status"
-            :options="statusOptions"
-            :placeholder="t('requestLogs.filterStatus')"
-            clearable
-            size="small"
-            @update:value="onSearch"
-          />
-        </div>
-        <div class="filter-item">
-          <NSelect
-            :value="streamSelect"
-            :options="streamOptions"
-            :placeholder="t('requestLogs.filterStream')"
-            clearable
-            size="small"
-            @update:value="onStreamChange"
-          />
-        </div>
+        <FilterSelectField
+          :label="t('requestLogs.filterCaller')"
+          :value="filter.api_key_id"
+          :options="callerOptions"
+          :placeholder="t('requestLogs.allFilterCaller')"
+          filterable
+          width="100%"
+          @update:value="onCallerChange"
+        />
+        <FilterSelectField
+          :label="t('requestLogs.filterProvider')"
+          :value="filter.provider_id"
+          :options="providerOptions"
+          :placeholder="t('requestLogs.allFilterProvider')"
+          width="100%"
+          @update:value="onProviderChange"
+        />
+        <FilterSelectField
+          :label="t('requestLogs.filterStatus')"
+          :value="filter.status"
+          :options="statusOptions"
+          :placeholder="t('requestLogs.allFilterStatus')"
+          width="100%"
+          @update:value="onStatusChange"
+        />
+        <FilterSelectField
+          :label="t('requestLogs.filterStream')"
+          :value="streamSelect"
+          :options="streamOptions"
+          :placeholder="t('requestLogs.allFilterStream')"
+          :clearable="false"
+          width="100%"
+          @update:value="onStreamChange"
+        />
         <div class="filter-item filter-item--range">
           <NDatePicker
             v-model:value="timeRange"
@@ -110,18 +103,20 @@
 
     <EmptyState v-if="!loading && rows.length === 0" :icon="FileSearch" :title="t('requestLogs.listEmpty')" />
     <div v-else class="data-table-wrapper">
-      <NDataTable
+      <ResponsiveDataTable
         :columns="columns"
         :data="rows"
         :loading="loading"
-        :bordered="false"
-        :single-line="false"
         :scroll-x="1630"
         :row-key="(row: RequestLogRow) => row.request_id"
         :row-props="rowProps"
         :pagination="pagination"
         remote
-      />
+      >
+        <template #empty>
+          <EmptyState :icon="FileSearch" :title="t('requestLogs.listEmpty')" />
+        </template>
+      </ResponsiveDataTable>
     </div>
   </div>
 </template>
@@ -134,7 +129,6 @@ import {
   NButton,
   NDatePicker,
   NInput,
-  NSelect,
   NTag,
   useMessage,
   type DataTableColumns,
@@ -156,6 +150,8 @@ import { formatMicros } from '../../utils/money'
 import { columnTitle } from '../../utils/columnTitle'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
+import FilterSelectField from '../../components/common/FilterSelectField.vue'
+import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import StatusClassTag from '../../components/request-logs/StatusClassTag.vue'
 
 const { t } = useI18n()
@@ -235,7 +231,7 @@ const statusOptions = computed<SelectOption[]>(() => ([
 ]))
 
 const streamOptions = computed<SelectOption[]>(() => ([
-  { label: t('requestLogs.stream_all'), value: 'all' },
+  { label: t('requestLogs.allFilterStream'), value: 'all' },
   { label: t('requestLogs.stream_true'), value: 'stream' },
   { label: t('requestLogs.stream_false'), value: 'non-stream' },
 ]))
@@ -478,6 +474,24 @@ function onStreamChange(v: 'all' | 'stream' | 'non-stream' | null) {
   void onSearch()
 }
 
+// FilterSelectField is a controlled input (no v-model), so each select's
+// handler writes the reactive filter field and then searches — mirroring the
+// old NSelect `@update:value="onSearch"` after v-model wrote the value.
+function onCallerChange(v: number | null) {
+  filter.api_key_id = v
+  void onSearch()
+}
+
+function onProviderChange(v: number | null) {
+  filter.provider_id = v
+  void onSearch()
+}
+
+function onStatusChange(v: StatusClass | null) {
+  filter.status = v
+  void onSearch()
+}
+
 const pagination = computed<PaginationProps>(() => ({
   page: page.value,
   pageSize: pageSize.value,
@@ -681,12 +695,6 @@ const columns = computed<DataTableColumns<RequestLogRow>>(() => [
 </script>
 
 <style scoped>
-.request-logs-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 /* Filter-bar styles (.filter-panel / .filter-grid / .filter-item /
    .filter-actions) are the canonical shared classes in styles/global.less —
    this page is the reference every other list page's filter bar matches. */

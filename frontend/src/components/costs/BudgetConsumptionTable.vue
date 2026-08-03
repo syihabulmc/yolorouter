@@ -8,30 +8,28 @@
      "days to exhaust" comes from a fixed recent window. The column headers
      label them so the two don't read as the same number. -->
 <template>
-  <NDataTable
+  <ResponsiveDataTable
     :columns="columns"
     :data="sortedRows"
     :loading="loading"
-    :bordered="false"
-    :single-line="false"
     :scroll-x="820"
     :row-key="(r: BudgetRow) => r.id"
-    :row-class-name="rowClassName"
-    size="small"
+    :row-props="rowProps"
   >
     <template #empty>
       <EmptyState :icon="Wallet" :title="t('costs.budget.empty')" />
     </template>
-  </NDataTable>
+  </ResponsiveDataTable>
 </template>
 
 <script setup lang="ts">
 import { computed, h } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NDataTable, type DataTableColumns } from 'naive-ui'
+import { type DataTableColumns } from 'naive-ui'
 import { Wallet } from '@lucide/vue'
 import EmptyState from '../EmptyState.vue'
+import ResponsiveDataTable from '../common/ResponsiveDataTable.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
 import {
@@ -65,11 +63,11 @@ const sortedRows = computed<BudgetRow[]>(() =>
   }),
 )
 
-function rowClassName(r: BudgetRow): string {
+function rowProps(r: BudgetRow): Record<string, unknown> {
   const ratio = ratioOf(r)
-  if (ratio == null) return ''
+  if (ratio == null) return {}
   const level = levelOf(ratio)
-  return level === 'ok' ? '' : `budget-row--${level}`
+  return level === 'ok' ? {} : { class: `budget-row--${level}` }
 }
 
 // renderConsumption draws the fill bar + percentage, or an em dash for
@@ -230,11 +228,14 @@ const columns = computed<DataTableColumns<BudgetRow>>(() => [
 }
 
 /* Row tints echo the consumption thresholds so a near-cap or overspent key
-   stands out even before the eye reaches the bar. */
-:deep(.budget-row--warn td) {
+   stands out even before the eye reaches the bar. On desktop the tint lands on
+   the row's cells; on mobile the same class rides on the stacked card. */
+:deep(.budget-row--warn td),
+:deep(.rdt-card.budget-row--warn) {
   background: color-mix(in srgb, var(--color-warning, #e6a23c) 8%, transparent);
 }
-:deep(.budget-row--over td) {
+:deep(.budget-row--over td),
+:deep(.rdt-card.budget-row--over) {
   background: color-mix(in srgb, var(--color-danger, #d03050) 9%, transparent);
 }
 </style>

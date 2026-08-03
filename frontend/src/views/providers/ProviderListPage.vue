@@ -1,6 +1,6 @@
 <!-- frontend/src/views/providers/ProviderListPage.vue -->
 <template>
-  <div class="providers-page">
+  <div class="common-page">
     <PageHeader :eyebrow="t('providers.eyebrow')" :title="t('providers.pageTitle')" :description="t('providers.pageDescription')">
       <template #actions>
         <n-button type="primary" @click="showCreate = true">
@@ -329,12 +329,6 @@ const columns = computed<DataTableColumns<Provider>>(() => [
 </script>
 
 <style scoped>
-.providers-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 :deep(.provider-name-cell) {
   font-weight: 650;
   color: var(--color-text);

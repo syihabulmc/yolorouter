@@ -6,7 +6,7 @@
      block (providers have no budget) and minus the provider breakdown table
      (that would be a single row — the entity itself). -->
 <template>
-  <div class="cost-detail-page">
+  <div class="common-page">
     <PageHeader :title="title" :description="t('costs.detail.providerDesc')">
       <template #actions>
         <NButton size="small" @click="goLogs">{{ t('costs.detail.viewLogs') }}</NButton>
@@ -209,12 +209,6 @@ watch(timeRange, () => { void reload() }, { deep: true })
 </script>
 
 <style scoped>
-.cost-detail-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 /* Only padding differs from the global .section-card (these pages use a
    tighter --space-5); bg / border / radius / __head come from global.less. */
 .section-card {

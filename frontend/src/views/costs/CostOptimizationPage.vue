@@ -11,7 +11,7 @@
      GETs run in parallel on mount and gate the CTA banner so it never flashes
      a false "off" state before the real values arrive. -->
 <template>
-  <div class="cost-optimization-page">
+  <div class="common-page">
     <PageHeader
       :eyebrow="t('costOptimization.eyebrow')"
       :title="t('costOptimization.title')"
@@ -421,12 +421,6 @@ const skipReasonColumns = computed<DataTableColumns<CompressSkipReasonRow>>(() =
 </script>
 
 <style scoped>
-.cost-optimization-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 /* Metric row: 5 KPI tiles. The base .metric-row/.metric/.metric__*
    classes live in global.less; each page only sets its own column count. */
 .metric-row {

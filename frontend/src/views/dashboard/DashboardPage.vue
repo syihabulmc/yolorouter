@@ -8,7 +8,7 @@
      cleared (rather than left on screen under a new range label) so KPIs and
      the selector never disagree. -->
 <template>
-  <div class="dashboard-page">
+  <div class="common-page">
     <PageHeader :eyebrow="t('dashboard.eyebrow')" :title="t('dashboard.pageTitle')" :description="t('dashboard.pageDescription')">
       <template #actions>
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPresetChange" />
@@ -104,7 +104,7 @@
         </div>
         <div class="kpi__body">
           <div class="kpi__label">
-            <HelpLabel :tip="t('dashboard.inputTokensCard_tip')">{{ t('dashboard.inputTokensCard') }}</HelpLabel>
+            <HelpLabel :tip="t('dashboard.inputTokensCard_tip')">{{ cardLabel('dashboard.inputTokensCard') }}</HelpLabel>
           </div>
           <div class="kpi__value">{{ formatNumber(data?.today.input_tokens ?? 0) }}</div>
           <div class="kpi__sub">{{ t('dashboard.inputTokensCard_sub') }}</div>
@@ -117,7 +117,7 @@
         </div>
         <div class="kpi__body">
           <div class="kpi__label">
-            <HelpLabel :tip="t('dashboard.outputTokensCard_tip')">{{ t('dashboard.outputTokensCard') }}</HelpLabel>
+            <HelpLabel :tip="t('dashboard.outputTokensCard_tip')">{{ cardLabel('dashboard.outputTokensCard') }}</HelpLabel>
           </div>
           <div class="kpi__value">{{ formatNumber(data?.today.output_tokens ?? 0) }}</div>
           <div class="kpi__sub">{{ t('dashboard.outputTokensCard_sub') }}</div>
@@ -130,7 +130,7 @@
         </div>
         <div class="kpi__body">
           <div class="kpi__label">
-            <HelpLabel :tip="t('dashboard.cacheWriteTokensCard_tip')">{{ t('dashboard.cacheWriteTokensCard') }}</HelpLabel>
+            <HelpLabel :tip="t('dashboard.cacheWriteTokensCard_tip')">{{ cardLabel('dashboard.cacheWriteTokensCard') }}</HelpLabel>
           </div>
           <div class="kpi__value">{{ formatNumber(data?.today.cache_write_tokens ?? 0) }}</div>
           <div class="kpi__sub">{{ t('dashboard.cacheWriteTokensCard_sub') }}</div>
@@ -143,7 +143,7 @@
         </div>
         <div class="kpi__body">
           <div class="kpi__label">
-            <HelpLabel :tip="t('dashboard.cacheReadTokensCard_tip')">{{ t('dashboard.cacheReadTokensCard') }}</HelpLabel>
+            <HelpLabel :tip="t('dashboard.cacheReadTokensCard_tip')">{{ cardLabel('dashboard.cacheReadTokensCard') }}</HelpLabel>
           </div>
           <div class="kpi__value">{{ formatNumber(data?.today.cache_read_tokens ?? 0) }}</div>
           <div class="kpi__sub">{{ t('dashboard.cacheReadTokensCard_sub') }}</div>
@@ -269,6 +269,7 @@ import { displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
 import { formatNumber, formatRate } from '../../utils/format'
 import { formatFailReason } from '../../utils/failReason'
+import { useIsMobile } from '../../composables/useIsMobile'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -283,6 +284,17 @@ function onPresetChange(v: RangePreset) {
   preset.value = v
 }
 const reqUrl =  window.location.origin
+
+// On phone-width viewports the token KPI labels drop the "Token" / "Tokens"
+// word to stay compact — the number and sub-caption still render in full, so
+// no information is lost, only the redundant label noise. Desktop keeps the
+// full label. Breakpoint is owned by the shared useIsMobile composable.
+const isMobile = useIsMobile()
+function cardLabel(key: string): string {
+  const label = t(key)
+  if (!isMobile.value) return label
+  return label.replace(/\s*Tokens?/gi, '').replace(/\s*Token/g, '').trim()
+}
 
 // The dashboard skeleton (KPI cards, trend, upstream status) always renders so
 // a fresh deployment sees a real overview reading zero rather than a blank
@@ -415,12 +427,6 @@ function goToRequestLog(requestId: string) {
 </script>
 
 <style scoped>
-.dashboard-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 .setup-banner {
   display: flex;
   align-items: center;
@@ -749,21 +755,22 @@ function goToRequestLog(requestId: string) {
 }
 
 @media (max-width: 768px) {
-  .dashboard-page {
-    gap: var(--space-3);
-  }
-
   .setup-banner {
     flex-direction: column;
     align-items: flex-start;
   }
   
+
+  .section-card,
   .kpi-row .kpi{
    padding: var(--space-3);
   }
 
   .upstream-row {
-    grid-template-columns: 1fr;
+    gap: var(--space-2);
+  }
+  .upstream-item {
+   padding: var(--space-2);
   }
 
   .kpi__value {

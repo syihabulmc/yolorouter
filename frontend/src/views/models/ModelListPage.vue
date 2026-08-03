@@ -1,6 +1,6 @@
 <!-- frontend/src/views/models/ModelListPage.vue -->
 <template>
-  <div class="models-page">
+  <div class="common-page">
     <PageHeader :eyebrow="t('models.eyebrow')" :title="t('models.pageTitle')" :description="t('models.pageDescription')">
       <template #actions>
         <n-button type="primary" @click="showCreate = true">
@@ -296,12 +296,6 @@ const columns = computed<DataTableColumns<Model>>(() => [
 </script>
 
 <style scoped>
-.models-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 :deep(.model-name-cell) {
   font-weight: 650;
   color: var(--color-text);

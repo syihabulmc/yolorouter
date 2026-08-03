@@ -1,6 +1,6 @@
 <!-- frontend/src/views/apikeys/ApiKeyListPage.vue -->
 <template>
-  <div class="apikeys-page">
+  <div class="common-page">
     <PageHeader :eyebrow="t('apiKeys.eyebrow')" :title="t('apiKeys.pageTitle')" :description="t('apiKeys.pageDescription')">
       <template #actions>
         <n-button type="primary" @click="showCreate = true">
@@ -346,12 +346,6 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
 </script>
 
 <style scoped>
-.apikeys-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 :deep(.mono-cell) {
   font-family: var(--font-mono, monospace);
   font-weight: 600;

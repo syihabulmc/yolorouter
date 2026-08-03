@@ -247,7 +247,46 @@ const { t } = useI18n();
     padding: 0 24px 40px;
   }
 }
+@media (max-width: 768px) {
+  .auth-page {
+    display: black;
+    min-width: 100%;
+    min-height: 100vh;
+  }
+  .auth-hero-warp,
+  .auth-hero {
+    display: none;
+  }
+  .auth-main {
+    min-width: 100%;
+    min-height: 100vh;
+    padding: 0 !important;
+  }
+  .auth-locale-select {
+    position: absolute;
+    top: var(--space-3) !important;
+    right: var(--space-2) !important;
+  }
+  .auth-card-wrap {
+    min-width: 100%;
+    min-height: 100vh;
+    background: #ffffff;
+    box-shadow: none;
+    border-radius: 0;
+    padding: 2px;
+    overflow: auto;
+  }
+  .auth-card-logo {
+    height: 140px;
+    margin-bottom: 28px;
+  }
+  .auth-card-body {
+    padding: 0 24px 40px;
+  }
+}
+
 </style>
+
 <style>
 .auth-page .n-form-item.n-form-item--medium-size.n-form-item--top-labelled {
   --n-label-height: 0 !important;

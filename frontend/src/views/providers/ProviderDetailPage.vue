@@ -1,6 +1,6 @@
 <!-- frontend/src/views/providers/ProviderDetailPage.vue -->
 <template>
-  <div class="provider-detail-page" v-if="provider">
+  <div class="common-page" v-if="provider">
     <PageHeader :eyebrow="t('providers.eyebrow')" :title="provider.name" :description="provider.base_url">
       <template #actions>
         <n-button size="small" @click="showEditProvider = true">{{ t('providers.editProvider') }}</n-button>
@@ -516,12 +516,6 @@ async function onTestAll() {
 </script>
 
 <style scoped>
-.provider-detail-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 .keys-toolbar {
   display: flex;
   justify-content: space-between;

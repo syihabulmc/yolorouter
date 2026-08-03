@@ -12,8 +12,11 @@
       <template #label>
         <HelpLabel :tip="t('providers.testModel_tip')">{{ t('providers.testModel') }}</HelpLabel>
       </template>
-      <n-space :wrap="false" :size="8" class="tester-row">
+      <div class="tester-row" :class="{ 'tester-row--mobile': isMobile }">
+        <!-- Desktop: the original filterable + tag select (pick from the fetched
+             catalogue or type a model not in the list). -->
         <n-select
+          v-if="!isMobile"
           :value="value"
           filterable
           tag
@@ -23,13 +26,41 @@
           class="model-select"
           @update:value="onModelChange"
         />
-        <n-button :loading="fetching" :disabled="!canProbe" @click="onFetchModels">
-          {{ t('providers.fetchModels') }}
-        </n-button>
-        <n-button type="primary" ghost :loading="testing" :disabled="!canTest" @click="onTest">
-          {{ t('providers.testConnection') }}
-        </n-button>
-      </n-space>
+
+        <!-- Mobile with a fetched catalogue: a trigger that raises the shared
+             bottom-sheet picker. -->
+        <FilterSelectField
+          v-else-if="fetchedModels.length"
+          :label="t('providers.testModel')"
+          :value="value || null"
+          :options="modelOptions"
+          :placeholder="t('providers.testModelSelectPlaceholder')"
+          width="100%"
+          size="medium"
+          class="model-select"
+          :clearable="false"
+          @update:value="onModelChange"
+        />
+
+        <!-- Mobile with no catalogue (upstream exposes no list, or not fetched
+             yet): a plain input to type the model name directly. -->
+        <n-input
+          v-else
+          :value="value"
+          :placeholder="t('providers.testModelSelectPlaceholder')"
+          class="model-select"
+          @update:value="onModelChange"
+        />
+
+        <div class="tester-actions">
+          <n-button :loading="fetching" :disabled="!canProbe" @click="onFetchModels">
+            {{ t('providers.fetchModels') }}
+          </n-button>
+          <n-button type="primary" ghost :loading="testing" :disabled="!canTest" @click="onTest">
+            {{ t('providers.testConnection') }}
+          </n-button>
+        </div>
+      </div>
     </n-form-item>
 
     <n-alert v-if="testOutcome !== null" :type="testOk ? 'success' : 'error'" :bordered="false" class="result">
@@ -54,6 +85,8 @@ import { displayMessage } from '../../api/client'
 import { testOutcomeI18nKey, testOutcomeLabel, isTestSuccess } from '../../utils/testOutcomeDisplay'
 import { testModelRule } from '../../utils/providerValidators'
 import HelpLabel from '../HelpLabel.vue'
+import FilterSelectField from '../common/FilterSelectField.vue'
+import { useIsMobile } from '../../composables/useIsMobile'
 
 const props = defineProps<{
   value: string
@@ -66,6 +99,8 @@ const emit = defineEmits<{ 'update:value': [string] }>()
 const { t, te } = useI18n()
 const message = useMessage()
 const store = useProvidersStore()
+
+const isMobile = useIsMobile()
 
 // fetchedModels is the upstream catalogue for the current credential; empty
 // until the admin fetches it (or when the upstream exposes no list).
@@ -200,7 +235,28 @@ async function onTest() {
 
 <style scoped>
 .tester-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
+}
+.tester-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+/* On a phone the select takes the full width on its own line and the two
+   buttons wrap onto a second row, each splitting the width so both stay
+   comfortably tappable. */
+.tester-row--mobile {
+  flex-direction: column;
+  align-items: stretch;
+}
+.tester-row--mobile .tester-actions {
+  width: 100%;
+}
+.tester-row--mobile .tester-actions > * {
+  flex: 1;
 }
 .model-select {
   min-width: 140px;
@@ -208,6 +264,7 @@ async function onTest() {
 }
 .result {
   margin-top: 4px;
+  margin-bottom: 12px;
 }
 .result-hint {
   margin-top: 4px;

@@ -1,6 +1,6 @@
 <!-- frontend/src/views/models/ModelDetailPage.vue -->
 <template>
-  <div class="model-detail-page" v-if="modelData">
+  <div class="common-page" v-if="modelData">
     <PageHeader :eyebrow="t('models.eyebrow')" :title="modelData.name" :description="`${t('models.runningStatusColumn')}: ${t(`models.running${runningStatusKey}`)}`">
       <template #actions>
         <n-button size="small" @click="showEditModel = true">{{ t('models.editModel') }}</n-button>
@@ -337,11 +337,6 @@ const candidateColumns = computed<DataTableColumns<ModelCandidate>>(() => [
 </script>
 
 <style scoped>
-.model-detail-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
 .route-toolbar {
   display: flex;
   justify-content: flex-end;

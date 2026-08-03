@@ -1,6 +1,6 @@
 <!-- frontend/src/views/system/SystemInfoPage.vue -->
 <template>
-  <div class="system-page">
+  <div class="common-page">
     <PageHeader :eyebrow="t('system.eyebrow')" :title="t('system.pageTitle')" :description="t('system.pageDescription')" />
 
     <n-descriptions label-placement="left" bordered :column="1" size="large" class="system-block" :label-style="labelStyle">
@@ -89,7 +89,7 @@ const uptimeLabel = computed(() => {
 </script>
 
 <style scoped>
-.system-page {
+.common-page {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);

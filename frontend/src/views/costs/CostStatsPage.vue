@@ -10,7 +10,7 @@
      recent burn rate. The section labels keep "this period" and "cumulative"
      from reading as the same number. -->
 <template>
-  <div class="cost-stats-page">
+  <div class="common-page">
     <PageHeader :eyebrow="t('costs.eyebrow')" :title="t('costs.pageTitle')" :description="t('costs.pageDescription')">
       <template #actions>
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPresetChange" />
@@ -235,12 +235,6 @@ watch(
 </script>
 
 <style scoped>
-.cost-stats-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-}
-
 .metric-row {
   grid-template-columns: repeat(4, 1fr);
 }
