@@ -3,9 +3,9 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
-
 	"github.com/yolorouter/yolorouter/internal/protocols"
+	"sort"
+	"strings"
 )
 
 // --- Responses Request Decoder ---
@@ -301,6 +301,16 @@ type ResponseEncoder struct{}
 func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessage {
 	var outputs []interface{}
 
+	// Output-item status, shared by the message and tool-call items below. A
+	// truncated or filtered run may have produced partial text or unparseable
+	// arguments; marking such items "completed" tells a client reading
+	// output items that they are final and safe to use, while the response-level
+	// status says "incomplete" — self-contradictory frames.
+	itemStatus := "completed"
+	if protocols.IRStopReasonIsAbnormal(resp.StopReason) {
+		itemStatus = "incomplete"
+	}
+
 	// Reasoning content
 	if resp.ReasoningContent != "" {
 		outputs = append(outputs, map[string]interface{}{
@@ -319,7 +329,7 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 			"id":      generateResponsesMessageID(),
 			"role":    "assistant",
 			"content": makeResponsesContentParts(resp.Content),
-			"status":  "completed",
+			"status":  itemStatus,
 		})
 	}
 
@@ -339,7 +349,7 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 			"call_id":   callID,
 			"name":      tc.Name,
 			"arguments": args,
-			"status":    "completed",
+			"status":    itemStatus,
 		})
 	}
 
@@ -350,15 +360,26 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 			"id":      generateResponsesMessageID(),
 			"role":    "assistant",
 			"content": makeResponsesContentParts(""),
-			"status":  "completed",
+			// Same itemStatus as the real items: this branch is exactly the one
+			// that fires when a run was content-filtered or truncated before any
+			// visible token, so it is the ONLY output item — claiming
+			// "completed" next to a top-level "incomplete" is the contradiction
+			// this change exists to remove.
+			"status": itemStatus,
 		})
 	}
 
 	status := "completed"
 	var incompleteDetails interface{}
-	if resp.StopReason == "length" {
+	// Mirrors makeCompleted: both truncation and content filtering are
+	// "incomplete" terminations, not clean finishes.
+	if protocols.IRStopReasonIsAbnormal(resp.StopReason) {
 		status = "incomplete"
-		incompleteDetails = map[string]interface{}{"reason": "max_output_tokens"}
+		reason := "content_filter"
+		if resp.StopReason == "length" {
+			reason = "max_output_tokens"
+		}
+		incompleteDetails = map[string]interface{}{"reason": reason}
 	}
 
 	usage := responsesWireUsage(resp.Usage)
@@ -405,8 +426,8 @@ type StreamEncoder struct {
 	usage             protocols.IRUsage
 	createdSent       bool
 	completed         bool
-	pendingStopReason string // Stop reason received via DeltaDone; response.completed is deferred to EncodeDone
-	hasStop           bool   // Whether DeltaDone has been received (distinguishes a legit empty stopReason="" from not-yet-received)
+	pendingStopReason string // stop reason received from DeltaDone, emitted only at EncodeDone via response.completed
+	hasStop           bool   // whether a DeltaDone was received (distinguishes a legitimate empty stopReason from none at all)
 	outputIndex       int
 
 	// Message state
@@ -453,7 +474,7 @@ func (e *StreamEncoder) EncodeDeltas(deltas []protocols.IRStreamDelta) []protoco
 
 		case protocols.DeltaThinking:
 			events = append(events, e.ensureCreated()...)
-			events = append(events, e.closeMessage()...)
+			events = append(events, e.closeMessage("")...)
 			if !e.reasoningAdded {
 				e.reasoningAdded = true
 				e.reasoningItemID = generateResponsesItemID()
@@ -475,7 +496,7 @@ func (e *StreamEncoder) EncodeDeltas(deltas []protocols.IRStreamDelta) []protoco
 		case protocols.DeltaToolCallStart:
 			events = append(events, e.ensureCreated()...)
 			events = append(events, e.closeReasoning()...)
-			events = append(events, e.closeMessage()...)
+			events = append(events, e.closeMessage("")...)
 			toolItemID := generateResponsesItemID()
 			callID := d.ID
 			if callID == "" {
@@ -515,26 +536,23 @@ func (e *StreamEncoder) EncodeDeltas(deltas []protocols.IRStreamDelta) []protoco
 			}))
 
 		case protocols.DeltaUsage:
-			// Field-level merge (via IRUsage.Merge, which only overwrites non-zero fields):
-			// the upstream may send partial usage chunks across multiple frames (for example,
-			// some OpenAI-compatible upstreams split prompt usage and completion usage into
-			// two separate frames for reasoning models). A whole-struct last-wins merge would
-			// let an already-populated PromptTokens/Cache field get zeroed out by a later
-			// completion-only chunk, causing both the client-facing SSE stream and billing to
-			// under-report input_tokens.
+			// Field-level merge (IRUsage.Merge overwrites only non-zero fields): an upstream may send
+			// partial usage chunks across multiple frames (e.g. some azure / litellm deployments split
+			// prompt usage and completion usage into two frames on reasoning models). A whole-struct
+			// last-wins assignment would let a later completion-only chunk clobber the collected
+			// PromptTokens / cache fields to 0, under-reporting input_tokens in both the client SSE
+			// and the billing layer.
 			e.usage.Merge(d.Usage)
 
 		case protocols.DeltaDone:
-			// Mid-stream item terminators (output_item.done etc.) are sent immediately and
-			// don't affect the client.
-			// response.completed is deferred to EncodeDone: when a Chat upstream sends
-			// finish_reason and usage in the same frame, the decoder emits DeltaDone before
-			// DeltaUsage, so calling makeCompleted right away would make
-			// response.completed.usage read all zeros and leave the downstream client unable
-			// to see the real token counts.
-			events = append(events, e.closeAllTools()...)
+			// Intermediate block terminations (output_item.done etc.) are emitted immediately —
+			// they do not affect the client. response.completed is deferred to EncodeDone: when a
+			// chat upstream carries finish_reason + usage in one frame, the decoder emits DeltaDone
+			// before DeltaUsage, so calling makeCompleted immediately would fill
+			// response.completed.usage with zeros and the client would not read the real tokens.
+			events = append(events, e.closeAllTools(d.StopReason)...)
 			events = append(events, e.closeReasoning()...)
-			events = append(events, e.closeMessage()...)
+			events = append(events, e.closeMessage(d.StopReason)...)
 			e.pendingStopReason = d.StopReason
 			e.hasStop = true
 
@@ -550,9 +568,9 @@ func (e *StreamEncoder) EncodeDeltas(deltas []protocols.IRStreamDelta) []protoco
 }
 
 func (e *StreamEncoder) EncodeDone() []protocols.SSEEvent {
-	// Only called when the caller considers the stream to have truly finished
-	// (finishErr == nil). At this point every DeltaUsage has already been applied to
-	// e.usage, so response.completed's usage is accurate.
+	// Only called when the caller considers the stream truly complete (finishErr == nil).
+	// By then every DeltaUsage has been applied to e.usage, so response.completed usage is
+	// accurate.
 	if e.completed || !e.hasStop {
 		return nil
 	}
@@ -598,9 +616,13 @@ func (e *StreamEncoder) ensureMessage() []protocols.SSEEvent {
 				"id":     e.messageItemID,
 				"role":   "assistant",
 				"status": "in_progress",
-				"content": []interface{}{
-					map[string]interface{}{"type": "input_text", "text": ""},
-				},
+				// Empty on purpose: OutputMessageContent only admits
+				// output_text | refusal, and "input_text" is a REQUEST-side part
+				// type — emitting it here makes a strict SDK reject the response
+				// at the very first output item. The official streaming example
+				// opens the item with no content and fills it via the
+				// response.content_part.added event emitted right below.
+				"content": []interface{}{},
 			},
 		}),
 		e.makeEvent("response.content_part.added", map[string]interface{}{
@@ -612,9 +634,21 @@ func (e *StreamEncoder) ensureMessage() []protocols.SSEEvent {
 	}
 }
 
-func (e *StreamEncoder) closeMessage() []protocols.SSEEvent {
+// closeMessage finalises the assistant message item.
+//
+// stopReason decides the item status for the same reason closeAllTools does:
+// a client that reconstructs the answer from response.output_item.done (the
+// documented way to read final items) would otherwise accept a half-written
+// message as complete, because the trailing response.incomplete arrives after
+// it. Flipping only the response-level status and the tool item — as an earlier
+// pass did — leaves self-contradictory frames on the wire.
+func (e *StreamEncoder) closeMessage(stopReason string) []protocols.SSEEvent {
 	if !e.messageAdded {
 		return nil
+	}
+	itemStatus := "completed"
+	if protocols.IRStopReasonIsAbnormal(stopReason) {
+		itemStatus = "incomplete"
 	}
 	idx := e.outputIndex
 	id := e.messageItemID
@@ -642,7 +676,7 @@ func (e *StreamEncoder) closeMessage() []protocols.SSEEvent {
 				"type":    "message",
 				"id":      id,
 				"role":    "assistant",
-				"status":  "completed",
+				"status":  itemStatus,
 				"content": makeResponsesContentParts(text),
 			},
 		}),
@@ -674,12 +708,49 @@ func (e *StreamEncoder) closeReasoning() []protocols.SSEEvent {
 	}
 }
 
-func (e *StreamEncoder) closeAllTools() []protocols.SSEEvent {
+// closeAllTools finalises the open function-call items.
+//
+// stopReason decides how: response.function_call_arguments.done is defined by
+// the schema as "arguments finalized", and output_item status "completed" says
+// the call is ready to execute. Emitting either after a truncated or filtered
+// run tells the client that partial — possibly unparseable — arguments are
+// complete, and it can act on them before the trailing response.incomplete
+// event even arrives. On an abnormal stop we therefore skip the .done event
+// entirely and mark the item "incomplete".
+func (e *StreamEncoder) closeAllTools(stopReason string) []protocols.SSEEvent {
 	if len(e.toolStates) == 0 {
 		return nil
 	}
-	var events []protocols.SSEEvent
+	itemStatus := "completed"
+	if protocols.IRStopReasonIsAbnormal(stopReason) {
+		itemStatus = "incomplete"
+	}
+	// Deterministic order: toolStates is a map, and Go randomises map iteration.
+	// That was survivable while the events carried no ordering field, but
+	// sequence_number (added in makeEvent) is defined by the schema as the
+	// authoritative event order — an SDK reassembling by it would otherwise see
+	// output_index 1 finalised before 0, differently on every run.
+	states := make([]*responsesToolState, 0, len(e.toolStates))
 	for _, ts := range e.toolStates {
+		states = append(states, ts)
+	}
+	// Sort by outputIdx — the field actually emitted as output_index — not by
+	// the map key (the upstream's IR tool index). The two are only coincidentally
+	// equal: the chat decoder passes tool_calls[].index through verbatim, so a
+	// gateway that opens index 2 before index 1 would otherwise finalise the
+	// items in reverse output_index order, and sequence_number now makes that
+	// ordering authoritative.
+	sort.Slice(states, func(i, j int) bool { return states[i].outputIdx < states[j].outputIdx })
+
+	var events []protocols.SSEEvent
+	for _, ts := range states {
+		// The .done event is emitted even on an abnormal stop. Suppressing it is
+		// a DIFFERENT contract from marking the item incomplete: every Responses
+		// consumer pairs .delta with .done to close a per-item argument buffer,
+		// so withholding it leaves that buffer open — the client either hangs on
+		// the item or silently drops arguments the model did partially emit.
+		// item status "incomplete" (below) is the schema-sanctioned way to say
+		// "these arguments are not final", and it is already applied.
 		events = append(events,
 			e.makeEvent("response.function_call_arguments.done", map[string]interface{}{
 				"output_index": ts.outputIdx,
@@ -687,7 +758,8 @@ func (e *StreamEncoder) closeAllTools() []protocols.SSEEvent {
 				"item_id":      ts.itemID,
 				"call_id":      ts.callID,
 				"name":         ts.name,
-			}),
+			}))
+		events = append(events,
 			e.makeEvent("response.output_item.done", map[string]interface{}{
 				"output_index": ts.outputIdx,
 				"item": map[string]interface{}{
@@ -696,7 +768,7 @@ func (e *StreamEncoder) closeAllTools() []protocols.SSEEvent {
 					"call_id":   ts.callID,
 					"name":      ts.name,
 					"arguments": ts.args,
-					"status":    "completed",
+					"status":    itemStatus,
 				},
 			}),
 		)
@@ -705,16 +777,18 @@ func (e *StreamEncoder) closeAllTools() []protocols.SSEEvent {
 	return events
 }
 
-// responsesWireUsage renders IR usage as the Responses API usage object,
-// shared by the streaming response.completed event and the non-streaming
-// response so the two shapes cannot drift apart.
+// responsesWireUsage builds the Responses API usage object shared by the
+// non-streaming encoder and the streaming response.completed event.
 //
-// Emits GROSS counts: the Responses API documents
-// input_tokens_details.cached_tokens as a breakdown OF input_tokens, so the
-// cached portion must sit inside the input total. Forwarding the raw IR
-// PromptTokens would be wrong for an Anthropic upstream, whose count is net —
-// the cache portion would vanish and the response would claim
-// cached_tokens > input_tokens.
+// input_tokens is the GROSS input (cache included): the official ResponseUsage
+// schema documents input_tokens_details as "a detailed breakdown of the input
+// tokens", making cached_tokens a strict subset of input_tokens. Emitting the
+// IR's raw PromptTokens would drop the whole cache portion for Anthropic
+// upstreams, whose input count is net.
+//
+// The Responses usage schema has no cache-WRITE field of its own, so
+// CacheWriteTokens is carried in the non-standard
+// protocols.CacheWriteAliasField below.
 func responsesWireUsage(u protocols.IRUsage) map[string]interface{} {
 	// A record the gateway itself refused publishes nothing: emitting sanitized
 	// counts would hand the client — and any downstream gateway billing from
@@ -726,33 +800,55 @@ func responsesWireUsage(u protocols.IRUsage) map[string]interface{} {
 	if u.Invalid {
 		return nil
 	}
-	usage := map[string]interface{}{
-		"input_tokens":  u.GrossPromptTokens(),
-		"output_tokens": u.CompletionTokens,
-		"total_tokens":  u.GrossTotalTokens(),
-	}
-	// BOTH members are in the schema's required list for input_tokens_details
-	// ([cached_tokens, cache_write_tokens]), so the object and both members are
-	// emitted unconditionally — a strict-validating downstream rejects the
-	// response otherwise. An earlier revision gated them on being non-zero, on
-	// the mistaken belief that the write was our own extension rather than
-	// OpenAI's field.
-	usage["input_tokens_details"] = map[string]interface{}{
+	// input_tokens_details and output_tokens_details are both in the schema's
+	// required list (as are their cached_tokens / reasoning_tokens members), so
+	// they are emitted unconditionally rather than only when non-zero — a
+	// strict-validating downstream would otherwise reject the response. An
+	// earlier revision emitted the write only when non-zero, on the mistaken
+	// belief that it was our own extension rather than OpenAI's field.
+	inputDetails := map[string]interface{}{
 		"cached_tokens":                 u.CacheReadTokens,
 		protocols.CacheWriteDetailField: u.CacheWriteTokens,
 	}
-	return usage
+	return map[string]interface{}{
+		"input_tokens":         u.GrossPromptTokens(),
+		"output_tokens":        u.CompletionTokens,
+		"total_tokens":         u.GrossTotalTokens(),
+		"input_tokens_details": inputDetails,
+		"output_tokens_details": map[string]interface{}{
+			"reasoning_tokens": u.ReasoningTokens,
+		},
+	}
 }
 
 func (e *StreamEncoder) makeCompleted(stopReason string) protocols.SSEEvent {
 	status := "completed"
+	// The Responses API defines response.incomplete as its own terminal event,
+	// not a variant of response.completed. Setting only the nested status while
+	// still labelling the event "response.completed" lets any SDK that switches
+	// on the event discriminant treat a max-output truncation as a clean finish
+	// — exactly the "truncation looks successful" failure this work set out to
+	// remove elsewhere.
+	eventType := "response.completed"
 	var details interface{}
-	if stopReason == "length" {
+	// content_filter is just as much an "incomplete" termination as truncation;
+	// encoding a safety block as response.completed told the client the answer
+	// finished cleanly.
+	if protocols.IRStopReasonIsAbnormal(stopReason) {
 		status = "incomplete"
-		details = map[string]interface{}{"reason": "max_output_tokens"}
+		eventType = "response.incomplete"
+		reason := "content_filter"
+		if stopReason == "length" {
+			reason = "max_output_tokens"
+		}
+		// incomplete_details.reason only allows max_output_tokens |
+		// content_filter, so anything abnormal that is not truncation is
+		// reported as content_filter — claiming a clean completion for an
+		// abnormal run is the one thing we must not do.
+		details = map[string]interface{}{"reason": reason}
 	}
 	usage := responsesWireUsage(e.usage)
-	return e.makeEvent("response.completed", map[string]interface{}{
+	return e.makeEvent(eventType, map[string]interface{}{
 		"response": map[string]interface{}{
 			"id":                 e.responseID,
 			"object":             "response",
@@ -767,8 +863,12 @@ func (e *StreamEncoder) makeCompleted(stopReason string) protocols.SSEEvent {
 
 func (e *StreamEncoder) makeEvent(eventType string, data map[string]interface{}) protocols.SSEEvent {
 	data["type"] = eventType
-	d, _ := json.Marshal(data)
+	// sequence_number is in the required list of every Responses stream event in
+	// the official schema. The counter was being incremented but never written,
+	// so a strict SDK would reject the whole stream.
+	data["sequence_number"] = e.seqNum
 	e.seqNum++
+	d, _ := json.Marshal(data)
 	return protocols.SSEEvent{Data: string(d)}
 }
 

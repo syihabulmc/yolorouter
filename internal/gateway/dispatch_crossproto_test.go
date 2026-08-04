@@ -273,7 +273,7 @@ func TestCrossProtocolOpenAIToAnthropicStream(t *testing.T) {
 }
 
 // TestCrossProtocolOpenAIToAnthropicStream_IncludeUsage is a regression test
-// for FIX 6: when the OpenAI-ingress caller sets
+// for the cross-protocol fix: when the OpenAI-ingress caller sets
 // stream_options.include_usage=true, the client must receive a final
 // usage-bearing chat.completion.chunk before [DONE] — previously the
 // cross-protocol chat.StreamEncoder merged DeltaUsage internally but never
@@ -355,7 +355,8 @@ func TestCrossProtocolOpenAIToAnthropicStream_IncludeUsage(t *testing.T) {
 }
 
 // TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody is a
-// regression test for FIX 7: on a successful cross-protocol non-stream
+// regression test for the cross-protocol fix: on a successful
+// cross-protocol non-stream
 // request, IRNonStreamRelay wrote the encoded client response directly and
 // only rc.SetBody (the raw upstream body) ran, leaving rc.ResponseBody (the
 // caller-facing audit body persisted to request_log_bodies.response_body)

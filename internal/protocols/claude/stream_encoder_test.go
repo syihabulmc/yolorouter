@@ -507,6 +507,102 @@ func TestClaudeResponseEncoder_CacheTokens(t *testing.T) {
 	}
 }
 
+// TestClaudeResponseEncoder_CacheIncludedInPrompt_NetInput verifies the non-stream
+// ResponseEncoder applies NetPromptTokens when CacheIncludedInPrompt=true (matching
+// the streaming buildTerminalUsage path). Without this guard, a regression that
+// switches EncodeResponse back to raw PromptTokens would silently diverge stream
+// vs non-stream input_tokens and go undetected.
+func TestClaudeResponseEncoder_CacheIncludedInPrompt_NetInput(t *testing.T) {
+	resp := protocols.NewIRResponse("msg_net", "deepseek-chat")
+	resp.Content = "ok"
+	resp.Usage = protocols.IRUsage{
+		PromptTokens:          17075,
+		CompletionTokens:      38,
+		CacheReadTokens:       256,
+		CacheIncludedInPrompt: true,
+	}
+
+	data := ResponseEncoder{}.EncodeResponse(resp)
+
+	var result map[string]interface{}
+	_ = json.Unmarshal(data, &result)
+
+	usage := result["usage"].(map[string]interface{})
+	if v, _ := usage["input_tokens"].(float64); int(v) != 16819 {
+		t.Errorf("input_tokens = %v, want 16819 (17075-256 net)", usage["input_tokens"])
+	}
+	if v, _ := usage["output_tokens"].(float64); int(v) != 38 {
+		t.Errorf("output_tokens = %v, want 38", usage["output_tokens"])
+	}
+	if v, _ := usage["cache_read_input_tokens"].(float64); int(v) != 256 {
+		t.Errorf("cache_read_input_tokens = %v, want 256", usage["cache_read_input_tokens"])
+	}
+}
+
+// TestStreamEncoder_MessageDeltaCarriesFullUsage verifies the terminal
+// message_delta carries the FULL usage (input + output + cache), not just
+// output_tokens. This fixes the "Claude message_start input_tokens=0 when
+// upstream usage arrives at stream end" bug (OpenAI/Gemini/Responses → Claude).
+// The terminal message_delta is the only event that can carry the real input
+// after message_start was sent with input=0. Standard message_delta usage
+// contains only output_tokens; the extra fields are a practical extension
+// (same approach as new-api's buildMessageDeltaPatchUsage).
+func TestStreamEncoder_MessageDeltaCarriesFullUsage(t *testing.T) {
+	enc := NewStreamEncoder()
+
+	events := enc.EncodeDeltas([]protocols.IRStreamDelta{
+		protocols.DeltaMessageStart{ID: "msg_1", Model: "deepseek-chat"},
+		protocols.DeltaText{Text: "hi"},
+		protocols.DeltaDone{StopReason: "stop"},
+		// OpenAI upstream sends usage at stream end; CacheIncludedInPrompt=true
+		// means PromptTokens (17075) includes the 256 cached tokens.
+		protocols.DeltaUsage{Usage: protocols.IRUsage{
+			PromptTokens:          17075,
+			CompletionTokens:      38,
+			CacheReadTokens:       256,
+			CacheIncludedInPrompt: true,
+		}},
+	})
+	events = append(events, enc.EncodeDone()...)
+
+	var msgStart, msgDelta map[string]interface{}
+	for _, ev := range events {
+		switch ev.Event {
+		case "message_start":
+			_ = json.Unmarshal([]byte(ev.Data), &msgStart)
+		case "message_delta":
+			_ = json.Unmarshal([]byte(ev.Data), &msgDelta)
+		}
+	}
+	if msgDelta == nil {
+		t.Fatal("no message_delta event emitted")
+	}
+
+	// message_start.input_tokens == 0 (known limitation: upstream usage has
+	// not arrived at the stream head yet — that is the bug this fix addresses
+	// by carrying input on the terminal message_delta instead).
+	startMsg := msgStart["message"].(map[string]interface{})
+	startUsage := startMsg["usage"].(map[string]interface{})
+	if v, _ := startUsage["input_tokens"].(float64); int(v) != 0 {
+		t.Errorf("message_start input_tokens = %v, want 0 (known limitation)", startUsage["input_tokens"])
+	}
+
+	// message_delta carries the full usage (the fix):
+	// input_tokens = 17075 - 256 = 16819 (net, excludes cache)
+	// output_tokens = 38
+	// cache_read_input_tokens = 256
+	deltaUsage := msgDelta["usage"].(map[string]interface{})
+	if v, _ := deltaUsage["input_tokens"].(float64); int(v) != 16819 {
+		t.Errorf("message_delta input_tokens = %v, want 16819 (17075-256 net)", deltaUsage["input_tokens"])
+	}
+	if v, _ := deltaUsage["output_tokens"].(float64); int(v) != 38 {
+		t.Errorf("message_delta output_tokens = %v, want 38", deltaUsage["output_tokens"])
+	}
+	if v, _ := deltaUsage["cache_read_input_tokens"].(float64); int(v) != 256 {
+		t.Errorf("message_delta cache_read_input_tokens = %v, want 256", deltaUsage["cache_read_input_tokens"])
+	}
+}
+
 func TestClaudeResponseEncoder_NoCacheTokens(t *testing.T) {
 	resp := protocols.NewIRResponse("msg_5", "claude-3-opus")
 	resp.Content = "ok"

@@ -46,9 +46,8 @@ func hijackAfterFirstFrame(firstFrame string) http.HandlerFunc {
 // TestRelayStreamMidFailureOpenAIIngress: a same-protocol OpenAI stream that
 // dies mid-flight (after the first data frame reached the client) must still
 // produce the OpenAI wire shape: an inline `data: {"error":...}` frame
-// followed by `data: [DONE]` — the existing pre-P3-Task-5 behavior, pinned
-// here as a regression guard now that writeStreamErrorEvent is
-// ingress-aware.
+// followed by `data: [DONE]` — the existing behavior, pinned here as a
+// regression guard now that writeStreamErrorEvent is ingress-aware.
 func TestRelayStreamMidFailureOpenAIIngress(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	upstream := httptest.NewServer(hijackAfterFirstFrame(

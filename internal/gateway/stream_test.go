@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/yolorouter/yolorouter/internal/protocols"
+	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
 func TestIsDataLine(t *testing.T) {
@@ -518,5 +519,43 @@ func TestWriteStreamErrorEventCapturesToStreamFile(t *testing.T) {
 				t.Errorf("captured stream file = %q, want it byte-for-byte equal to the client bytes %q", captured, rec.Body.Bytes())
 			}
 		})
+	}
+}
+
+// TestApplyStreamWriteDeadline_WarnsOnceAcrossRepeatedFailures guards the
+// warn-once gate in applyStreamWriteDeadline: a writer that cannot honor
+// SetWriteDeadline fails identically on every forwarded chunk, so the warning
+// must be logged exactly once per request. Production *http.response always
+// supports it; the warning exists so a wrapper that forgets to unwrap cannot
+// silently disable the slow-client protection.
+func TestApplyStreamWriteDeadline_WarnsOnceAcrossRepeatedFailures(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "test.log")
+	logger.Init(logger.Config{Level: "warn", Filename: logFile, Console: false})
+	t.Cleanup(func() {
+		_ = logger.Sync()
+		logger.Init(logger.Config{Filename: os.DevNull})
+	})
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder() // does not support SetWriteDeadline
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodGet, "/x", nil)
+
+	for range 5 {
+		applyStreamWriteDeadline(c, "req-warn-once")
+	}
+	_ = logger.Sync()
+
+	data, readErr := os.ReadFile(logFile)
+	if readErr != nil {
+		t.Fatalf("read log file: %v", readErr)
+	}
+	count := strings.Count(string(data), "gateway: apply stream write deadline failed")
+	if count != 1 {
+		t.Errorf("expected exactly 1 warning log line despite 5 failing calls, got %d: %s", count, data)
+	}
+	if !strings.Contains(string(data), "req-warn-once") {
+		t.Error("warning log must carry the request ID")
 	}
 }

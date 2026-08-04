@@ -267,7 +267,7 @@ func writeStreamErrorEvent(c *gin.Context, rc *RelayContext) error {
 	// bare EOF with no protocol error / [DONE], while the capture file
 	// (which appended unconditionally in the old code) recorded bytes that
 	// were never delivered.
-	_ = protocols.ApplyStreamWriteDeadline(c)
+	applyStreamWriteDeadline(c, rc.RequestID)
 	msg := streamErrorMessage(rc.RequestID)
 	switch rc.Ingress {
 	case protocols.ProtocolClaude:
@@ -278,6 +278,22 @@ func writeStreamErrorEvent(c *gin.Context, rc *RelayContext) error {
 		return writeResponsesStreamErrorEvent(c, rc, msg)
 	default:
 		return writeOpenAIStreamErrorEvent(c, rc, msg)
+	}
+}
+
+// streamWriteDeadlineWarnedKey gates the sliding-deadline warning to once per
+// request: ApplyStreamWriteDeadline runs before every forwarded chunk, and on
+// a writer without SetWriteDeadline support the error would otherwise spam the
+// log. Production *http.response always supports it, so a warning means some
+// wrapper disabled the slow-client protection.
+const streamWriteDeadlineWarnedKey = "gateway_stream_write_deadline_warned"
+
+// applyStreamWriteDeadline slides the per-write deadline and logs a warning
+// (at most once per request) when the writer does not support SetWriteDeadline.
+func applyStreamWriteDeadline(c *gin.Context, requestID string) {
+	if err := protocols.ApplyStreamWriteDeadline(c); err != nil && !c.GetBool(streamWriteDeadlineWarnedKey) {
+		c.Set(streamWriteDeadlineWarnedKey, true)
+		logger.Warn("gateway: apply stream write deadline failed", zap.String("request_id", requestID), zap.Error(err))
 	}
 }
 

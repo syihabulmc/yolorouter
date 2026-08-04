@@ -2,12 +2,11 @@ package responses
 
 import (
 	"encoding/json"
-	"strings"
-	"testing"
-
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/protocols/claude"
 	"github.com/yolorouter/yolorouter/internal/protocols/gemini"
+	"strings"
+	"testing"
 )
 
 // --- RequestDecoder ---
@@ -741,20 +740,21 @@ func TestResponsesDecoder_NegativeCacheWriteSurvivesForRejection(t *testing.T) {
 			TotalTokens:              105,
 			CacheCreationInputTokens: -50,
 		})
-		if d.usage.CacheWriteTokens != -50 {
-			t.Errorf("CacheWriteTokens = %d, want -50 preserved", d.usage.CacheWriteTokens)
+		// The streaming path folds the frame through IRUsage.Merge, which copies
+		// only values greater than zero — so the negative is erased from the
+		// field, but Merge has already marked the accumulated record Invalid at
+		// its entry (IsIncoherent runs before the copy). The verdict survives;
+		// the raw value does not need to.
+		if !d.usage.Invalid {
+			t.Errorf("usage must be marked Invalid so the coherence check can reject the record, got %+v", d.usage)
 		}
 	})
 }
 
-// TestResponsesWireUsage_RequiredDetailMembersAlwaysPresent pins the schema
-// contract taken from OpenAI's own OpenAPI spec (archived under
-// docs/vendor-reference/openai/): ResponseUsage.input_tokens_details declares
-// required: [cached_tokens, cache_write_tokens]. Both must therefore appear
-// even when zero, or a strict-validating downstream rejects the response.
-//
-// An earlier revision emitted cache_write_tokens only when non-zero, believing
-// it to be this gateway's own extension. It is not — it is OpenAI's field.
+// TestResponsesWireUsage_RequiredDetailMembersAlwaysPresent pins the required
+// wire shape: ResponseUsage.input_tokens_details always contains cached_tokens
+// and cache_write_tokens. Both must appear even when zero, or a
+// strict-validating downstream rejects the response.
 func TestResponsesWireUsage_RequiredDetailMembersAlwaysPresent(t *testing.T) {
 	usage := responsesWireUsage(protocols.IRUsage{PromptTokens: 10, CompletionTokens: 2})
 

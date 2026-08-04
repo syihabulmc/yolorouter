@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
-
 	"github.com/yolorouter/yolorouter/internal/protocols"
+	"strings"
 )
 
 // ResponseDecoder decodes a Claude Messages API JSON response into IR.
@@ -47,7 +46,6 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 			CacheReadTokens:  resp.Usage.CacheReadInputTokens,
 		},
 	}
-
 	// Set the verdict at the IR exit so every consumer reads Invalid instead of
 	// re-judging. Claude is the net-convention protocol (input_tokens excludes
 	// cache), so IsIncoherent here effectively checks negatives — but routing it
@@ -85,9 +83,9 @@ type StreamDecoder struct {
 	id          string
 	model       string
 	started     bool
-	completed   bool   // the stream is only considered to have ended naturally after message_stop
-	doneEmitted bool   // whether DeltaDone was already emitted during message_delta (the standard upstream path)
-	upstreamErr error  // an explicit upstream type:"error" event; makes Finish return an error so the caller doesn't settle billing incorrectly
+	completed   bool   // the stream is only considered naturally finished after message_stop
+	doneEmitted bool   // whether DeltaDone was already emitted during message_delta (standard upstream path)
+	upstreamErr error  // explicit upstream type:"error" event; makes Finish return an error so the caller cannot settle a failed run as success
 	blockType   string // current content_block type
 	blockIndex  int
 	toolNames   map[int]string
@@ -145,10 +143,10 @@ func (d *StreamDecoder) DecodeChunk(raw string) ([]protocols.IRStreamDelta, erro
 			Input json.RawMessage `json:"input,omitempty"`
 		} `json:"content_block,omitempty"`
 		Usage *struct {
-			OutputTokens             int `json:"output_tokens"`
-			InputTokens              int `json:"input_tokens,omitempty"`
-			CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
-			CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+			InputTokens              *int `json:"input_tokens,omitempty"`
+			OutputTokens             int  `json:"output_tokens"`
+			CacheCreationInputTokens int  `json:"cache_creation_input_tokens,omitempty"`
+			CacheReadInputTokens     int  `json:"cache_read_input_tokens,omitempty"`
 		} `json:"usage,omitempty"`
 	}
 	if json.Unmarshal([]byte(payload), &event) != nil {
@@ -229,26 +227,25 @@ func (d *StreamDecoder) DecodeChunk(raw string) ([]protocols.IRStreamDelta, erro
 		}
 		if event.Usage != nil {
 			d.usage.CompletionTokens = event.Usage.OutputTokens
-			// message_delta is the terminal usage event: its non-zero fields
-			// replace message_start's value (last-wins). A converting upstream
-			// (OpenAI/Gemini/Responses, whose usage only resolves at stream end)
-			// emits message_start with input_tokens=0 and reports the real input
-			// here, so adopt the delta's value whenever it is non-zero.
+			// Fallback backfill: gateway may emit net input_tokens on message_delta
+			// to compensate for message_start's input=0 (upstream usage arrives
+			// at stream end). Only backfill when message_start left input at 0;
+			// never overwrite a real value. Background in stream_encoder.go
+			// claudeUsageMap / emitMessageDelta doc.
+			if event.Usage.InputTokens != nil && *event.Usage.InputTokens > 0 && d.usage.PromptTokens == 0 {
+				d.usage.PromptTokens = *event.Usage.InputTokens
+			}
+			// Anthropic updates the final cache token counts in message_delta (on a full cache hit message_start carries input_tokens=0)
 			if event.Usage.CacheCreationInputTokens > 0 {
 				d.usage.CacheWriteTokens = event.Usage.CacheCreationInputTokens
 			}
 			if event.Usage.CacheReadInputTokens > 0 {
 				d.usage.CacheReadTokens = event.Usage.CacheReadInputTokens
 			}
-			if event.Usage.InputTokens > 0 {
-				d.usage.PromptTokens = event.Usage.InputTokens
+			newTotal := d.usage.PromptTokens + event.Usage.OutputTokens + d.usage.CacheWriteTokens + d.usage.CacheReadTokens
+			if d.usage.TotalTokens == 0 || d.usage.TotalTokens < newTotal {
+				d.usage.TotalTokens = newTotal
 			}
-			// TotalTokens is recomputed from the per-field totals on every
-			// message_delta so it stays consistent when a last-wins update
-			// lowers a field (e.g. message_delta correcting message_start's
-			// input downward). A "never decrease" high-water mark here would
-			// leave TotalTokens above the sum of its parts and leak into billing.
-			d.usage.TotalTokens = d.usage.PromptTokens + event.Usage.OutputTokens + d.usage.CacheWriteTokens + d.usage.CacheReadTokens
 			// Extract Anthropic web search count from raw payload
 			var wsExtract struct {
 				Usage *struct {
@@ -264,20 +261,17 @@ func (d *StreamDecoder) DecodeChunk(raw string) ([]protocols.IRStreamDelta, erro
 		}
 
 	case "message_stop":
-		// terminal event: marks the stream as having ended naturally, so Finish can
-		// fall back to emitting the usage captured from message_start
+		// terminal event: mark the stream as naturally finished so Finish can fall back to emitting the usage carried in message_start
 		d.completed = true
 
 	case "ping":
 		// ignore
 
 	case "error":
-		// An explicit upstream error event (e.g.
-		// {"type":"error","error":{"type":"overloaded_error","message":"..."}}).
-		// Finish must return an error here so the caller takes the failure path
-		// (502, user not billed) instead of treating a subsequent EOF as a
-		// successful settlement and silently swallowing the in-stream error.
-		// If a stream emits multiple error events, only the first one is kept.
+		// Explicit upstream error events (e.g. {"type":"error","error":{"type":"overloaded_error","message":"..."}})
+		// must make Finish return an error: the caller then takes the failure path (502, user not billed)
+		// instead of treating the trailing EOF as a success and quietly settling a failed stream as
+		// successful. When a stream carries multiple error events, the first one wins.
 		if d.upstreamErr == nil {
 			var errPayload struct {
 				Error struct {
@@ -297,11 +291,10 @@ func (d *StreamDecoder) DecodeChunk(raw string) ([]protocols.IRStreamDelta, erro
 }
 
 func (d *StreamDecoder) Finish() ([]protocols.IRStreamDelta, error) {
-	// An explicit upstream error event takes priority: the caller takes the failure
-	// path, and partial usage is still passed through to record provider cost, but
-	// DeltaDone is not emitted so the relay helper doesn't treat the stream as
-	// successful (IRStreamRelay checks finishErr and skips EncodeDone; sawDone must
-	// not be set either).
+	// Explicit upstream error events take priority: the caller takes the failure path, but partial
+	// usage is still passed through so provider cost is recorded. No DeltaDone is emitted, so the
+	// relay helper does not treat the stream as successful (IRStreamRelay skips EncodeDone on
+	// finishErr, and sawDone must not be raised either).
 	if d.upstreamErr != nil {
 		var out []protocols.IRStreamDelta
 		if d.usage.PromptTokens > 0 || d.usage.CompletionTokens > 0 || d.usage.CacheWriteTokens > 0 || d.usage.CacheReadTokens > 0 {
@@ -309,19 +302,17 @@ func (d *StreamDecoder) Finish() ([]protocols.IRStreamDelta, error) {
 		}
 		return out, d.upstreamErr
 	}
-	// Only fall back to emitting a terminal signal after message_stop has been
-	// received (d.completed=true) -- this prevents a truncated stream from being
-	// billed as a successful completion.
+	// Fall back to emitting the terminal signal only after message_stop (d.completed=true) —
+	// prevents a truncated stream from being settled as a billable success.
 	//
-	// Two upstream paths need to be covered:
-	// 1) Standard Claude: message_delta already emitted DeltaDone + full usage, so
-	//    this only needs to add one more DeltaUsage (last-wins, doesn't affect
-	//    encoder.Usage); DeltaDone is not emitted again.
-	// 2) Some Anthropic-compatible upstream providers jump straight from
-	//    content_block_stop to message_stop without a message_delta event, so this
-	//    must emit DeltaDone (so the relay helper's sawDone flag recognizes a clean
-	//    completion) plus DeltaUsage (passing message_start's input_tokens through
-	//    to the billing layer).
+	// Both upstream shapes must be covered:
+	// 1) Standard Claude: message_delta already emitted DeltaDone + full usage, so this only
+	//    appends one DeltaUsage (last-wins does not affect encoder.Usage); DeltaDone is not
+	//    re-emitted.
+	// 2) Gateway-fronted Anthropic: jumps straight from content_block_stop to message_stop with
+	//    no message_delta, so a DeltaDone must be emitted here (so the relay helper's sawDone
+	//    marks the stream complete) plus a DeltaUsage (passing message_start's input_tokens to
+	//    the billing layer).
 	if !d.completed || !d.started {
 		return nil, nil
 	}
@@ -337,17 +328,31 @@ func (d *StreamDecoder) Finish() ([]protocols.IRStreamDelta, error) {
 }
 
 // claudeMapStopReason maps Claude API stop_reason to IR stop_reason.
+// claudeMapStopReason normalises Anthropic's stop_reason onto the IR
+// vocabulary (stop | length | tool_calls | content_filter | error).
+//
+// Anthropic's enum is end_turn | max_tokens | stop_sequence | tool_use |
+// pause_turn | refusal | model_context_window_exceeded. Lower-casing unknown
+// values instead of mapping them let "refusal" reach the IR verbatim, where no
+// egress encoder recognises it: the abnormal-termination guard did not fire, so
+// a safety refusal could be masked by a tool-call inference, and encoders
+// emitted a value outside their own protocol's enum.
 func claudeMapStopReason(reason string) string {
 	switch reason {
-	case "end_turn":
+	case "end_turn", "stop_sequence", "pause_turn":
 		return "stop"
 	case "tool_use":
 		return "tool_calls"
-	case "max_tokens":
+	case "max_tokens", "model_context_window_exceeded":
 		return "length"
-	case "stop_sequence":
-		return "stop"
+	case "refusal":
+		// "streaming classifiers intervene to handle potential policy
+		// violations" — the same concept OpenAI calls content_filter.
+		return "content_filter"
 	default:
+		// Anything Anthropic adds later passes through lower-cased, matching
+		// new-api's reasonmap default. The values above are mapped because each
+		// has a real equivalent in the other protocols.
 		if reason != "" {
 			return strings.ToLower(reason)
 		}
@@ -355,7 +360,14 @@ func claudeMapStopReason(reason string) string {
 	}
 }
 
-// irToClaudeStopReason maps IR stop_reason to Claude API stop_reason.
+// irToClaudeStopReason maps the IR vocabulary onto Anthropic's stop_reason
+// enum (end_turn | max_tokens | stop_sequence | tool_use | pause_turn |
+// refusal | model_context_window_exceeded).
+//
+// content_filter MUST be translated: it is not in Anthropic's enum, so passing
+// it through produced wire a strict SDK rejects. "refusal" is the documented
+// equivalent ("streaming classifiers intervene to handle potential policy
+// violations").
 func irToClaudeStopReason(reason string) string {
 	switch reason {
 	case "stop":
@@ -364,6 +376,8 @@ func irToClaudeStopReason(reason string) string {
 		return "tool_use"
 	case "length":
 		return "max_tokens"
+	case "content_filter":
+		return "refusal"
 	default:
 		return reason
 	}

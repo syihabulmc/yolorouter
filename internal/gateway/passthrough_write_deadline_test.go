@@ -246,7 +246,8 @@ func (w *failingPassthroughWriter) Write(b []byte) (int, error) {
 func (w *failingPassthroughWriter) WriteHeader(code int) { w.status = code }
 
 // TestPassthroughStreamToClient_WriteErrorPropagatedAsClientWrite is a fast,
-// deterministic unit test for FIX 1 + FIX 2: a downstream Write failure
+// deterministic unit test for the write-deadline fix: a downstream Write
+// failure
 // inside passthroughStreamToClient's forward loop must be wrapped in
 // protocols.ErrClientWrite and returned (not silently swallowed), and the
 // undelivered bytes must not land in the stream capture file.

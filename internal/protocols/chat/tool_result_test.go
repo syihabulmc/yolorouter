@@ -2,9 +2,8 @@ package chat
 
 import (
 	"encoding/json"
-	"testing"
-
 	"github.com/yolorouter/yolorouter/internal/protocols"
+	"testing"
 )
 
 // TestChatEncode_MultipleToolResultsSplit pins a regression: when a single

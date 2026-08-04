@@ -571,8 +571,8 @@ func TestNetPromptTokens(t *testing.T) {
 // A stated total that the parts overflow is "attribution unknown", not
 // impossible — the tokens were really consumed. Every gateway surveyed
 // (new-api, litellm, llmgateway) recomputes total = prompt + completion and
-// bills on; this gateway follows that convention (see usage-cross-protocol-
-// matrix §三). See TestComputeCostAcceptsContradictoryTotal for the positive case.
+// bills on; this gateway follows that convention. See
+// TestComputeCostAcceptsContradictoryTotal for the positive case.
 func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
 	readPrice := 0.02
 	cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0, CacheReadPrice: &readPrice}
@@ -600,7 +600,7 @@ func TestComputeCostRejectsIncoherentUsage(t *testing.T) {
 		{"negative cache write", &Usage{PromptTokens: 100, CompletionTokens: 10, CacheWriteTokens: -1}},
 		{"negative total", &Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: -1}},
 		{
-			// P2-4 regression: a negative reasoning count must reach the verdict.
+			// Regression: a negative reasoning count must reach the verdict.
 			// It arrives on IRUsage.ReasoningTokens; the bridge carries it across
 			// so the wire encoder (which refuses via HasNegativeCount) and this
 			// billing gate agree on rejecting it.

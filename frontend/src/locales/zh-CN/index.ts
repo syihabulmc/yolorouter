@@ -530,6 +530,7 @@ export default {
     clientDisconnected: '客户端已断开连接',
     panicRecovered: '内部错误（已恢复）',
     allCandidatesFailed: '所有上游候选均失败',
+    contentInspectionRefused: '被上游内容审查拒绝',
     partialThenExhausted: '部分成功后所有候选耗尽',
     noCapabilityCandidate: '没有候选支持此模型',
     noVerifiedCandidate: '没有已验证的上游 Key 可用',
@@ -904,7 +905,7 @@ export default {
     attempt_keyLabel: 'Key 标签',
     attempt_keyLabel_tip: '该次尝试使用的上游 Key 的管理员标签，不展示完整 Key',
     attempt_outcome: '结果',
-    attempt_outcome_tip: '该次尝试的结局分类：成功 / 鉴权失败 / 限流 / 连接错误 / 上游错误 / 客户端错误 / 未识别状态',
+    attempt_outcome_tip: '该次尝试的结局分类：成功 / 鉴权失败 / 限流 / 连接错误 / 上游错误 / 客户端错误 / 未识别状态 / 内容审查拒绝',
     attempt_statusCode: '状态码',
     attempt_statusCode_tip: '上游返回的 HTTP 状态码',
     attempt_failReason: '失败原因',
@@ -922,6 +923,7 @@ export default {
     attempt_outcome_server_error: '上游错误',
     attempt_outcome_client_error: '客户端错误',
     attempt_outcome_bad_status: '未识别状态',
+    attempt_outcome_content_filtered: '内容审查拒绝',
 
     attemptsEmpty: '该请求未记录任何上游尝试（可能在路由前就被拒绝）',
 

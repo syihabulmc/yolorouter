@@ -527,6 +527,7 @@ export default {
     clientDisconnected: 'Client disconnected',
     panicRecovered: 'Internal error (recovered)',
     allCandidatesFailed: 'All upstream candidates failed',
+    contentInspectionRefused: 'Refused by upstream content inspection',
     partialThenExhausted: 'Partial success then all candidates exhausted',
     noCapabilityCandidate: 'No candidate has this model capability',
     noVerifiedCandidate: 'No verified upstream key available',
@@ -901,7 +902,7 @@ export default {
     attempt_keyLabel: 'Key Label',
     attempt_keyLabel_tip: 'Admin label of the upstream key used by this attempt; full key is never displayed',
     attempt_outcome: 'Outcome',
-    attempt_outcome_tip: 'Outcome bucket: success / auth_failed / rate_limited / conn_error / server_error / client_error / bad_status',
+    attempt_outcome_tip: 'Outcome bucket: success / auth_failed / rate_limited / conn_error / server_error / client_error / bad_status / content_filtered',
     attempt_statusCode: 'Status Code',
     attempt_statusCode_tip: 'HTTP status code returned by the upstream',
     attempt_failReason: 'Failure Reason',
@@ -919,6 +920,7 @@ export default {
     attempt_outcome_server_error: 'Upstream error',
     attempt_outcome_client_error: 'Client error',
     attempt_outcome_bad_status: 'Unknown status',
+    attempt_outcome_content_filtered: 'Content filtered',
 
     attemptsEmpty: 'No upstream attempts recorded for this request (it may have been rejected before routing).',
 

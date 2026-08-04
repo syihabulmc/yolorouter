@@ -758,7 +758,7 @@ func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *RelayCon
 		case headerWritten:
 			// Slide the per-write deadline before each forwarded line so
 			// a slow-reading client is bounded by streamWriteWindow.
-			_ = protocols.ApplyStreamWriteDeadline(c)
+			applyStreamWriteDeadline(c, rc.RequestID)
 			// A downstream Write/Flush error here (deadline exceeded, broken
 			// pipe) must be wrapped in protocols.ErrClientWrite and returned
 			// immediately: this is the production streaming path (every
@@ -781,7 +781,7 @@ func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *RelayCon
 		case isDataLine(line):
 			// First data frame — commit the SSE headers, flush any buffered
 			// preamble in order, then forward the data line.
-			_ = protocols.ApplyStreamWriteDeadline(c)
+			applyStreamWriteDeadline(c, rc.RequestID)
 			writeSSEHeader(c)
 			// The 200 status + SSE headers are committed the moment
 			// writeSSEHeader returns — mark first-byte-sent now, before the
@@ -1136,7 +1136,7 @@ func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *R
 			// passthroughStreamToClient's identical headerWritten branch for
 			// the full rationale (this is the production streaming path for
 			// every non-OpenAI passthrough egress).
-			_ = protocols.ApplyStreamWriteDeadline(c)
+			applyStreamWriteDeadline(c, rc.RequestID)
 			if _, err := c.Writer.Write(line); err != nil {
 				return currentUsage(), fmt.Errorf("%w: passthrough write to client: %w", protocols.ErrClientWrite, err)
 			}
@@ -1148,7 +1148,7 @@ func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *R
 			// First data frame — commit the SSE headers, flush any buffered
 			// preamble in order, then forward the data line. Mirrors
 			// passthroughStreamToClient's identical first-data-frame handling.
-			_ = protocols.ApplyStreamWriteDeadline(c)
+			applyStreamWriteDeadline(c, rc.RequestID)
 			writeSSEHeader(c)
 			// The 200 status + SSE headers are committed the moment
 			// writeSSEHeader returns — mark first-byte-sent now, before the

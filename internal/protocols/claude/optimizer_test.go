@@ -2,11 +2,10 @@ package claude
 
 import (
 	"encoding/json"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"net/http"
 	"reflect"
 	"testing"
-
-	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

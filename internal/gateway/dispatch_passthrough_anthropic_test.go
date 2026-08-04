@@ -12,7 +12,8 @@ import (
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
 
-// This file is the regression coverage for FIX 2: the same-protocol
+// This file is the regression coverage for the passthrough fix: the
+// same-protocol
 // passthrough response helpers (dispatchPassthroughNonStream /
 // dispatchPassthroughStream) used to assume every passthrough egress spoke
 // OpenAI — RewriteNonStreamResponse's extractUsage only recognizes

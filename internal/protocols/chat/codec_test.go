@@ -643,7 +643,7 @@ func TestOpenAIDecodeRequest_ExtendedParams(t *testing.T) {
 	}
 }
 
-// TestOpenAIDecodeRequest_StopScalar is a regression test for the P1 fix
+// TestOpenAIDecodeRequest_StopScalar is a regression test for the fix
 // that made the decoder accept "stop" as a plain string, not just an array —
 // OpenAI's Chat Completions API documents "stop" as EITHER a string OR an
 // array of strings, and a scalar "stop" used to fail the top-level JSON

@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yolorouter/yolorouter/internal/protocols"
-	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
 // controlStreamDecoder turns each raw line into one DeltaText, or a DeltaDone
@@ -159,7 +156,8 @@ func TestIRStreamRelay_WriteErrorClassifiedAsClientWrite(t *testing.T) {
 }
 
 // TestIRStreamRelay_FlushErrorClassifiedAsClientWriteAndNotCaptured verifies
-// FIX 4: a Flush failure (Write succeeded, but the real delivery error only
+// Flush-failure handling: a Flush failure (Write succeeded, but the real
+// delivery error only
 // surfaces on Flush) is also classified via protocols.ErrClientWrite, AND —
 // critically — the bytes are NOT captured to buf, since capture must only
 // happen once both the Write and the Flush that carried it succeeded.
@@ -186,7 +184,8 @@ func TestIRStreamRelay_FlushErrorClassifiedAsClientWriteAndNotCaptured(t *testin
 }
 
 // TestIRStreamRelay_CapturesOnlyAfterSuccessfulFlush is the positive control
-// for FIX 4: when both Write and Flush succeed, the bytes ARE captured, and
+// for the flush-failure fix: when both Write and Flush succeed, the bytes
+// ARE captured, and
 // in the same order they were written to the client.
 func TestIRStreamRelay_CapturesOnlyAfterSuccessfulFlush(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -213,7 +212,8 @@ func TestIRStreamRelay_CapturesOnlyAfterSuccessfulFlush(t *testing.T) {
 }
 
 // TestIRStreamRelayJSONLines_EmitFailureReturnsImmediately is a regression
-// test for FIX 3: on emit() failure, IRStreamRelayJSONLines used to fall
+// test for the emit-failure fix: on emit() failure, IRStreamRelayJSONLines
+// used to fall
 // through to the leftover-lineBuf and decoder.Finish() blocks, which would
 // emit() AGAIN onto an already-dead connection. This test crafts two lines
 // so the write for the second one fails, and verifies the writer sees
@@ -287,7 +287,7 @@ func (stubResponseEncoder) EncodeResponse(*protocols.IRResponse) json.RawMessage
 	return json.RawMessage(`{"ok":true}`)
 }
 
-// TestIRNonStreamRelay_2xxWriteErrorClassifiedAsClientWrite is the P2-1 fix
+// TestIRNonStreamRelay_2xxWriteErrorClassifiedAsClientWrite is the fix
 // pin for IRNonStreamRelay's success path: before the fix, the final
 // c.Writer.Write(encoded) call discarded its error entirely, so a downstream
 // write failure after a fully-decoded 2xx response was indistinguishable
@@ -372,47 +372,24 @@ func TestIRNonStreamRelay_NonSuccessErrorBodyWriteErrorClassifiedAsClientWrite(t
 	assert.Nil(t, usage, "no usage is expected on the error-body passthrough path")
 }
 
-// TestApplyStreamWriteDeadline_WarnsOnceAcrossRepeatedFailures is a
-// regression test for FIX 5: ApplyStreamWriteDeadline's failure used to be
-// silently discarded at every one of its 7 call sites, losing the
-// ClearWriteDeadline-era invariant that a persistently unsupported writer
-// (e.g. a middleware wrapper missing Unwrap) must be operationally visible,
-// not silently degrade the sliding write-deadline protection. This asserts
-// the warning is logged exactly once — not once per chunk — across many
-// repeated failures against the same request, which is what a real SSE
-// stream's per-chunk ApplyStreamWriteDeadline calls look like.
-func TestApplyStreamWriteDeadline_WarnsOnceAcrossRepeatedFailures(t *testing.T) {
-	dir := t.TempDir()
-	logFile := filepath.Join(dir, "test.log")
-	logger.Init(logger.Config{Level: "warn", Filename: logFile, Console: false})
-	t.Cleanup(func() {
-		_ = logger.Sync()
-		// Point subsequent log calls in this process at /dev/null instead of
-		// this test's (about-to-be-removed) tmp directory, and avoid falling
-		// back to logger.Init's default console output, which would print a
-		// warning line for every other test in this binary that happens to
-		// hit an unsupported writer (e.g. httptest.ResponseRecorder).
-		logger.Init(logger.Config{Filename: os.DevNull})
-	})
-
+// TestApplyStreamWriteDeadline_ErrorsOnUnsupportedWriter guards the surviving
+// behaviour of ApplyStreamWriteDeadline after the protocol-layer cleanup
+// removed its logging: the error from an unsupported writer (e.g.
+// httptest.ResponseRecorder, which lacks SetWriteDeadline) must still be
+// returned to the caller so tests and callers can observe the failure, even
+// though the warn-once log that used to accompany it is gone (the protocol
+// layer no longer depends on pkg/logger; the caller owns observability).
+func TestApplyStreamWriteDeadline_ErrorsOnUnsupportedWriter(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder() // does not support SetWriteDeadline
 	c, _ := gin.CreateTestContext(w)
 	c.Request, _ = http.NewRequest(http.MethodGet, "/x", nil)
-	c.Set("request_id", "req-warn-once")
 
-	// Simulate several chunks in a stream all hitting the same unsupported
-	// writer — SetWriteDeadline fails identically on every call.
+	// Repeated per-chunk calls must each surface the failure identically —
+	// that is what a real SSE stream's per-chunk ApplyStreamWriteDeadline
+	// calls look like.
 	for range 5 {
 		err := protocols.ApplyStreamWriteDeadline(c)
 		require.Error(t, err)
 	}
-	_ = logger.Sync()
-
-	data, readErr := os.ReadFile(logFile)
-	require.NoError(t, readErr)
-	count := strings.Count(string(data), "apply stream write deadline failed")
-	assert.Equal(t, 1, count,
-		"expected exactly 1 warning log line despite 5 failing calls, got %d: %s", count, data)
-	assert.Contains(t, string(data), "req-warn-once", "warning log must carry the request ID")
 }

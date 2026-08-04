@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"strings"
+	"time"
 )
 
 // StreamEncoder encodes IR deltas into OpenAI Chat Completions SSE format.
@@ -13,21 +14,62 @@ type StreamEncoder struct {
 	started      bool
 	id           string
 	hasToolCalls bool
+	sawDone      bool
+
+	// created is the Unix timestamp stamped on every chunk of this stream.
+	// `created` is in the required list of both ChatCompletionChunk and
+	// ChatCompletion in the official OpenAPI schema, so omitting it makes a
+	// strict-validating downstream reject the whole response. Captured once at
+	// construction so all frames of one stream agree, matching real OpenAI.
+	created int64
 
 	// IncludeUsage mirrors the caller's stream_options.include_usage=true
-	// request: when true, EncodeDone emits one extra usage-only chunk
-	// (empty choices, populated usage) before the [DONE] terminator, the
-	// same shape a real OpenAI streaming response uses. Only meaningful for
-	// a cross-protocol egress, where this encoder — not the upstream itself
-	// — is what produces the client-facing SSE frames; the gateway wires
-	// this from rc.WantsStreamUsage. Defaults to false (no usage chunk),
-	// matching the pre-existing behavior for every caller that doesn't set
-	// it.
+	// request: when true, EncodeDone emits one extra usage-only chunk (empty
+	// choices, populated usage) before the [DONE] terminator, the same shape a
+	// real OpenAI streaming response uses. Only meaningful on a cross-protocol
+	// egress, where this encoder — not the upstream — produces the
+	// client-facing SSE frames; the same-protocol passthrough path bypasses
+	// the encoder entirely and forwards the upstream's own frames verbatim.
+	// Wired from IRRequest.Stream.IncludeUsage by the dispatch layer.
 	IncludeUsage bool
 }
 
 func NewStreamEncoder() *StreamEncoder {
-	return &StreamEncoder{}
+	return &StreamEncoder{created: time.Now().UTC().Unix()}
+}
+
+// newChunk builds the shared chat.completion.chunk envelope. Centralising it
+// keeps `created` (a required field) on every frame and applies the
+// include_usage rule that non-final chunks carry an explicit `usage: null`.
+func (e *StreamEncoder) newChunk(choices []interface{}) map[string]interface{} {
+	chunk := map[string]interface{}{
+		"id":      e.id,
+		"object":  "chat.completion.chunk",
+		"created": e.created,
+		"model":   e.model,
+		"choices": choices,
+	}
+	if e.IncludeUsage {
+		// Per the OpenAI API docs, with stream_options.include_usage=true every
+		// chunk except the final usage-only one reports usage as null.
+		chunk["usage"] = nil
+	}
+	return chunk
+}
+
+// deltaChunk wraps a single choice delta in the standard envelope.
+//
+// finish_reason is emitted as an explicit null: the schema lists it alongside
+// delta and index in choices[].required for every streaming chunk, and OpenAI's
+// own examples carry `"finish_reason": null` on content frames. Omitting it is
+// the same class of defect as the missing `created` — invisible to lenient
+// clients, fatal to a schema-validating one, and on every frame rather than one.
+func (e *StreamEncoder) deltaChunk(delta map[string]interface{}) protocols.SSEEvent {
+	chunk := e.newChunk([]interface{}{
+		map[string]interface{}{"index": 0, "delta": delta, "finish_reason": nil},
+	})
+	data, _ := json.Marshal(chunk)
+	return protocols.SSEEvent{Data: string(data)}
 }
 
 func (e *StreamEncoder) EncodeDeltas(deltas []protocols.IRStreamDelta) []protocols.SSEEvent {
@@ -41,29 +83,29 @@ func (e *StreamEncoder) EncodeDeltas(deltas []protocols.IRStreamDelta) []protoco
 			e.started = true
 
 		case protocols.DeltaText:
-			events = append(events, openaiTextChunk(e.id, e.model, d.Text))
+			events = append(events, e.textChunk(d.Text))
 
 		case protocols.DeltaThinking:
-			events = append(events, openaiReasoningChunk(e.id, e.model, d.Text))
+			events = append(events, e.reasoningChunk(d.Text))
 
 		case protocols.DeltaToolCallStart:
 			e.hasToolCalls = true
-			events = append(events, openaiToolCallStartChunk(e.id, e.model, d.Index, d.ID, d.Name))
+			events = append(events, e.toolCallStartChunk(d.Index, d.ID, d.Name))
 
 		case protocols.DeltaToolCallArgs:
-			events = append(events, openaiToolCallArgsChunk(e.id, e.model, d.Index, d.Arguments))
+			events = append(events, e.toolCallArgsChunk(d.Index, d.Arguments))
 
 		case protocols.DeltaUsage:
-			// Field-level merge (via IRUsage.Merge), aligned with the claude /
-			// responses / gemini encoders: when the upstream sends usage across
-			// multiple partial chunks, a later completion-only frame must not
-			// zero out PromptTokens / cache fields that were already collected
-			// — otherwise we under-report billed usage and the client reads
-			// wrong usage numbers.
+			// Field-level merge (via IRUsage.Merge), matching the claude /
+			// responses / gemini encoders: when an upstream sends partial usage
+			// chunks across multiple frames, a later completion-only frame must
+			// not clobber already-collected PromptTokens / cache fields to 0
+			// (which would under-bill and hand the client wrong usage).
 			e.usage.Merge(d.Usage)
 
 		case protocols.DeltaDone:
-			events = append(events, openaiFinishChunk(e.id, e.model, d.StopReason, e.hasToolCalls))
+			e.sawDone = true
+			events = append(events, e.finishChunk(d.StopReason, e.hasToolCalls))
 
 		case protocols.DeltaUnknown:
 			var value json.RawMessage
@@ -76,65 +118,65 @@ func (e *StreamEncoder) EncodeDeltas(deltas []protocols.IRStreamDelta) []protoco
 	return events
 }
 
-// EncodeDone emits the OpenAI SSE stream terminator (`data: [DONE]`),
-// preceded by a usage-only chunk when IncludeUsage is set and usage has
-// meaningful token counts — mirroring how a real OpenAI stream with
-// stream_options.include_usage=true sends one final chunk with empty
-// choices and populated usage right before [DONE]. IRStreamRelay calls this
-// once, only on a clean end (no upstream error), after every delta has been
-// encoded — so a cross-protocol stream, whose egress decoder produces no
-// OpenAI-style [DONE] sentinel (or usage chunk) of its own, still terminates
-// the way an OpenAI SDK expects. On the same-protocol passthrough path this
-// encoder is bypassed entirely and the upstream's own [DONE] (and usage
-// chunk, if any) is forwarded verbatim, so there is no risk of a duplicate
-// terminator or usage frame.
+// EncodeDone emits the OpenAI SSE stream terminator (`data: [DONE]`), preceded
+// by a usage-only chunk when IncludeUsage is set and usage carries meaningful
+// counts — mirroring a real OpenAI stream with stream_options.include_usage=true,
+// which sends one final chunk with empty choices and populated usage right
+// before [DONE].
+//
+// Called by the IR stream relay once, only on a clean end (finishErr == nil),
+// after every delta has been encoded — so DeltaUsage has already been merged
+// into e.usage and the counts are complete. On a failed stream it is not called
+// at all, so no success terminator leaks out.
+//
+// The same-protocol passthrough path bypasses this encoder and forwards the
+// upstream's own [DONE] verbatim, so there is no risk of a duplicate terminator.
+//
+// Gated on sawDone — mirroring the guards the other three ingress encoders
+// already have (gemini: !e.hasStop, responses: e.completed || !e.hasStop,
+// claude: e.stopped || e.pendingStopReason == ""). A truncated upstream that
+// closes the socket cleanly mid-stream still reaches here with finishErr == nil
+// (io.EOF is not a scanner error and the egress decoders' Finish() returns no
+// error when they never saw a terminal frame). Emitting [DONE] there would hand
+// the client an explicit success terminator for a half-written answer, which an
+// OpenAI SDK would accept as a complete response instead of retrying.
 func (e *StreamEncoder) EncodeDone() []protocols.SSEEvent {
+	if !e.sawDone {
+		return nil
+	}
 	var events []protocols.SSEEvent
-	if e.IncludeUsage && hasMeaningfulChatUsage(e.usage) {
-		events = append(events, openaiUsageChunk(e.id, e.model, e.usage))
+	if e.IncludeUsage && protocols.HasAnyUsage(e.usage) {
+		events = append(events, e.usageChunk())
 	}
 	events = append(events, protocols.SSEEvent{Data: "[DONE]"})
 	return events
 }
 
-// hasMeaningfulChatUsage reports whether usage carries at least one non-zero
-// token count, guarding against emitting an empty (all-zero) usage chunk
-// when the upstream never actually reported usage.
-func hasMeaningfulChatUsage(u protocols.IRUsage) bool {
-	// Never put an impossible record on the wire: the client would read it as
-	// authoritative, and a downstream gateway would bill it.
-	if u.Invalid {
-		return false
-	}
-	return u.PromptTokens > 0 || u.CompletionTokens > 0 || u.TotalTokens > 0
-}
-
-// openaiUsageChunk builds the final usage-only SSE frame OpenAI's
-// stream_options.include_usage=true sends before [DONE]: same envelope as a
-// content chunk, empty choices, populated usage. Mirrors ResponseEncoder's
-// non-stream usage block (including the cached_tokens detail) so the
-// stream and non-stream shapes stay consistent.
-func openaiUsageChunk(id, model string, usage protocols.IRUsage) protocols.SSEEvent {
-	chunk := map[string]interface{}{
-		"id":      id,
-		"object":  "chat.completion.chunk",
-		"model":   model,
-		"choices": []interface{}{},
-		"usage":   openAIWireUsage(usage),
-	}
+// usageChunk builds the final usage-only SSE frame that
+// stream_options.include_usage=true produces: the standard chunk envelope with
+// an empty choices array and populated usage. Reuses newChunk so it carries the
+// same id / created / model as every content frame — a mismatched id would make
+// clients that group chunks by id discard it as a separate completion.
+func (e *StreamEncoder) usageChunk() protocols.SSEEvent {
+	chunk := e.newChunk([]interface{}{})
+	// Overwrite the null placeholder newChunk sets for non-final frames.
+	chunk["usage"] = openAIWireUsage(e.usage)
 	data, _ := json.Marshal(chunk)
 	return protocols.SSEEvent{Data: string(data)}
 }
 
-// openAIWireUsage builds the OpenAI-spec usage object, shared by the streaming
-// usage-only chunk and the non-streaming response so the two shapes cannot
-// drift apart.
+// openAIWireUsage builds the OpenAI usage object shared by the
+// non-streaming response and the streaming usage-only chunk.
 //
-// Emits GROSS counts: OpenAI documents cached_tokens as a breakdown OF
-// prompt_tokens, so the cached portion must be inside the prompt total.
-// Forwarding the raw IR PromptTokens would be wrong for an Anthropic upstream,
-// whose count is net — the whole cache portion would vanish and the response
-// would claim cached_tokens > prompt_tokens.
+// prompt_tokens is the GROSS input (cache included). cached_tokens is a
+// breakdown of prompt_tokens and must therefore remain within that total.
+// Emitting the IR's raw PromptTokens would drop the whole cache portion for
+// Anthropic upstreams and produce the impossible cached_tokens > prompt_tokens.
+//
+// OpenAI's usage has no cache-WRITE field of its own, so CacheWriteTokens is
+// carried in the non-standard protocols.CacheWriteAliasField below; without it
+// a downstream gateway could not tell those tokens from fresh input and would
+// under-bill that portion.
 func openAIWireUsage(u protocols.IRUsage) map[string]interface{} {
 	// A record the gateway itself refused publishes nothing: emitting sanitized
 	// counts would hand the client — and any downstream gateway billing from
@@ -162,6 +204,13 @@ func openAIWireUsage(u protocols.IRUsage) map[string]interface{} {
 		}
 		usage["prompt_tokens_details"] = details
 	}
+	// Reasoning tokens are decoded into the IR by the responses/claude decoders
+	// but had no egress here, so clients doing reasoning cost breakdowns saw 0.
+	if u.ReasoningTokens > 0 {
+		usage["completion_tokens_details"] = map[string]interface{}{
+			"reasoning_tokens": u.ReasoningTokens,
+		}
+	}
 	return usage
 }
 
@@ -183,6 +232,10 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 	choice := map[string]interface{}{
 		"index":         0,
 		"finish_reason": mapFromOpenAIFinishReason(resp.StopReason, len(resp.ToolCalls) > 0),
+		// logprobs is in choices[].required for the non-streaming response
+		// (finish_reason / index / message / logprobs); it is nullable, so an
+		// explicit null satisfies the schema without inventing data.
+		"logprobs": nil,
 	}
 	message := map[string]interface{}{
 		"role": "assistant",
@@ -213,8 +266,11 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 	choice["message"] = message
 
 	result := map[string]interface{}{
-		"id":      openAIResponseID(resp.ID),
-		"object":  "chat.completion",
+		"id":     openAIResponseID(resp.ID),
+		"object": "chat.completion",
+		// `created` is in ChatCompletion's required list; omitting it makes a
+		// strict-validating downstream reject the response.
+		"created": time.Now().UTC().Unix(),
 		"model":   resp.Model,
 		"choices": []interface{}{choice},
 		"usage":   openAIWireUsage(resp.Usage),
@@ -226,105 +282,62 @@ func (ResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessag
 
 // --- helpers ---
 
-func openaiTextChunk(id, model, text string) protocols.SSEEvent {
-	chunk := map[string]interface{}{
-		"id":     id,
-		"object": "chat.completion.chunk",
-		"model":  model,
-		"choices": []interface{}{
+func (e *StreamEncoder) textChunk(text string) protocols.SSEEvent {
+	return e.deltaChunk(map[string]interface{}{"content": text})
+}
+
+func (e *StreamEncoder) reasoningChunk(text string) protocols.SSEEvent {
+	return e.deltaChunk(map[string]interface{}{"reasoning_content": text})
+}
+
+func (e *StreamEncoder) toolCallStartChunk(index int, callID, name string) protocols.SSEEvent {
+	return e.deltaChunk(map[string]interface{}{
+		"tool_calls": []interface{}{
 			map[string]interface{}{
-				"index": 0,
-				"delta": map[string]interface{}{"content": text},
+				"index":    index,
+				"id":       callID,
+				"type":     "function",
+				"function": map[string]interface{}{"name": name, "arguments": ""},
 			},
 		},
-	}
+	})
+}
+
+func (e *StreamEncoder) toolCallArgsChunk(index int, arguments string) protocols.SSEEvent {
+	return e.deltaChunk(map[string]interface{}{
+		"tool_calls": []interface{}{
+			map[string]interface{}{
+				"index":    index,
+				"function": map[string]interface{}{"arguments": arguments},
+			},
+		},
+	})
+}
+
+func (e *StreamEncoder) finishChunk(reason string, hasToolCalls bool) protocols.SSEEvent {
+	chunk := e.newChunk([]interface{}{
+		map[string]interface{}{
+			"index":         0,
+			"delta":         map[string]interface{}{},
+			"finish_reason": mapFromOpenAIFinishReason(reason, hasToolCalls),
+		},
+	})
 	data, _ := json.Marshal(chunk)
 	return protocols.SSEEvent{Data: string(data)}
 }
 
-func openaiReasoningChunk(id, model, text string) protocols.SSEEvent {
-	chunk := map[string]interface{}{
-		"id":     id,
-		"object": "chat.completion.chunk",
-		"model":  model,
-		"choices": []interface{}{
-			map[string]interface{}{
-				"index": 0,
-				"delta": map[string]interface{}{"reasoning_content": text},
-			},
-		},
-	}
-	data, _ := json.Marshal(chunk)
-	return protocols.SSEEvent{Data: string(data)}
-}
-
-func openaiToolCallStartChunk(id, model string, index int, callID, name string) protocols.SSEEvent {
-	chunk := map[string]interface{}{
-		"id":     id,
-		"object": "chat.completion.chunk",
-		"model":  model,
-		"choices": []interface{}{
-			map[string]interface{}{
-				"index": 0,
-				"delta": map[string]interface{}{
-					"tool_calls": []interface{}{
-						map[string]interface{}{
-							"index":    index,
-							"id":       callID,
-							"type":     "function",
-							"function": map[string]interface{}{"name": name, "arguments": ""},
-						},
-					},
-				},
-			},
-		},
-	}
-	data, _ := json.Marshal(chunk)
-	return protocols.SSEEvent{Data: string(data)}
-}
-
-func openaiToolCallArgsChunk(id, model string, index int, arguments string) protocols.SSEEvent {
-	chunk := map[string]interface{}{
-		"id":     id,
-		"object": "chat.completion.chunk",
-		"model":  model,
-		"choices": []interface{}{
-			map[string]interface{}{
-				"index": 0,
-				"delta": map[string]interface{}{
-					"tool_calls": []interface{}{
-						map[string]interface{}{
-							"index":    index,
-							"function": map[string]interface{}{"arguments": arguments},
-						},
-					},
-				},
-			},
-		},
-	}
-	data, _ := json.Marshal(chunk)
-	return protocols.SSEEvent{Data: string(data)}
-}
-
-func openaiFinishChunk(id, model, reason string, hasToolCalls bool) protocols.SSEEvent {
-	mapped := mapFromOpenAIFinishReason(reason, hasToolCalls)
-	chunk := map[string]interface{}{
-		"id":     id,
-		"object": "chat.completion.chunk",
-		"model":  model,
-		"choices": []interface{}{
-			map[string]interface{}{
-				"index":         0,
-				"delta":         map[string]interface{}{},
-				"finish_reason": mapped,
-			},
-		},
-	}
-	data, _ := json.Marshal(chunk)
-	return protocols.SSEEvent{Data: string(data)}
-}
-
+// mapFromOpenAIFinishReason maps an IR stop reason onto OpenAI's finish_reason
+// enum (stop | length | tool_calls | content_filter).
+//
+// An explicit abnormal termination OUTRANKS the tool-call inference. A run cut
+// off by max tokens can already have emitted partial tool-call argument deltas;
+// reporting "tool_calls" would tell the client those arguments are complete and
+// safe to execute when they may not even be valid JSON. "length" /
+// "content_filter" must survive so the client knows the call is unusable.
 func mapFromOpenAIFinishReason(reason string, hasToolCalls bool) interface{} {
+	if protocols.IRStopReasonIsAbnormal(reason) {
+		return reason
+	}
 	if hasToolCalls {
 		return "tool_calls"
 	}
