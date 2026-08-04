@@ -121,10 +121,6 @@ watch(
   },
 )
 
-function onUpdateShow(value: boolean) {
-  emit('update:show', value)
-}
-
 async function onSubmit() {
   try {
     await formRef.value?.validate()

@@ -236,12 +236,14 @@ async function onGenerate() {
 async function onCopy(): Promise<boolean> {
   try {
     if (isMobile) {
-      var oInput = document.getElementById('copy'); 
-      oInput.value = (plaintext.value)
-      oInput.select();
-      if (document.execCommand('Copy')) {
-        console.log('success')
-      } else {
+      const oInput = document.getElementById('copy') as HTMLInputElement | null
+      if (!oInput) {
+        message.error(t('apiKeys.copyFailed'))
+        return false
+      }
+      oInput.value = plaintext.value
+      oInput.select()
+      if (!document.execCommand('Copy')) {
         message.error(t('apiKeys.copyFailed'))
         return false
       }

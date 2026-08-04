@@ -63,7 +63,7 @@
       <!-- Server-side paging still needs to be reachable on mobile — the
            desktop pager lives inside NDataTable, so render a standalone one
            here driven by the same pagination object. -->
-      <div v-if="pagination && pagination.itemCount > 10" class="rdt-cards__pager">
+      <div v-if="pagination && (pagination.itemCount ?? 0) > 10" class="rdt-cards__pager">
         <NPagination
           :page="pagination.page"
           :page-size="pagination.pageSize"
