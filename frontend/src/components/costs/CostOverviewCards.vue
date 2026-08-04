@@ -76,7 +76,7 @@ const { t } = useI18n()
 const netCacheSaved = computed(() => netCacheSavedMicros(props.overview))
 </script>
 
-<style scoped>
+<style scoped lang="less">
 /* Four-up grid override on the shared .metric-row shell. Drops to 2-up on
    tablet and 1-up on phone, matching the page-level cost stats layout. */
 .metric-row {
@@ -107,7 +107,7 @@ const netCacheSaved = computed(() => netCacheSavedMicros(props.overview))
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   /* .metric-row .metric.one-line{
      grid-column: 1 / -1;
   } */

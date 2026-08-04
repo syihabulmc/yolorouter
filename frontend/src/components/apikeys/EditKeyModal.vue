@@ -240,7 +240,7 @@ async function onSave() {
 }
 </script>
 
-<style scoped>
+<style scoped lang="less">
 .full-width {
   width: 100%;
 }
@@ -268,7 +268,7 @@ async function onSave() {
   column-gap: 16px;
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .limit-grid {
     grid-template-columns: 1fr;
   }

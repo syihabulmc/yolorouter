@@ -426,7 +426,7 @@ function goToRequestLog(requestId: string) {
 }
 </script>
 
-<style scoped>
+<style scoped lang="less">
 .setup-banner {
   display: flex;
   align-items: center;
@@ -768,7 +768,7 @@ function goToRequestLog(requestId: string) {
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .setup-banner {
     flex-direction: column;
     align-items: flex-start;

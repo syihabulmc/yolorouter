@@ -234,7 +234,7 @@ watch(
 )
 </script>
 
-<style scoped>
+<style scoped lang="less">
 .metric-row {
   grid-template-columns: repeat(4, 1fr);
 }
@@ -286,7 +286,7 @@ watch(
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .metric-row {
     grid-template-columns: repeat(2, 1fr);
   }

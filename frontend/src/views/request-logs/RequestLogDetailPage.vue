@@ -479,7 +479,7 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
 ])
 </script>
 
-<style scoped>
+<style scoped lang="less">
 .loading-state {
   color: var(--color-text-secondary);
   padding: var(--space-8);
@@ -573,7 +573,7 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
   color: var(--color-text-secondary);
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .compress-body-grid {
     grid-template-columns: 1fr;
   }

@@ -20,9 +20,8 @@
     </button>
   </n-dropdown>
 
-  <!-- Mobile: the same trigger raises a bottom sheet of languages, mirroring
-       the TimeRangeSelect interaction so the app shell reads consistently on a
-       phone. -->
+  <!-- Mobile: the same trigger raises the shared OptionSheet (a plain value
+       picker over LOCALES), so every phone overlay reads the same. -->
   <template v-else>
     <button class="locale-switch" type="button" aria-haspopup="menu" @click="sheetOpen = true">
       <NIcon :size="16" class="locale-switch__globe"><Globe /></NIcon>
@@ -30,31 +29,21 @@
       <NIcon :size="14" class="locale-switch__chevron"><ChevronDown /></NIcon>
     </button>
 
-    <NDrawer v-model:show="sheetOpen" placement="bottom" :height="sheetHeight" class="locale-sheet">
-      <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0;">
-        <div class="locale-sheet__body">
-          <div class="locale-sheet__handle" />
-          <button
-            v-for="l in LOCALES"
-            :key="l.value"
-            type="button"
-            class="locale-sheet__option"
-            :class="{ 'locale-sheet__option--active': l.value === locale.locale }"
-            @click="onSheetSelect(l.value)"
-          >
-            <span>{{ l.label }}</span>
-            <NIcon v-if="l.value === locale.locale" :size="18"><Check /></NIcon>
-          </button>
-        </div>
-      </NDrawerContent>
-    </NDrawer>
+    <OptionSheet
+      v-model:show="sheetOpen"
+      :options="LOCALES"
+      :value="locale.locale"
+      :height="sheetHeight"
+      @select="onSheetSelect"
+    />
   </template>
 </template>
 
 <script setup lang="ts">
 import { computed, h, ref } from 'vue'
-import { NDrawer, NDrawerContent, NIcon, type DropdownOption } from 'naive-ui'
+import { NIcon, type DropdownOption } from 'naive-ui'
 import { Globe, ChevronDown, Check } from '@lucide/vue'
+import OptionSheet from './common/OptionSheet.vue'
 import { useLocaleStore } from '../store/locale'
 import { useIsMobile } from '../composables/useIsMobile'
 import { LOCALES } from '../i18n'
@@ -93,7 +82,6 @@ function onLocaleChange(value: 'zh-CN' | 'en') {
 }
 
 function onSheetSelect(value: 'zh-CN' | 'en') {
-  sheetOpen.value = false
   locale.setLocale(value)
 }
 </script>
@@ -126,53 +114,5 @@ function onSheetSelect(value: 'zh-CN' | 'en') {
 
 .locale-switch__chevron {
   color: var(--color-text-muted);
-}
-
-/* Rounded top corners on the bottom sheet — naive's drawer is square by
-   default. Mirrors the TimeRangeSelect sheet. */
-:deep(.locale-sheet.n-drawer) {
-  border-top-left-radius: var(--radius-xl);
-  border-top-right-radius: var(--radius-xl);
-  overflow: hidden;
-}
-
-.locale-sheet__body {
-  display: flex;
-  flex-direction: column;
-  padding: var(--space-2) var(--space-3) var(--space-4);
-}
-
-.locale-sheet__handle {
-  width: 36px;
-  height: 4px;
-  margin: var(--space-2) auto var(--space-3);
-  border-radius: var(--radius-full);
-  background: var(--color-border);
-}
-
-.locale-sheet__option {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 48px;
-  padding: 0 var(--space-3);
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--color-text);
-  font: inherit;
-  font-size: var(--text-base);
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-out);
-}
-
-.locale-sheet__option:active {
-  background: var(--color-surface-hover);
-}
-
-.locale-sheet__option--active {
-  color: var(--color-accent);
-  font-weight: 600;
 }
 </style>

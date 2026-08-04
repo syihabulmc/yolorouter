@@ -10,9 +10,9 @@
          card-specific definition to keep in sync.
 
      Controlled/pure: the parent owns columns + data. Breakpoint comes from the
-     shared useIsMobile composable (768px). Empty and loading states on desktop
-     are naive's; on mobile they're rendered here. Pass an #empty slot to
-     control the empty message in both layouts. -->
+     shared useIsMobile composable (MOBILE_BREAKPOINT). Empty and loading
+     states on desktop are naive's; on mobile they're rendered here. Pass an
+     #empty slot to control the empty message in both layouts. -->
 <template>
   <!-- Desktop: the full data table. -->
   <NDataTable
@@ -158,7 +158,7 @@ function onMobilePageSize(ps: number) {
 }
 </script>
 
-<style scoped>
+<style scoped lang="less">
 .rdt-cards {
   display: flex;
   flex-direction: column;
@@ -238,7 +238,7 @@ function onMobilePageSize(ps: number) {
   color: #6467f2 !important
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .rdt-cards__pager {
     display: flex;
     justify-content: center;

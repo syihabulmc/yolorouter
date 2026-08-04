@@ -302,7 +302,7 @@ function reset() {
 }
 </script>
 
-<style scoped>
+<style scoped lang="less">
 .full-width {
   width: 100%;
 }
@@ -330,7 +330,7 @@ function reset() {
   column-gap: 16px;
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .limit-grid {
     grid-template-columns: 1fr;
   }

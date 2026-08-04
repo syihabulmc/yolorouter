@@ -265,7 +265,7 @@ a {
   font-weight: 700;
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .layout-content {
     /* The mobile top bar (see DefaultLayout) now occupies the top of the
        viewport, so the content just needs ordinary padding rather than the
@@ -382,7 +382,7 @@ a {
   gap: var(--space-6);
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .common-page {
     gap: var(--space-3);
   }
@@ -392,7 +392,7 @@ a {
     gap: var(--space-3);
 
     &.new-line{
-      display: black; 
+      display: block;
       .page-header__actions {
         position: static;
       }

@@ -14,27 +14,17 @@
       <span class="filter-select__trigger-label">{{ currentPresetLabel }}</span>
       <template #icon><ChevronDown :size="14" /></template>
     </NButton>
-    <NDrawer v-model:show="sheetOpen" placement="bottom" height="270" class="rd-sheet filter-select-sheet">
-      <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0;">
-        <div class="filter-sheet">
-          <div class="filter-sheet__handle" />
-          <div class="filter-sheet__title">{{ t('analytics.timeRange') }}</div>
-          <div class="filter-sheet__list">
-            <button
-              v-for="opt in mobilePresetOptions"
-              :key="opt.value"
-              type="button"
-              class="filter-sheet__option"
-              :class="{ 'filter-sheet__option--active': opt.value === preset }"
-              @click="onSheetSelect(opt.value)"
-            >
-              <span>{{ opt.label }}</span>
-              <NIcon v-if="opt.value === preset" :size="18"><Check /></NIcon>
-            </button>
-          </div>
-        </div>
-      </NDrawerContent>
-    </NDrawer>
+    <!-- The preset list is a plain value picker, so OptionSheet renders the
+         rows and highlights the active one directly — no bespoke sheet markup
+         here. -->
+    <OptionSheet
+      v-model:show="sheetOpen"
+      :title="t('analytics.timeRange')"
+      :options="mobilePresetOptions"
+      :value="preset"
+      :height="270"
+      @select="onSheetSelect"
+    />
   </template>
   <!-- Desktop: the full select + inline custom daterange picker. -->
   <div v-else class="time-range">
@@ -60,8 +50,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NButton, NDatePicker, NDrawer, NDrawerContent, NIcon, NSelect, type SelectOption } from 'naive-ui'
-import { Check, ChevronDown } from '@lucide/vue'
+import { NButton, NDatePicker, NSelect, type SelectOption } from 'naive-ui'
+import { ChevronDown } from '@lucide/vue'
+import OptionSheet from '../common/OptionSheet.vue'
 import { useIsMobile } from '../../composables/useIsMobile'
 
 export type RangePreset = 'today' | 'yesterday' | 'last7d' | 'last30d' | 'custom'
@@ -112,7 +103,6 @@ const mobilePresetOptions = computed(() =>
 )
 
 function onSheetSelect(v: RangePreset) {
-  sheetOpen.value = false
   onPresetChange(v)
 }
 
@@ -226,71 +216,4 @@ watch(
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-
-/* Rounded top corners on the bottom sheet — naive's drawer is square by
-   default. The class is set on <NDrawer> but the rounded surface is the
-   drawer container, so target it via :deep. */
-:deep(.filter-select-sheet.n-drawer) {
-  border-top-left-radius: var(--radius-xl);
-  border-top-right-radius: var(--radius-xl);
-  overflow: hidden;
-}
-
-.filter-sheet {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: var(--space-2) var(--space-3) var(--space-4);
-}
-
-.filter-sheet__handle {
-  width: 36px;
-  height: 4px;
-  margin: var(--space-2) auto var(--space-2);
-  border-radius: var(--radius-full);
-  background: var(--color-border);
-}
-
-.filter-sheet__title {
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-  padding: 0 var(--space-3);
-  margin-bottom: var(--space-2);
-}
-
-.filter-sheet__list {
-  flex: 1;
-  overflow-y: auto;
-}
-
-.filter-sheet__option {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 48px;
-  padding: 0 var(--space-3);
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--color-text);
-  font: inherit;
-  font-size: var(--text-base);
-  text-align: left;
-  cursor: pointer;
-  width: 100%;
-  transition: background var(--duration-fast) var(--ease-out);
-}
-
-.filter-sheet__option:active {
-  background: var(--color-surface-hover);
-}
-
-.filter-sheet__option--active {
-  color: var(--color-accent);
-  font-weight: 600;
-}
-
 </style>

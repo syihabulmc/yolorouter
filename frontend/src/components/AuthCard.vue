@@ -74,7 +74,7 @@ defineProps<{ title: string; subtitle: string }>();
 const { t } = useI18n();
 </script>
 
-<style scoped>
+<style scoped lang="less">
 .auth-page {
   display: flex;
   width: 100vw;
@@ -247,9 +247,9 @@ const { t } = useI18n();
     padding: 0 24px 40px;
   }
 }
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .auth-page {
-    display: black;
+    display: block;
     min-width: 100%;
     min-height: 100vh;
   }

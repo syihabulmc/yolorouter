@@ -380,7 +380,7 @@ async function onChangePasswordSubmit() {
 }
 </script>
 
-<style scoped>
+<style scoped lang="less">
 .layout-sider {
   background-color: var(--color-sidebar);
 }
@@ -498,7 +498,8 @@ async function onChangePasswordSubmit() {
 }
 
 /* Mobile top bar: a sticky header carrying the hamburger + brand, shown only
-   below the 640px breakpoint where the persistent sider is dropped. */
+   below the mobile breakpoint (@mobile-breakpoint) where the persistent sider
+   is dropped. */
 .mobile-topbar {
   position: sticky;
   top: 0;
@@ -545,7 +546,7 @@ async function onChangePasswordSubmit() {
 /* With the top bar in play the content no longer starts at the viewport top,
    so its own height must subtract the bar to keep the internal scroll
    working (the desktop rule above uses the full 100dvh). */
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .layout-content {
     height: calc(100dvh - 56px);
   }
@@ -585,7 +586,7 @@ async function onChangePasswordSubmit() {
   font-weight: 600;
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .sidebar-bottom {
     padding: var(--space-3) 6px var(--space-4);
   }

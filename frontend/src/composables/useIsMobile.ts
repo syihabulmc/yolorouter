@@ -1,9 +1,12 @@
 // frontend/src/composables/useIsMobile.ts
 import { onUnmounted, ref, type Ref } from 'vue'
 
-// Single source of truth for the mobile breakpoint. Keep this in sync with the
-// `@media (max-width: 768px)` queries in the .less files — one number governs
-// both the JS matchMedia checks and the CSS layout switches.
+// Single source of truth for the mobile breakpoint. This JS constant must stay
+// in sync with the LESS variable `@mobile-breakpoint`, injected via
+// `additionalData` in vite.config.ts (css.preprocessorOptions.less) — CSS media
+// queries cannot read a JS or CSS variable, so the number is duplicated in
+// those two places by design. Use `@mobile-breakpoint` in .less /
+// <style lang="less"> blocks rather than hard-coding 768px.
 export const MOBILE_BREAKPOINT = 768
 const MOBILE_MEDIA_QUERY = `(max-width: ${MOBILE_BREAKPOINT}px)`
 

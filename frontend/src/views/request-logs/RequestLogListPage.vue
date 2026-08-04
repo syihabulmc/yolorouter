@@ -763,7 +763,7 @@ const columns = computed<DataTableColumns<RequestLogRow>>(() => [
 
 /* Mobile-only: the datetimerange picker is split into two stacked datetime
    pickers so each fits the narrow viewport. .filter-item--range already goes
-   full-width under the global 768px breakpoint. */
+   full-width under the global mobile breakpoint (@mobile-breakpoint). */
 .filter-range-split {
   display: flex;
   gap: var(--space-2);

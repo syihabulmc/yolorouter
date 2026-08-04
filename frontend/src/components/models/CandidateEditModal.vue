@@ -904,7 +904,7 @@ async function onSaveAnywayDisabled() {
 }
 </script>
 
-<style scoped>
+<style scoped lang="less">
 /* Read-only context: which outward model this candidate is being mapped to.
    A blank provider model name defaults to this, so it doubles as the fallback
    reference the admin needs when choosing the provider-side model. */
@@ -1033,7 +1033,7 @@ async function onSaveAnywayDisabled() {
   column-gap: 16px;
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .price-grid {
     grid-template-columns: 1fr;
   }

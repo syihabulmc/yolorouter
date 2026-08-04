@@ -179,7 +179,7 @@ onMounted(() => {
 watch(timeRange, () => { void reload() }, { deep: true })
 </script>
 
-<style scoped>
+<style scoped lang="less">
 /* Only padding differs from the global .section-card (these pages use a
    tighter --space-5); bg / border / radius / __head come from global.less. */
 .section-card {
@@ -192,7 +192,7 @@ watch(timeRange, () => { void reload() }, { deep: true })
   justify-content: center;
   min-height: 240px;
 }
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .section-card {
     padding: var(--space-3);
   }

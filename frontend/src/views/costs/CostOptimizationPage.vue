@@ -417,7 +417,7 @@ const skipReasonColumns = computed<DataTableColumns<CompressSkipReasonRow>>(() =
 ])
 </script>
 
-<style scoped>
+<style scoped lang="less">
 /* Metric row: 5 KPI tiles. The base .metric-row/.metric/.metric__*
    classes live in global.less; each page only sets its own column count. */
 .metric-row {
@@ -533,7 +533,7 @@ const skipReasonColumns = computed<DataTableColumns<CompressSkipReasonRow>>(() =
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: @mobile-breakpoint) {
   .section-card,
   .cta-banner {
     padding: var(--space-3);
