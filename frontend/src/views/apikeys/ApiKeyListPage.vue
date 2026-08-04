@@ -141,7 +141,7 @@ async function reload() {
 // setFilters resets the store to page 1, so a search always lands on the
 // first page of results.
 function onSearch() {
-  store.setFilters({ query: draft.query.trim(), owner: draft.owner.trim(), status: draft.status ?? null})
+  store.setFilters({ query: draft.query.trim(), owner: draft.owner.trim(), status: draft.status ?? ''})
   void reload()
 }
 function onReset() {

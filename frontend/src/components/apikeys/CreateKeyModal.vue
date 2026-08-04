@@ -105,7 +105,7 @@
         </template>
       </n-input>
     </div>
-
+    <input type="text" id="copy" style="opacity: 0;">
     <template #footer>
       <n-space justify="end">
         <n-button v-if="step === 'form'" @click="emit('update:show', false)">{{ t('apiKeys.cancel') }}</n-button>
@@ -235,7 +235,19 @@ async function onGenerate() {
 // the one-time key would be lost with no way to retrieve it.
 async function onCopy(): Promise<boolean> {
   try {
-    await navigator.clipboard.writeText(plaintext.value)
+    if (isMobile) {
+      var oInput = document.getElementById('copy'); 
+      oInput.value = (plaintext.value)
+      oInput.select();
+      if (document.execCommand('Copy')) {
+        console.log('success')
+      } else {
+        message.error(t('apiKeys.copyFailed'))
+        return false
+      }
+    } else {
+      await navigator.clipboard.writeText(plaintext.value)
+    }
     copied.value = true
     setTimeout(() => {
       copied.value = false
@@ -257,7 +269,7 @@ async function copyAndClose() {
 // Dismissing via the card's X (or Esc, though disabled here) without ticking
 // unrecoverable afterwards. This path never copies, so its confirm button is
 // "close anyway", not the "copy and close" of the primary button.
-function requestClose() {
+async function requestClose() {
   if (step.value === 'plaintext') {
     dialog.warning({
       title: t('apiKeys.unsavedConfirmTitle'),

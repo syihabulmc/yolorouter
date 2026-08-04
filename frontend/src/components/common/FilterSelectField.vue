@@ -282,6 +282,7 @@ function select(v: Value | null) {
   font-size: var(--text-base);
   text-align: left;
   cursor: pointer;
+  width: 100%;
   transition: background var(--duration-fast) var(--ease-out);
 }
 
