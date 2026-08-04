@@ -30,36 +30,33 @@
               <template #prefix><Search :size="14" /></template>
             </n-input>
           </div>
-          <div class="filter-item">
-            <n-select
-              v-model:value="filter.protocol"
-              :options="protocolOptions"
-              :placeholder="t('providers.filterProtocol')"
-              clearable
-              size="small"
-              @update:value="onSearch"
-            />
-          </div>
-          <div class="filter-item">
-            <n-select
-              v-model:value="filter.running"
-              :options="runningStatusOptions"
-              :placeholder="t('providers.filterRunningStatus')"
-              clearable
-              size="small"
-              @update:value="onSearch"
-            />
-          </div>
-          <div class="filter-item">
-            <n-select
-              v-model:value="filter.management"
-              :options="managementStatusOptions"
-              :placeholder="t('providers.filterManagementStatus')"
-              clearable
-              size="small"
-              @update:value="onSearch"
-            />
-          </div>
+          <FilterSelectField
+            v-model:value="filter.protocol"
+            :label="t('providers.filterProtocol')"
+            :options="protocolOptions"
+            :placeholder="t('providers.filterProtocol')"
+            size="small"
+            width="100%"
+            @update:value="onSearch"
+          />
+          <FilterSelectField
+            v-model:value="filter.running"
+            :label="t('providers.filterRunningStatus')"
+            :options="runningStatusOptions"
+            :placeholder="t('providers.filterRunningStatus')"
+            size="small"
+            width="100%"
+            @update:value="onSearch"
+          />
+          <FilterSelectField
+            v-model:value="filter.management"
+            :label="t('providers.filterManagementStatus')"
+            :options="managementStatusOptions"
+            :placeholder="t('providers.filterManagementStatus')"
+            size="small"
+            width="100%"
+            @update:value="onSearch"
+          />
           <div class="filter-actions">
             <n-button size="small" type="primary" @click="onSearch">{{ t('providers.search') }}</n-button>
             <n-button size="small" quaternary @click="onReset">{{ t('providers.reset') }}</n-button>
@@ -91,7 +88,7 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NDropdown, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { MoreHorizontal, Plus, Search, Server } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
@@ -101,6 +98,8 @@ import EmptyState from '../../components/EmptyState.vue'
 import NewProviderModal from '../../components/providers/NewProviderModal.vue'
 import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
+import ResponsiveDropdown from '../../components/common/ResponsiveDropdown.vue'
+import FilterSelectField from '../../components/common/FilterSelectField.vue'
 import { columnTitle } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { ALL_PROTOCOLS, enabledProtocolEndpoints } from '../../utils/providerProtocol'
@@ -316,10 +315,12 @@ const columns = computed<DataTableColumns<Provider>>(() => [
         { onClick: (e: MouseEvent) => e.stopPropagation() },
         [
           h(
-            NDropdown,
+            ResponsiveDropdown,
             {
               trigger: 'click',
               placement: 'bottom-end',
+              triggerText: t('common.actions'),
+              height: 150,
               options: [
                 { label: t('providers.editProvider'), key: 'edit' },
                 { label: t('costs.detail.viewCost'), key: 'viewCost' },

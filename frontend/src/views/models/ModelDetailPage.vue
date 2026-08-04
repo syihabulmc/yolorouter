@@ -1,21 +1,33 @@
 <!-- frontend/src/views/models/ModelDetailPage.vue -->
 <template>
   <div class="common-page" v-if="modelData">
-    <PageHeader  class="new-line"  :eyebrow="t('models.eyebrow')" :title="modelData.name" :description="`${t('models.runningStatusColumn')}: ${t(`models.running${runningStatusKey}`)}`">
+    <PageHeader class="actions-placeholder" :eyebrow="t('models.eyebrow')" :title="modelData.name" :description="`${t('models.runningStatusColumn')}: ${t(`models.running${runningStatusKey}`)}`">
       <template #actions>
-        <n-button size="small" @click="showEditModel = true">{{ t('models.editModel') }}</n-button>
-        <n-button quaternary @click="router.push(modelCostDetailLocation(modelData.name))">
-          {{ t('costs.detail.viewCost') }}
-        </n-button>
-        <n-button quaternary @click="onToggleModelStatus">
-          {{ modelData.management_status === 1 ? t('models.statusDisabled') : t('models.statusEnabled') }}
-        </n-button>
+        <template v-if="!isMobile">
+          <n-button size="small" @click="showEditModel = true">{{ t('models.editModel') }}</n-button>
+          <n-button size="small" @click="router.push(modelCostDetailLocation(modelData.name))">
+            {{ t('costs.detail.viewCost') }}
+          </n-button>
+          <n-button size="small" @click="onToggleModelStatus">
+            {{ modelData.management_status === 1 ? t('models.statusDisabled') : t('models.statusEnabled') }}
+          </n-button>
+        </template>
+
+        <ResponsiveDropdown
+          v-else
+          trigger="click"
+          placement="bottom-end"
+          :height="240"
+          :trigger-text="t('common.actions')"
+          :options="headerActionOptions"
+          @select="onHeaderAction"
+        />
       </template>
     </PageHeader>
 
     <n-tabs v-model:value="activeTab" type="line" animated>
       <n-tab-pane name="route" :tab="t('models.tabRoute')">
-        <div class="route-toolbar">
+        <div v-if="!isMobile" class="route-toolbar">
           <n-button @click="showAddCandidate = true">
             <template #icon><Plus :size="16" /></template>
             {{ t('models.addCandidate') }}
@@ -63,7 +75,7 @@ import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 // NTooltip is not in main.ts's create() registry, so it must be imported
 // explicitly or Vue renders it as an inert unknown element.
-import { NButton, NDropdown, NSwitch, NTag, NTooltip, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { NButton, NSwitch, NTag, NTooltip, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { ChevronDown, ChevronUp, MoreHorizontal, Plus } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
@@ -77,16 +89,18 @@ import EmptyState from '../../components/EmptyState.vue'
 import CandidateEditModal from '../../components/models/CandidateEditModal.vue'
 import ModelEditModal from '../../components/models/ModelEditModal.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
+import ResponsiveDropdown from '../../components/common/ResponsiveDropdown.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { useSingleRowAction } from '../../composables/useSingleRowAction'
-
+import { useIsMobile } from '../../composables/useIsMobile.ts'
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const dialog = useDialog()
 const message = useMessage()
 const store = useModelsStore()
+const isMobile = useIsMobile()
 
 const modelId = Number(route.params.id)
 const modelData = ref<Model | null>(null)
@@ -109,6 +123,25 @@ const testingCandidateId = ref<number | null>(null)
 const reorderAction = useSingleRowAction()
 
 const runningStatusKey = computed(() => modelRunningStatusDisplay(modelData.value?.running_status ?? 'not_configured').i18nKey)
+
+// On mobile the header buttons collapse into a single ResponsiveDropdown, so the
+// toggle-status row's label follows the model's current management_status.
+const headerActionOptions = computed(() => [
+  { label: t('models.editModel'), key: 'edit' },
+  { label: t('costs.detail.viewCost'), key: 'viewCost' },
+  { label: t('models.addCandidate'), key: 'addCandidate' },
+  {
+    label: modelData.value?.management_status === 1 ? t('models.statusDisabled') : t('models.statusEnabled'),
+    key: 'toggleStatus',
+  },
+])
+
+function onHeaderAction(key: string) {
+  if (key === 'edit') showEditModel.value = true
+  else if (key === 'viewCost') router.push(modelCostDetailLocation(modelData.value!.name))
+  else if (key === 'addCandidate') showAddCandidate.value = true
+  else if (key === 'toggleStatus') onToggleModelStatus()
+}
 
 onMounted(() => {
   void reload().catch((err) => message.error(displayMessage(err, t)))
@@ -302,10 +335,14 @@ const candidateColumns = computed<DataTableColumns<ModelCandidate>>(() => [
     align: 'center',
     render: (row) =>
       h(
-        NDropdown,
+        ResponsiveDropdown,
         {
           trigger: 'click',
           placement: 'bottom-end',
+          triggerText: t('common.actions'),
+          disabled: testingCandidateId.value === row.id,
+          loading: testingCandidateId.value === row.id,
+          height: 200,
           options: [
             { label: t('models.editCandidate'), key: 'edit' },
             // Titled so the dropdown says what a retest actually does — it

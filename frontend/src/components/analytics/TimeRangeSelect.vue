@@ -14,23 +14,24 @@
       <span class="filter-select__trigger-label">{{ currentPresetLabel }}</span>
       <template #icon><ChevronDown :size="14" /></template>
     </NButton>
-    <NDrawer v-model:show="sheetOpen" placement="bottom" :height="sheetHeight" class="filter-select-sheet">
+    <NDrawer v-model:show="sheetOpen" placement="bottom" height="270" class="rd-sheet filter-select-sheet">
       <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0;">
         <div class="filter-sheet">
           <div class="filter-sheet__handle" />
-            <div class="filter-sheet__title">{{ t('analytics.timeRange') }}</div>
-
-          <button
-            v-for="opt in mobilePresetOptions"
-            :key="opt.value"
-            type="button"
-            class="filter-sheet__option"
-            :class="{ 'filter-sheet__option--active': opt.value === preset }"
-            @click="onSheetSelect(opt.value)"
-          >
-            <span>{{ opt.label }}</span>
-            <NIcon v-if="opt.value === preset" :size="18"><Check /></NIcon>
-          </button>
+          <div class="filter-sheet__title">{{ t('analytics.timeRange') }}</div>
+          <div class="filter-sheet__list">
+            <button
+              v-for="opt in mobilePresetOptions"
+              :key="opt.value"
+              type="button"
+              class="filter-sheet__option"
+              :class="{ 'filter-sheet__option--active': opt.value === preset }"
+              @click="onSheetSelect(opt.value)"
+            >
+              <span>{{ opt.label }}</span>
+              <NIcon v-if="opt.value === preset" :size="18"><Check /></NIcon>
+            </button>
+          </div>
         </div>
       </NDrawerContent>
     </NDrawer>
@@ -92,7 +93,6 @@ const presetOptions = computed<SelectOption[]>(() => [
 // Bottom-sheet open state + a height that fits the four preset rows plus the
 // drag handle without leaving a tall empty gap.
 const sheetOpen = ref(false)
-const sheetHeight = 300
 
 // Below the mobile breakpoint the select+picker pair is replaced by a single
 // dropdown button (see template). Leaving mobile with the sheet still open
@@ -259,6 +259,11 @@ watch(
   color: var(--color-text-muted);
   padding: 0 var(--space-3);
   margin-bottom: var(--space-2);
+}
+
+.filter-sheet__list {
+  flex: 1;
+  overflow-y: auto;
 }
 
 .filter-sheet__option {

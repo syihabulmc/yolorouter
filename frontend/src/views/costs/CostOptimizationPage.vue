@@ -84,7 +84,7 @@
         <div class="metric__value">{{ formatNumber(avgSaved) }}</div>
       </div>
     </div>
-123
+
     <!-- Dimension cards: four line charts (daily / API key / model / provider)
          in a 2x2 grid. All four breakdowns come from one stats call, so every
          card renders from the same stats ref without per-card reload. -->

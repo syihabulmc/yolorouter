@@ -157,6 +157,7 @@
       :options="languageOptions"
       :value="localeStore.locale"
       @select="onSelectLanguage"
+      :height="200"
     />
   </n-layout>
 </template>

@@ -22,25 +22,31 @@
             </n-button>
           </div>
         </template>
-        <n-select
+        <FilterSelectField
           v-model:value="form.providerId"
+          :label="t('models.provider')"
           :options="providerOptions"
           :placeholder="t('models.provider')"
-          style="width: 100%"
+          :clearable="false"
+          width="100%"
+          size="medium"
         />
       </n-form-item>
       <n-form-item path="providerModelName">
         <template #label>
           <HelpLabel :tip="t('models.providerModelName_tip')">{{ t('models.providerModelName') }}</HelpLabel>
         </template>
-        <n-select
+        <FilterSelectField
           v-model:value="providerModelName"
+          :label="t('models.providerModelName')"
           :options="modelOptions"
           :loading="loadingModels"
           filterable
           tag
           clearable
           :placeholder="t('models.providerModelNameHint')"
+          width="100%"
+          size="medium"
         />
       </n-form-item>
       <div class="price-grid">
@@ -208,6 +214,7 @@ import { capabilityState } from '../../utils/modelStatusDisplay'
 import { testOutcomeI18nKey, TEST_OUTCOME_VERIFICATION_UNSUPPORTED } from '../../utils/testOutcomeDisplay'
 import HelpLabel from '../HelpLabel.vue'
 import ModalDrawer from '../common/ModalDrawer.vue'
+import FilterSelectField from '../common/FilterSelectField.vue'
 import NewProviderModal from '../providers/NewProviderModal.vue'
 import type { CandidateTestReport, ModelCandidate, ProbeReport, SuggestedPrice } from '../../api/models'
 import { suggestCandidatePrice } from '../../api/models'

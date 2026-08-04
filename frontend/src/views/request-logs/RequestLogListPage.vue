@@ -84,15 +84,40 @@
           @update:value="onStreamChange"
         />
         <div class="filter-item filter-item--range">
+          <!-- Desktop: a single datetimerange picker. On mobile the range
+               variant is too wide to fit, so it's split into two standalone
+               datetime pickers (start / end) driven by the same startTime /
+               endTime refs the range picker writes through. -->
           <NDatePicker
-            v-model:value="timeRange"
+            v-if="!isMobile"
+            :value="timeRange"
             type="datetimerange"
             clearable
             size="small"
             :shortcuts="rangeShortcuts"
             :placeholder="t('requestLogs.filterTimeRange')"
-            @update:value="onSearch"
+            @update:value="onRangeChange"
           />
+          <div v-else class="filter-range-split">
+            <NDatePicker
+              v-model:value="startTime"
+              type="datetime"
+              clearable
+              size="small"
+              :placeholder="t('requestLogs.filterStartTime')"
+              :is-date-disabled="disableAfterEnd"
+              @update:value="onSearch"
+            />
+            <NDatePicker
+              v-model:value="endTime"
+              type="datetime"
+              clearable
+              size="small"
+              :placeholder="t('requestLogs.filterEndTime')"
+              :is-date-disabled="disableBeforeStart"
+              @update:value="onSearch"
+            />
+          </div>
         </div>
         <div class="filter-actions">
           <NButton size="small" type="primary" @click="onSearch">{{ t('requestLogs.search') }}</NButton>
@@ -153,6 +178,7 @@ import EmptyState from '../../components/EmptyState.vue'
 import FilterSelectField from '../../components/common/FilterSelectField.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import StatusClassTag from '../../components/request-logs/StatusClassTag.vue'
+import { useIsMobile } from '../../composables/useIsMobile'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -184,7 +210,42 @@ const filter = reactive<ListFilter>({
 // direct v-model two-way binding — NSelect can't cleanly carry null as a
 // value, so we drive the binding through :value + @update:value instead.
 const streamSelect = ref<'all' | 'stream' | 'non-stream'>('all')
-const timeRange = ref<[number, number] | null>(null)
+// Start / end are the source of truth for the time filter. Desktop binds a
+// single datetimerange picker through the `timeRange` computed below; mobile
+// binds these two refs directly to standalone datetime pickers. Keeping the
+// pair split (rather than a [start, end] tuple) lets the mobile UI set just
+// one bound, and lets buildListParams send start / end independently.
+const startTime = ref<number | null>(null)
+const endTime = ref<number | null>(null)
+
+// Reactive mobile flag — the same breakpoint composable the rest of the app
+// uses. Drives the datetimerange (desktop) vs. two datetime pickers (mobile)
+// switch in the template.
+const isMobile = useIsMobile()
+
+// Adapter for the desktop datetimerange picker: it holds a [start, end] tuple
+// or null, so surface both bounds together and only when both are present.
+const timeRange = computed<[number, number] | null>(() =>
+  startTime.value != null && endTime.value != null ? [startTime.value, endTime.value] : null,
+)
+
+// datetimerange emits the whole tuple (or null on clear); fan it back out to
+// the two source refs, then search. Shortcuts flow through here too.
+function onRangeChange(v: [number, number] | null) {
+  startTime.value = v ? v[0] : null
+  endTime.value = v ? v[1] : null
+  void onSearch()
+}
+
+// Cross-bound guards for the two mobile pickers so start can't exceed end and
+// vice versa. NDatePicker's is-date-disabled works at day granularity, which
+// is enough to keep the pair coherent.
+function disableAfterEnd(ts: number): boolean {
+  return endTime.value != null && ts > endTime.value
+}
+function disableBeforeStart(ts: number): boolean {
+  return startTime.value != null && ts < startTime.value
+}
 
 // Flags tracking whether model_name / request_id originated from a URL
 // query param (a deep link from a cost detail page). Values sourced that
@@ -321,7 +382,8 @@ function applyQueryFilter() {
     const startMs = Date.parse(q.start)
     const endMs = Date.parse(q.end)
     if (!Number.isNaN(startMs) && !Number.isNaN(endMs)) {
-      timeRange.value = [startMs, endMs]
+      startTime.value = startMs
+      endTime.value = endMs
     }
   }
 }
@@ -373,10 +435,9 @@ function buildListParams(): RequestLogListParams {
   if (filter.provider_id != null) params.provider_id = filter.provider_id
   if (filter.status) params.status = filter.status
   if (filter.is_stream != null) params.is_stream = filter.is_stream
-  if (timeRange.value) {
-    params.start = new Date(timeRange.value[0]).toISOString()
-    params.end = new Date(timeRange.value[1]).toISOString()
-  }
+  // start / end are independent bounds — on mobile the user may set only one.
+  if (startTime.value != null) params.start = new Date(startTime.value).toISOString()
+  if (endTime.value != null) params.end = new Date(endTime.value).toISOString()
   return params
 }
 
@@ -444,7 +505,8 @@ function onReset() {
   filter.status = null
   filter.is_stream = null
   streamSelect.value = 'all'
-  timeRange.value = null
+  startTime.value = null
+  endTime.value = null
   // Drop the verbatim-no-trim override too, so post-reset typed searches
   // return to the normal submit-time trim behavior.
   querySourcedModelName.value = false
@@ -698,6 +760,19 @@ const columns = computed<DataTableColumns<RequestLogRow>>(() => [
 /* Filter-bar styles (.filter-panel / .filter-grid / .filter-item /
    .filter-actions) are the canonical shared classes in styles/global.less —
    this page is the reference every other list page's filter bar matches. */
+
+/* Mobile-only: the datetimerange picker is split into two stacked datetime
+   pickers so each fits the narrow viewport. .filter-item--range already goes
+   full-width under the global 768px breakpoint. */
+.filter-range-split {
+  display: flex;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.filter-range-split :deep(.n-date-picker) {
+  width: 100%;
+}
 
 :deep(.mono-cell) {
   font-family: var(--font-mono, monospace);

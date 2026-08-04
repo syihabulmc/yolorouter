@@ -1,15 +1,27 @@
 <!-- frontend/src/views/providers/ProviderDetailPage.vue -->
 <template>
   <div class="common-page" v-if="provider">
-    <PageHeader class="new-line" :eyebrow="t('providers.eyebrow')" :title="provider.name" :description="provider.base_url">
+    <PageHeader class="actions-placeholder" :eyebrow="t('providers.eyebrow')" :title="provider.name" :description="provider.base_url">
       <template #actions>
-        <n-button size="small" @click="showEditProvider = true">{{ t('providers.editProvider') }}</n-button>
-        <n-button quaternary @click="router.push(`/costs/providers/${provider.id}`)">
-          {{ t('costs.detail.viewCost') }}
-        </n-button>
-        <n-button quaternary @click="onToggleProviderStatus">
-          {{ provider.management_status === 1 ? t('providers.statusDisabled') : t('providers.statusEnabled') }}
-        </n-button>
+        <template v-if="!isMobile">
+          <n-button size="small" @click="showEditProvider = true">{{ t('providers.editProvider') }}</n-button>
+          <n-button size="small" @click="router.push(`/costs/providers/${provider.id}`)">
+            {{ t('costs.detail.viewCost') }}
+          </n-button>
+          <n-button size="small" @click="onToggleProviderStatus">
+            {{ provider.management_status === 1 ? t('providers.statusDisabled') : t('providers.statusEnabled') }}
+          </n-button>
+        </template>
+
+        <ResponsiveDropdown
+          v-else
+          trigger="click"
+          placement="bottom-end"
+          :trigger-text="t('common.actions')"
+          :loading="testingAll"
+          :options="headerActionOptions"
+          @select="onHeaderAction"
+        />
       </template>
     </PageHeader>
 
@@ -19,7 +31,7 @@
           <span v-if="pendingCount !== null" class="keys-toolbar__count">
             {{ t('providers.testAllPendingCount', { count: pendingCount }) }}
           </span>
-          <n-space>
+          <n-space v-if="!isMobile">
             <n-button @click="showAddKey = true">
               <template #icon><Plus :size="16" /></template>
               {{ t('providers.addKey') }}
@@ -86,7 +98,7 @@
 import { computed, h, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
-import { NButton, NDropdown, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
+import { NButton, NSpace, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { ChevronDown, ChevronUp, MoreHorizontal, Plus, PlayCircle } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
 import { useModelsStore } from '../../store/models'
@@ -98,11 +110,13 @@ import EmptyState from '../../components/EmptyState.vue'
 import KeyEditModal from '../../components/providers/KeyEditModal.vue'
 import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
+import ResponsiveDropdown from '../../components/common/ResponsiveDropdown.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { testOutcomeLabel } from '../../utils/testOutcomeDisplay'
 import { verificationDestinationCount } from '../../utils/providerProtocol'
 import { useSingleRowAction } from '../../composables/useSingleRowAction'
 import { useClientPagination } from '../../composables/useClientPagination'
+import { useIsMobile } from '../../composables/useIsMobile'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -111,6 +125,7 @@ const dialog = useDialog()
 const message = useMessage()
 const store = useProvidersStore()
 const modelsStore = useModelsStore()
+const isMobile = useIsMobile()
 
 // Independent client-side pagination for the two tables on this page — both are
 // fully-fetched admin lists that can grow long (many keys, or many models
@@ -157,6 +172,29 @@ const pendingCount = computed(() => {
 const destinationCount = computed(() =>
   provider.value ? verificationDestinationCount(provider.value.provider_type, provider.value.protocol_endpoints) : 1,
 )
+
+// On mobile the header buttons and the keys-toolbar buttons collapse into a
+// single ResponsiveDropdown, so the toggle-status row's label follows the
+// provider's current management_status and Test All disables while a run is in
+// flight (the trigger button also spins via :loading="testingAll").
+const headerActionOptions = computed(() => [
+  { label: t('providers.editProvider'), key: 'edit' },
+  { label: t('costs.detail.viewCost'), key: 'viewCost' },
+  { label: t('providers.addKey'), key: 'addKey' },
+  { label: t('providers.testAllButton'), key: 'testAll', disabled: testingAll.value },
+  {
+    label: provider.value?.management_status === 1 ? t('providers.statusDisabled') : t('providers.statusEnabled'),
+    key: 'toggleStatus',
+  },
+])
+
+function onHeaderAction(key: string) {
+  if (key === 'edit') showEditProvider.value = true
+  else if (key === 'viewCost') router.push(`/costs/providers/${provider.value!.id}`)
+  else if (key === 'addKey') showAddKey.value = true
+  else if (key === 'testAll') void onTestAll()
+  else if (key === 'toggleStatus') onToggleProviderStatus()
+}
 
 function batchResultLabel(result: BatchTestResult): string {
   if (result.needs_reentry) return t('providers.needsReentry')
@@ -345,10 +383,14 @@ const keyColumns = computed<DataTableColumns<ProviderKey>>(() => [
     align: 'center',
     render: (row) =>
       h(
-        NDropdown,
+        ResponsiveDropdown,
         {
           trigger: 'click',
           placement: 'bottom-end',
+          triggerText: t('common.actions'),
+          disabled: testingKeyId.value === row.id,
+          loading: testingKeyId.value === row.id,
+          height: 140,
           options: [
             { label: t('providers.editKey'), key: 'edit' },
             { label: t('providers.testConnection'), key: 'test', disabled: row.needs_reentry },

@@ -30,26 +30,24 @@
               <template #prefix><Search :size="14" /></template>
             </n-input>
           </div>
-          <div class="filter-item">
-            <n-select
-              v-model:value="filter.running"
-              :options="runningStatusOptions"
-              :placeholder="t('models.filterRunningStatus')"
-              clearable
-              size="small"
-              @update:value="onSearch"
-            />
-          </div>
-          <div class="filter-item">
-            <n-select
-              v-model:value="filter.management"
-              :options="managementStatusOptions"
-              :placeholder="t('models.filterManagementStatus')"
-              clearable
-              size="small"
-              @update:value="onSearch"
-            />
-          </div>
+          <FilterSelectField
+            v-model:value="filter.running"
+            :label="t('models.filterRunningStatus')"
+            :options="runningStatusOptions"
+            :placeholder="t('models.filterRunningStatus')"
+            size="small"
+            width="100%"
+            @update:value="onSearch"
+          />
+          <FilterSelectField
+            v-model:value="filter.management"
+            :label="t('models.filterManagementStatus')"
+            :options="managementStatusOptions"
+            :placeholder="t('models.filterManagementStatus')"
+            size="small"
+            width="100%"
+            @update:value="onSearch"
+          />
           <div class="filter-actions">
             <n-button size="small" type="primary" @click="onSearch">{{ t('models.search') }}</n-button>
             <n-button size="small" quaternary @click="onReset">{{ t('models.reset') }}</n-button>
@@ -79,7 +77,7 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NSwitch, NTag, useDialog, useMessage,NDropdown, type DataTableColumns } from 'naive-ui'
+import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { Boxes, Plus, Search, MoreHorizontal } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
@@ -94,6 +92,8 @@ import EmptyState from '../../components/EmptyState.vue'
 import NewModelModal from '../../components/models/NewModelModal.vue'
 import ModelEditModal from '../../components/models/ModelEditModal.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
+import ResponsiveDropdown from '../../components/common/ResponsiveDropdown.vue'
+import FilterSelectField from '../../components/common/FilterSelectField.vue'
 import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
 
 const { t } = useI18n()
@@ -261,10 +261,12 @@ const columns = computed<DataTableColumns<Model>>(() => [
         { onClick: (e: MouseEvent) => e.stopPropagation() },
         [
           h(
-            NDropdown,
+            ResponsiveDropdown,
             {
               trigger: 'click',
               placement: 'bottom-end',
+              triggerText: t('common.actions'),
+              height: 200,
               options: [
                 { label: t('models.editModel'), key: 'edit' },
                 { label: t('costs.detail.viewCost'), key: 'viewCost' },

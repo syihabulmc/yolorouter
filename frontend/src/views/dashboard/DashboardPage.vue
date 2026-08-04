@@ -99,7 +99,7 @@
          the period's true token total. -->
     <div class="kpi-row">
       <div class="kpi">
-        <div class="kpi__icon kpi__icon--neutral">
+        <div class="kpi__icon kpi__icon--cyan">
           <ArrowDownToLine :size="18" />
         </div>
         <div class="kpi__body">
@@ -112,7 +112,7 @@
       </div>
 
       <div class="kpi">
-        <div class="kpi__icon kpi__icon--neutral">
+        <div class="kpi__icon kpi__icon--orange">
           <ArrowUpFromLine :size="18" />
         </div>
         <div class="kpi__body">
@@ -125,7 +125,7 @@
       </div>
 
       <div class="kpi">
-        <div class="kpi__icon kpi__icon--neutral">
+        <div class="kpi__icon kpi__icon--pink">
           <HardDriveUpload :size="18" />
         </div>
         <div class="kpi__body">
@@ -138,7 +138,7 @@
       </div>
 
       <div class="kpi">
-        <div class="kpi__icon kpi__icon--neutral">
+        <div class="kpi__icon kpi__icon--teal">
           <HardDriveDownload :size="18" />
         </div>
         <div class="kpi__body">
@@ -508,12 +508,26 @@ function goToRequestLog(requestId: string) {
   color: var(--color-warning);
 }
 
-/* Token counters are volume, not health. They deliberately sit outside the
-   semantic palette so amber/green keep meaning "needs attention" / "good"
-   on the row above. */
-.kpi__icon--neutral {
-  background: var(--color-bg-soft);
-  color: var(--color-text-muted);
+/* Token counters are volume, not health — they get their own non-semantic hues
+   so amber/green keep meaning "needs attention" / "good" on the row above. */
+.kpi__icon--cyan {
+  background: var(--color-cyan-subtle);
+  color: var(--color-cyan);
+}
+
+.kpi__icon--orange {
+  background: var(--color-orange-subtle);
+  color: var(--color-orange);
+}
+
+.kpi__icon--pink {
+  background: var(--color-pink-subtle);
+  color: var(--color-pink);
+}
+
+.kpi__icon--teal {
+  background: var(--color-teal-subtle);
+  color: var(--color-teal);
 }
 
 /* min-width: 0 lets the body shrink inside the flex row instead of forcing the

@@ -124,7 +124,7 @@
     </div>
 
     <!-- Dimension tabs + report table -->
-    <div class="section-card">
+    <div class="section-card  table-card">
       <NTabs :value="dimension" type="line" @update:value="onDimensionChange">
         <NTabPane :name="'model'" :tab="t('analytics.dimensionModel')">
           <ResponsiveDataTable
@@ -584,11 +584,15 @@ const timeColumns = computed<DataTableColumns<TimeReportRow>>(() => [
   }
 }
 @media (max-width: 1100px) {
-  .section-card {
+  .section-card.table-card {
     padding: 0;
+    border: 0;
   }
+
   :deep(.n-tabs-nav-scroll-wrapper) {
     padding: 0 20px;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-lg);
   }
 }
 </style>

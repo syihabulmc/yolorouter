@@ -819,6 +819,8 @@ export default {
     filterStream: 'Stream mode',
     allFilterStream: 'All Stream mode',
     filterTimeRange: 'Time range',
+    filterStartTime: 'Start time',
+    filterEndTime: 'End time',
     rangeToday: 'Today',
     rangeYesterday: 'Yesterday',
     range7d: 'Last 7 days',

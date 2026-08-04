@@ -32,16 +32,15 @@
             @keyup.enter="onSearch"
           />
         </div>
-        <div class="filter-item">
-          <n-select
-            v-model:value="draft.status"
-            :options="statusOptions"
-            :placeholder="t('apiKeys.filterStatus')"
-            clearable
-            size="small"
-            @update:value="onSearch"
-          />
-        </div>
+        <FilterSelectField
+          v-model:value="draft.status"
+          :label="t('apiKeys.filterStatus')"
+          :options="statusOptions"
+          :placeholder="t('apiKeys.filterStatus')"
+          size="small"
+          width="100%"
+          @update:value="onSearch"
+        />
         <div class="filter-actions">
           <n-button size="small" type="primary" @click="onSearch">{{ t('apiKeys.search') }}</n-button>
           <n-button size="small" quaternary @click="onReset">{{ t('apiKeys.reset') }}</n-button>
@@ -84,7 +83,7 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NTag, useDialog, useMessage,NDropdown, type DataTableColumns, type DropdownOption, type PaginationProps } from 'naive-ui'
+import { NButton, NTag, useDialog, useMessage, type DataTableColumns, type DropdownOption, type PaginationProps } from 'naive-ui'
 import { KeyRound, Plus, Search, MoreHorizontal } from '@lucide/vue'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { displayMessage } from '../../api/client'
@@ -98,6 +97,8 @@ import CreateKeyModal from '../../components/apikeys/CreateKeyModal.vue'
 import EditKeyModal from '../../components/apikeys/EditKeyModal.vue'
 import KeyOptimize from '../../components/apikeys/KeyOptimize.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
+import ResponsiveDropdown from '../../components/common/ResponsiveDropdown.vue'
+import FilterSelectField from '../../components/common/FilterSelectField.vue'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -112,7 +113,7 @@ const showCompress = ref(false)
 const compressKeyId = ref<number | null>(null)
 // Live draft of the filter controls; the server filters only update when the
 // user hits Enter or the Search button, matching the request-logs page.
-const draft = reactive({ query: store.query, owner: store.owner, status: store.status as string | null })
+const draft = reactive({ query: store.query, owner: store.owner, status: (store.status || null) as string | null })
 
 const statusOptions = computed(() => [
   { label: t('apiKeys.statusActive'), value: 'active' },
@@ -140,7 +141,7 @@ async function reload() {
 // setFilters resets the store to page 1, so a search always lands on the
 // first page of results.
 function onSearch() {
-  store.setFilters({ query: draft.query.trim(), owner: draft.owner.trim(), status: draft.status ?? '' })
+  store.setFilters({ query: draft.query.trim(), owner: draft.owner.trim(), status: draft.status ?? null})
   void reload()
 }
 function onReset() {
@@ -317,10 +318,11 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
     align: 'center',
     render: (row) =>
       h(
-        NDropdown,
+        ResponsiveDropdown,
         {
           trigger: 'click',
           placement: 'bottom-end',
+          triggerText: t('common.actions'),
           options: rowActions(row),
           onSelect: (key: string) => {
             if (key === 'edit') openEdit(row.id)

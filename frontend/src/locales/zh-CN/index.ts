@@ -822,6 +822,8 @@ export default {
     filterStream: '调用方式',
     allFilterStream: '全部调用方式',
     filterTimeRange: '时间范围',
+    filterStartTime: '开始时间',
+    filterEndTime: '结束时间',
     rangeToday: '今天',
     rangeYesterday: '昨天',
     range7d: '近 7 天',

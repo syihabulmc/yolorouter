@@ -92,7 +92,7 @@
     </div>
 
     <!-- Module: budget consumption table -->
-    <div class="section-card">
+    <div class="section-card table-card">
       <div class="section-card__head">
         <HelpLabel :tip="t('costs.budget.title_tip')">{{ t('costs.budget.title') }}</HelpLabel>
       </div>
@@ -288,7 +288,28 @@ watch(
 
 @media (max-width: 768px) {
   .metric-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .section-card {
+    padding: var(--space-3);
+  }
+  .section-card.table-card {
+    padding: 0;
+    border: 0;
+  }
+  .section-card.table-card .section-card__head{
+    padding: var(--space-3) 0;
+    margin: 0;
+  }
+  .section-card.table-card .section-card__head::before{
+    content: "";
+    display: inline-block;
+    width: 4px;
+    height: 1.5em;
+    border-radius: 2px;
+    background: var(--color-primary, #6467f2);
+    flex: 0 0 auto;
   }
 }
 </style>

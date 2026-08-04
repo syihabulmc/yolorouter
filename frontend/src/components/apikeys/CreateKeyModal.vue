@@ -46,15 +46,21 @@
         <template #label>
           <HelpLabel :tip="t('apiKeys.modelAllowlist_tip')">{{ t('apiKeys.modelAllowlist') }}</HelpLabel>
         </template>
-        <n-select
-          v-model:value="form.model_ids"
+        <FilterSelectField
+          :value="form.model_ids"
+          :label="t('apiKeys.modelAllowlist')"
           multiple
           filterable
+          :clearable="false"
           :options="modelOptions"
+          size="medium"
           :placeholder="t('apiKeys.modelAllowlist')"
+          width="100%"
+          class="w-full"
+          @update:value="(v: number | number[] | null) => (form.model_ids = (v as number[] | null) ?? [])"
         />
       </n-form-item>
-      <div style="position: absolute;top: 17px;left: 254px;">
+      <div :style="isMobile ? 'position: absolute; top: 12px; right: 10px;' : 'position: absolute; top: 17px; right: 60px;'">
         <NDatePicker v-model:value="form.expires_at" type="datetime" clearable class="full-width" :placeholder="t('apiKeys.selectExpiresAt')" />
       </div>
 
@@ -122,6 +128,8 @@ import { toMicros } from '../../utils/money'
 import { modelIdsRule } from '../../utils/apiKeyValidators'
 import HelpLabel from '../HelpLabel.vue'
 import ModalDrawer from '../common/ModalDrawer.vue'
+import FilterSelectField from '../common/FilterSelectField.vue'
+import { useIsMobile } from '../../composables/useIsMobile'
 
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{ (e: 'update:show', v: boolean): void; (e: 'created'): void }>()
@@ -141,6 +149,10 @@ const dialog = useDialog()
 const message = useMessage()
 const store = useApiKeysStore()
 const modelsStore = useModelsStore()
+
+// Drives the header float position for the expiry picker (mobile drawer vs
+// desktop card anchor differently).
+const isMobile = useIsMobile()
 
 const formRef = ref<FormInst | null>(null)
 const submitting = ref(false)

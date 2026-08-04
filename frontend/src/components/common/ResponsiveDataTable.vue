@@ -182,15 +182,16 @@ function onMobilePageSize(ps: number) {
   flex-direction: column;
   gap: var(--space-2);
   background: var(--color-surface);
-}
-.rdt-card + .rdt-card {
-  border-top: 1px solid var(--color-border-subtle);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg, 12px);
+  overflow: hidden;
+  padding-bottom: var(--space-2);
 }
 
 .rdt-card__header {
   font-size: var(--text-base);
   font-weight: 700;
-  color: var(--color-text);
+  color: #6467f2;
   overflow-wrap: anywhere;
   padding: var(--space-3) var(--space-4) 0;
 }
@@ -232,12 +233,16 @@ function onMobilePageSize(ps: number) {
   font-weight: 600;
   color: var(--color-text);
 }
-  @media (max-width: 768px) {
-    .rdt-cards__pager {
-      display: flex;
-      justify-content: center;
-      padding: var(--space-3) 0 ;
-    }
-  }
 
+:deep(.rdt-card__header span) {
+  color: #6467f2 !important
+}
+
+@media (max-width: 768px) {
+  .rdt-cards__pager {
+    display: flex;
+    justify-content: center;
+    padding: var(--space-3) 0 ;
+  }
+}
 </style>

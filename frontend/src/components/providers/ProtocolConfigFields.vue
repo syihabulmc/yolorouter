@@ -18,6 +18,7 @@
         :clearable="false"
         width="100%"
         size="medium"
+        class="w-full"
         @update:value="onPrimaryChange"
       />
     </n-form-item>

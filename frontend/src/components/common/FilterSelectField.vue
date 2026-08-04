@@ -19,27 +19,30 @@
       :value="value"
       :options="options"
       :size="size"
+      :multiple="multiple"
+      :tag="tag"
+      :loading="loading"
       :clearable="clearable"
       :filterable="filterable"
       :placeholder="placeholder"
       :style="{ width }"
-      @update:value="(v: SelectValue) => emit('update:value', (v ?? null) as Value)"
+      @update:value="(v: SelectValue) => emit('update:value', (v ?? null) as unknown as Value | null)"
     />
 
     <!-- Mobile: trigger + bottom sheet. -->
     <template v-else>
       <NButton :size="size" class="filter-select__trigger" @click="openSheet" icon-placement="right">
-        <span class="filter-select__trigger-label" :class="{ 'is-placeholder': value == null }">
+        <span class="filter-select__trigger-label" :class="{ 'is-placeholder': isEmpty }">
           {{ currentLabel }}
         </span>
         <template #icon><ChevronDown :size="14" /></template>
       </NButton>
 
-      <NDrawer v-model:show="sheetOpen" placement="bottom" :height="sheetHeight" class="filter-select-sheet">
+      <NDrawer v-model:show="sheetOpen" placement="bottom" :height="sheetHeight" class="rd-sheet filter-select-sheet">
         <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0;">
           <div class="filter-sheet">
             <div class="filter-sheet__handle" />
-            <div class="filter-sheet__title">{{ label }}</div>
+            <div class="filter-sheet__title">{{ label || placeholder }}</div>
 
             <NInput
               v-if="filterable"
@@ -57,11 +60,11 @@
                 v-if="clearable"
                 type="button"
                 class="filter-sheet__option"
-                :class="{ 'filter-sheet__option--active': value == null }"
+                :class="{ 'filter-sheet__option--active': isEmpty }"
                 @click="select(null)"
               >
                 <span>{{ placeholder }}</span>
-                <NIcon v-if="value == null" :size="18"><Check /></NIcon>
+                <NIcon v-if="isEmpty" :size="18"><Check /></NIcon>
               </button>
 
               <button
@@ -69,11 +72,11 @@
                 :key="String(opt.value)"
                 type="button"
                 class="filter-sheet__option"
-                :class="{ 'filter-sheet__option--active': opt.value === value }"
+                :class="{ 'filter-sheet__option--active': isActive(opt.value as Value) }"
                 @click="select(opt.value as Value)"
               >
                 <span>{{ opt.label }}</span>
-                <NIcon v-if="opt.value === value" :size="18"><Check /></NIcon>
+                <NIcon v-if="isActive(opt.value as Value)" :size="18"><Check /></NIcon>
               </button>
 
               <p v-if="!visibleOptions.length" class="filter-sheet__empty">{{ placeholder }}</p>
@@ -91,27 +94,39 @@ import { NButton, NDrawer, NDrawerContent, NIcon, NInput, NSelect, type SelectOp
 import { Check, ChevronDown } from '@lucide/vue'
 import { useIsMobile } from '../../composables/useIsMobile'
 
-type SelectValue = string | number | null
+type SelectValue = Value | Value[] | null
 
 const props = withDefaults(
   defineProps<{
-    label: string
-    value: Value | null
+    label?: string
+    value: Value | Value[] | null
     options: SelectOption[]
     placeholder?: string
     clearable?: boolean
     filterable?: boolean
+    multiple?: boolean
+    tag?: boolean
+    loading?: boolean
     size?: 'tiny' | 'small' | 'medium' | 'large'
     width?: string
+    sheetHeight?: number
   }>(),
   {
+    label: '',
     placeholder: '',
     clearable: true,
     filterable: false,
+    multiple: false,
+    tag: false,
+    loading: false,
     size: 'small',
     width: '200px',
+    sheetHeight: 350
   },
 )
+// Public emit stays single-valued so the many single-select callers keep their
+// (Value | null) handlers; multiple-select callers pass their own cast handler
+// and receive the array at runtime (emitted via a cast below).
 const emit = defineEmits<{
   'update:value': [value: Value | null]
 }>()
@@ -121,13 +136,34 @@ const search = ref('')
 // Close the sheet if the viewport grows back to desktop, so it never strands
 // an open overlay over the inline control (same guard as TimeRangeSelect).
 const sheetOpen = ref(false)
-const sheetHeight = 420
 const isMobile = useIsMobile(() => {
   sheetOpen.value = false
 })
 
-// Trigger label: the selected option's label, or the placeholder when unset.
+// Selected values normalized to an array so single- and multiple-select share
+// one code path for the mobile sheet's active state and trigger label.
+const selectedValues = computed<Value[]>(() => {
+  const v = props.value
+  if (v == null) return []
+  return Array.isArray(v) ? v : [v]
+})
+const isEmpty = computed(() => selectedValues.value.length === 0)
+
+function isActive(v: Value): boolean {
+  return props.multiple ? selectedValues.value.includes(v) : v === props.value
+}
+
+// Trigger label: the selected option label(s), or the placeholder when unset.
+// In multiple mode the chosen labels are joined so the collapsed trigger still
+// shows what is selected.
 const currentLabel = computed(() => {
+  if (isEmpty.value) return props.placeholder
+  if (props.multiple) {
+    const labels = props.options
+      .filter((o) => selectedValues.value.includes(o.value as Value))
+      .map((o) => o.label as string)
+    return labels.length ? labels.join(', ') : props.placeholder
+  }
   const match = props.options.find((o) => o.value === props.value)
   return (match?.label as string) ?? props.placeholder
 })
@@ -147,6 +183,20 @@ function openSheet() {
 }
 
 function select(v: Value | null) {
+  if (props.multiple) {
+    // Toggle within the current selection and keep the sheet open so several
+    // options can be picked in one pass; the clear row (v == null) drops all.
+    if (v == null) {
+      emit('update:value', [] as unknown as Value)
+      return
+    }
+    const cur = selectedValues.value.slice()
+    const i = cur.indexOf(v)
+    if (i >= 0) cur.splice(i, 1)
+    else cur.push(v)
+    emit('update:value', cur as unknown as Value)
+    return
+  }
   emit('update:value', v)
   sheetOpen.value = false
 }
@@ -176,11 +226,16 @@ function select(v: Value | null) {
   border-top-right-radius: var(--radius-xl);
   overflow: hidden;
 }
+:deep(.n-scrollbar-content.n-drawer-body-content-wrapper) {
+  height: 100%;
+}
 
 .filter-sheet {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  height: 100%;
+  overflow: hidden;
   padding: var(--space-2) var(--space-3) var(--space-4);
 }
 
@@ -209,7 +264,6 @@ function select(v: Value | null) {
 
 .filter-sheet__list {
   flex: 1;
-  min-height: 0;
   overflow-y: auto;
 }
 

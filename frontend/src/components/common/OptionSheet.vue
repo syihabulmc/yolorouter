@@ -7,7 +7,7 @@
      Generic over string | number so it serves both id-valued and
      name/enum-valued option lists. -->
 <template>
-  <NDrawer v-model:show="show" placement="bottom" :height="height" class="option-sheet">
+  <NDrawer v-model:show="show" placement="bottom" :height="height" class="rd-sheet option-sheet">
     <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0;">
       <div class="option-sheet__body">
         <div class="option-sheet__handle" />

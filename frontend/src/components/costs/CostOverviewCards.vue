@@ -108,8 +108,8 @@ const netCacheSaved = computed(() => netCacheSavedMicros(props.overview))
 }
 
 @media (max-width: 768px) {
-  .metric-row .metric.one-line{
+  /* .metric-row .metric.one-line{
      grid-column: 1 / -1;
-  }
+  } */
 }
 </style>

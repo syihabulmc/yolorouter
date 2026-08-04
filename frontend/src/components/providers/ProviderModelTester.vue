@@ -15,7 +15,7 @@
       <div class="tester-row" :class="{ 'tester-row--mobile': isMobile }">
         <!-- Desktop: the original filterable + tag select (pick from the fetched
              catalogue or type a model not in the list). -->
-        <n-select
+        <NSelect
           v-if="!isMobile"
           :value="value"
           filterable
@@ -79,7 +79,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useMessage, type FormItemRule } from 'naive-ui'
+import { NSelect, useMessage, type FormItemRule } from 'naive-ui'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
 import { testOutcomeI18nKey, testOutcomeLabel, isTestSuccess } from '../../utils/testOutcomeDisplay'

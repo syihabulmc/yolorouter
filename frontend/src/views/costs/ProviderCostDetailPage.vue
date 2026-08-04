@@ -228,10 +228,16 @@ watch(timeRange, () => { void reload() }, { deep: true })
   }
   .section-card.table-card {
     padding: 0;
+    border: 0;
   }
-  .section-card.table-card .section-card__head{
-    padding: var(--space-3);
+   .section-card.table-card .section-card__head::before{
+    content: "";
+    display: inline-block;
+    width: 4px;
+    height: 1.5em;
+    border-radius: 2px;
+    background: var(--color-primary, #6467f2);
+    flex: 0 0 auto;
   }
-  
 }
 </style>
