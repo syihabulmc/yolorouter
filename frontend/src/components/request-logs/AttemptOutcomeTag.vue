@@ -1,7 +1,8 @@
 <!-- frontend/src/components/request-logs/AttemptOutcomeTag.vue
      Renderer for an AttemptRecord.outcome string (the AttemptOutcome*
      constants in internal/gateway/types.go: success / auth_failed /
-     rate_limited / conn_error / server_error / client_error / bad_status).
+     rate_limited / conn_error / server_error / client_error / bad_status /
+     content_filtered).
 
      Colour groups reflect the relay loop's switch decision, not just the
      HTTP status: green = the attempt that succeeded, amber = key-rotation
@@ -30,6 +31,10 @@ const TYPE_MAP: Record<string, 'success' | 'error' | 'warning' | 'default'> = {
   server_error: 'error',
   client_error: 'error',
   bad_status: 'error',
+  // Red like the other failover triggers: the upstream refused the payload and
+  // the chain moved on to another candidate, which is exactly what red means
+  // in the grouping above.
+  content_filtered: 'error',
 }
 
 const tagType = computed(() => TYPE_MAP[props.outcome] ?? 'default')

@@ -538,6 +538,15 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 	ingress := rc.Ingress
 	for i := range candidates {
 		cand := candidates[i]
+		// Cleared ABOVE the budget gate below, not with the other per-candidate
+		// fields further down: the gate exits the loop mid-iteration, so a reset
+		// placed after it would be skipped exactly when the previous candidate
+		// had just been refused — and the request would be reported as a content
+		// refusal when what actually ended it was running out of time. Normal
+		// exhaustion is unaffected: the last candidate clears these on entry and
+		// sets them again itself if it is refused.
+		rc.ContentInspectionStatus = 0
+		rc.ContentInspectionErrType = ""
 		// Per-request total-budget gate: RequestDeadline is the hard cap that
 		// spans every candidate and key rotation. Checking it only at the
 		// first attempt left later candidates reachable after the budget had
@@ -556,7 +565,9 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 		// would otherwise record as the "final hit provider" of an all-failed
 		// request. rc.UpstreamURL is reset the same way so a candidate that
 		// fails before sending (negotiate / build) never inherits the previous
-		// candidate's URL in its AttemptRecord or the upstream_url column.
+		// candidate's URL in its AttemptRecord or the upstream_url column. The
+		// content-inspection fields belong to the same family — see their reset
+		// above the budget gate, which is why they are not repeated here.
 		rc.Provider = nil
 		rc.UpstreamURL = ""
 
@@ -845,6 +856,21 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 	rc.UpstreamResponseBody = errBody
 	_ = resp.Body.Close()
 
+	// A content-inspection refusal is reclassified from terminal to failover.
+	// Status alone cannot tell it apart from a malformed request — only the
+	// body can — so the upgrade happens here, after the read above, and before
+	// the attempt record is appended so the log shows why the chain continued.
+	// The refusal is remembered for allCandidatesFailed: if every candidate
+	// moderates the payload, the caller must still get that verdict rather than
+	// a generic 502 that reads like an outage.
+	if class.Category == statusTerminalClient && isContentInspectionRejection(statusCode, string(errBody)) {
+		class.Category = statusFailover
+		class.Outcome = AttemptContentFiltered
+		note = fmt.Sprintf("upstream %d content inspection", statusCode)
+		rc.ContentInspectionStatus = statusCode
+		rc.ContentInspectionErrType = class.ErrorType
+	}
+
 	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, statusCode, class.Outcome, note))
 	switch class.Category {
 	case statusRotateKey:
@@ -871,6 +897,24 @@ func (s *RelayService) allCandidatesFailed(c *gin.Context, rc *RelayContext, sta
 			status = http.StatusBadGateway
 		}
 		s.finalize(rc, status, "partial_then_exhausted", start)
+		return
+	}
+	// The chain ended on a content-inspection refusal. That is a verdict on the
+	// request, not an outage, so surface the upstream's own status and say why
+	// — a 502 "all upstream candidates failed" would send the caller looking
+	// for a broken provider instead of at their own prompt. Keyed on the LAST
+	// candidate (the loop clears these on every iteration) rather than "any
+	// candidate was refused": a chain that ends on a 5xx, or on a candidate
+	// that could not even be dispatched to, really is a fault on our side of
+	// the wire, whatever an earlier candidate thought of the payload.
+	if rc.ContentInspectionStatus != 0 {
+		errType := rc.ContentInspectionErrType
+		if errType == "" {
+			errType = errTypeInvalidRequest
+		}
+		WriteIngressError(c, rc.Ingress, rc.ContentInspectionStatus, errType,
+			"request was refused by upstream content inspection", rc.RequestID)
+		s.finalize(rc, rc.ContentInspectionStatus, "content_inspection_refused", start)
 		return
 	}
 	status := http.StatusBadGateway

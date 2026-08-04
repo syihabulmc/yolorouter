@@ -98,6 +98,20 @@ type RelayContext struct {
 
 	StatusCode int // set by finalize when the log row is written
 
+	// ContentInspectionStatus / ContentInspectionErrType describe the MOST
+	// RECENT candidate only — relayCandidates clears them at the top of each
+	// iteration, alongside Provider/UpstreamURL and for the same reason, so
+	// they are set if and only if the candidate that just ran was refused by
+	// the upstream's content inspection. Every other failover reason is an
+	// upstream fault
+	// whose generic 502 is the honest answer once the chain is exhausted; a
+	// moderation refusal is a verdict on the request, so reporting it as "all
+	// upstream candidates failed" would hide the one thing the caller can act
+	// on. Zero means the last attempt was not such a refusal and the ordinary
+	// terminal applies.
+	ContentInspectionStatus  int
+	ContentInspectionErrType string
+
 	// Usage from the successful attempt, if any — drives cost + the log row.
 	Usage *Usage
 
@@ -215,6 +229,9 @@ const (
 	AttemptServerError = "server_error" // 5xx -> failover candidate
 	AttemptClientError = "client_error" // 4xx (non-auth) -> do NOT switch
 	AttemptBadStatus   = "bad_status"   // unmapped non-2xx -> do NOT switch
+	// AttemptContentFiltered is the one 4xx that DOES switch: the upstream's
+	// input inspection refused the payload, which another candidate may not.
+	AttemptContentFiltered = "content_filtered"
 )
 
 // Usage is the token usage pulled from an OpenAI-compatible response or
