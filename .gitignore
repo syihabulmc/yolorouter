@@ -30,9 +30,6 @@ web/dist/
 .wrangler/
 .superpowers/
 
-# Cloudflare Worker source is kept private (first-party infra, not published)
-deploy/cloudflare-worker/
-
 gui-test-screenshots/
 # Article drafts and their assets stay local. Scoped to this one subdirectory
 # on purpose: a bare "docs/" also swallows docs/screenshots/, which README.md
