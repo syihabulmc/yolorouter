@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env pwsh
+#!/usr/bin/env pwsh
 <#
 .SYNOPSIS
     yolorouter one-command installer for Windows.
@@ -319,81 +319,54 @@ function Download-AndExtract {
     $sumsPath = Join-Path $script:TMP_DIR 'checksums.txt'
     $skipVerify = $false
 
-    # ---- local dev path: copy from repo bin/ if available ----
-    $localBin = Join-Path $PSScriptRoot '..\bin'
-    $localAsset = Join-Path $localBin $asset
-    $localSums = Join-Path $localBin 'checksums.txt'
-    $localBinary = Join-Path $localBin "$BINARY_NAME.exe"
+    # ---- remote path: download from GitHub ----
+    $assetUrl = Mirror-Url "$GITHUB_DL/download/$($script:TAG)/$asset"
+    $sumsUrlCanonical = "$GITHUB_DL/download/$($script:TAG)/checksums.txt"
+    $sumsUrl = Mirror-Url $sumsUrlCanonical
 
-    if ((Test-Path $localAsset) -or (Test-Path $localBinary)) {
-        info "$(m '使用本地 bin/ 目录的文件...' 'Using local files from bin/...')"
-
-        if (Test-Path $localAsset) {
-            Copy-Item $localAsset $assetPath -Force
+    info ("$(m '下载 {0}' 'Downloading {0}')" -f $asset)
+    $prevProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $assetUrl -OutFile $assetPath -UseBasicParsing -ErrorAction Stop
+    } catch {
+        $ProgressPreference = $prevProgress
+        $status = $null
+        $resp = $_.Exception.Response
+        if ($resp -and $resp.StatusCode) { $status = [int]$resp.StatusCode }
+        $detail = $_.Exception.Message
+        if ($status -eq 404) {
+            die (m "下载失败（404）: $assetUrl。该版本可能没有针对本平台的发布资产（windows_${script:ARCH}）。" "Download failed (404): $assetUrl. This release may have no asset for this platform (windows_${script:ARCH}).")
+        } elseif ($status) {
+            die (m "下载失败（HTTP $status）: $assetUrl。$detail" "Download failed (HTTP $status): $assetUrl. $detail")
         } else {
-            # No zip — copy the binary directly, skip checksum and extraction.
-            Copy-Item $localBinary (Join-Path $script:TMP_DIR "$BINARY_NAME.exe") -Force
-            $skipVerify = $true
-            info "$(m '跳过校验和解压（本地开发模式，直接使用 .exe）' 'Skipping checksum and extraction (local dev mode, using .exe directly)')"
+            $mirrorHint = if ($MIRROR) { m "当前镜像: $MIRROR，请确认镜像可用。" "Current mirror: $MIRROR; check the mirror is reachable." } else { m "未设置镜像，已直连 GitHub。如无法访问 GitHub，请设置 YOLO_MIRROR=https://你的镜像/ 后重试。" "No mirror set, connecting to GitHub directly. If GitHub is unreachable, set YOLO_MIRROR=https://your-mirror/ and retry." }
+            die (m "下载失败（网络错误，非 404）: $assetUrl。$detail $mirrorHint" "Download failed (network error, not a 404): $assetUrl. $detail $mirrorHint")
         }
-
-        if (-not $skipVerify) {
-            if (Test-Path $localSums) {
-                Copy-Item $localSums $sumsPath -Force
-            } else {
-                warn "$(m '本地 bin/ 下没有 checksums.txt，跳过校验' 'No checksums.txt in local bin/, skipping verification')"
-                $skipVerify = $true
-            }
-        }
-    } else {
-        # ---- remote path: download from GitHub ----
-        $assetUrl = Mirror-Url "$GITHUB_DL/download/$($script:TAG)/$asset"
-        $sumsUrlCanonical = "$GITHUB_DL/download/$($script:TAG)/checksums.txt"
-        $sumsUrl = Mirror-Url $sumsUrlCanonical
-
-        info ("$(m '下载 {0}' 'Downloading {0}')" -f $asset)
-        $prevProgress = $ProgressPreference
-        $ProgressPreference = 'SilentlyContinue'
-        try {
-            Invoke-WebRequest -Uri $assetUrl -OutFile $assetPath -UseBasicParsing -ErrorAction Stop
-        } catch {
-            $ProgressPreference = $prevProgress
-            $status = $null
-            $resp = $_.Exception.Response
-            if ($resp -and $resp.StatusCode) { $status = [int]$resp.StatusCode }
-            $detail = $_.Exception.Message
-            if ($status -eq 404) {
-                die (m "下载失败（404）: $assetUrl。该版本可能没有针对本平台的发布资产（windows_${script:ARCH}）。" "Download failed (404): $assetUrl. This release may have no asset for this platform (windows_${script:ARCH}).")
-            } elseif ($status) {
-                die (m "下载失败（HTTP $status）: $assetUrl。$detail" "Download failed (HTTP $status): $assetUrl. $detail")
-            } else {
-                $mirrorHint = if ($MIRROR) { m "当前镜像: $MIRROR，请确认镜像可用。" "Current mirror: $MIRROR; check the mirror is reachable." } else { m "未设置镜像，已直连 GitHub。如无法访问 GitHub，请设置 YOLO_MIRROR=https://你的镜像/ 后重试。" "No mirror set, connecting to GitHub directly. If GitHub is unreachable, set YOLO_MIRROR=https://your-mirror/ and retry." }
-                die (m "下载失败（网络错误，非 404）: $assetUrl。$detail $mirrorHint" "Download failed (network error, not a 404): $assetUrl. $detail $mirrorHint")
-            }
-        } finally {
-            $ProgressPreference = $prevProgress
-        }
-
-        info "$(m '校验 sha256...' 'Verifying sha256...')"
-        $prevProgress = $ProgressPreference
-        $ProgressPreference = 'SilentlyContinue'
-        try {
-            try {
-                Invoke-WebRequest -Uri $sumsUrlCanonical -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
-            } catch {
-                if ($sumsUrl -ne $sumsUrlCanonical) {
-                    warn (m "无法从 GitHub 获取 checksums.txt，改用镜像；镜像返回的校验值仅在镜像本身可信时才可信" "Could not fetch checksums.txt from GitHub; falling back to the mirror. The mirror checksum is only as trustworthy as the mirror itself.")
-                    Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
-                } else {
-                    throw
-                }
-            }
-        } catch {
-            die (m "下载 checksums.txt 失败: $sumsUrl" "Failed to download checksums.txt: $sumsUrl")
-        } finally {
-            $ProgressPreference = $prevProgress
-        }
+    } finally {
+        $ProgressPreference = $prevProgress
     }
+
+    info "$(m '校验 sha256...' 'Verifying sha256...')"
+    $prevProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        try {
+            Invoke-WebRequest -Uri $sumsUrlCanonical -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
+        } catch {
+            if ($sumsUrl -ne $sumsUrlCanonical) {
+                warn (m "无法从 GitHub 获取 checksums.txt，改用镜像；镜像返回的校验值仅在镜像本身可信时才可信" "Could not fetch checksums.txt from GitHub; falling back to the mirror. The mirror checksum is only as trustworthy as the mirror itself.")
+                Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
+            } else {
+                throw
+            }
+        }
+    } catch {
+        die (m "下载 checksums.txt 失败: $sumsUrl" "Failed to download checksums.txt: $sumsUrl")
+    } finally {
+        $ProgressPreference = $prevProgress
+    }
+    
 
     # ---- verify sha256 ----
     if (-not $skipVerify) {
