@@ -48,13 +48,19 @@ type RequestLog struct {
 	// https://api.openai.com/v1/chat/completions). Both are empty when no
 	// upstream request was sent (pre-relay rejection) and for rows predating
 	// this column — the detail UI renders the placeholder for empty values.
-	RequestPath    string    `gorm:"column:request_path" json:"request_path"`
-	UpstreamURL    string    `gorm:"column:upstream_url" json:"upstream_url"`
-	FailReason     *string   `gorm:"column:fail_reason" json:"fail_reason"`
-	Attempts       int       `gorm:"column:attempts" json:"attempts"`
-	AttemptsDetail *string   `gorm:"column:attempts_detail" json:"attempts_detail"`
-	DurationMs     int64     `gorm:"column:duration_ms" json:"duration_ms"`
-	CreatedAt      time.Time `gorm:"column:created_at" json:"created_at"`
+	RequestPath    string  `gorm:"column:request_path" json:"request_path"`
+	UpstreamURL    string  `gorm:"column:upstream_url" json:"upstream_url"`
+	FailReason     *string `gorm:"column:fail_reason" json:"fail_reason"`
+	Attempts       int     `gorm:"column:attempts" json:"attempts"`
+	AttemptsDetail *string `gorm:"column:attempts_detail" json:"attempts_detail"`
+	DurationMs     int64   `gorm:"column:duration_ms" json:"duration_ms"`
+	// FactsJSON holds observations that have no column of their own, verbatim,
+	// keyed by their stable names. Empty when everything reported was
+	// recognised. It exists so an observation from a capability this build has
+	// no column for is stored rather than dropped — a dropped one is
+	// indistinguishable from one that never happened.
+	FactsJSON string    `gorm:"column:facts_json" json:"facts_json"`
+	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
 }
 
 func (RequestLog) TableName() string { return "request_logs" }

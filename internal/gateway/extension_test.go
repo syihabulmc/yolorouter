@@ -511,3 +511,77 @@ func TestFailReasonPrefersTheReporterCode(t *testing.T) {
 		t.Errorf("failReason = %q, want the kind name as fallback", got)
 	}
 }
+
+// mutatingRecorder is the rule-breaker: it does everything a recorder must not
+// do to the history it is handed.
+type mutatingRecorder struct{}
+
+func (mutatingRecorder) Name() string { return "mutating" }
+
+func (mutatingRecorder) Record(_ context.Context, _ struct{}, _ fact.Outcome, tl fact.Timeline) {
+	// Grow it, edit an entry in place, and edit the Fact that entry points at.
+	tl.Append(fact.Entry{Reporter: "forged", Fact: &fact.Fact{Kind: fact.KindClientGone}})
+	got := tl.All()
+	for i := range got {
+		got[i].Reporter = "overwritten"
+		if got[i].Fact != nil {
+			got[i].Fact.Reason = "overwritten"
+		}
+	}
+}
+
+// readingRecorder runs after the rule-breaker and keeps what it was given, so
+// the assertions can ask what actually survived.
+type readingRecorder struct {
+	saw []fact.Entry
+}
+
+func (r *readingRecorder) Name() string { return "reading" }
+
+func (r *readingRecorder) Record(_ context.Context, _ struct{}, _ fact.Outcome, tl fact.Timeline) {
+	r.saw = tl.All()
+}
+
+// TestRecordersCannotEditTheHistoryTheyRead checks that the timeline a recorder
+// receives is its own to read and nobody else's to lose.
+//
+// Recorders run in sequence over one history. If the first could grow or edit
+// it, the audit trail would depend on the order recorders happen to be
+// registered in — the same order dependence the fold exists to rule out,
+// arriving through a later door. Handing the timeline over by value is what
+// prevents it, so this test fails if that is ever relaxed back to a pointer.
+func TestRecordersCannotEditTheHistoryTheyRead(t *testing.T) {
+	rc := &Exchange{requestID: "req-timeline-isolation"}
+	rc.timeline.Append(fact.Entry{
+		Attempt:  0,
+		Reporter: "original",
+		Fact:     &fact.Fact{Kind: fact.KindPayloadRefused, Reason: "original"},
+	})
+
+	svc := &Service{}
+	reader := &readingRecorder{}
+	bind := func(*Exchange) struct{} { return struct{}{} }
+	RegisterRecorder(svc, mutatingRecorder{}, bind)
+	RegisterRecorder(svc, reader, bind)
+
+	svc.runRecorders(context.Background(), rc, fact.Outcome{})
+
+	if len(reader.saw) != 1 {
+		t.Fatalf("the second recorder saw %d entries, want 1: the first one's append reached it",
+			len(reader.saw))
+	}
+	if reader.saw[0].Reporter != "original" {
+		t.Errorf("the second recorder read Reporter %q, want %q: the first one's edit reached it",
+			reader.saw[0].Reporter, "original")
+	}
+	if reader.saw[0].Fact.Reason != "original" {
+		t.Errorf("the second recorder read Reason %q, want %q: entries are copied but the Fact they point at is not",
+			reader.saw[0].Fact.Reason, "original")
+	}
+
+	// The kernel's own copy is the one anything after this reads.
+	kept := rc.timeline.All()
+	if len(kept) != 1 || kept[0].Reporter != "original" || kept[0].Fact.Reason != "original" {
+		t.Errorf("the kernel's timeline was modified by a recorder: %+v", kept)
+	}
+}

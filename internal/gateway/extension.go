@@ -273,7 +273,10 @@ func newExchangeSink(rc *Exchange) *exchangeSink {
 	s := &exchangeSink{
 		timeline: &rc.timeline,
 		attempt:  len(rc.attempts),
-		now:      time.Now,
+		// Timeline entries are stamped in UTC like every other time this
+		// service persists or compares, so an audit trail assembled from
+		// several hosts stays in one frame of reference.
+		now: func() time.Time { return time.Now().UTC() },
 	}
 	if rc.candidate != nil {
 		s.candidate = rc.candidate.ID
@@ -439,6 +442,24 @@ func RegisterAdmission[V, T any](s *Service, a AdmissionOf[V, T], bind func(*Exc
 	s.admissions = append(s.admissions, admissionAdapter[V, T]{inner: a, bind: bind})
 }
 
+// RegisteredAdmissions names the admissions in acquisition order, which is the
+// reverse of the order they are compensated in.
+//
+// Stack discipline makes "release what was taken last, first" true by
+// construction, but it leaves WHICH order that is as a property of the lines in
+// the assembly function — and "the balance pre-deduct must be reversed after the
+// sub-request charge" is a real constraint that no longer has anywhere to live
+// once it is only an ordering of statements. This is what lets the assembly pin
+// it: exported because the assembly, and therefore the test that pins it, is
+// necessarily in another package.
+func (s *Service) RegisteredAdmissions() []string {
+	out := make([]string, len(s.admissions))
+	for i, a := range s.admissions {
+		out[i] = a.name()
+	}
+	return out
+}
+
 // heldTicket pairs a ticket with the admission that issued it.
 type heldTicket struct {
 	by     admission
@@ -484,5 +505,87 @@ func (s *Service) releaseAdmissions(ctx context.Context, rc *Exchange, held []he
 	for i := len(held) - 1; i >= 0; i-- {
 		sink.reporter = held[i].by.name()
 		held[i].by.release(ctx, rc, held[i].ticket, out, sink)
+	}
+}
+
+// recorderWriteBudget bounds how long the audit trail may take to persist. It
+// runs after the caller has been served, so it delays nothing the caller sees;
+// the bound exists so a stuck database cannot pin goroutines indefinitely.
+const recorderWriteBudget = 5 * time.Second
+
+// RecorderOf is the terminal fan-in: called exactly once per exchange, on every
+// exit path, after the outcome is settled.
+//
+// It receives the whole timeline. That is the point of the shape: a recorder
+// learns what happened from what was reported, not by reaching into the
+// exchange for each capability's private field. A capability that starts
+// reporting something new needs no change here to have it persisted, and one
+// that stops reporting cannot leave a stale field behind that still looks
+// current.
+//
+// The timeline arrives by value so that recorders are readers. Several of them
+// run in sequence over the same history, and one that grew or edited it would
+// decide what the others get to see.
+type RecorderOf[V any] interface {
+	Name() string
+	Record(ctx context.Context, view V, out fact.Outcome, tl fact.Timeline)
+}
+
+// recorder is the kernel-side, view-erased form.
+type recorder interface {
+	name() string
+	record(ctx context.Context, e *Exchange, out fact.Outcome, tl fact.Timeline)
+}
+
+type recorderAdapter[V any] struct {
+	inner RecorderOf[V]
+	bind  func(*Exchange) V
+}
+
+func (a recorderAdapter[V]) name() string { return a.inner.Name() }
+
+func (a recorderAdapter[V]) record(ctx context.Context, e *Exchange, out fact.Outcome, tl fact.Timeline) {
+	a.inner.Record(ctx, a.bind(e), out, tl)
+}
+
+// RegisterRecorder wires a recorder into the service.
+func RegisterRecorder[V any](s *Service, r RecorderOf[V], bind func(*Exchange) V) {
+	s.recorders = append(s.recorders, recorderAdapter[V]{inner: r, bind: bind})
+}
+
+// runRecorders hands the settled exchange to every recorder.
+//
+// A recorder that panics must not take the others down with it, nor the request
+// it is describing: by the time this runs the caller has already been served,
+// and losing an audit row is bad where failing a served request would be worse.
+func (s *Service) runRecorders(ctx context.Context, rc *Exchange, out fact.Outcome) {
+	if len(s.recorders) == 0 {
+		return
+	}
+	if ctx == nil {
+		// Reached only from a caller that never established a request context.
+		ctx = context.Background()
+	}
+	// The audit trail is written on a context detached from the request's own
+	// cancellation, and bounded separately. A cancelled caller is exactly the
+	// case where the row matters most — a request that ended in a disconnect is
+	// one somebody will come looking for — and inheriting that cancellation
+	// means the write fails precisely then. The bound keeps a stuck database
+	// from holding the goroutine after the caller is long gone.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recorderWriteBudget)
+	defer cancel()
+
+	for _, r := range s.recorders {
+		func() {
+			defer func() {
+				if v := recover(); v != nil {
+					logger.Error("gateway: recorder panicked",
+						zap.String("recorder", r.name()),
+						zap.String("request_id", rc.requestID),
+						zap.Any("panic", v))
+				}
+			}()
+			r.record(ctx, rc, out, rc.timeline)
+		}()
 	}
 }

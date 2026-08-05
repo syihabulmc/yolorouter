@@ -107,6 +107,8 @@ func TestFinalizeWritesBodyRow(t *testing.T) {
 
 	svc.finalize(rc, 200, "", time.Now())
 
+	svc.recordTerminal(rc)
+
 	var logCount int64
 	db.Model(&model.RequestLog{}).Count(&logCount)
 	if logCount != 1 {
@@ -164,6 +166,7 @@ func TestFinalizeBodyWriteFailureDoesNotRollbackBilling(t *testing.T) {
 		}
 	}()
 	svc.finalize(rc, 200, "", time.Now())
+	svc.recordTerminal(rc)
 
 	var logCount int64
 	db.Model(&model.RequestLog{}).Count(&logCount)
@@ -268,6 +271,7 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 		}},
 	}
 	svc.finalize(rc, 200, "", time.Now())
+	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-compress-1")
 	if err != nil || row == nil {
@@ -313,6 +317,7 @@ func TestFinalizeWritesCompressSkippedColumns(t *testing.T) {
 		compressSkipReason: "too_small",
 	}
 	svc.finalize(rc, 200, "", time.Now())
+	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-compress-skip-1")
 	if err != nil || row == nil {
@@ -350,6 +355,7 @@ func TestFinalizeWritesCompressColumnsUncompressed(t *testing.T) {
 
 	rc := &Exchange{requestID: "req-nocompress-1", apiKeyID: apiKey.ID}
 	svc.finalize(rc, 200, "", time.Now())
+	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-nocompress-1")
 	if err != nil || row == nil {
@@ -392,6 +398,7 @@ func TestFinalizeCompressCostSavedZeroWhenPricingUnknown(t *testing.T) {
 		// Attempts is empty (pre-relay rejection).
 	}
 	svc.finalize(rc, http.StatusInternalServerError, "no_candidate", time.Now())
+	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-unknown-price-1")
 	if err != nil || row == nil {
@@ -439,6 +446,7 @@ func TestFinalizeCompressPhantomSavingsZeroedOnPreRelayRejection(t *testing.T) {
 	}
 	// 503 = no routable candidate, the most common post-compress pre-relay path.
 	svc.finalize(rc, http.StatusServiceUnavailable, "no_enabled_candidate", time.Now())
+	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-phantom-1")
 	if err != nil || row == nil {
@@ -472,28 +480,6 @@ func TestFinalizeCompressPhantomSavingsZeroedOnPreRelayRejection(t *testing.T) {
 // TestJoinCompressors covers the comma-join helper directly: per-block
 // occurrences are preserved (NOT deduped) so stats can count how many times
 // each compressor fired, order is preserved, and empty input yields "".
-func TestJoinCompressors(t *testing.T) {
-	cases := []struct {
-		name string
-		in   []string
-		want string
-	}{
-		{"nil", nil, ""},
-		{"empty", []string{}, ""},
-		{"single", []string{"whitespace"}, "whitespace"},
-		{"distinct", []string{"whitespace", "contractions"}, "whitespace,contractions"},
-		{"duplicates preserved", []string{"whitespace", "contractions", "whitespace", "whitespace"}, "whitespace,contractions,whitespace,whitespace"},
-		{"blanks filtered", []string{"", "whitespace", "", ""}, "whitespace"},
-		{"repeats counted", []string{"log", "log", "diff"}, "log,log,diff"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := joinCompressors(tc.in); got != tc.want {
-				t.Errorf("joinCompressors(%v) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
 
 func TestNetPromptTokens(t *testing.T) {
 	cases := []struct {
@@ -883,6 +869,7 @@ func TestFinalizeNormalizesCacheExclusivePrompt(t *testing.T) {
 			reqID := fmt.Sprintf("req-cacheconv-%d", i)
 			rc := &Exchange{requestID: reqID, apiKeyID: apiKey.ID, candidate: cand, usage: tc.usage}
 			svc.finalize(rc, 200, "", time.Now())
+			svc.recordTerminal(rc)
 
 			row, err := repository.GetRequestLogByRequestID(db, reqID)
 			if err != nil || row == nil {

@@ -1,0 +1,250 @@
+// Package requestlog persists the audit trail for one exchange: the summary row
+// and the captured bodies.
+//
+// It learns what happened from the reported timeline rather than by reading
+// each capability's own state. That is the whole reason the timeline exists.
+// The arrangement it replaces had one function reaching into a shared struct
+// for every field it wanted, which meant a capability that renamed or stopped
+// setting a field silently lost its column — the row still wrote, just with a
+// zero where the number used to be, and nothing failed.
+package requestlog
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+
+	"gorm.io/gorm"
+
+	"github.com/yolorouter/yolorouter/internal/fact"
+	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/repository"
+	"github.com/yolorouter/yolorouter/pkg/logger"
+	"go.uber.org/zap"
+)
+
+// View is what the recorder reads off the exchange: the caller's identity and
+// route, and the captured bodies.
+//
+// It is the widest view any capability declares, which is expected — an audit
+// row summarises everything. The width being written down here, in the package
+// that has it, is the improvement: it is a list someone can review, rather than
+// an open licence to read any field.
+//
+// Everything that some other capability produced — usage, cost, attempts,
+// compression outcome — is deliberately absent. Those arrive through the
+// timeline.
+type View interface {
+	RequestID() string
+	APIKeyID() uint
+	OriginalModel() string
+	ProviderID() *uint
+	IsStream() bool
+	IngressPath() string
+	UpstreamURL() string
+
+	CompressSkipReason() string
+
+	RequestHeaders() []byte
+	RequestBody() []byte
+	CompressedRequestBody() []byte
+	UpstreamRequestBody() []byte
+	ResponseBody() []byte
+	UpstreamResponseBody() []byte
+	StreamBodyPath() string
+	StreamBodyTruncated() bool
+}
+
+// Recorder writes the audit trail.
+type Recorder struct {
+	db *gorm.DB
+}
+
+// New returns a recorder that writes through db.
+func New(db *gorm.DB) *Recorder { return &Recorder{db: db} }
+
+// Name identifies the recorder in logs.
+func (*Recorder) Name() string { return "request_log" }
+
+// Record writes the summary row and the body row.
+//
+// A failure to write bodies is logged and no more: the summary row carries the
+// billing figures and is the authoritative one, so it must not be rolled back
+// because a diagnostic capture could not be stored.
+func (r *Recorder) Record(ctx context.Context, view View, out fact.Outcome, tl fact.Timeline) {
+	s := summarise(tl)
+
+	apiKeyID := view.APIKeyID()
+	var failPtr *string
+	if out.FailReason != "" {
+		fr := out.FailReason
+		failPtr = &fr
+	}
+
+	// Compression savings only mean something if the request actually reached an
+	// upstream. One that compressed a body and was then rejected before any
+	// candidate ran must not inflate the savings metrics — it saved nothing,
+	// because nothing was sent. The skip reason is kept either way: it is
+	// audit-only and is most useful precisely on the paths that never dispatched.
+	tokensSaved, costSaved, compressors := s.compressTokensSaved, s.compressCostSavedMicros, s.compressorsApplied
+	if s.attempts == 0 {
+		tokensSaved, costSaved, compressors = 0, 0, ""
+	}
+
+	row := &model.RequestLog{
+		RequestID:                        view.RequestID(),
+		APIKeyID:                         &apiKeyID,
+		ModelName:                        view.OriginalModel(),
+		ProviderID:                       view.ProviderID(),
+		IsStream:                         view.IsStream(),
+		StatusCode:                       out.StatusCode,
+		InputTokens:                      s.inputTokens,
+		OutputTokens:                     s.outputTokens,
+		CacheWriteTokens:                 s.cacheWriteTokens,
+		CacheReadTokens:                  s.cacheReadTokens,
+		CostMicros:                       s.costMicros,
+		CostKnown:                        s.costKnown,
+		CacheReadSavedMicros:             s.cacheReadSavedMicros,
+		CacheWriteExtraMicros:            s.cacheWriteExtraMicros,
+		CompressEstimatedTokensSaved:     tokensSaved,
+		CompressEstimatedCostSavedMicros: costSaved,
+		CompressSkipReason:               view.CompressSkipReason(),
+		CompressorsApplied:               compressors,
+		RequestPath:                      view.IngressPath(),
+		UpstreamURL:                      view.UpstreamURL(),
+		FailReason:                       failPtr,
+		Attempts:                         s.attempts,
+		DurationMs:                       out.Duration.Milliseconds(),
+		FactsJSON:                        encodeOverflow(s.overflow, view.RequestID()),
+	}
+	if s.attemptsDetail != "" {
+		detail := s.attemptsDetail
+		row.AttemptsDetail = &detail // *string so empty stays SQL NULL, not ''
+	}
+
+	if err := repository.CreateRequestLog(r.db.WithContext(ctx), row); err != nil {
+		logger.Error("gateway: write request log failed",
+			zap.String("request_id", view.RequestID()), zap.Error(err))
+	}
+
+	bodyRow := &model.RequestLogBody{
+		RequestID:             view.RequestID(),
+		RequestHeaders:        string(view.RequestHeaders()),
+		RequestBody:           string(view.RequestBody()),
+		UpstreamRequestBody:   string(view.UpstreamRequestBody()),
+		ResponseBody:          string(view.ResponseBody()),
+		UpstreamResponseBody:  string(view.UpstreamResponseBody()),
+		StreamBodyPath:        view.StreamBodyPath(),
+		StreamBodyTruncated:   view.StreamBodyTruncated(),
+		CompressedRequestBody: string(view.CompressedRequestBody()),
+	}
+	if err := repository.UpsertRequestLogBody(r.db.WithContext(ctx), bodyRow); err != nil {
+		logger.Error("gateway: write request log body failed",
+			zap.String("request_id", view.RequestID()), zap.Error(err))
+	}
+}
+
+// summary is what the timeline said, reduced to the columns this row has.
+type summary struct {
+	inputTokens, outputTokens         int
+	cacheWriteTokens, cacheReadTokens int
+	costKnown                         bool
+	costMicros                        int64
+	cacheReadSavedMicros              int64
+	cacheWriteExtraMicros             int64
+	compressCostSavedMicros           int64
+	compressTokensSaved               int
+	compressorsApplied                string
+	attempts                          int
+	attemptsDetail                    string
+	// overflow holds every record this build has no column for, so it is
+	// stored rather than dropped.
+	overflow []overflowEntry
+}
+
+// overflowEntry is one unrecognised record, kept under its stable name so a
+// build that later grows a column for it can find what was already collected.
+type overflowEntry struct {
+	Attempt int         `json:"attempt"`
+	Name    string      `json:"name"`
+	Record  fact.Record `json:"record"`
+}
+
+// summarise reads the records this row has columns for and collects the rest.
+//
+// The default arm is the contract, not an oversight. A record this build has no
+// column for must survive into the row anyway: dropping it is silent — the row
+// still writes, just without the number — and leaves no way to tell an
+// observation that never happened from one nobody made room for. Collecting it
+// under its stable name turns a missing column into something an operator can
+// find.
+func summarise(tl fact.Timeline) summary {
+	var s summary
+	for _, e := range tl.All() {
+		if e.Record == nil {
+			continue // a routing fact; those steer the request, they are not columns
+		}
+		switch rec := e.Record.(type) {
+		case fact.UsageReported:
+			s.inputTokens = rec.Prompt
+			s.outputTokens = rec.Completion
+			s.cacheWriteTokens = rec.CacheWrite
+			s.cacheReadTokens = rec.CacheRead
+		case fact.CostComputed:
+			s.costKnown = rec.Known
+			s.costMicros = rec.Micros
+			s.cacheReadSavedMicros = rec.CacheReadSavedMicros
+			s.cacheWriteExtraMicros = rec.CacheWriteExtraMicros
+			s.compressCostSavedMicros = rec.CompressCostSavedMicros
+		case fact.TokensSaved:
+			s.compressTokensSaved = rec.EstimatedTokens
+			s.compressorsApplied = joinCompressors(rec.Compressors)
+		case fact.AttemptsRecorded:
+			s.attempts = rec.Count
+			s.attemptsDetail = rec.Detail
+		default:
+			s.overflow = append(s.overflow, overflowEntry{
+				Attempt: e.Attempt,
+				Name:    rec.RecordName(),
+				Record:  rec,
+			})
+		}
+	}
+	return s
+}
+
+// encodeOverflow renders the unrecognised records for storage. A failure to
+// encode is reported and the rest of the row is still written: losing the
+// overflow is bad, losing the billing row with it would be worse.
+func encodeOverflow(entries []overflowEntry, requestID string) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	out, err := json.Marshal(entries)
+	if err != nil {
+		logger.Warn("gateway: could not encode unrecognised records",
+			zap.String("request_id", requestID), zap.Error(err))
+		return ""
+	}
+	return string(out)
+}
+
+// joinCompressors collapses the per-block list into the comma-joined string the
+// column stores.
+//
+// Repeats are preserved, not deduped: the compress engine appends one entry per
+// modified block, so a compressor appearing three times means it shrank three
+// blocks, and that count is what downstream stats are counting.
+func joinCompressors(applied []string) string {
+	if len(applied) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(applied))
+	for _, name := range applied {
+		if name == "" {
+			continue
+		}
+		parts = append(parts, name)
+	}
+	return strings.Join(parts, ",")
+}

@@ -21,6 +21,7 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
 	"github.com/yolorouter/yolorouter/internal/capability/ratelimit"
+	"github.com/yolorouter/yolorouter/internal/capability/requestlog"
 	"github.com/yolorouter/yolorouter/internal/capability/systemprompt"
 	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/model"
@@ -146,6 +147,7 @@ func newSvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProv
 		func(e *Exchange) systemprompt.View { return e })
 	lim := ratelimit.NewLimiter()
 	RegisterAdmission(svc, lim, func(e *Exchange) ratelimit.View { return e })
+	RegisterRecorder(svc, requestlog.New(db), func(e *Exchange) requestlog.View { return e })
 	svcLimiters.Store(svc, lim)
 	return svc
 }

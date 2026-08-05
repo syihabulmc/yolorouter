@@ -162,3 +162,39 @@ type RateLimitSnapshot struct {
 }
 
 func (RateLimitSnapshot) RecordName() string { return "rate_limit_snapshot" }
+
+// CostComputed carries what an exchange cost, once the kernel has priced it.
+//
+// It is a record rather than something a consumer recomputes because pricing
+// and persistence must not be able to disagree: the number written to the audit
+// row has to be the same number that was charged, and the only way to guarantee
+// that is for both to read one value.
+//
+// Known distinguishes "cost nothing" from "could not be priced" — a request
+// that never reached a priced candidate has no cost, which is not the same as a
+// free one, and a dashboard that sums them together reports revenue that never
+// existed.
+type CostComputed struct {
+	Base
+	Known                   bool
+	Micros                  int64
+	CacheReadSavedMicros    int64
+	CacheWriteExtraMicros   int64
+	CompressCostSavedMicros int64
+}
+
+func (CostComputed) RecordName() string { return "cost_computed" }
+
+// AttemptsRecorded carries how many upstream attempts ran and their detail.
+//
+// The count is what separates a request that reached an upstream from one
+// rejected before any candidate was tried, which several consumers need:
+// compression savings from a request that never left the building would inflate
+// every savings metric that counts it.
+type AttemptsRecorded struct {
+	Base
+	Count  int
+	Detail string // JSON, empty when nothing ran
+}
+
+func (AttemptsRecorded) RecordName() string { return "attempts_recorded" }

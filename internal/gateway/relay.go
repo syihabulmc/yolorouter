@@ -126,6 +126,9 @@ type Service struct {
 	// admissions gate the exchange before any upstream work. Registration
 	// order is acquisition order; release runs in reverse.
 	admissions []admission
+
+	// recorders receive the settled exchange exactly once, on every exit path.
+	recorders []recorder
 }
 
 // NewService wires the gateway with the already-decoded AES master key
@@ -210,6 +213,11 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// RequestCtx deadline => attempt ctx deadline too.
 	requestCtx, requestCancel := context.WithDeadline(c.Request.Context(), rc.requestDeadline)
 	defer requestCancel()
+	// Armed before anything else that defers, so it unwinds LAST: recording has
+	// to see a timeline that nothing will append to, and admissions release
+	// after their own defer, which is registered later and therefore runs
+	// first.
+	defer s.recordTerminal(rc)
 	rc.requestCtx = requestCtx
 	// The ingress protocol is a property of the request path, computed once
 	// up front so every error write in this function (and the pre-candidate

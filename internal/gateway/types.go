@@ -130,6 +130,11 @@ type Exchange struct {
 	// ordering in one place.
 	timeline fact.Timeline
 
+	// outcome is what finalize settled on, held until every release has run so
+	// the recorders see a timeline nothing will be appended to.
+	outcome        fact.Outcome
+	outcomeSettled bool
+
 	// rewriteSteps records, in order, every egress rewrite that actually
 	// changed the body for the current candidate. Reset alongside the body
 	// it describes.
@@ -233,6 +238,71 @@ func (rc *Exchange) CustomSystemPrompt() string { return rc.customSystemPrompt }
 // answer cannot change mid-exchange and recomputing it invites two call sites
 // to disagree.
 func (rc *Exchange) IsChatEndpoint() bool { return rc.isChatEndpoint }
+
+// The getters below serve the recorder, which needs the widest view of any
+// capability — an audit row is by nature a summary of everything. That width is
+// not a failure of the split: it is a list, written in the recorder's own
+// package, of exactly what it reads, which is what the previous arrangement
+// (any code in the package reaching for any field) could never produce.
+
+// RequestID is the id shared with the access log and the caller's error
+// messages, so one identifier locates a request everywhere it was recorded.
+func (rc *Exchange) RequestID() string { return rc.requestID }
+
+// OriginalModel is the model name the caller asked for.
+func (rc *Exchange) OriginalModel() string { return rc.originalModel }
+
+// IsStream reports whether the caller asked for a streamed response.
+func (rc *Exchange) IsStream() bool { return rc.isStream }
+
+// IngressPath is the caller's request path.
+func (rc *Exchange) IngressPath() string { return rc.ingressPath }
+
+// UpstreamURL is where the last attempt was dispatched, empty if none was.
+func (rc *Exchange) UpstreamURL() string { return rc.upstreamURL }
+
+// ProviderID identifies the provider of the last attempt, nil when no candidate
+// was reached.
+func (rc *Exchange) ProviderID() *uint {
+	if rc.provider == nil {
+		return nil
+	}
+	id := rc.provider.ID
+	return &id
+}
+
+// CompressSkipReason says why compression declined, empty when it did not.
+func (rc *Exchange) CompressSkipReason() string { return rc.compressSkipReason }
+
+// RequestHeaders is the masked header capture.
+func (rc *Exchange) RequestHeaders() []byte { return rc.requestHeaders }
+
+// RequestBody is the caller's body, verbatim.
+func (rc *Exchange) RequestBody() []byte { return rc.requestBody }
+
+// CompressedRequestBody is the post-compression body, empty when none was made.
+func (rc *Exchange) CompressedRequestBody() []byte { return rc.requestBodyCompressed }
+
+// UpstreamRequestBody is what the last attempt sent.
+func (rc *Exchange) UpstreamRequestBody() []byte { return rc.upstreamRequestBody }
+
+// ResponseBody is what the caller received.
+func (rc *Exchange) ResponseBody() []byte { return rc.responseBody }
+
+// UpstreamResponseBody is what the upstream returned, unaltered.
+func (rc *Exchange) UpstreamResponseBody() []byte { return rc.upstreamResponseBody }
+
+// StreamBodyPath is where a streamed response was captured, empty when the
+// response was not streamed or nothing was captured.
+func (rc *Exchange) StreamBodyPath() string {
+	if !rc.streamBodyCaptured {
+		return ""
+	}
+	return rc.requestID + ".stream"
+}
+
+// StreamBodyTruncated reports whether the stream capture hit its cap.
+func (rc *Exchange) StreamBodyTruncated() bool { return rc.streamBodyTruncated }
 
 // EffectiveRequestBody returns the body that upstream encoding should use as
 // its input: the compressed body when a successful compression pass produced

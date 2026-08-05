@@ -225,6 +225,9 @@ func TestRelayCandidatesProviderKeyLoadCanceledContextReturns499(t *testing.T) {
 	}
 
 	svc.relayCandidates(c, rc, []model.ModelCandidate{cand}, time.Now())
+	// relayCandidates settles the exchange; Handle is what records it, so a
+	// test that calls the inner function has to do the same.
+	svc.recordTerminal(rc)
 
 	if rc.statusCode != 499 {
 		t.Errorf("rc.statusCode = %d, want 499", rc.statusCode)

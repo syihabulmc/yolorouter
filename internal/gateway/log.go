@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"strings"
 	"time"
 
+	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
@@ -239,114 +239,49 @@ func (s *Service) finalize(rc *Exchange, statusCode int, failReason string, star
 		return // already finalized (e.g. Handle's panic-recovery defer after a normal finalize)
 	}
 	rc.statusCode = statusCode
-	durationMs := time.Since(start).Milliseconds()
+	// Stop the clock before any persistence runs. What follows writes to the
+	// database, and a budget update waiting on a row lock would otherwise be
+	// billed to the caller as request latency — inflating exactly the dashboard
+	// someone consults to find out whether the gateway is slow.
+	duration := time.Since(start)
+
+	sink := newExchangeSink(rc)
+	sink.reporter = "kernel"
+
 	// Settle the cache convention once, here, before either consumer of the
-	// usage reads it: pricing below and the persisted counts further down must
-	// not be able to disagree about whether the prompt includes the cache. One
-	// normalization point covers every ingress protocol and both the streaming
-	// and non-streaming paths.
+	// usage reads it: pricing below and the persisted counts must not be able to
+	// disagree about whether the prompt includes the cache. One normalization
+	// point covers every ingress protocol and both the streaming and
+	// non-streaming paths.
 	//
 	// A truncated stream can reach this with a partial record (the pumps keep
-	// whatever usage arrived before the cut, deliberately), so the reclassification
-	// must not depend on the record being complete — it doesn't: a partial record
-	// whose stated total no longer corroborates the net reading simply stays
-	// inclusive and is rejected as incoherent, exactly as it was before.
+	// whatever usage arrived before the cut, deliberately), so the
+	// reclassification must not depend on the record being complete — it
+	// doesn't: a partial record whose stated total no longer corroborates the
+	// net reading simply stays inclusive and is rejected as incoherent, exactly
+	// as it was before.
 	normalizeCacheConvention(rc.usage)
 	cost := computeCost(rc.candidate, rc.usage, rc.compressEstimatedTokensSaved)
 
-	var providerID *uint
-	if rc.provider != nil {
-		id := rc.provider.ID
-		providerID = &id
-	}
-	var failPtr *string
-	if failReason != "" {
-		fr := failReason
-		failPtr = &fr
-	}
-	apiKeyID := rc.apiKeyID
-	var inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens int
-	switch {
-	case rc.usage == nil:
-		// Leave every count at 0; CostKnown is already false.
-	case !usageIsCoherent(rc.usage):
-		// Same rejection computeCost applies, so the persisted counts can never
-		// disagree with the billing decision. Storing the raw values would let a
-		// negative or impossible count poison every SUM() the dashboard and
-		// analytics pages run.
-		logger.Warn("gateway: upstream reported incoherent token usage, counts dropped",
-			zap.String("request_id", rc.requestID),
-			zap.Int("prompt_tokens", rc.usage.PromptTokens),
-			zap.Int("completion_tokens", rc.usage.CompletionTokens),
-			zap.Int("cache_read_tokens", rc.usage.CacheReadTokens),
-			zap.Int("cache_write_tokens", rc.usage.CacheWriteTokens))
-	default:
-		// Persist the NET input (cache excluded) so request_logs.input_tokens
-		// and every SUM(input_tokens) aggregate share one convention across
-		// protocols — cache tokens live in their own columns. Same source of
-		// truth as billing (computeCost also goes through netPromptTokens).
-		inputTokens = netPromptTokens(rc.usage)
-		outputTokens = rc.usage.CompletionTokens
-		cacheWriteTokens = rc.usage.CacheWriteTokens
-		cacheReadTokens = rc.usage.CacheReadTokens
+	s.reportUsage(rc, sink)
+	sink.Note(fact.CostComputed{
+		Known:                   cost.Known,
+		Micros:                  cost.CostMicros,
+		CacheReadSavedMicros:    cost.CacheReadSavedMicros,
+		CacheWriteExtraMicros:   cost.CacheWriteExtraMicros,
+		CompressCostSavedMicros: cost.CompressCostSavedMicros,
+	})
+	sink.Note(attemptsRecord(rc))
+	if rc.compressEstimatedTokensSaved > 0 || len(rc.compressorsApplied) > 0 {
+		sink.Note(fact.TokensSaved{
+			Compressors:     rc.compressorsApplied,
+			EstimatedTokens: rc.compressEstimatedTokensSaved,
+		})
 	}
 
-	// Compression savings are only meaningful when the request actually reached
-	// upstream (len(rc.attempts) > 0 — the relay loop appends at least one
-	// attempt before sending). A request that compressed the body but was then
-	// rejected pre-relay (no routable candidate, model not found, allowlist
-	// denied) must NOT inflate compress-rate / savings metrics: zero the
-	// savings fields and clear the compressors list. CompressSkipReason is
-	// kept unconditionally — it is audit-only and useful even on pre-relay
-	// failures to diagnose why compression was bypassed.
-	compressTokensSaved := rc.compressEstimatedTokensSaved
-	compressCostSavedMicros := cost.CompressCostSavedMicros
-	compressorsApplied := joinCompressors(rc.compressorsApplied)
-	if len(rc.attempts) == 0 {
-		compressTokensSaved = 0
-		compressCostSavedMicros = 0
-		compressorsApplied = ""
-	}
-
-	logRow := &model.RequestLog{
-		RequestID:                        rc.requestID,
-		APIKeyID:                         &apiKeyID,
-		ModelName:                        rc.originalModel,
-		ProviderID:                       providerID,
-		IsStream:                         rc.isStream,
-		StatusCode:                       statusCode,
-		InputTokens:                      inputTokens,
-		OutputTokens:                     outputTokens,
-		CacheWriteTokens:                 cacheWriteTokens,
-		CacheReadTokens:                  cacheReadTokens,
-		CostMicros:                       cost.CostMicros,
-		CostKnown:                        cost.Known,
-		CacheReadSavedMicros:             cost.CacheReadSavedMicros,
-		CacheWriteExtraMicros:            cost.CacheWriteExtraMicros,
-		CompressEstimatedTokensSaved:     compressTokensSaved,
-		CompressEstimatedCostSavedMicros: compressCostSavedMicros,
-		CompressSkipReason:               rc.compressSkipReason,
-		CompressorsApplied:               compressorsApplied,
-		RequestPath:                      rc.ingressPath,
-		UpstreamURL:                      rc.upstreamURL,
-		FailReason:                       failPtr,
-		Attempts:                         len(rc.attempts),
-		DurationMs:                       durationMs,
-	}
-	// Keep every attempt's order / key label / failure cause, not
-	// just the count. Stored as JSON so the query page can render it
-	// later without a schema change; empty when no attempt ran (pre-check
-	// failure before any candidate was tried).
-	if len(rc.attempts) > 0 {
-		if detail, mErr := json.Marshal(rc.attempts); mErr == nil {
-			s := string(detail)
-			logRow.AttemptsDetail = &s // *string so empty stays SQL NULL, not ''
-		}
-	}
-	if err := repository.CreateRequestLog(s.db, logRow); err != nil {
-		logger.Error("gateway: write request log failed",
-			zap.String("request_id", rc.requestID), zap.Error(err))
-	}
+	// Charging happens here rather than in a recorder: what the caller is billed
+	// is not an audit concern, and a deployment that swapped out its audit trail
+	// must not be able to stop collecting money by accident.
 	if cost.Known && cost.CostMicros > 0 {
 		if err := repository.IncrementAPIKeyBudgetSpent(s.db, rc.apiKeyID, cost.CostMicros); err != nil {
 			logger.Error("gateway: increment budget spent failed",
@@ -354,55 +289,79 @@ func (s *Service) finalize(rc *Exchange, statusCode int, failReason string, star
 		}
 	}
 
-	// Record obtainable request/response bodies
-	// (stored verbatim; v0.1 does not scrub body content — only request
-	// headers are masked, via SanitizeHeaders). Idempotent UPSERT (UNIQUE
-	// request_id) so retry/double-call never duplicates. Best-effort: a body-
-	// write failure is logged only — the billing row (above) is authoritative
-	// and must not roll back on a body failure.
-	//
-	// streamBodyPath is derived here (not stored on rc) rather than kept as a
-	// second string field alongside streamBodyCaptured (simplification: the
-	// path is always exactly "<request_id>.stream" — see rc.streamBodyCaptured's
-	// doc comment in types.go).
-	streamBodyPath := ""
-	if rc.streamBodyCaptured {
-		streamBodyPath = rc.requestID + ".stream"
+	// The outcome is stored rather than handed straight to the recorders,
+	// because recording must be the last thing that happens: admissions release
+	// after this returns, and one that reports its own final accounting would
+	// otherwise report it into a timeline nobody reads again. Handle arms the
+	// recorder pass before it arms anything else, so it unwinds last.
+	rc.outcome = fact.Outcome{
+		StatusCode: statusCode,
+		FailReason: failReason,
+		Duration:   duration,
+		Attempts:   len(rc.attempts),
+		Delivered:  rc.firstByteSent,
 	}
-	bodyRow := &model.RequestLogBody{
-		RequestID:             rc.requestID,
-		RequestHeaders:        string(rc.requestHeaders),
-		RequestBody:           string(rc.requestBody),
-		UpstreamRequestBody:   string(rc.upstreamRequestBody),
-		ResponseBody:          string(rc.responseBody),
-		UpstreamResponseBody:  string(rc.upstreamResponseBody),
-		StreamBodyPath:        streamBodyPath,
-		StreamBodyTruncated:   rc.streamBodyTruncated,
-		CompressedRequestBody: string(rc.requestBodyCompressed),
-	}
-	if err := repository.UpsertRequestLogBody(s.db, bodyRow); err != nil {
-		logger.Error("gateway: write request log body failed",
-			zap.String("request_id", rc.requestID), zap.Error(err))
-	}
+	rc.outcomeSettled = true
 }
 
-// joinCompressors collapses the per-block list of compressors that fired into
-// the comma-joined string stored in request_logs.compressors_applied. The
-// compress engine appends one entry per modified block, so the same compressor
-// can appear multiple times when it shrank several blocks; per-block
-// occurrences are preserved (NOT deduped) so downstream stats can count how
-// many times each compressor actually fired. Empty input yields "" (SQL
-// default).
-func joinCompressors(applied []string) string {
-	if len(applied) == 0 {
-		return ""
+// recordTerminal hands the settled exchange to the recorders.
+//
+// It is separate from finalize, and runs later, because recording must be the
+// last thing that happens: admissions release after finalize returns, and one
+// that reports its own final accounting would otherwise report it into a
+// timeline nobody reads again.
+//
+// A no-op when nothing settled the exchange, which means no work was ever done
+// on its behalf and there is nothing to describe.
+func (s *Service) recordTerminal(rc *Exchange) {
+	if !rc.outcomeSettled {
+		return
 	}
-	parts := make([]string, 0, len(applied))
-	for _, name := range applied {
-		if name == "" {
-			continue
+	s.runRecorders(rc.requestCtx, rc, rc.outcome)
+}
+
+// reportUsage puts the billable counts on the timeline, or records that the
+// upstream's own numbers contradicted themselves.
+//
+// An incoherent record is reported as such rather than persisted raw: a
+// negative or impossible count poisons every SUM() the dashboard runs, and the
+// same rejection is applied to pricing, so the stored counts can never disagree
+// with the billing decision.
+func (s *Service) reportUsage(rc *Exchange, sink fact.Sink) {
+	if rc.usage == nil {
+		return
+	}
+	if !usageIsCoherent(rc.usage) {
+		logger.Warn("gateway: upstream reported incoherent token usage, counts dropped",
+			zap.String("request_id", rc.requestID),
+			zap.Int("prompt_tokens", rc.usage.PromptTokens),
+			zap.Int("completion_tokens", rc.usage.CompletionTokens),
+			zap.Int("cache_read_tokens", rc.usage.CacheReadTokens),
+			zap.Int("cache_write_tokens", rc.usage.CacheWriteTokens))
+		sink.Note(fact.UsageIncoherent{Reason: "upstream counts do not corroborate each other"})
+		return
+	}
+	// The NET input (cache excluded) is what is persisted, so every
+	// SUM(input_tokens) shares one convention across protocols and cache tokens
+	// stay in their own columns.
+	sink.Note(fact.UsageReported{
+		Unit:       fact.UnitToken,
+		Source:     fact.UsageFromUpstream,
+		Prompt:     netPromptTokens(rc.usage),
+		Completion: rc.usage.CompletionTokens,
+		CacheRead:  rc.usage.CacheReadTokens,
+		CacheWrite: rc.usage.CacheWriteTokens,
+	})
+}
+
+// attemptsRecord carries the attempt count and, when anything ran, its detail.
+// The detail is JSON so a query page can render it without a schema change.
+func attemptsRecord(rc *Exchange) fact.AttemptsRecorded {
+	rec := fact.AttemptsRecorded{Count: len(rc.attempts)}
+	if len(rc.attempts) > 0 {
+		if detail, err := json.Marshal(rc.attempts); err == nil {
+			rec.Detail = string(detail)
 		}
-		parts = append(parts, name)
 	}
-	return strings.Join(parts, ",")
+	return rec
 }
