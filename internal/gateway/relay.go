@@ -119,6 +119,10 @@ type Service struct {
 	// judgements fold together by a rule that does not depend on who reported
 	// first.
 	upstreamErrorObservers []upstreamErrorObserver
+
+	// egressRewriters rewrite the outbound body, ordered by stage at
+	// registration so no per-request sort is needed.
+	egressRewriters []egressRewriter
 }
 
 // NewService wires the gateway with the already-decoded AES master key
@@ -631,10 +635,30 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, candidates []mod
 		// + stream-usage injection + URL), not on which key ends up sending
 		// it, so every key attempt below reuses the same bytes instead of
 		// rebuilding them.
-		outBody, url, err := s.buildUpstreamBody(rc, ingress, egress)
+		outBody, url, verdict, err := s.buildUpstreamBody(rc, ingress, egress)
 		if err != nil {
 			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "build request: "+err.Error()))
 			continue // build failure -> skip candidate, nothing sent yet
+		}
+		// Anything as strong as "abandon this candidate" stops the send. The
+		// full effect may be more than this path can execute — a terminate
+		// verdict also wants a specific status, which the exhausted-chain
+		// terminal below cannot always reproduce — but the floor is absolute:
+		// once a fact resolved to a verdict this strong, dispatching the body
+		// anyway would mean a reported judgement was overridden by omission.
+		// Under-executing a verdict is recoverable; ignoring it is not.
+		if verdict.Loop >= LoopNextCandidate {
+			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus,
+				"egress rewrite verdict "+verdict.loopFrom.String()))
+			continue
+		}
+		// Retry-same and rotate-key have no meaning before anything was sent;
+		// they are logged so the reporting capability's misunderstanding is
+		// visible rather than silently absorbed.
+		if verdict.Loop > LoopContinue {
+			logger.Warn("gateway: reported verdict is not executable before dispatch",
+				zap.String("request_id", rc.requestID),
+				zap.String("verdict", verdict.loopFrom.String()))
 		}
 
 		if s.tryKeys(c, rc, &cand, provider, enabled, egress, outBody, url, start) == outcomeDone {

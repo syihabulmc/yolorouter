@@ -32,9 +32,9 @@ func (s *Service) buildUpstreamBody(
 	rc *Exchange,
 	ingress protocols.ProtocolID,
 	egress *EgressDecision,
-) ([]byte, string, error) {
+) ([]byte, string, resolved, error) {
 	if egress == nil {
-		return nil, "", fmt.Errorf("gateway: buildUpstreamBody requires a non-nil egress decision")
+		return nil, "", resolved{}, fmt.Errorf("gateway: buildUpstreamBody requires a non-nil egress decision")
 	}
 
 	providerModelName := rc.candidate.ProviderModelName
@@ -44,18 +44,18 @@ func (s *Service) buildUpstreamBody(
 	if egress.Passthrough {
 		rewritten, err := passthroughRequestBody(egress.Protocol, rc.EffectiveRequestBody(), providerModelName)
 		if err != nil {
-			return nil, "", fmt.Errorf("rewrite model field: %w", err)
+			return nil, "", resolved{}, fmt.Errorf("rewrite model field: %w", err)
 		}
 		outBody = rewritten
 	} else {
 		dec := codecsFor(ingress).RequestDecoder
 		ir, err := dec.DecodeRequest(json.RawMessage(rc.EffectiveRequestBody()), providerModelName, rc.isStream)
 		if err != nil {
-			return nil, "", fmt.Errorf("decode ingress request (%s): %w", ingress, err)
+			return nil, "", resolved{}, fmt.Errorf("decode ingress request (%s): %w", ingress, err)
 		}
 		encoded, err := egressCodecs.RequestEncoder.EncodeRequest(ir)
 		if err != nil {
-			return nil, "", fmt.Errorf("encode egress request (%s): %w", egress.Protocol, err)
+			return nil, "", resolved{}, fmt.Errorf("encode egress request (%s): %w", egress.Protocol, err)
 		}
 		outBody = []byte(encoded)
 	}
@@ -63,16 +63,16 @@ func (s *Service) buildUpstreamBody(
 	if egress.Protocol == protocols.ProtocolOpenAI {
 		injected, err := EnsureStreamUsageInjection(outBody, rc.isStream, rc.wantsStreamUsage)
 		if err != nil {
-			return nil, "", fmt.Errorf("inject stream usage: %w", err)
+			return nil, "", resolved{}, fmt.Errorf("inject stream usage: %w", err)
 		}
 		outBody = injected
 	}
 
-	// Apply the resolved custom system prompt after stream-usage injection so
-	// it operates on the final egress-encoded body. No-op when disabled or the
-	// ingress path is outside the chat allowlist; malformed bodies are
-	// returned unchanged by the injector.
-	outBody = applyCustomSystemPrompt(rc, egress.Protocol, outBody)
+	// Rewriters run after stream-usage injection so they operate on the final
+	// egress-encoded body, in the order assembly gave them. A rewriter that
+	// refuses the body comes back as a verdict for the caller to act on, not as
+	// an error here: what a refusal costs the request is the table's call.
+	outBody, verdict := s.rewriteEgress(rc.requestCtx, rc, egress.Protocol, outBody)
 
 	path := egressCodecs.RequestEncoder.EgressPath(providerModelName, rc.isStream)
 	url := protocols.JoinUpstreamURL(egress.BaseURL, path, egress.Protocol)
@@ -80,7 +80,7 @@ func (s *Service) buildUpstreamBody(
 		url = strings.Replace(url, ":generateContent", ":streamGenerateContent?alt=sse", 1)
 	}
 
-	return outBody, url, nil
+	return outBody, url, verdict, nil
 }
 
 // passthroughRequestBody prepares the same-protocol passthrough request body

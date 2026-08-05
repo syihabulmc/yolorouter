@@ -20,7 +20,7 @@ func TestBuildUpstreamBody_PassthroughOpenAIToOpenAI(t *testing.T) {
 	}
 	egress := &EgressDecision{Protocol: protocols.ProtocolOpenAI, BaseURL: "https://api.openai.com/v1", Passthrough: true}
 
-	outBody, url, err := s.buildUpstreamBody(rc, protocols.ProtocolOpenAI, egress)
+	outBody, url, _, err := s.buildUpstreamBody(rc, protocols.ProtocolOpenAI, egress)
 	if err != nil {
 		t.Fatalf("buildUpstreamBody returned error: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestBuildUpstreamBody_CrossProtocolOpenAIToAnthropic(t *testing.T) {
 	}
 	egress := &EgressDecision{Protocol: protocols.ProtocolClaude, BaseURL: "https://api.anthropic.com", Passthrough: false}
 
-	outBody, url, err := s.buildUpstreamBody(rc, protocols.ProtocolOpenAI, egress)
+	outBody, url, _, err := s.buildUpstreamBody(rc, protocols.ProtocolOpenAI, egress)
 	if err != nil {
 		t.Fatalf("buildUpstreamBody returned error: %v", err)
 	}

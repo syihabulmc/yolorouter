@@ -125,6 +125,11 @@ type Exchange struct {
 	// ordering in one place.
 	timeline fact.Timeline
 
+	// rewriteSteps records, in order, every egress rewrite that actually
+	// changed the body for the current candidate. Reset alongside the body
+	// it describes.
+	rewriteSteps []rewriteStep
+
 	// firstByteSent flips true once any byte has been written to the client
 	// (after this, no more Key/candidate switching is allowed).
 	firstByteSent bool
@@ -194,6 +199,24 @@ func (rc *Exchange) MarkFirstByteSent() bool {
 	rc.firstByteSent = true
 	return true
 }
+
+// The getters below exist for capabilities, which read exchange state through
+// the narrow view each one declares for itself rather than by reaching into
+// the struct. They are added as capabilities ask for them, not pre-emptively:
+// a getter with no caller is a field that has quietly stayed public.
+
+// CustomSystemPromptEnabled reports whether a prompt was resolved for this
+// request, from either the global setting or a per-key override.
+func (rc *Exchange) CustomSystemPromptEnabled() bool { return rc.customSystemPromptEnabled }
+
+// CustomSystemPrompt returns the resolved prompt text, empty when none applies.
+func (rc *Exchange) CustomSystemPrompt() string { return rc.customSystemPrompt }
+
+// IsChatEndpoint reports whether the caller's route is one where a system
+// prompt means anything. Computed once from the request path, because the
+// answer cannot change mid-exchange and recomputing it invites two call sites
+// to disagree.
+func (rc *Exchange) IsChatEndpoint() bool { return rc.isChatEndpoint }
 
 // EffectiveRequestBody returns the body that upstream encoding should use as
 // its input: the compressed body when a successful compression pass produced

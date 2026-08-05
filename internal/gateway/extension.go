@@ -1,10 +1,17 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"sort"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/yolorouter/yolorouter/internal/fact"
+	"github.com/yolorouter/yolorouter/internal/protocols"
+	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
 // Extension points are declared here; implementations live in their own
@@ -61,6 +68,170 @@ func (a upstreamErrorObserverAdapter[V]) observe(ctx context.Context, e *Exchang
 // call, not at run time.
 func RegisterUpstreamErrorObserver[V any](s *Service, o UpstreamErrorObserverOf[V], bind func(*Exchange) V) {
 	s.upstreamErrorObservers = append(s.upstreamErrorObservers, upstreamErrorObserverAdapter[V]{inner: o, bind: bind})
+}
+
+// EgressRewriterOf rewrites the body about to be sent upstream, once per
+// CANDIDATE, after the modality has encoded it and before credentials are
+// attached. Key rotation within a candidate reuses the rewritten body — the
+// body depends on where it is going, not on which credential sends it — so a
+// rewriter must not assume it runs again per key.
+//
+// It returns the body to send. Returning the input unchanged — or nil, which
+// the kernel reads the same way — is how a rewriter declines; there is no
+// separate "skip" signal, because a rewriter that has nothing to do and a
+// rewriter that decided against acting are the same thing from the kernel's
+// side.
+//
+// An error means "this body is unusable", and it stops the attempt: nothing is
+// sent upstream. That makes it the wrong tool for the common case. A rewriter
+// that merely could not do its job — a body it cannot parse is a body some
+// upstream may still accept — must return the ORIGINAL body and report what
+// happened. Reserve the error for a body that must not be sent.
+//
+// Even then the rewriter does not choose the consequence: it says the body is
+// unusable, and the kernel's table decides what that costs the request.
+//
+// The egress protocol is a parameter rather than something read off the view
+// because it belongs to the attempt, not the exchange: the same request can be
+// encoded for a different protocol on a later candidate.
+type EgressRewriterOf[V any] interface {
+	Name() string
+	RewriteEgress(ctx context.Context, view V, egress protocols.ProtocolID, body []byte, sink fact.Sink) ([]byte, error)
+}
+
+// EgressStage fixes the order of egress rewriters.
+//
+// Order is supplied at registration rather than declared by the rewriter, and
+// that placement is the point: where a rewriter sits relative to the others is
+// a property of the pipeline being assembled, not of the rewriter itself. A
+// rewriter that renamed a field would have no way to know which other rewriter
+// reads the renamed name — whoever composes them does.
+//
+// It also keeps the constraint from leaking: were the stage part of the
+// interface, every rewriter would have to name this type, and naming it means
+// importing the kernel — exactly the dependency the split exists to prevent.
+//
+// The values are spaced so a rewriter can be inserted between two existing ones
+// without renumbering, and a collision is a startup failure rather than a tie
+// broken silently by registration order.
+type EgressStage uint8
+
+const (
+	// StageCustomPrompt appends to the system text, so it runs late: it must
+	// see the body every other rewriter has finished shaping.
+	StageCustomPrompt EgressStage = 50
+)
+
+// egressRewriter is the kernel-side, view-erased form.
+type egressRewriter interface {
+	name() string
+	stage() EgressStage
+	rewrite(ctx context.Context, e *Exchange, egress protocols.ProtocolID, body []byte, sink fact.Sink) ([]byte, error)
+}
+
+type egressRewriterAdapter[V any] struct {
+	inner   EgressRewriterOf[V]
+	bind    func(*Exchange) V
+	atStage EgressStage
+}
+
+func (a egressRewriterAdapter[V]) name() string       { return a.inner.Name() }
+func (a egressRewriterAdapter[V]) stage() EgressStage { return a.atStage }
+
+func (a egressRewriterAdapter[V]) rewrite(ctx context.Context, e *Exchange, egress protocols.ProtocolID, body []byte, sink fact.Sink) ([]byte, error) {
+	return a.inner.RewriteEgress(ctx, a.bind(e), egress, body, sink)
+}
+
+// RegisterEgressRewriter wires a rewriter into the service, keeping the slice
+// ordered by stage so the run order is settled at assembly rather than
+// recomputed per request. Two rewriters claiming the same stage is a
+// programming error and panics here, at startup, rather than resolving to
+// whichever was registered first.
+func RegisterEgressRewriter[V any](s *Service, r EgressRewriterOf[V], at EgressStage, bind func(*Exchange) V) {
+	adapter := egressRewriterAdapter[V]{inner: r, bind: bind, atStage: at}
+	for _, existing := range s.egressRewriters {
+		if existing.stage() == adapter.stage() {
+			panic(fmt.Sprintf("gateway: egress rewriters %q and %q both claim stage %d",
+				existing.name(), adapter.name(), adapter.stage()))
+		}
+	}
+	s.egressRewriters = append(s.egressRewriters, adapter)
+	sort.Slice(s.egressRewriters, func(i, j int) bool {
+		return s.egressRewriters[i].stage() < s.egressRewriters[j].stage()
+	})
+}
+
+// rewriteEgress runs the registered rewriters in stage order over one attempt's
+// body, and reports the verdict the kernel should act on.
+//
+// A rewriter that errors has declared the body unusable, and this stops there.
+// Carrying on with the last good body would send upstream exactly what a
+// rewriter just refused to produce — the rewriter would have been better off
+// never running. What the refusal costs the request is still not the
+// rewriter's call: it reports a fact and the table decides, which is why the
+// failure comes back as a verdict rather than as an error the caller must
+// interpret.
+func (s *Service) rewriteEgress(ctx context.Context, rc *Exchange, egress protocols.ProtocolID, body []byte) ([]byte, resolved) {
+	if len(s.egressRewriters) == 0 {
+		return body, resolved{}
+	}
+	if ctx == nil {
+		// Reached only from a caller that never established a request context.
+		// A rewriter that consults ctx should see an inert one rather than a
+		// nil that panics on first use.
+		ctx = context.Background()
+	}
+	// The chain describes the body being built now; steps from an earlier
+	// candidate describe a body that no longer exists.
+	rc.rewriteSteps = nil
+	sink := newExchangeSink(rc)
+	for _, r := range s.egressRewriters {
+		sink.reporter = r.name()
+		out, err := r.rewrite(ctx, rc, egress, body, sink)
+		if err != nil {
+			logger.Warn("gateway: egress rewrite refused the body",
+				zap.String("request_id", rc.requestID),
+				zap.String("rewriter", r.name()),
+				zap.Error(err))
+			sink.Report(fact.Fact{
+				Kind:   fact.KindEgressRewriteFailed,
+				Detail: r.name() + ": " + err.Error(),
+			})
+			return body, sink.resolve()
+		}
+		if out != nil && changedBytes(body, out) {
+			// The chain is the answer to "who shaped this body": every applied
+			// step, in order, with its size effect. One current body plus this
+			// list replaces any scheme where rewriters write to separate fields
+			// and a later reader has to arbitrate which one is in effect.
+			rc.rewriteSteps = append(rc.rewriteSteps, rewriteStep{
+				Name:      r.name(),
+				ByteDelta: len(out) - len(body),
+			})
+			body = out
+		}
+	}
+	return body, sink.resolve()
+}
+
+// rewriteStep records one applied rewrite for the audit trail.
+type rewriteStep struct {
+	Name      string
+	ByteDelta int
+}
+
+// changedBytes reports whether a rewriter actually produced a different body.
+// Identity of the backing array is the test: rewriters return their input
+// (possibly re-sliced) when they decline. Lengths are compared first so the
+// address check never indexes an empty slice.
+func changedBytes(before, after []byte) bool {
+	if len(after) != len(before) {
+		return true
+	}
+	if len(after) == 0 {
+		return false
+	}
+	return &after[0] != &before[0]
 }
 
 // exchangeSink collects what capabilities report during one exchange.
@@ -168,6 +339,13 @@ func (s *exchangeSink) resolve() resolved {
 // report: each one sees the whole response and none of them knows what the
 // others recognised, so stopping early would make the verdict depend on
 // registration order — the one thing the fold is built to rule out.
+//
+// Each observer gets its own copy of the response for the same reason. Header
+// and Body are a map and a slice, so handing every observer the same value
+// would let one that normalises either in place change what the next one sees,
+// reintroducing order dependence through a second door. The Body is also the
+// bytes already captured for the audit row, so a stray write would rewrite the
+// record of what the upstream actually said.
 func (s *Service) observeUpstreamError(ctx context.Context, rc *Exchange, up fact.Upstream) resolved {
 	if len(s.upstreamErrorObservers) == 0 {
 		return resolved{}
@@ -175,7 +353,26 @@ func (s *Service) observeUpstreamError(ctx context.Context, rc *Exchange, up fac
 	sink := newExchangeSink(rc)
 	for _, o := range s.upstreamErrorObservers {
 		sink.reporter = o.name()
-		o.observe(ctx, rc, up, sink)
+		o.observe(ctx, rc, isolate(up), sink)
 	}
 	return sink.resolve()
+}
+
+// isolate returns a copy an observer cannot use to reach anything outside
+// itself.
+//
+// The cost is one header clone and one body copy per observer. Error bodies are
+// already read under a 1 MiB bound and observers number in the single digits,
+// so this buys a structural guarantee for a bounded price — and the alternative,
+// trusting every present and future observer to treat its input as read-only,
+// is the kind of guarantee that holds until exactly one of them does not.
+func isolate(up fact.Upstream) fact.Upstream {
+	out := up
+	if up.Header != nil {
+		out.Header = up.Header.Clone()
+	}
+	if up.Body != nil {
+		out.Body = bytes.Clone(up.Body)
+	}
+	return out
 }

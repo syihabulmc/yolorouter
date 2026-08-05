@@ -20,6 +20,7 @@ import (
 	ycrypto "github.com/yolorouter/yolorouter/pkg/crypto"
 
 	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
+	"github.com/yolorouter/yolorouter/internal/capability/systemprompt"
 	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
@@ -140,6 +141,8 @@ func newSvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProv
 	// as production does.
 	RegisterUpstreamErrorObserver(svc, contentinspect.New(),
 		func(e *Exchange) contentinspect.View { return e })
+	RegisterEgressRewriter(svc, systemprompt.New(), StageCustomPrompt,
+		func(e *Exchange) systemprompt.View { return e })
 	return svc
 }
 

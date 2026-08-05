@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
+	"github.com/yolorouter/yolorouter/internal/capability/systemprompt"
 	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/gateway"
 	"github.com/yolorouter/yolorouter/internal/handler"
@@ -350,6 +351,8 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// getter the Exchange does not have, this line would fail to compile.
 	gateway.RegisterUpstreamErrorObserver(relaySvc, contentinspect.New(),
 		func(e *gateway.Exchange) contentinspect.View { return e })
+	gateway.RegisterEgressRewriter(relaySvc, systemprompt.New(), gateway.StageCustomPrompt,
+		func(e *gateway.Exchange) systemprompt.View { return e })
 
 	v1 := gatewayGroup(r, "/v1", bodiesDir, db)
 	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))
