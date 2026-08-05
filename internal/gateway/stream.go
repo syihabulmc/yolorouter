@@ -80,8 +80,8 @@ var maxStreamBodyFileBytes int64 = 1 << 30 // 1 GiB
 // pump and classify the failure instead of silently dropping it (a swallowed
 // downstream Write error left the sliding write-deadline protection
 // unenforced on the production passthrough streaming path).
-func forwardStreamLine(c *gin.Context, rc *RelayContext, line []byte, usage **Usage, doneSeen *bool) ([]byte, error) {
-	wroteData, u, done, sent, writeErr := writeStreamLine(c.Writer, line, rc.OriginalModel, rc.WantsStreamUsage)
+func forwardStreamLine(c *gin.Context, rc *Exchange, line []byte, usage **Usage, doneSeen *bool) ([]byte, error) {
+	wroteData, u, done, sent, writeErr := writeStreamLine(c.Writer, line, rc.originalModel, rc.wantsStreamUsage)
 	if wroteData {
 		rc.MarkFirstByteSent()
 	}
@@ -258,7 +258,7 @@ func usageFromRawMap(m map[string]json.RawMessage) *Usage {
 // Returns the first Write error encountered so callers can react (e.g. skip
 // a subsequent [DONE]); callers that have already committed to finalization
 // may simply discard it.
-func writeStreamErrorEvent(c *gin.Context, rc *RelayContext) error {
+func writeStreamErrorEvent(c *gin.Context, rc *Exchange) error {
 	// Slide the per-write deadline before writing the terminal error frame,
 	// exactly as normal chunk forwarding does. Without this, when
 	// BodyIdleTimeout > streamWriteWindow, the last healthy chunk may have
@@ -267,9 +267,9 @@ func writeStreamErrorEvent(c *gin.Context, rc *RelayContext) error {
 	// bare EOF with no protocol error / [DONE], while the capture file
 	// (which appended unconditionally in the old code) recorded bytes that
 	// were never delivered.
-	applyStreamWriteDeadline(c, rc.RequestID)
-	msg := streamErrorMessage(rc.RequestID)
-	switch rc.Ingress {
+	applyStreamWriteDeadline(c, rc.requestID)
+	msg := streamErrorMessage(rc.requestID)
+	switch rc.ingress {
 	case protocols.ProtocolClaude:
 		return writeClaudeStreamErrorEvent(c, rc, msg)
 	case protocols.ProtocolGemini:
@@ -318,7 +318,7 @@ func streamErrorMessage(requestID string) string {
 // innermost writer. If either Write or Flush fails, the bytes are NOT
 // appended to the capture file (the client never received them) and the
 // error is returned so the caller can short-circuit subsequent frames.
-func writeAndCaptureSSE(c *gin.Context, rc *RelayContext, b []byte) error {
+func writeAndCaptureSSE(c *gin.Context, rc *Exchange, b []byte) error {
 	if _, err := c.Writer.Write(b); err != nil {
 		return err
 	}
@@ -343,7 +343,7 @@ func flushAndCheckError(c *gin.Context) error {
 // writeOpenAIStreamErrorEvent writes the OpenAI-shaped mid-stream error: an
 // inline `data: {"error":...}` frame followed by `data: [DONE]`. Returns the
 // first Write error so the caller knows whether the terminal frame landed.
-func writeOpenAIStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) error {
+func writeOpenAIStreamErrorEvent(c *gin.Context, rc *Exchange, msg string) error {
 	evt := fmt.Sprintf(`data: {"error":{"message":%q,"type":"upstream_error"}}`+"\n\n", msg)
 	if err := writeAndCaptureSSE(c, rc, []byte(evt)); err != nil {
 		return err
@@ -363,7 +363,7 @@ func writeOpenAIStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) e
 // envelope. Claude has no [DONE] terminator convention — the Anthropic SDK
 // treats the connection close right after this event as the end of the
 // stream, so nothing further is written.
-func writeClaudeStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) error {
+func writeClaudeStreamErrorEvent(c *gin.Context, rc *Exchange, msg string) error {
 	evt := protocols.SSEEvent{
 		Event: "error",
 		Data:  fmt.Sprintf(`{"type":"error","error":{"type":"api_error","message":%q}}`, msg),
@@ -383,7 +383,7 @@ func writeClaudeStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) e
 // out with the first upstream chunk), so there is no meaningful per-request
 // status left to report — 500/INTERNAL is the same "opaque upstream failure"
 // choice writeClaudeStreamErrorEvent makes with its fixed api_error type.
-func writeGeminiStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) error {
+func writeGeminiStreamErrorEvent(c *gin.Context, rc *Exchange, msg string) error {
 	const midStreamStatus = http.StatusInternalServerError
 	evt := fmt.Sprintf(`data: {"error":{"code":%d,"message":%q,"status":%q}}`+"\n\n",
 		midStreamStatus, msg, geminiErrorStatus(midStreamStatus))
@@ -400,7 +400,7 @@ func writeGeminiStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) e
 // Responses SSE stream is framed as typed response.* events, never OpenAI
 // Chat's [DONE] sentinel (see this function's doc comment on
 // writeStreamErrorEvent).
-func writeResponsesStreamErrorEvent(c *gin.Context, rc *RelayContext, msg string) error {
+func writeResponsesStreamErrorEvent(c *gin.Context, rc *Exchange, msg string) error {
 	evt := fmt.Sprintf(`data: {"type":"error","message":%q,"code":null,"param":null}`+"\n\n", msg)
 	if err := writeAndCaptureSSE(c, rc, []byte(evt)); err != nil {
 		return err
@@ -440,18 +440,18 @@ func isClientWriteError(err error) bool {
 // unaffected either way; only the audit capture is skipped (and, for a real
 // OS-level open error, logged so an unwritable data/bodies dir is visible
 // in ops logs instead of silently dropping every stream body forever).
-func openStreamBodyFile(c *gin.Context, rc *RelayContext) {
-	if rc.RequestID == "" {
+func openStreamBodyFile(c *gin.Context, rc *Exchange) {
+	if rc.requestID == "" {
 		return
 	}
 	dir := streamBodiesDir(c)
 	if dir == "" {
 		return
 	}
-	path := filepath.Join(dir, rc.RequestID+".stream")
+	path := filepath.Join(dir, rc.requestID+".stream")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		logger.Warn("gateway: open stream body file failed", zap.String("request_id", rc.RequestID), zap.Error(err))
+		logger.Warn("gateway: open stream body file failed", zap.String("request_id", rc.requestID), zap.Error(err))
 		return
 	}
 	rc.streamBodyFile = f
@@ -469,7 +469,7 @@ func openStreamBodyFile(c *gin.Context, rc *RelayContext) {
 
 // closeStreamBodyFile closes the stream capture file opened by
 // openStreamBodyFile, if any. Safe to call even when open never succeeded.
-func closeStreamBodyFile(rc *RelayContext) {
+func closeStreamBodyFile(rc *Exchange) {
 	if rc.streamBodyFile != nil {
 		_ = rc.streamBodyFile.Close()
 		rc.streamBodyFile = nil
@@ -488,7 +488,7 @@ func closeStreamBodyFile(rc *RelayContext) {
 // 120s upstream timeout could. Hitting it sets rc.streamBodyTruncated=true
 // (marked, never silent) and stops appending; the caller's own stream is
 // entirely unaffected.
-func appendStreamBodyLine(rc *RelayContext, line []byte) {
+func appendStreamBodyLine(rc *Exchange, line []byte) {
 	if rc.streamBodyFile == nil || rc.streamBodyTruncated || len(line) == 0 {
 		return
 	}
@@ -504,7 +504,7 @@ func appendStreamBodyLine(rc *RelayContext, line []byte) {
 	n, err := rc.streamBodyFile.Write(line)
 	rc.streamBodyBytesWritten += int64(n)
 	if err != nil {
-		logger.Warn("gateway: write stream body failed", zap.String("request_id", rc.RequestID), zap.Error(err))
+		logger.Warn("gateway: write stream body failed", zap.String("request_id", rc.requestID), zap.Error(err))
 	}
 }
 
@@ -519,7 +519,7 @@ func appendStreamBodyLine(rc *RelayContext, line []byte) {
 // against ever discarding a backstop-marked file, even though in practice
 // that flag never fires on an empty file (it only fires after content was
 // already appended).
-func removeEmptyStreamBodyFile(c *gin.Context, rc *RelayContext) {
+func removeEmptyStreamBodyFile(c *gin.Context, rc *Exchange) {
 	if !rc.streamBodyCaptured || rc.streamBodyTruncated {
 		return
 	}
@@ -527,7 +527,7 @@ func removeEmptyStreamBodyFile(c *gin.Context, rc *RelayContext) {
 	if dir == "" {
 		return
 	}
-	path := filepath.Join(dir, rc.RequestID+".stream")
+	path := filepath.Join(dir, rc.requestID+".stream")
 	info, err := os.Stat(path)
 	if err != nil || info.Size() != 0 {
 		return

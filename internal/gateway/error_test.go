@@ -42,9 +42,9 @@ func TestClassifyUpstreamStatus(t *testing.T) {
 }
 
 // TestWriteOpenAIErrorStashesResponseBody: when a
-// RelayContext is on the gin context (as Handle installs it), the local
+// Exchange is on the gin context (as Handle installs it), the local
 // error JSON WriteOpenAIErrorWithRequestID returns to the caller is also
-// stashed into rc.ResponseBody, so request_log_bodies.response_body reflects
+// stashed into rc.responseBody, so request_log_bodies.response_body reflects
 // what the caller actually received for a locally-rejected request.
 func TestWriteOpenAIErrorStashesResponseBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -52,15 +52,15 @@ func TestWriteOpenAIErrorStashesResponseBody(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
-	rc := &RelayContext{RequestID: "req_x"}
+	rc := &Exchange{requestID: "req_x"}
 	c.Set(relayContextKey, rc)
 
 	WriteOpenAIErrorWithRequestID(c, http.StatusNotFound, errTypeNotFound, "model does not exist", "req_x")
 
-	if rc.ResponseBody == nil {
-		t.Fatal("rc.ResponseBody was not stashed")
+	if rc.responseBody == nil {
+		t.Fatal("rc.responseBody was not stashed")
 	}
-	got := string(rc.ResponseBody)
+	got := string(rc.responseBody)
 	for _, want := range []string{`"message"`, `"type"`, "model does not exist", errTypeNotFound, "req_x"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("ResponseBody = %s, want it to contain %q", got, want)
@@ -68,11 +68,11 @@ func TestWriteOpenAIErrorStashesResponseBody(t *testing.T) {
 	}
 }
 
-// TestWriteOpenAIErrorNoRelayContextIsNoop confirms the stash is a true
-// no-op (no panic, no side effect) when no RelayContext is on the context —
+// TestWriteOpenAIErrorNoExchangeIsNoop confirms the stash is a true
+// no-op (no panic, no side effect) when no Exchange is on the context —
 // the path middleware.APIKeyAuth's own 401s take, since Handle never runs
 // for those.
-func TestWriteOpenAIErrorNoRelayContextIsNoop(t *testing.T) {
+func TestWriteOpenAIErrorNoExchangeIsNoop(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

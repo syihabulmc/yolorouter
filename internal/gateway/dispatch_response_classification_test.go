@@ -56,7 +56,7 @@ func TestWriteAndCaptureSSE_FailureDoesNotAppend(t *testing.T) {
 	c, _ := gin.CreateTestContext(fw)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Set(BodiesDirContextKey, dir)
-	rc := &RelayContext{RequestID: "req-fail-write", Ingress: protocols.ProtocolOpenAI}
+	rc := &Exchange{requestID: "req-fail-write", ingress: protocols.ProtocolOpenAI}
 	openStreamBodyFile(c, rc)
 	defer closeStreamBodyFile(rc)
 
@@ -65,7 +65,7 @@ func TestWriteAndCaptureSSE_FailureDoesNotAppend(t *testing.T) {
 		t.Fatal("expected a Write error from writeAndCaptureSSE, got nil")
 	}
 	// The capture file must NOT contain the undelivered bytes.
-	captured, readErr := os.ReadFile(filepath.Join(dir, rc.RequestID+".stream"))
+	captured, readErr := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 	if readErr != nil {
 		t.Fatalf("read capture file: %v", readErr)
 	}
@@ -82,7 +82,7 @@ func TestWriteAndCaptureSSE_SuccessAppends(t *testing.T) {
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Set(BodiesDirContextKey, dir)
-	rc := &RelayContext{RequestID: "req-ok-write", Ingress: protocols.ProtocolOpenAI}
+	rc := &Exchange{requestID: "req-ok-write", ingress: protocols.ProtocolOpenAI}
 	openStreamBodyFile(c, rc)
 	defer closeStreamBodyFile(rc)
 
@@ -93,7 +93,7 @@ func TestWriteAndCaptureSSE_SuccessAppends(t *testing.T) {
 	if !bytes.Equal(rec.Body.Bytes(), data) {
 		t.Errorf("client body = %q, want %q", rec.Body.Bytes(), data)
 	}
-	captured, _ := os.ReadFile(filepath.Join(dir, rc.RequestID+".stream"))
+	captured, _ := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 	if !bytes.Equal(captured, data) {
 		t.Errorf("capture file = %q, want %q (must match client bytes)", captured, data)
 	}
@@ -108,7 +108,7 @@ func TestWriteStreamErrorEvent_FailureReturnsError(t *testing.T) {
 	c, _ := gin.CreateTestContext(fw)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Set(BodiesDirContextKey, dir)
-	rc := &RelayContext{RequestID: "req-fail-evt", Ingress: protocols.ProtocolOpenAI}
+	rc := &Exchange{requestID: "req-fail-evt", ingress: protocols.ProtocolOpenAI}
 	openStreamBodyFile(c, rc)
 	defer closeStreamBodyFile(rc)
 
@@ -117,7 +117,7 @@ func TestWriteStreamErrorEvent_FailureReturnsError(t *testing.T) {
 		t.Fatal("expected a Write error from writeStreamErrorEvent, got nil")
 	}
 	// No bytes should have been captured — the write failed.
-	captured, _ := os.ReadFile(filepath.Join(dir, rc.RequestID+".stream"))
+	captured, _ := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 	if len(captured) > 0 {
 		t.Errorf("capture file must be empty on total write failure, got %q", captured)
 	}
@@ -168,7 +168,7 @@ func TestNon2xxErrorBodySlowTrickle503_BoundedByShortBudget(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -240,7 +240,7 @@ func TestUnauthorized401_CASPersistsKeyFailureBeforeBodyRead(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-dead", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -351,7 +351,7 @@ func TestProcessDispatchResponseStream_ClientWriteTimeoutClassification(t *testi
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-p", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "claude-3-5-sonnet-20241022", true, true, 1)
@@ -361,9 +361,9 @@ func TestProcessDispatchResponseStream_ClientWriteTimeoutClassification(t *testi
 	// http.NewResponseController.
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	var capturedRC atomic.Pointer[RelayContext]
+	var capturedRC atomic.Pointer[Exchange]
 	prevHook := testHookHandleDone
-	testHookHandleDone = func(rc *RelayContext) {
+	testHookHandleDone = func(rc *Exchange) {
 		capturedRC.Store(rc)
 	}
 	t.Cleanup(func() { testHookHandleDone = prevHook })
@@ -409,10 +409,10 @@ func TestProcessDispatchResponseStream_ClientWriteTimeoutClassification(t *testi
 
 	// Verify the attempt was classified as a client write timeout, not an
 	// upstream server error.
-	if len(rc.Attempts) == 0 {
+	if len(rc.attempts) == 0 {
 		t.Fatal("expected at least one attempt record")
 	}
-	last := rc.Attempts[len(rc.Attempts)-1]
+	last := rc.attempts[len(rc.attempts)-1]
 	if last.Outcome != AttemptConnError {
 		t.Errorf("attempt outcome = %q, want %q (client write timeout must not be classified as upstream server fault)",
 			last.Outcome, AttemptConnError)
@@ -452,7 +452,7 @@ func TestProcessDispatchResponseStream_ServerErrorStillClassifiedAsPartial(t *te
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-p2", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude2", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o-2", "claude-3-5-sonnet-20241022", true, true, 1)
@@ -460,9 +460,9 @@ func TestProcessDispatchResponseStream_ServerErrorStillClassifiedAsPartial(t *te
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	var capturedRC atomic.Pointer[RelayContext]
+	var capturedRC atomic.Pointer[Exchange]
 	prevHook := testHookHandleDone
-	testHookHandleDone = func(rc *RelayContext) {
+	testHookHandleDone = func(rc *Exchange) {
 		capturedRC.Store(rc)
 	}
 	t.Cleanup(func() { testHookHandleDone = prevHook })
@@ -502,10 +502,10 @@ func TestProcessDispatchResponseStream_ServerErrorStillClassifiedAsPartial(t *te
 
 	// An upstream read error must NOT be classified as client_write_timeout.
 	// It should be AttemptServerError (or similar upstream-fault outcome).
-	if len(rc.Attempts) == 0 {
+	if len(rc.attempts) == 0 {
 		t.Fatal("expected at least one attempt record")
 	}
-	last := rc.Attempts[len(rc.Attempts)-1]
+	last := rc.attempts[len(rc.attempts)-1]
 	if strings.Contains(last.FailReason, "client write timeout") {
 		t.Errorf("upstream read error was misclassified as client_write_timeout: fail_reason=%q", last.FailReason)
 	}

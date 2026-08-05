@@ -67,7 +67,7 @@ func TestMessagesIngressNonStreamSuccess(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "gpt-4o-real", true, true, 1)
@@ -156,14 +156,14 @@ func TestMessagesIngressStreamSuccess(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -236,8 +236,8 @@ func TestMessagesIngressStreamSuccess(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.Usage == nil || captured.Usage.PromptTokens != 10 || captured.Usage.CompletionTokens != 2 {
-		t.Errorf("captured usage = %+v, want prompt=10 completion=2 (mapped from openai prompt_tokens/completion_tokens)", captured.Usage)
+	if captured.usage == nil || captured.usage.PromptTokens != 10 || captured.usage.CompletionTokens != 2 {
+		t.Errorf("captured usage = %+v, want prompt=10 completion=2 (mapped from openai prompt_tokens/completion_tokens)", captured.usage)
 	}
 }
 
@@ -318,7 +318,7 @@ func TestMessagesIngressMalformedBodyRejected(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			svc := newRelaySvc(t, db)
+			svc := newSvc(t, db)
 			p := createProvider(t, db, "openai-provider", upstream.URL)
 			createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 			m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "gpt-4o-real", true, true, 1)
@@ -373,7 +373,7 @@ func TestMessagesIngressMidStreamFailure(t *testing.T) {
 	))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "gpt-4o-real", true, true, 1)
@@ -426,15 +426,15 @@ func TestMessagesIngressStreamAuditMatchesClientBytes(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
 	dir := t.TempDir()
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -448,11 +448,11 @@ func TestMessagesIngressStreamAuditMatchesClientBytes(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.RequestID == "" {
+	if captured.requestID == "" {
 		t.Fatal("expected a non-empty request id")
 	}
 
-	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.RequestID+".stream"))
+	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.requestID+".stream"))
 	if err != nil {
 		t.Fatalf("read captured stream file: %v", err)
 	}

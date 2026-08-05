@@ -11,12 +11,12 @@ import (
 )
 
 func TestBuildUpstreamBody_PassthroughOpenAIToOpenAI(t *testing.T) {
-	s := &RelayService{}
-	rc := &RelayContext{
-		OriginalModel: "gpt-4o",
-		IsStream:      false,
-		Candidate:     &model.ModelCandidate{ProviderModelName: "gpt-4o-2024-08-06"},
-		RequestBody:   []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
+	s := &Service{}
+	rc := &Exchange{
+		originalModel: "gpt-4o",
+		isStream:      false,
+		candidate:     &model.ModelCandidate{ProviderModelName: "gpt-4o-2024-08-06"},
+		requestBody:   []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
 	}
 	egress := &EgressDecision{Protocol: protocols.ProtocolOpenAI, BaseURL: "https://api.openai.com/v1", Passthrough: true}
 
@@ -53,7 +53,7 @@ func TestBuildUpstreamBody_PassthroughOpenAIToOpenAI(t *testing.T) {
 }
 
 func TestBuildUpstreamBody_CrossProtocolOpenAIToAnthropic(t *testing.T) {
-	s := &RelayService{}
+	s := &Service{}
 	// NOTE: intentionally no "role":"system" message here. The P1 chat
 	// RequestDecoder (internal/protocols/chat/request_decoder.go) decodes a
 	// leading system-role message into a RoleSystem entry inside
@@ -64,11 +64,11 @@ func TestBuildUpstreamBody_CrossProtocolOpenAIToAnthropic(t *testing.T) {
 	// IR round-trip; asserting on it here would pin a known cross-protocol
 	// data-loss gap in the codec layer (out of scope for this dispatch-layer
 	// change) as if it were correct behavior.
-	rc := &RelayContext{
-		OriginalModel: "gpt-4o",
-		IsStream:      false,
-		Candidate:     &model.ModelCandidate{ProviderModelName: "claude-3-5-sonnet-20241022"},
-		RequestBody:   []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
+	rc := &Exchange{
+		originalModel: "gpt-4o",
+		isStream:      false,
+		candidate:     &model.ModelCandidate{ProviderModelName: "claude-3-5-sonnet-20241022"},
+		requestBody:   []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
 	}
 	egress := &EgressDecision{Protocol: protocols.ProtocolClaude, BaseURL: "https://api.anthropic.com", Passthrough: false}
 

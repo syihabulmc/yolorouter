@@ -19,7 +19,7 @@ import (
 // (io.ErrUnexpectedEOF from the chunked decoder, not io.EOF) — modeling a
 // real "upstream connection died mid-stream" failure, so
 // passthroughStreamToClient/dispatchPassthroughStream take the mid-stream
-// error branch (rc.FirstByteSent=true, err != nil) that calls
+// error branch (rc.firstByteSent=true, err != nil) that calls
 // writeStreamErrorEvent, instead of the clean-EOF-without-[DONE] branch
 // (errStreamNoDoneTerminator) which deliberately does NOT inject a
 // synthetic error event.
@@ -55,7 +55,7 @@ func TestRelayStreamMidFailureOpenAIIngress(t *testing.T) {
 	))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -92,7 +92,7 @@ func TestRelayStreamMidFailureClaudeIngress(t *testing.T) {
 	))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "claude-3-5-sonnet-20241022", true, true, 1)
@@ -131,7 +131,7 @@ func TestRelayStreamMidFailureGeminiIngress(t *testing.T) {
 	))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createGeminiProvider(t, db, "gemini-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-gemini-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gemini-2.0-flash-real", true, true, 1)
@@ -174,7 +174,7 @@ func TestRelayStreamMidFailureResponsesIngress(t *testing.T) {
 	))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createResponsesProvider(t, db, "responses-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-responses-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)

@@ -23,7 +23,7 @@ import (
 // Claude ingress -> Claude egress passthrough (an Anthropic-type provider,
 // createAnthropicProvider from dispatch_crossproto_test.go, hit via a
 // /v1/messages request so ingress==egress==claude and Negotiate reports
-// Passthrough=true) silently lost billing (rc.Usage stayed nil) and, on
+// Passthrough=true) silently lost billing (rc.usage stayed nil) and, on
 // stream, always finalized as "stream_no_done" even for a stream that
 // completed cleanly with message_stop. These tests drive that exact
 // same-protocol Anthropic passthrough shape and assert both bugs are fixed.
@@ -31,7 +31,7 @@ import (
 // TestPassthroughAnthropicNonStream_UsageAndModelRewrite is the non-stream
 // counterpart. The Claude upstream response is byte-forwarded to the client
 // (content/id/stop_reason preserved verbatim) with only the top-level
-// "model" field rewritten back to the external name, and rc.Usage must be
+// "model" field rewritten back to the external name, and rc.usage must be
 // populated from the Anthropic input_tokens/output_tokens fields.
 func TestPassthroughAnthropicNonStream_UsageAndModelRewrite(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -42,14 +42,14 @@ func TestPassthroughAnthropicNonStream_UsageAndModelRewrite(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "claude-3-5-sonnet-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"messages":[{"role":"user","content":"What is 2+2?"}]}`)
@@ -89,17 +89,17 @@ func TestPassthroughAnthropicNonStream_UsageAndModelRewrite(t *testing.T) {
 		t.Errorf("provider model name leaked into the client response: %s", w.Body.String())
 	}
 
-	// --- rc.Usage must be populated from the Anthropic usage object (the
+	// --- rc.usage must be populated from the Anthropic usage object (the
 	// bug: RewriteNonStreamResponse's OpenAI-shaped extractUsage never
-	// matches input_tokens/output_tokens, so rc.Usage stayed nil) ---
+	// matches input_tokens/output_tokens, so rc.usage stayed nil) ---
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.Usage == nil {
-		t.Fatal("rc.Usage is nil, want it populated from the Anthropic input_tokens/output_tokens")
+	if captured.usage == nil {
+		t.Fatal("rc.usage is nil, want it populated from the Anthropic input_tokens/output_tokens")
 	}
-	if captured.Usage.PromptTokens != 15 || captured.Usage.CompletionTokens != 5 {
-		t.Errorf("captured usage = %+v, want prompt=15 completion=5 (mapped from claude input_tokens/output_tokens)", captured.Usage)
+	if captured.usage.PromptTokens != 15 || captured.usage.CompletionTokens != 5 {
+		t.Errorf("captured usage = %+v, want prompt=15 completion=5 (mapped from claude input_tokens/output_tokens)", captured.usage)
 	}
 }
 
@@ -109,7 +109,7 @@ func TestPassthroughAnthropicNonStream_UsageAndModelRewrite(t *testing.T) {
 // OpenAI [DONE] terminator — Claude has no such convention). Before the fix,
 // passthroughStreamToClient's completion check only recognized the literal
 // `data: [DONE]` line, so this exact fixture always finalized as
-// "stream_no_done" with rc.Usage nil despite completing cleanly.
+// "stream_no_done" with rc.usage nil despite completing cleanly.
 func TestPassthroughAnthropicStream_UsageAndCleanCompletion(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 
@@ -140,14 +140,14 @@ func TestPassthroughAnthropicStream_UsageAndCleanCompletion(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "claude-3-5-sonnet-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -177,26 +177,26 @@ func TestPassthroughAnthropicStream_UsageAndCleanCompletion(t *testing.T) {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
 
-	// --- rc.Usage must be populated from the Anthropic
+	// --- rc.usage must be populated from the Anthropic
 	// input_tokens/output_tokens accumulated across message_start +
 	// message_delta ---
-	if captured.Usage == nil {
-		t.Fatal("rc.Usage is nil, want it populated from the Anthropic stream usage")
+	if captured.usage == nil {
+		t.Fatal("rc.usage is nil, want it populated from the Anthropic stream usage")
 	}
-	if captured.Usage.PromptTokens != 10 || captured.Usage.CompletionTokens != 2 {
-		t.Errorf("captured usage = %+v, want prompt=10 completion=2 (mapped from claude input_tokens/output_tokens)", captured.Usage)
+	if captured.usage.PromptTokens != 10 || captured.usage.CompletionTokens != 2 {
+		t.Errorf("captured usage = %+v, want prompt=10 completion=2 (mapped from claude input_tokens/output_tokens)", captured.usage)
 	}
 
 	// --- the request must NOT be finalized as stream_no_done: exactly one
 	// attempt, and it must be AttemptSuccess with no fail_reason ---
-	if len(captured.Attempts) != 1 {
-		t.Fatalf("Attempts = %+v, want exactly 1", captured.Attempts)
+	if len(captured.attempts) != 1 {
+		t.Fatalf("Attempts = %+v, want exactly 1", captured.attempts)
 	}
-	if captured.Attempts[0].Outcome != AttemptSuccess {
-		t.Errorf("attempt outcome = %q, want %q (a clean message_stop completion must not be misreported as stream_no_done)", captured.Attempts[0].Outcome, AttemptSuccess)
+	if captured.attempts[0].Outcome != AttemptSuccess {
+		t.Errorf("attempt outcome = %q, want %q (a clean message_stop completion must not be misreported as stream_no_done)", captured.attempts[0].Outcome, AttemptSuccess)
 	}
-	if captured.Attempts[0].FailReason != "" {
-		t.Errorf("attempt fail_reason = %q, want empty", captured.Attempts[0].FailReason)
+	if captured.attempts[0].FailReason != "" {
+		t.Errorf("attempt fail_reason = %q, want empty", captured.attempts[0].FailReason)
 	}
 }
 
@@ -231,14 +231,14 @@ func TestPassthroughAnthropicStream_MessageStartModelRewrite(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "claude-3-5-sonnet-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -302,17 +302,17 @@ func TestPassthroughAnthropicStream_MessageStartModelRewrite(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.Usage == nil {
-		t.Fatal("rc.Usage is nil, want it populated despite the model rewrite")
+	if captured.usage == nil {
+		t.Fatal("rc.usage is nil, want it populated despite the model rewrite")
 	}
-	if captured.Usage.PromptTokens != 10 || captured.Usage.CompletionTokens != 2 {
-		t.Errorf("captured usage = %+v, want prompt=10 completion=2", captured.Usage)
+	if captured.usage.PromptTokens != 10 || captured.usage.CompletionTokens != 2 {
+		t.Errorf("captured usage = %+v, want prompt=10 completion=2", captured.usage)
 	}
-	if len(captured.Attempts) != 1 || captured.Attempts[0].Outcome != AttemptSuccess {
-		t.Errorf("attempts = %+v, want exactly one AttemptSuccess (model rewrite must not break clean-done classification)", captured.Attempts)
+	if len(captured.attempts) != 1 || captured.attempts[0].Outcome != AttemptSuccess {
+		t.Errorf("attempts = %+v, want exactly one AttemptSuccess (model rewrite must not break clean-done classification)", captured.attempts)
 	}
-	if captured.Attempts[0].FailReason != "" {
-		t.Errorf("attempt fail_reason = %q, want empty", captured.Attempts[0].FailReason)
+	if captured.attempts[0].FailReason != "" {
+		t.Errorf("attempt fail_reason = %q, want empty", captured.attempts[0].FailReason)
 	}
 }
 

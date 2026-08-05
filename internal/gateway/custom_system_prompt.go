@@ -12,7 +12,7 @@ import (
 
 // SettingsProvider is the read-only window the gateway has into the cached
 // global custom system prompt and input-compression switch. Implemented by
-// the system settings service and injected into RelayService by the router.
+// the system settings service and injected into Service by the router.
 // The gateway imports only the neutral settings DTO (not the service
 // package), so there is no import cycle.
 type SettingsProvider interface {
@@ -37,22 +37,22 @@ func joinSystemText(orig, custom string) string {
 // the injection format by egress protocol (the body is already egress-encoded).
 // Malformed bodies are returned unchanged: never panic, never silently rewrite
 // a malformed request.
-func applyCustomSystemPrompt(rc *RelayContext, egressProto protocols.ProtocolID, body []byte) []byte {
-	if body == nil || !rc.CustomSystemPromptEnabled || rc.CustomSystemPrompt == "" {
+func applyCustomSystemPrompt(rc *Exchange, egressProto protocols.ProtocolID, body []byte) []byte {
+	if body == nil || !rc.customSystemPromptEnabled || rc.customSystemPrompt == "" {
 		return body
 	}
-	if !rc.IsChatEndpoint {
+	if !rc.isChatEndpoint {
 		return body
 	}
 	switch egressProto {
 	case protocols.ProtocolClaude:
-		return claude.InjectCustomSystemPromptOnly(body, rc.CustomSystemPrompt)
+		return claude.InjectCustomSystemPromptOnly(body, rc.customSystemPrompt)
 	case protocols.ProtocolOpenAI:
-		return injectOpenAI(body, rc.CustomSystemPrompt)
+		return injectOpenAI(body, rc.customSystemPrompt)
 	case protocols.ProtocolResponses:
-		return injectResponses(body, rc.CustomSystemPrompt)
+		return injectResponses(body, rc.customSystemPrompt)
 	case protocols.ProtocolGemini:
-		return injectGemini(body, rc.CustomSystemPrompt)
+		return injectGemini(body, rc.customSystemPrompt)
 	default:
 		return body
 	}

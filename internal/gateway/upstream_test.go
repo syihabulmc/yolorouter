@@ -10,7 +10,7 @@ import (
 )
 
 // testGatewayConfig returns the production gateway defaults via the exported
-// constructor, so a test-built RelayService behaves the same as a
+// constructor, so a test-built Service behaves the same as a
 // production-wired one; individual tests can override fields on the returned
 // struct as needed.
 func testGatewayConfig() config.GatewayConfig {

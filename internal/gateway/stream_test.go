@@ -191,7 +191,7 @@ func runStreamPump(t *testing.T, upstreamBody string, wantsUsage bool) (*Usage, 
 		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
 		Header:     make(http.Header),
 	}
-	rc := &RelayContext{OriginalModel: "ext", IsStream: true, WantsStreamUsage: wantsUsage}
+	rc := &Exchange{originalModel: "ext", isStream: true, wantsStreamUsage: wantsUsage}
 	return passthroughStreamToClient(c, resp, rc)
 }
 
@@ -256,7 +256,7 @@ func TestStreamUpstreamPostDoneDisconnectSucceeds(t *testing.T) {
 		Body:       io.NopCloser(&cancelAfterReader{data: []byte(body), cancel: cancel}),
 		Header:     make(http.Header),
 	}
-	rc := &RelayContext{OriginalModel: "ext", IsStream: true, WantsStreamUsage: true}
+	rc := &Exchange{originalModel: "ext", isStream: true, wantsStreamUsage: true}
 	_, err := passthroughStreamToClient(c, resp, rc)
 	if err != nil {
 		t.Fatalf("post-[DONE] disconnect must succeed, got %v", err)
@@ -277,7 +277,7 @@ func TestStreamUpstreamStripsInjectedUsage(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Header:     make(http.Header),
 	}
-	rc := &RelayContext{OriginalModel: "ext", IsStream: true, WantsStreamUsage: false}
+	rc := &Exchange{originalModel: "ext", isStream: true, wantsStreamUsage: false}
 	usage, err := passthroughStreamToClient(c, resp, rc)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
@@ -294,10 +294,10 @@ func TestStreamUpstreamStripsInjectedUsage(t *testing.T) {
 // and a RequestID (stream body capture: internal/router/router.go
 // stashes the absolute bodies dir on every request's gin.Context; here the
 // test wires it directly instead of going through the real middleware). It
-// returns the RelayContext so callers can inspect streamBodyCaptured/
+// returns the Exchange so callers can inspect streamBodyCaptured/
 // streamBodyTruncated and the recorder so callers can check the bytes the
 // caller actually received.
-func runStreamPumpCapture(t *testing.T, upstreamBody, requestID, bodiesDir string) (*RelayContext, *httptest.ResponseRecorder, *Usage, error) {
+func runStreamPumpCapture(t *testing.T, upstreamBody, requestID, bodiesDir string) (*Exchange, *httptest.ResponseRecorder, *Usage, error) {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -308,7 +308,7 @@ func runStreamPumpCapture(t *testing.T, upstreamBody, requestID, bodiesDir strin
 		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
 		Header:     make(http.Header),
 	}
-	rc := &RelayContext{RequestID: requestID, OriginalModel: "ext", IsStream: true, WantsStreamUsage: true}
+	rc := &Exchange{requestID: requestID, originalModel: "ext", isStream: true, wantsStreamUsage: true}
 	usage, err := passthroughStreamToClient(c, resp, rc)
 	// The pump deliberately leaves the capture file open for its caller to
 	// close (dispatchPassthroughStream does it on every exit path, so a
@@ -434,7 +434,7 @@ func TestWriteStreamErrorEventOpenAIIngress(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	rc := &RelayContext{RequestID: "req-openai-mid", Ingress: protocols.ProtocolOpenAI}
+	rc := &Exchange{requestID: "req-openai-mid", ingress: protocols.ProtocolOpenAI}
 
 	_ = writeStreamErrorEvent(c, rc)
 
@@ -462,7 +462,7 @@ func TestWriteStreamErrorEventClaudeIngress(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-	rc := &RelayContext{RequestID: "req-claude-mid", Ingress: protocols.ProtocolClaude}
+	rc := &Exchange{requestID: "req-claude-mid", ingress: protocols.ProtocolClaude}
 
 	_ = writeStreamErrorEvent(c, rc)
 
@@ -505,13 +505,13 @@ func TestWriteStreamErrorEventCapturesToStreamFile(t *testing.T) {
 			c, _ := gin.CreateTestContext(rec)
 			c.Request = httptest.NewRequest(http.MethodPost, tt.path, nil)
 			c.Set(BodiesDirContextKey, dir)
-			rc := &RelayContext{RequestID: "req-" + tt.name + "-capture", Ingress: IngressProtocol(tt.path)}
+			rc := &Exchange{requestID: "req-" + tt.name + "-capture", ingress: IngressProtocol(tt.path)}
 			openStreamBodyFile(c, rc)
 			defer closeStreamBodyFile(rc)
 
 			_ = writeStreamErrorEvent(c, rc)
 
-			captured, err := os.ReadFile(filepath.Join(dir, rc.RequestID+".stream"))
+			captured, err := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 			if err != nil {
 				t.Fatalf("read captured stream file: %v", err)
 			}

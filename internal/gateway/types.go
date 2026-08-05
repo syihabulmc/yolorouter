@@ -21,84 +21,84 @@ import (
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
-// RelayContext holds per-request relay state for the gateway pass-through,
+// Exchange holds per-request relay state for the gateway pass-through,
 // key rotation, failover, and request logging.
-type RelayContext struct {
-	RequestID     string
-	OriginalModel string // external model name; every response model field is rewritten to this
-	IsStream      bool
-	// Ingress is the wire protocol of the caller's request path, computed
+type Exchange struct {
+	requestID     string
+	originalModel string // external model name; every response model field is rewritten to this
+	isStream      bool
+	// ingress is the wire protocol of the caller's request path, computed
 	// once in Handle from c.Request.URL.Path. Every gateway call site that
 	// already has rc in scope reads this instead of recomputing it.
-	Ingress protocols.ProtocolID
-	// IngressPath is the caller's request path, captured at Handle entry. The
+	ingress protocols.ProtocolID
+	// ingressPath is the caller's request path, captured at Handle entry. The
 	// custom system prompt injection allowlist keys off it: Gemini's route is
 	// a wildcard :modelaction and the ingress protocol falls back to
 	// ProtocolOpenAI for non-generateContent actions, so the path alone
 	// distinguishes countTokens / embedContent from real chat.
-	IngressPath string
-	// UpstreamURL is the full URL the gateway dispatched to for the current
+	ingressPath string
+	// upstreamURL is the full URL the gateway dispatched to for the current
 	// candidate's attempt. Reset to "" at the start of each candidate in
 	// relayCandidates so a build-failed candidate never inherits the previous
 	// candidate's URL; set in attemptOne right before the request is sent.
 	// makeAttempt stamps each AttemptRecord with it, and finalize copies it to
 	// the request_logs.upstream_url column under the same "last attempt wins"
 	// rule as UpstreamRequestBody.
-	UpstreamURL string
-	// IsChatEndpoint is computed once in Handle from IngressPath. Both the
+	upstreamURL string
+	// isChatEndpoint is computed once in Handle from IngressPath. Both the
 	// compression gate and the CSP injection gate read this bool instead of
-	// recomputing IsChatEndpoint(path) independently.
-	IsChatEndpoint bool
-	// CustomSystemPromptEnabled / CustomSystemPrompt are the two-level-resolved
+	// recomputing isChatEndpoint(path) independently.
+	isChatEndpoint bool
+	// customSystemPromptEnabled / CustomSystemPrompt are the two-level-resolved
 	// prompt for this request. Empty or disabled means no injection.
-	CustomSystemPromptEnabled bool
-	CustomSystemPrompt        string
-	// CompressEnabled is the two-level-resolved input-compression switch for
+	customSystemPromptEnabled bool
+	customSystemPrompt        string
+	// compressEnabled is the two-level-resolved input-compression switch for
 	// this request. When true and the ingress path is a chat endpoint, the
 	// caller's body is run through the compress engine before relay.
-	CompressEnabled bool
-	// CompressSkipReason records why compression was skipped (when it was
+	compressEnabled bool
+	// compressSkipReason records why compression was skipped (when it was
 	// enabled but the engine returned Skipped=true). Empty when compression
 	// was disabled, applied successfully, or never attempted.
-	CompressSkipReason string
-	// CompressEstimatedTokensSaved / CompressorsApplied / RequestBodyCompressed
+	compressSkipReason string
+	// compressEstimatedTokensSaved / CompressorsApplied / RequestBodyCompressed
 	// record the outcome of a successful compression pass. RequestBodyCompressed
 	// is the compressed body that upstream encoding (buildUpstreamBody) uses as
 	// its input via EffectiveRequestBody; RequestBody stays the verbatim caller
 	// body for the audit row.
-	CompressEstimatedTokensSaved int
-	CompressorsApplied           []string
-	RequestBodyCompressed        []byte
-	// WantsStreamUsage is true when the caller set
+	compressEstimatedTokensSaved int
+	compressorsApplied           []string
+	requestBodyCompressed        []byte
+	// wantsStreamUsage is true when the caller set
 	// stream_options.include_usage=true. Controls whether usage frames
 	// collected upstream are forwarded to the caller (the gateway always
 	// requests usage upstream for its own cost accounting, but only
 	// forwards it when the caller asked).
-	WantsStreamUsage bool
-	APIKeyID         uint
+	wantsStreamUsage bool
+	apiKeyID         uint
 
-	// RequestDeadline is the absolute cutoff for the whole request across all
+	// requestDeadline is the absolute cutoff for the whole request across all
 	// failover candidates (the request_timeout budget). Set once at Handle
 	// entry as now + gateway.RequestTimeout; each upstream attempt reads it
 	// to derive its own per-attempt cap as min(attempt_timeout,
-	// time.Until(RequestDeadline)) so a request near its total budget can't
+	// time.Until(requestDeadline)) so a request near its total budget can't
 	// start a fresh full-length attempt. Zero before Handle assigns it.
-	RequestDeadline time.Time
+	requestDeadline time.Time
 
-	// RequestCtx is the context carrying RequestDeadline, set once at Handle
+	// requestCtx is the context carrying RequestDeadline, set once at Handle
 	// entry. Candidate queries (model/candidate/key GORM reads) and each
 	// per-attempt context derive from this, so a stalled DB cannot overrun
 	// the total request budget. Without this, the GORM calls used s.db with
 	// no deadline and a stuck query could block past RequestDeadline.
-	RequestCtx context.Context
+	requestCtx context.Context
 
 	// Current-attempt target (overwritten on each candidate switch).
-	Candidate *model.ModelCandidate
-	Provider  *model.Provider
+	candidate *model.ModelCandidate
+	provider  *model.Provider
 
-	StatusCode int // set by finalize when the log row is written
+	statusCode int // set by finalize when the log row is written
 
-	// ContentInspectionStatus / ContentInspectionErrType describe the MOST
+	// contentInspectionStatus / ContentInspectionErrType describe the MOST
 	// RECENT candidate only — relayCandidates clears them at the top of each
 	// iteration, alongside Provider/UpstreamURL and for the same reason, so
 	// they are set if and only if the candidate that just ran was refused by
@@ -109,18 +109,18 @@ type RelayContext struct {
 	// upstream candidates failed" would hide the one thing the caller can act
 	// on. Zero means the last attempt was not such a refusal and the ordinary
 	// terminal applies.
-	ContentInspectionStatus  int
-	ContentInspectionErrType string
+	contentInspectionStatus  int
+	contentInspectionErrType string
 
-	// Usage from the successful attempt, if any — drives cost + the log row.
-	Usage *Usage
+	// usage from the successful attempt, if any — drives cost + the log row.
+	usage *Usage
 
-	// Attempts records every candidate try in order.
-	Attempts []AttemptRecord
+	// attempts records every candidate try in order.
+	attempts []AttemptRecord
 
-	// FirstByteSent flips true once any byte has been written to the client
+	// firstByteSent flips true once any byte has been written to the client
 	// (after this, no more Key/candidate switching is allowed).
-	FirstByteSent bool
+	firstByteSent bool
 
 	// logWritten guards finalize against double-write: Handle installs a
 	// panic-recovery defer that calls finalize if no normal path did, and
@@ -132,7 +132,7 @@ type RelayContext struct {
 
 	// Bodies captured for the request_log_bodies row.
 	// v0.1 stores them VERBATIM — body content is not scrubbed (only request
-	// headers are masked; see RequestHeaders below). RequestBody is set as
+	// headers are masked; see RequestHeaders below). requestBody is set as
 	// soon as the caller body is read. UpstreamRequestBody is overwritten on
 	// each attempt (success => successful attempt; total failure => last
 	// attempt). ResponseBody is the caller-FACING response (post-rewrite,
@@ -141,16 +141,16 @@ type RelayContext struct {
 	// bounded-read). For stream, the sent SSE is appended to streamBodyFile
 	// instead and dispatchPassthroughStream clears these two so they stay empty.
 	// Nil/empty on early failure or body-read failure.
-	RequestBody          []byte
-	UpstreamRequestBody  []byte
-	ResponseBody         []byte
-	UpstreamResponseBody []byte
-	// RequestHeaders is the caller's request headers as a JSON object, with
+	requestBody          []byte
+	upstreamRequestBody  []byte
+	responseBody         []byte
+	upstreamResponseBody []byte
+	// requestHeaders is the caller's request headers as a JSON object, with
 	// sensitive headers already masked (SanitizeHeaders). This header-name
 	// masking is the ONLY redaction v0.1 does — body content above is stored
 	// verbatim. Captured once at Handle entry so it survives even an early
 	// rejection.
-	RequestHeaders []byte
+	requestHeaders []byte
 
 	// streamBodyFile/streamBodyCaptured/streamBodyTruncated are the
 	// stream-only counterpart of the four body fields above: the sent SSE
@@ -178,13 +178,13 @@ type RelayContext struct {
 // this call was the one that flipped it — the stream path uses that to decide
 // whether a mid-stream upstream error can still switch (no) or must be
 // surfaced inline (yes).
-func (rc *RelayContext) MarkFirstByteSent() bool {
+func (rc *Exchange) MarkFirstByteSent() bool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
-	if rc.FirstByteSent {
+	if rc.firstByteSent {
 		return false
 	}
-	rc.FirstByteSent = true
+	rc.firstByteSent = true
 	return true
 }
 
@@ -194,11 +194,11 @@ func (rc *RelayContext) MarkFirstByteSent() bool {
 // instead of RequestBody directly so that both the passthrough (model-field
 // rewrite) and cross-protocol (IR decode/encode) paths consume the compressed
 // body without every call site branching.
-func (rc *RelayContext) EffectiveRequestBody() []byte {
-	if rc.RequestBodyCompressed != nil {
-		return rc.RequestBodyCompressed
+func (rc *Exchange) EffectiveRequestBody() []byte {
+	if rc.requestBodyCompressed != nil {
+		return rc.requestBodyCompressed
 	}
-	return rc.RequestBody
+	return rc.requestBody
 }
 
 // AttemptRecord is one candidate try (the log keeps every attempt,

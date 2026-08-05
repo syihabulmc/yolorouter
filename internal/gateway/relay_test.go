@@ -112,43 +112,43 @@ func (s stubSettingsProvider) GetInputCompression(_ context.Context) (bool, int6
 	return s.compressEnabled, 1, s.compressErr
 }
 
-// newRelaySvc builds a RelayService and swaps in a plain transport so the
+// newSvc builds a Service and swaps in a plain transport so the
 // test can dial a loopback-bound httptest server — safehttp.NewTransport()
 // (the production transport) deliberately refuses loopback (SSRF defense),
 // which would block every test here. Same pattern as provider_client_test's
 // newTestClient.
-func newRelaySvc(t *testing.T, db *gorm.DB) *RelayService {
+func newSvc(t *testing.T, db *gorm.DB) *Service {
 	t.Helper()
-	return newRelaySvcWithSettings(t, db, stubSettingsProvider{})
+	return newSvcWithSettings(t, db, stubSettingsProvider{})
 }
 
-// newRelaySvcWithSettingsAndGateway is the shared core behind
-// newRelaySvcWithSettings / newRelaySvcWithGateway: it wires the RelayService
+// newSvcWithSettingsAndGateway is the shared core behind
+// newSvcWithSettings / newSvcWithGateway: it wires the Service
 // against a caller-chosen settings provider AND gateway config, then swaps in
 // a plain transport so the test can dial a loopback httptest server (the
 // production safehttp transport deliberately refuses loopback for SSRF
 // defense, which would block every test here).
-func newRelaySvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProvider, gateway config.GatewayConfig) *RelayService {
+func newSvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProvider, gateway config.GatewayConfig) *Service {
 	t.Helper()
 	masterKey := bytes.Repeat([]byte{0x42}, 32)
-	svc := NewRelayService(db, masterKey, false, sp, gateway)
+	svc := NewService(db, masterKey, false, sp, gateway)
 	svc.client.httpClient.Transport = &http.Transport{}
 	return svc
 }
 
-// newRelaySvcWithSettings is newRelaySvc with a caller-built stub, so a test
+// newSvcWithSettings is newSvc with a caller-built stub, so a test
 // can pre-seed the global compression / CSP state the gateway reads.
-func newRelaySvcWithSettings(t *testing.T, db *gorm.DB, sp stubSettingsProvider) *RelayService {
+func newSvcWithSettings(t *testing.T, db *gorm.DB, sp stubSettingsProvider) *Service {
 	t.Helper()
-	return newRelaySvcWithSettingsAndGateway(t, db, sp, testGatewayConfig())
+	return newSvcWithSettingsAndGateway(t, db, sp, testGatewayConfig())
 }
 
-// newRelaySvcWithGateway is newRelaySvc with a caller-built GatewayConfig, so
+// newSvcWithGateway is newSvc with a caller-built GatewayConfig, so
 // a test can exercise a non-default request_timeout budget (e.g. asserting
 // Handle stamps RequestDeadline = now + RequestTimeout).
-func newRelaySvcWithGateway(t *testing.T, db *gorm.DB, gateway config.GatewayConfig) *RelayService {
+func newSvcWithGateway(t *testing.T, db *gorm.DB, gateway config.GatewayConfig) *Service {
 	t.Helper()
-	return newRelaySvcWithSettingsAndGateway(t, db, stubSettingsProvider{}, gateway)
+	return newSvcWithSettingsAndGateway(t, db, stubSettingsProvider{}, gateway)
 }
 
 func newCtx(body []byte) (*gin.Context, *httptest.ResponseRecorder) {
@@ -258,7 +258,7 @@ func TestRelayNonStreamSuccess(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-upstream-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -301,7 +301,7 @@ func TestRelayNonStreamScalarStopNotRejected(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-upstream-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -317,13 +317,13 @@ func TestRelayNonStreamScalarStopNotRejected(t *testing.T) {
 }
 
 // TestFinalizeNonStreamCapturesBodies: a 2xx
-// non-stream upstream response is captured into the RelayContext's 4 body
+// non-stream upstream response is captured into the Exchange's 4 body
 // fields — the caller's original request, the rewritten (provider model
 // name) request actually sent upstream, the raw upstream response (provider
 // model name), and the caller-facing rewritten response (external model
 // name). response_body and upstream_response_body must differ (only the
 // model field), proving both are recorded independently and neither is a
-// copy of the other. It asserts the RelayContext fields directly via
+// copy of the other. It asserts the Exchange fields directly via
 // testHookHandleDone AND (now that finalize persists the row) that
 // the same four values landed in request_log_bodies.
 func TestFinalizeNonStreamCapturesBodies(t *testing.T) {
@@ -334,14 +334,14 @@ func TestFinalizeNonStreamCapturesBodies(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-upstream-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`)
@@ -355,42 +355,42 @@ func TestFinalizeNonStreamCapturesBodies(t *testing.T) {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
 
-	if !bytes.Contains(captured.RequestBody, []byte(`"model":"gpt-4o"`)) {
-		t.Errorf("RequestBody = %s, want it to contain the caller's original request", captured.RequestBody)
+	if !bytes.Contains(captured.requestBody, []byte(`"model":"gpt-4o"`)) {
+		t.Errorf("RequestBody = %s, want it to contain the caller's original request", captured.requestBody)
 	}
-	if !bytes.Contains(captured.UpstreamRequestBody, []byte(`"model":"gpt-4o-real"`)) {
-		t.Errorf("UpstreamRequestBody = %s, want the rewritten (provider model name) request", captured.UpstreamRequestBody)
+	if !bytes.Contains(captured.upstreamRequestBody, []byte(`"model":"gpt-4o-real"`)) {
+		t.Errorf("UpstreamRequestBody = %s, want the rewritten (provider model name) request", captured.upstreamRequestBody)
 	}
-	if !bytes.Contains(captured.UpstreamResponseBody, []byte(`"model":"gpt-4o-real"`)) {
-		t.Errorf("UpstreamResponseBody = %s, want the raw upstream response (provider model name)", captured.UpstreamResponseBody)
+	if !bytes.Contains(captured.upstreamResponseBody, []byte(`"model":"gpt-4o-real"`)) {
+		t.Errorf("UpstreamResponseBody = %s, want the raw upstream response (provider model name)", captured.upstreamResponseBody)
 	}
-	if !bytes.Contains(captured.ResponseBody, []byte(`"model":"gpt-4o"`)) {
-		t.Errorf("ResponseBody = %s, want the caller-facing rewritten response (external model name)", captured.ResponseBody)
+	if !bytes.Contains(captured.responseBody, []byte(`"model":"gpt-4o"`)) {
+		t.Errorf("ResponseBody = %s, want the caller-facing rewritten response (external model name)", captured.responseBody)
 	}
-	if bytes.Equal(captured.ResponseBody, captured.UpstreamResponseBody) {
+	if bytes.Equal(captured.responseBody, captured.upstreamResponseBody) {
 		t.Error("ResponseBody and UpstreamResponseBody must differ (post- vs pre-rewrite model field)")
 	}
 
 	// finalize must persist the same four values into
 	// request_log_bodies, keyed by request_id (UPSERT, 1:1 with request_logs).
-	dbBody, err := repository.GetRequestLogBodyByRequestID(db, captured.RequestID)
+	dbBody, err := repository.GetRequestLogBodyByRequestID(db, captured.requestID)
 	if err != nil {
 		t.Fatalf("GetRequestLogBodyByRequestID: %v", err)
 	}
 	if dbBody == nil {
 		t.Fatal("expected a request_log_bodies row to be persisted by finalize")
 	}
-	if dbBody.RequestBody != string(captured.RequestBody) {
-		t.Errorf("persisted RequestBody = %q, want %q", dbBody.RequestBody, captured.RequestBody)
+	if dbBody.RequestBody != string(captured.requestBody) {
+		t.Errorf("persisted RequestBody = %q, want %q", dbBody.RequestBody, captured.requestBody)
 	}
-	if dbBody.UpstreamRequestBody != string(captured.UpstreamRequestBody) {
-		t.Errorf("persisted UpstreamRequestBody = %q, want %q", dbBody.UpstreamRequestBody, captured.UpstreamRequestBody)
+	if dbBody.UpstreamRequestBody != string(captured.upstreamRequestBody) {
+		t.Errorf("persisted UpstreamRequestBody = %q, want %q", dbBody.UpstreamRequestBody, captured.upstreamRequestBody)
 	}
-	if dbBody.ResponseBody != string(captured.ResponseBody) {
-		t.Errorf("persisted ResponseBody = %q, want %q", dbBody.ResponseBody, captured.ResponseBody)
+	if dbBody.ResponseBody != string(captured.responseBody) {
+		t.Errorf("persisted ResponseBody = %q, want %q", dbBody.ResponseBody, captured.responseBody)
 	}
-	if dbBody.UpstreamResponseBody != string(captured.UpstreamResponseBody) {
-		t.Errorf("persisted UpstreamResponseBody = %q, want %q", dbBody.UpstreamResponseBody, captured.UpstreamResponseBody)
+	if dbBody.UpstreamResponseBody != string(captured.upstreamResponseBody) {
+		t.Errorf("persisted UpstreamResponseBody = %q, want %q", dbBody.UpstreamResponseBody, captured.upstreamResponseBody)
 	}
 }
 
@@ -413,7 +413,7 @@ func TestHandleSetsRequestDeadline(t *testing.T) {
 
 	// Use a non-default RequestTimeout (15m vs the 30m default) so the
 	// assertion pins the deadline to THIS config, not to any default.
-	svc := newRelaySvcWithGateway(t, db, config.GatewayConfig{
+	svc := newSvcWithGateway(t, db, config.GatewayConfig{
 		ConnectTimeout:   5 * time.Second,
 		HeaderTimeout:    600 * time.Second,
 		FirstByteTimeout: 600 * time.Second,
@@ -426,8 +426,8 @@ func TestHandleSetsRequestDeadline(t *testing.T) {
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`))
@@ -439,14 +439,14 @@ func TestHandleSetsRequestDeadline(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.RequestDeadline.IsZero() {
-		t.Fatal("RequestDeadline not set on RelayContext")
+	if captured.requestDeadline.IsZero() {
+		t.Fatal("RequestDeadline not set on Exchange")
 	}
 	// Deadline should be ~before + RequestTimeout (15m), allowing for Handle's
 	// own runtime. The window is wide enough to absorb test-machine variance
 	// but narrow enough that a zero-value (year 1) or 30m-default deadline
 	// would fail.
-	remaining := time.Until(captured.RequestDeadline)
+	remaining := time.Until(captured.requestDeadline)
 	if remaining <= 14*time.Minute || remaining >= 15*time.Minute {
 		t.Errorf("RequestDeadline remaining = %v, want within (14m, 15m) for a 15m RequestTimeout", remaining)
 	}
@@ -473,7 +473,7 @@ func TestRelayKeyRotation(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-bad", "bad", 1, true)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-good", "good", 2, true)
@@ -514,7 +514,7 @@ func TestRelayCandidateFailover(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p1 := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-1", "k1", 1, true)
 	p2 := createProvider(t, db, "p2", upstream.URL)
@@ -573,7 +573,7 @@ func TestRelayClientErrorNoSwitch(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-2", "k2", 2, true)
@@ -601,7 +601,7 @@ func TestRelayModelNotAllowed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -631,7 +631,7 @@ func TestRelayAllowAllModelsBypassesAllowlist(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -660,7 +660,7 @@ func TestRelayRevokedKey(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -689,7 +689,7 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 	cases := []struct {
 		name          string
 		configureKey  func(k *model.APIKey)
-		preRejectHook func(svc *RelayService, apiKeyID uint)
+		preRejectHook func(svc *Service, apiKeyID uint)
 		wantStatus    int
 		wantRespSub   string
 	}{
@@ -724,7 +724,7 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 				limit := 1
 				k.ConcurrencyLimit = &limit
 			},
-			preRejectHook: func(svc *RelayService, apiKeyID uint) {
+			preRejectHook: func(svc *Service, apiKeyID uint) {
 				svc.limiter.AcquireConcurrency(apiKeyID, 1) // exhaust the only slot
 			},
 			wantStatus:  http.StatusTooManyRequests,
@@ -736,7 +736,7 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 				limit := 1
 				k.RPMLimit = &limit
 			},
-			preRejectHook: func(svc *RelayService, apiKeyID uint) {
+			preRejectHook: func(svc *Service, apiKeyID uint) {
 				svc.limiter.CheckRPM(apiKeyID, 1, time.Now()) // consume the only token
 			},
 			wantStatus:  http.StatusTooManyRequests,
@@ -747,7 +747,7 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			db := testutil.NewSQLiteDB(t)
-			svc := newRelaySvc(t, db)
+			svc := newSvc(t, db)
 			p := createProvider(t, db, "p1", "http://unused.invalid")
 			m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 			apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
@@ -759,8 +759,8 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 				tc.preRejectHook(svc, apiKey.ID)
 			}
 
-			var captured *RelayContext
-			testHookHandleDone = func(rc *RelayContext) { captured = rc }
+			var captured *Exchange
+			testHookHandleDone = func(rc *Exchange) { captured = rc }
 			defer func() { testHookHandleDone = nil }()
 
 			c, w := newCtx(reqBody)
@@ -772,15 +772,15 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 			if captured == nil {
 				t.Fatal("testHookHandleDone was never invoked")
 			}
-			if !bytes.Contains(captured.RequestBody, []byte(`"model":"gpt-4o"`)) {
-				t.Errorf("RequestBody = %s, want it to contain the caller's request", captured.RequestBody)
+			if !bytes.Contains(captured.requestBody, []byte(`"model":"gpt-4o"`)) {
+				t.Errorf("RequestBody = %s, want it to contain the caller's request", captured.requestBody)
 			}
-			if len(captured.UpstreamRequestBody) != 0 || len(captured.UpstreamResponseBody) != 0 {
+			if len(captured.upstreamRequestBody) != 0 || len(captured.upstreamResponseBody) != 0 {
 				t.Errorf("expected empty upstream_* for a pre-dispatch rejection, got request=%q response=%q",
-					captured.UpstreamRequestBody, captured.UpstreamResponseBody)
+					captured.upstreamRequestBody, captured.upstreamResponseBody)
 			}
 
-			dbBody, err := repository.GetRequestLogBodyByRequestID(db, captured.RequestID)
+			dbBody, err := repository.GetRequestLogBodyByRequestID(db, captured.requestID)
 			if err != nil {
 				t.Fatalf("GetRequestLogBodyByRequestID: %v", err)
 			}
@@ -810,7 +810,7 @@ func TestRelayAllCandidatesFailed(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -849,7 +849,7 @@ func TestRelayBudgetExceededReturnsInsufficientQuota(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -907,7 +907,7 @@ func TestRelayStreamSuccess(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -960,14 +960,14 @@ func TestRelayClaudeMalformedBodyRejectedBeforeCandidateLoop(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "claude-3-5-sonnet-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	// messages is non-empty and max_tokens is positive (passes
@@ -1008,12 +1008,12 @@ func TestRelayClaudeMalformedBodyRejectedBeforeCandidateLoop(t *testing.T) {
 	}
 	// The audit trail must record the Claude envelope actually sent, not the
 	// OpenAI-shaped one.
-	if !bytes.Contains(captured.ResponseBody, []byte(`"type":"error"`)) {
-		t.Errorf("rc.ResponseBody = %s, want the Claude error envelope stashed for audit", captured.ResponseBody)
+	if !bytes.Contains(captured.responseBody, []byte(`"type":"error"`)) {
+		t.Errorf("rc.responseBody = %s, want the Claude error envelope stashed for audit", captured.responseBody)
 	}
-	if len(captured.UpstreamRequestBody) != 0 || len(captured.UpstreamResponseBody) != 0 {
+	if len(captured.upstreamRequestBody) != 0 || len(captured.upstreamResponseBody) != 0 {
 		t.Errorf("expected empty upstream_* (candidate loop never entered), got request=%q response=%q",
-			captured.UpstreamRequestBody, captured.UpstreamResponseBody)
+			captured.upstreamRequestBody, captured.upstreamResponseBody)
 	}
 }
 
@@ -1051,7 +1051,7 @@ func TestGeminiIngressResolvesModelFromPath(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gpt-4o-real", true, true, 1)
@@ -1093,14 +1093,14 @@ func TestGeminiIngressStreamActionSetsStreamFromPath(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
@@ -1113,8 +1113,8 @@ func TestGeminiIngressStreamActionSetsStreamFromPath(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if !captured.IsStream {
-		t.Errorf("rc.IsStream = false, want true (from the :streamGenerateContent path suffix)")
+	if !captured.isStream {
+		t.Errorf("rc.isStream = false, want true (from the :streamGenerateContent path suffix)")
 	}
 }
 
@@ -1131,7 +1131,7 @@ func TestGeminiIngressMalformedPathRejected(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gpt-4o-real", true, true, 1)
@@ -1165,7 +1165,7 @@ func TestResponsesIngressResolvesModelAndStreamFromBody(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "responses-model", "gpt-4o-real", true, true, 1)
@@ -1195,7 +1195,7 @@ func TestResponsesIngressMissingInputRejected(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "responses-model", "gpt-4o-real", true, true, 1)
@@ -1231,7 +1231,7 @@ func jsonStr(s string) string {
 
 // TestCompressTriggersAcrossProtocols: for each of the four ingress protocols,
 // compression enabled globally shrinks a build-output body before relay.
-// The compressed body reaches the upstream (captured via the RelayContext)
+// The compressed body reaches the upstream (captured via the Exchange)
 // and is strictly shorter than the caller's original.
 func TestCompressTriggersAcrossProtocols(t *testing.T) {
 	cases := []struct {
@@ -1288,14 +1288,14 @@ func TestCompressTriggersAcrossProtocols(t *testing.T) {
 			defer upstream.Close()
 
 			sp := stubSettingsProvider{compressEnabled: true}
-			svc := newRelaySvcWithSettings(t, db, sp)
+			svc := newSvcWithSettings(t, db, sp)
 			p := createProvider(t, db, "p1", upstream.URL)
 			createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 			m := createModelAndCandidate(t, db, p, tc.externalNm, tc.providerMn, true, true, 1)
 			apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-			var captured *RelayContext
-			testHookHandleDone = func(rc *RelayContext) { captured = rc }
+			var captured *Exchange
+			testHookHandleDone = func(rc *Exchange) { captured = rc }
 			defer func() { testHookHandleDone = nil }()
 
 			origBody := tc.body()
@@ -1308,24 +1308,24 @@ func TestCompressTriggersAcrossProtocols(t *testing.T) {
 			if captured == nil {
 				t.Fatal("testHookHandleDone was never invoked")
 			}
-			if !captured.CompressEnabled {
-				t.Error("rc.CompressEnabled = false, want true")
+			if !captured.compressEnabled {
+				t.Error("rc.compressEnabled = false, want true")
 			}
-			if captured.RequestBodyCompressed == nil {
-				t.Fatal("rc.RequestBodyCompressed is nil, compression did not produce a body")
+			if captured.requestBodyCompressed == nil {
+				t.Fatal("rc.requestBodyCompressed is nil, compression did not produce a body")
 			}
-			if len(captured.RequestBodyCompressed) >= len(origBody) {
+			if len(captured.requestBodyCompressed) >= len(origBody) {
 				t.Errorf("compressed body (%d bytes) is not shorter than original (%d bytes)",
-					len(captured.RequestBodyCompressed), len(origBody))
+					len(captured.requestBodyCompressed), len(origBody))
 			}
-			if captured.CompressEstimatedTokensSaved <= 0 {
+			if captured.compressEstimatedTokensSaved <= 0 {
 				t.Error("CompressEstimatedTokensSaved should be positive")
 			}
-			if len(captured.CompressorsApplied) == 0 {
+			if len(captured.compressorsApplied) == 0 {
 				t.Error("CompressorsApplied should not be empty")
 			}
-			if captured.CompressSkipReason != "" {
-				t.Errorf("CompressSkipReason = %q, want empty (compression applied)", captured.CompressSkipReason)
+			if captured.compressSkipReason != "" {
+				t.Errorf("CompressSkipReason = %q, want empty (compression applied)", captured.compressSkipReason)
 			}
 		})
 	}
@@ -1333,7 +1333,7 @@ func TestCompressTriggersAcrossProtocols(t *testing.T) {
 
 // TestCompressSkipsNoLiveZone: compression is enabled but the body has no
 // live-zone blocks (last message is assistant — no user/tool text after it).
-// The engine returns Skipped=NoLiveZone, rc.RequestBodyCompressed stays nil,
+// The engine returns Skipped=NoLiveZone, rc.requestBodyCompressed stays nil,
 // and the request proceeds with the original body.
 func TestCompressSkipsNoLiveZone(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -1344,14 +1344,14 @@ func TestCompressSkipsNoLiveZone(t *testing.T) {
 	defer upstream.Close()
 
 	sp := stubSettingsProvider{compressEnabled: true}
-	svc := newRelaySvcWithSettings(t, db, sp)
+	svc := newSvcWithSettings(t, db, sp)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	// Last message is assistant — no user/tool content follows, so locate
@@ -1366,11 +1366,11 @@ func TestCompressSkipsNoLiveZone(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.RequestBodyCompressed != nil {
+	if captured.requestBodyCompressed != nil {
 		t.Error("RequestBodyCompressed should be nil when the engine skips")
 	}
-	if captured.CompressSkipReason != "no_live_zone" {
-		t.Errorf("CompressSkipReason = %q, want %q", captured.CompressSkipReason, "no_live_zone")
+	if captured.compressSkipReason != "no_live_zone" {
+		t.Errorf("CompressSkipReason = %q, want %q", captured.compressSkipReason, "no_live_zone")
 	}
 }
 
@@ -1386,14 +1386,14 @@ func TestCompressDisabledBySwitch(t *testing.T) {
 
 	// Global switch off.
 	sp := stubSettingsProvider{compressEnabled: false}
-	svc := newRelaySvcWithSettings(t, db, sp)
+	svc := newSvcWithSettings(t, db, sp)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
@@ -1406,20 +1406,20 @@ func TestCompressDisabledBySwitch(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.CompressEnabled {
-		t.Error("rc.CompressEnabled should be false")
+	if captured.compressEnabled {
+		t.Error("rc.compressEnabled should be false")
 	}
-	if captured.RequestBodyCompressed != nil {
+	if captured.requestBodyCompressed != nil {
 		t.Error("RequestBodyCompressed should be nil when compression is off")
 	}
-	if captured.CompressSkipReason != "" {
-		t.Errorf("CompressSkipReason = %q, want empty (compression never attempted)", captured.CompressSkipReason)
+	if captured.compressSkipReason != "" {
+		t.Errorf("CompressSkipReason = %q, want empty (compression never attempted)", captured.compressSkipReason)
 	}
 }
 
 // TestCompressNonChatEndpointNotCompressed: a path whose IsChatEndpoint is
 // false (Gemini countTokens) is not compressed even when CompressEnabled is
-// true. rc.RequestBodyCompressed stays nil and no skip reason is recorded
+// true. rc.requestBodyCompressed stays nil and no skip reason is recorded
 // (the gate was never entered).
 func TestCompressNonChatEndpointNotCompressed(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -1430,14 +1430,14 @@ func TestCompressNonChatEndpointNotCompressed(t *testing.T) {
 	defer upstream.Close()
 
 	sp := stubSettingsProvider{compressEnabled: true}
-	svc := newRelaySvcWithSettings(t, db, sp)
+	svc := newSvcWithSettings(t, db, sp)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	// countTokens is under the Gemini prefix but is NOT a generateContent/
@@ -1453,14 +1453,14 @@ func TestCompressNonChatEndpointNotCompressed(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if !captured.CompressEnabled {
-		t.Error("rc.CompressEnabled should be true (global switch on)")
+	if !captured.compressEnabled {
+		t.Error("rc.compressEnabled should be true (global switch on)")
 	}
-	if captured.RequestBodyCompressed != nil {
+	if captured.requestBodyCompressed != nil {
 		t.Error("RequestBodyCompressed should be nil — non-chat endpoints are not compressed")
 	}
-	if captured.CompressSkipReason != "" {
-		t.Errorf("CompressSkipReason = %q, want empty (gate never entered)", captured.CompressSkipReason)
+	if captured.compressSkipReason != "" {
+		t.Errorf("CompressSkipReason = %q, want empty (gate never entered)", captured.compressSkipReason)
 	}
 }
 
@@ -1479,14 +1479,14 @@ func TestCompressFailOpenProceeds(t *testing.T) {
 	defer upstream.Close()
 
 	sp := stubSettingsProvider{compressEnabled: true}
-	svc := newRelaySvcWithSettings(t, db, sp)
+	svc := newSvcWithSettings(t, db, sp)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	// Short prose content with no build-output/diff/grep anchors: the engine
@@ -1502,10 +1502,10 @@ func TestCompressFailOpenProceeds(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.RequestBodyCompressed != nil {
+	if captured.requestBodyCompressed != nil {
 		t.Error("RequestBodyCompressed should be nil when the engine skips")
 	}
-	if captured.CompressSkipReason == "" {
+	if captured.compressSkipReason == "" {
 		t.Error("CompressSkipReason should record why the engine skipped")
 	}
 	// The original body content reaches upstream unchanged.
@@ -1515,7 +1515,7 @@ func TestCompressFailOpenProceeds(t *testing.T) {
 }
 
 // TestCompressOverrideShortCircuitsGlobal: a per-key override (enabled=false)
-// wins over a globally-enabled switch. rc.CompressEnabled must be false and
+// wins over a globally-enabled switch. rc.compressEnabled must be false and
 // no compression attempt is made.
 func TestCompressOverrideShortCircuitsGlobal(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -1527,7 +1527,7 @@ func TestCompressOverrideShortCircuitsGlobal(t *testing.T) {
 
 	// Global switch ON, but per-key override says OFF.
 	sp := stubSettingsProvider{compressEnabled: true}
-	svc := newRelaySvcWithSettings(t, db, sp)
+	svc := newSvcWithSettings(t, db, sp)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -1535,8 +1535,8 @@ func TestCompressOverrideShortCircuitsGlobal(t *testing.T) {
 	apiKey.CompressEnabledOverride = true
 	apiKey.CompressEnabled = false
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
@@ -1549,10 +1549,10 @@ func TestCompressOverrideShortCircuitsGlobal(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.CompressEnabled {
-		t.Error("rc.CompressEnabled should be false (per-key override wins)")
+	if captured.compressEnabled {
+		t.Error("rc.compressEnabled should be false (per-key override wins)")
 	}
-	if captured.RequestBodyCompressed != nil {
+	if captured.requestBodyCompressed != nil {
 		t.Error("RequestBodyCompressed should be nil when override disables compression")
 	}
 }
@@ -1569,7 +1569,7 @@ func TestCompressOverrideEnablesWhenGlobalOff(t *testing.T) {
 
 	// Global OFF, per-key override ON.
 	sp := stubSettingsProvider{compressEnabled: false}
-	svc := newRelaySvcWithSettings(t, db, sp)
+	svc := newSvcWithSettings(t, db, sp)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -1577,8 +1577,8 @@ func TestCompressOverrideEnablesWhenGlobalOff(t *testing.T) {
 	apiKey.CompressEnabledOverride = true
 	apiKey.CompressEnabled = true
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
@@ -1591,10 +1591,10 @@ func TestCompressOverrideEnablesWhenGlobalOff(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if !captured.CompressEnabled {
-		t.Error("rc.CompressEnabled should be true (per-key override enables)")
+	if !captured.compressEnabled {
+		t.Error("rc.compressEnabled should be true (per-key override enables)")
 	}
-	if captured.RequestBodyCompressed == nil {
+	if captured.requestBodyCompressed == nil {
 		t.Error("RequestBodyCompressed should be non-nil (override enabled compression)")
 	}
 }
@@ -1611,14 +1611,14 @@ func TestCompressGlobalFailOpenOnError(t *testing.T) {
 	defer upstream.Close()
 
 	sp := stubSettingsProvider{compressErr: errors.New("settings db unavailable")}
-	svc := newRelaySvcWithSettings(t, db, sp)
+	svc := newSvcWithSettings(t, db, sp)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
@@ -1631,10 +1631,10 @@ func TestCompressGlobalFailOpenOnError(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.CompressEnabled {
-		t.Error("rc.CompressEnabled should be false (fail-open on settings error)")
+	if captured.compressEnabled {
+		t.Error("rc.compressEnabled should be false (fail-open on settings error)")
 	}
-	if captured.RequestBodyCompressed != nil {
+	if captured.requestBodyCompressed != nil {
 		t.Error("RequestBodyCompressed should be nil when settings read fails")
 	}
 }
@@ -1661,14 +1661,14 @@ func TestCompressAndCSPCoexist(t *testing.T) {
 		},
 		compressEnabled: true,
 	}
-	svc := newRelaySvcWithSettings(t, db, sp)
+	svc := newSvcWithSettings(t, db, sp)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	origBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":` + jsonStr(buildOutputContent()) + `}]}`)
@@ -1682,15 +1682,15 @@ func TestCompressAndCSPCoexist(t *testing.T) {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
 	// Compression applied.
-	if captured.RequestBodyCompressed == nil {
+	if captured.requestBodyCompressed == nil {
 		t.Fatal("RequestBodyCompressed should be non-nil (compression enabled and ran)")
 	}
-	if len(captured.RequestBodyCompressed) >= len(origBody) {
+	if len(captured.requestBodyCompressed) >= len(origBody) {
 		t.Errorf("compressed body (%d) should be shorter than original (%d)",
-			len(captured.RequestBodyCompressed), len(origBody))
+			len(captured.requestBodyCompressed), len(origBody))
 	}
 	// CSP resolved.
-	if !captured.CustomSystemPromptEnabled {
+	if !captured.customSystemPromptEnabled {
 		t.Error("CustomSystemPromptEnabled should be true")
 	}
 	// The upstream body must carry BOTH the injected system prompt AND the
@@ -1740,14 +1740,14 @@ func TestAttemptOne_StreamBodyIdleIsTerminal(t *testing.T) {
 	gw.BodyIdleTimeout = 100 * time.Millisecond
 	gw.AttemptTimeout = 2 * time.Second
 	gw.RequestTimeout = 5 * time.Second
-	svc := newRelaySvcWithGateway(t, db, gw)
+	svc := newSvcWithGateway(t, db, gw)
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
@@ -1764,10 +1764,10 @@ func TestAttemptOne_StreamBodyIdleIsTerminal(t *testing.T) {
 		t.Errorf("response body missing the first streamed chunk: %s", w.Body.String())
 	}
 	// Exactly one attempt — no failover after the first byte went out.
-	if len(captured.Attempts) != 1 {
-		t.Fatalf("expected exactly 1 attempt (no failover on a mid-stream cut), got %d: %+v", len(captured.Attempts), captured.Attempts)
+	if len(captured.attempts) != 1 {
+		t.Fatalf("expected exactly 1 attempt (no failover on a mid-stream cut), got %d: %+v", len(captured.attempts), captured.attempts)
 	}
-	last := captured.Attempts[0]
+	last := captured.attempts[0]
 	if last.Outcome != AttemptServerError {
 		t.Errorf("attempt outcome = %q, want %q", last.Outcome, AttemptServerError)
 	}
@@ -1833,7 +1833,7 @@ func TestAttemptOne_NonStreamBodyIdleFailovers(t *testing.T) {
 	gw.BodyIdleTimeout = 100 * time.Millisecond
 	gw.AttemptTimeout = 2 * time.Second
 	gw.RequestTimeout = 5 * time.Second
-	svc := newRelaySvcWithGateway(t, db, gw)
+	svc := newSvcWithGateway(t, db, gw)
 	p1 := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-1", "k1", 1, true)
 	p2 := createProvider(t, db, "p2", upstream.URL)
@@ -1864,8 +1864,8 @@ func TestAttemptOne_NonStreamBodyIdleFailovers(t *testing.T) {
 	}
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
@@ -1892,21 +1892,21 @@ func TestAttemptOne_NonStreamBodyIdleFailovers(t *testing.T) {
 		t.Errorf("response body missing candidate B content: %s", w.Body.String())
 	}
 	// Two attempts recorded: A failed with a first-byte-timeout read-body error, B succeeded.
-	if len(captured.Attempts) != 2 {
-		t.Fatalf("expected 2 attempts (A failed, B succeeded), got %d: %+v", len(captured.Attempts), captured.Attempts)
+	if len(captured.attempts) != 2 {
+		t.Fatalf("expected 2 attempts (A failed, B succeeded), got %d: %+v", len(captured.attempts), captured.attempts)
 	}
-	if captured.Attempts[0].Outcome != AttemptBadStatus {
-		t.Errorf("attempt A outcome = %q, want %q (read-body failover)", captured.Attempts[0].Outcome, AttemptBadStatus)
+	if captured.attempts[0].Outcome != AttemptBadStatus {
+		t.Errorf("attempt A outcome = %q, want %q (read-body failover)", captured.attempts[0].Outcome, AttemptBadStatus)
 	}
 	// The firstByte/inter-chunk timeout error messages both contain "timeout"
 	// ("first byte timeout" / "idle timeout between chunks"); either is a
 	// legitimate read-body cut. The assertion accepts both so the test stays
 	// valid regardless of which phase fired.
-	if !strings.Contains(captured.Attempts[0].FailReason, "timeout") {
-		t.Errorf("attempt A FailReason = %q, want it to contain \"timeout\" (first-byte or inter-chunk)", captured.Attempts[0].FailReason)
+	if !strings.Contains(captured.attempts[0].FailReason, "timeout") {
+		t.Errorf("attempt A FailReason = %q, want it to contain \"timeout\" (first-byte or inter-chunk)", captured.attempts[0].FailReason)
 	}
-	if captured.Attempts[1].Outcome != AttemptSuccess {
-		t.Errorf("attempt B outcome = %q, want %q", captured.Attempts[1].Outcome, AttemptSuccess)
+	if captured.attempts[1].Outcome != AttemptSuccess {
+		t.Errorf("attempt B outcome = %q, want %q", captured.attempts[1].Outcome, AttemptSuccess)
 	}
 }
 
@@ -1945,7 +1945,7 @@ func TestRelayCandidateLoopRespectsRequestBudget(t *testing.T) {
 	// Short RequestTimeout (150ms) + long AttemptTimeout (30s) so the first
 	// attempt is bounded by the request budget, not the per-attempt budget -
 	// exercising the candidate-loop gate rather than attemptOne's own check.
-	svc := newRelaySvcWithGateway(t, db, config.GatewayConfig{
+	svc := newSvcWithGateway(t, db, config.GatewayConfig{
 		ConnectTimeout:   5 * time.Second,
 		HeaderTimeout:    600 * time.Second,
 		FirstByteTimeout: 600 * time.Second,
@@ -1977,8 +1977,8 @@ func TestRelayCandidateLoopRespectsRequestBudget(t *testing.T) {
 	}
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
@@ -1999,7 +1999,7 @@ func TestRelayCandidateLoopRespectsRequestBudget(t *testing.T) {
 	// Exactly one attempt recorded: candidate 1 timed out consuming the entire
 	// request budget, so the candidate-loop gate stopped the walk before
 	// candidate 2 could register its own budget-exhausted attempt.
-	if len(captured.Attempts) != 1 {
-		t.Errorf("expected exactly 1 attempt (budget gate stops the walk), got %d: %+v", len(captured.Attempts), captured.Attempts)
+	if len(captured.attempts) != 1 {
+		t.Errorf("expected exactly 1 attempt (budget gate stops the walk), got %d: %+v", len(captured.attempts), captured.attempts)
 	}
 }

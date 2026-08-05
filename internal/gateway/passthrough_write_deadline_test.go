@@ -72,7 +72,7 @@ func TestPassthroughStreamToClient_ClientWriteTimeoutClassification(t *testing.T
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p-passthrough-slow", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-passthrough-slow", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o-slow", "gpt-4o-real", true, true, 1)
@@ -80,9 +80,9 @@ func TestPassthroughStreamToClient_ClientWriteTimeoutClassification(t *testing.T
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	var capturedRC atomic.Pointer[RelayContext]
+	var capturedRC atomic.Pointer[Exchange]
 	prevHook := testHookHandleDone
-	testHookHandleDone = func(rc *RelayContext) { capturedRC.Store(rc) }
+	testHookHandleDone = func(rc *Exchange) { capturedRC.Store(rc) }
 	t.Cleanup(func() { testHookHandleDone = prevHook })
 
 	r.POST("/v1/chat/completions", func(c *gin.Context) {
@@ -120,10 +120,10 @@ func TestPassthroughStreamToClient_ClientWriteTimeoutClassification(t *testing.T
 		t.Fatal("handler did not complete within 10s — the sliding write deadline should have released the concurrency slot")
 	}
 
-	if len(rc.Attempts) == 0 {
+	if len(rc.attempts) == 0 {
 		t.Fatal("expected at least one attempt record")
 	}
-	last := rc.Attempts[len(rc.Attempts)-1]
+	last := rc.attempts[len(rc.attempts)-1]
 	if last.Outcome != AttemptConnError {
 		t.Errorf("attempt outcome = %q, want %q (client write timeout must not be classified as an upstream server fault)",
 			last.Outcome, AttemptConnError)
@@ -165,7 +165,7 @@ func TestPassthroughStreamToClientDecoded_ClientWriteTimeoutClassification(t *te
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createGeminiProvider(t, db, "gemini-passthrough-slow", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-gemini-slow", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash-slow", "gemini-real", true, true, 1)
@@ -173,9 +173,9 @@ func TestPassthroughStreamToClientDecoded_ClientWriteTimeoutClassification(t *te
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	var capturedRC atomic.Pointer[RelayContext]
+	var capturedRC atomic.Pointer[Exchange]
 	prevHook := testHookHandleDone
-	testHookHandleDone = func(rc *RelayContext) { capturedRC.Store(rc) }
+	testHookHandleDone = func(rc *Exchange) { capturedRC.Store(rc) }
 	t.Cleanup(func() { testHookHandleDone = prevHook })
 
 	r.POST("/v1beta/models/:modelaction", func(c *gin.Context) {
@@ -213,10 +213,10 @@ func TestPassthroughStreamToClientDecoded_ClientWriteTimeoutClassification(t *te
 		t.Fatal("handler did not complete within 10s — the sliding write deadline should have released the concurrency slot")
 	}
 
-	if len(rc.Attempts) == 0 {
+	if len(rc.attempts) == 0 {
 		t.Fatal("expected at least one attempt record")
 	}
-	last := rc.Attempts[len(rc.Attempts)-1]
+	last := rc.attempts[len(rc.attempts)-1]
 	if last.Outcome != AttemptConnError {
 		t.Errorf("attempt outcome = %q, want %q (client write timeout must not be classified as an upstream server fault)",
 			last.Outcome, AttemptConnError)
@@ -257,7 +257,7 @@ func TestPassthroughStreamToClient_WriteErrorPropagatedAsClientWrite(t *testing.
 	c, _ := gin.CreateTestContext(fw)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Set(BodiesDirContextKey, dir)
-	rc := &RelayContext{RequestID: "req-passthrough-write-fail", OriginalModel: "ext", IsStream: true}
+	rc := &Exchange{requestID: "req-passthrough-write-fail", originalModel: "ext", isStream: true}
 
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
@@ -280,7 +280,7 @@ func TestPassthroughStreamToClient_WriteErrorPropagatedAsClientWrite(t *testing.
 	if !isClientWriteError(err) {
 		t.Errorf("isClientWriteError(%v) = false, want true", err)
 	}
-	captured, readErr := os.ReadFile(filepath.Join(dir, rc.RequestID+".stream"))
+	captured, readErr := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 	if readErr != nil {
 		t.Fatalf("read capture file: %v", readErr)
 	}
@@ -299,7 +299,7 @@ func TestPassthroughStreamToClientDecoded_WriteErrorPropagatedAsClientWrite(t *t
 	c, _ := gin.CreateTestContext(fw)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	c.Set(BodiesDirContextKey, dir)
-	rc := &RelayContext{RequestID: "req-passthrough-decoded-write-fail", OriginalModel: "ext", IsStream: true}
+	rc := &Exchange{requestID: "req-passthrough-decoded-write-fail", originalModel: "ext", isStream: true}
 
 	body := `event: message_start` + "\n" +
 		`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"real-model","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}` + "\n\n"
@@ -321,7 +321,7 @@ func TestPassthroughStreamToClientDecoded_WriteErrorPropagatedAsClientWrite(t *t
 	if !errors.Is(err, protocols.ErrClientWrite) {
 		t.Errorf("error must be classified via protocols.ErrClientWrite, got %v", err)
 	}
-	captured, readErr := os.ReadFile(filepath.Join(dir, rc.RequestID+".stream"))
+	captured, readErr := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 	if readErr != nil {
 		t.Fatalf("read capture file: %v", readErr)
 	}

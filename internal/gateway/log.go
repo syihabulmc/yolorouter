@@ -225,7 +225,7 @@ func safeUpstreamMessage(status int) string {
 // finalize writes the request_logs row and, when cost is known and positive,
 // accumulates the spend onto the API key's budget_spent_micros. Called on
 // every exit path (success, every failure class) so each gateway request
-// produces exactly one row. rc.Candidate/Provider/Usage may be nil
+// produces exactly one row. rc.candidate/Provider/Usage may be nil
 // on early failures (before any candidate was tried); finalize is nil-safe
 // for all of them.
 //
@@ -234,11 +234,11 @@ func safeUpstreamMessage(status int) string {
 // atomically (repository.IncrementAPIKeyBudgetSpent is a single
 // budget_spent_micros = budget_spent_micros + ? UPDATE) cannot lose updates to
 // each other.
-func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason string, start time.Time) {
+func (s *Service) finalize(rc *Exchange, statusCode int, failReason string, start time.Time) {
 	if rc.logWritten.Swap(true) {
 		return // already finalized (e.g. Handle's panic-recovery defer after a normal finalize)
 	}
-	rc.StatusCode = statusCode
+	rc.statusCode = statusCode
 	durationMs := time.Since(start).Milliseconds()
 	// Settle the cache convention once, here, before either consumer of the
 	// usage reads it: pricing below and the persisted counts further down must
@@ -251,12 +251,12 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 	// must not depend on the record being complete — it doesn't: a partial record
 	// whose stated total no longer corroborates the net reading simply stays
 	// inclusive and is rejected as incoherent, exactly as it was before.
-	normalizeCacheConvention(rc.Usage)
-	cost := computeCost(rc.Candidate, rc.Usage, rc.CompressEstimatedTokensSaved)
+	normalizeCacheConvention(rc.usage)
+	cost := computeCost(rc.candidate, rc.usage, rc.compressEstimatedTokensSaved)
 
 	var providerID *uint
-	if rc.Provider != nil {
-		id := rc.Provider.ID
+	if rc.provider != nil {
+		id := rc.provider.ID
 		providerID = &id
 	}
 	var failPtr *string
@@ -264,56 +264,56 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 		fr := failReason
 		failPtr = &fr
 	}
-	apiKeyID := rc.APIKeyID
+	apiKeyID := rc.apiKeyID
 	var inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens int
 	switch {
-	case rc.Usage == nil:
+	case rc.usage == nil:
 		// Leave every count at 0; CostKnown is already false.
-	case !usageIsCoherent(rc.Usage):
+	case !usageIsCoherent(rc.usage):
 		// Same rejection computeCost applies, so the persisted counts can never
 		// disagree with the billing decision. Storing the raw values would let a
 		// negative or impossible count poison every SUM() the dashboard and
 		// analytics pages run.
 		logger.Warn("gateway: upstream reported incoherent token usage, counts dropped",
-			zap.String("request_id", rc.RequestID),
-			zap.Int("prompt_tokens", rc.Usage.PromptTokens),
-			zap.Int("completion_tokens", rc.Usage.CompletionTokens),
-			zap.Int("cache_read_tokens", rc.Usage.CacheReadTokens),
-			zap.Int("cache_write_tokens", rc.Usage.CacheWriteTokens))
+			zap.String("request_id", rc.requestID),
+			zap.Int("prompt_tokens", rc.usage.PromptTokens),
+			zap.Int("completion_tokens", rc.usage.CompletionTokens),
+			zap.Int("cache_read_tokens", rc.usage.CacheReadTokens),
+			zap.Int("cache_write_tokens", rc.usage.CacheWriteTokens))
 	default:
 		// Persist the NET input (cache excluded) so request_logs.input_tokens
 		// and every SUM(input_tokens) aggregate share one convention across
 		// protocols — cache tokens live in their own columns. Same source of
 		// truth as billing (computeCost also goes through netPromptTokens).
-		inputTokens = netPromptTokens(rc.Usage)
-		outputTokens = rc.Usage.CompletionTokens
-		cacheWriteTokens = rc.Usage.CacheWriteTokens
-		cacheReadTokens = rc.Usage.CacheReadTokens
+		inputTokens = netPromptTokens(rc.usage)
+		outputTokens = rc.usage.CompletionTokens
+		cacheWriteTokens = rc.usage.CacheWriteTokens
+		cacheReadTokens = rc.usage.CacheReadTokens
 	}
 
 	// Compression savings are only meaningful when the request actually reached
-	// upstream (len(rc.Attempts) > 0 — the relay loop appends at least one
+	// upstream (len(rc.attempts) > 0 — the relay loop appends at least one
 	// attempt before sending). A request that compressed the body but was then
 	// rejected pre-relay (no routable candidate, model not found, allowlist
 	// denied) must NOT inflate compress-rate / savings metrics: zero the
 	// savings fields and clear the compressors list. CompressSkipReason is
 	// kept unconditionally — it is audit-only and useful even on pre-relay
 	// failures to diagnose why compression was bypassed.
-	compressTokensSaved := rc.CompressEstimatedTokensSaved
+	compressTokensSaved := rc.compressEstimatedTokensSaved
 	compressCostSavedMicros := cost.CompressCostSavedMicros
-	compressorsApplied := joinCompressors(rc.CompressorsApplied)
-	if len(rc.Attempts) == 0 {
+	compressorsApplied := joinCompressors(rc.compressorsApplied)
+	if len(rc.attempts) == 0 {
 		compressTokensSaved = 0
 		compressCostSavedMicros = 0
 		compressorsApplied = ""
 	}
 
 	logRow := &model.RequestLog{
-		RequestID:                        rc.RequestID,
+		RequestID:                        rc.requestID,
 		APIKeyID:                         &apiKeyID,
-		ModelName:                        rc.OriginalModel,
+		ModelName:                        rc.originalModel,
 		ProviderID:                       providerID,
-		IsStream:                         rc.IsStream,
+		IsStream:                         rc.isStream,
 		StatusCode:                       statusCode,
 		InputTokens:                      inputTokens,
 		OutputTokens:                     outputTokens,
@@ -325,32 +325,32 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 		CacheWriteExtraMicros:            cost.CacheWriteExtraMicros,
 		CompressEstimatedTokensSaved:     compressTokensSaved,
 		CompressEstimatedCostSavedMicros: compressCostSavedMicros,
-		CompressSkipReason:               rc.CompressSkipReason,
+		CompressSkipReason:               rc.compressSkipReason,
 		CompressorsApplied:               compressorsApplied,
-		RequestPath:                      rc.IngressPath,
-		UpstreamURL:                      rc.UpstreamURL,
+		RequestPath:                      rc.ingressPath,
+		UpstreamURL:                      rc.upstreamURL,
 		FailReason:                       failPtr,
-		Attempts:                         len(rc.Attempts),
+		Attempts:                         len(rc.attempts),
 		DurationMs:                       durationMs,
 	}
 	// Keep every attempt's order / key label / failure cause, not
 	// just the count. Stored as JSON so the query page can render it
 	// later without a schema change; empty when no attempt ran (pre-check
 	// failure before any candidate was tried).
-	if len(rc.Attempts) > 0 {
-		if detail, mErr := json.Marshal(rc.Attempts); mErr == nil {
+	if len(rc.attempts) > 0 {
+		if detail, mErr := json.Marshal(rc.attempts); mErr == nil {
 			s := string(detail)
 			logRow.AttemptsDetail = &s // *string so empty stays SQL NULL, not ''
 		}
 	}
 	if err := repository.CreateRequestLog(s.db, logRow); err != nil {
 		logger.Error("gateway: write request log failed",
-			zap.String("request_id", rc.RequestID), zap.Error(err))
+			zap.String("request_id", rc.requestID), zap.Error(err))
 	}
 	if cost.Known && cost.CostMicros > 0 {
-		if err := repository.IncrementAPIKeyBudgetSpent(s.db, rc.APIKeyID, cost.CostMicros); err != nil {
+		if err := repository.IncrementAPIKeyBudgetSpent(s.db, rc.apiKeyID, cost.CostMicros); err != nil {
 			logger.Error("gateway: increment budget spent failed",
-				zap.String("request_id", rc.RequestID), zap.Error(err))
+				zap.String("request_id", rc.requestID), zap.Error(err))
 		}
 	}
 
@@ -367,22 +367,22 @@ func (s *RelayService) finalize(rc *RelayContext, statusCode int, failReason str
 	// doc comment in types.go).
 	streamBodyPath := ""
 	if rc.streamBodyCaptured {
-		streamBodyPath = rc.RequestID + ".stream"
+		streamBodyPath = rc.requestID + ".stream"
 	}
 	bodyRow := &model.RequestLogBody{
-		RequestID:             rc.RequestID,
-		RequestHeaders:        string(rc.RequestHeaders),
-		RequestBody:           string(rc.RequestBody),
-		UpstreamRequestBody:   string(rc.UpstreamRequestBody),
-		ResponseBody:          string(rc.ResponseBody),
-		UpstreamResponseBody:  string(rc.UpstreamResponseBody),
+		RequestID:             rc.requestID,
+		RequestHeaders:        string(rc.requestHeaders),
+		RequestBody:           string(rc.requestBody),
+		UpstreamRequestBody:   string(rc.upstreamRequestBody),
+		ResponseBody:          string(rc.responseBody),
+		UpstreamResponseBody:  string(rc.upstreamResponseBody),
 		StreamBodyPath:        streamBodyPath,
 		StreamBodyTruncated:   rc.streamBodyTruncated,
-		CompressedRequestBody: string(rc.RequestBodyCompressed),
+		CompressedRequestBody: string(rc.requestBodyCompressed),
 	}
 	if err := repository.UpsertRequestLogBody(s.db, bodyRow); err != nil {
 		logger.Error("gateway: write request log body failed",
-			zap.String("request_id", rc.RequestID), zap.Error(err))
+			zap.String("request_id", rc.requestID), zap.Error(err))
 	}
 }
 

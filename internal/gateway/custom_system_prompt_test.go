@@ -30,7 +30,7 @@ func TestIsChatEndpointAllowlist(t *testing.T) {
 }
 
 func TestApplyCustomSystemPromptDisabledNoOp(t *testing.T) {
-	rc := &RelayContext{IngressPath: "/v1/chat/completions", IsChatEndpoint: true}
+	rc := &Exchange{ingressPath: "/v1/chat/completions", isChatEndpoint: true}
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
 	out := applyCustomSystemPrompt(rc, protocols.ProtocolOpenAI, body)
 	if string(out) != string(body) {
@@ -39,11 +39,11 @@ func TestApplyCustomSystemPromptDisabledNoOp(t *testing.T) {
 }
 
 func TestApplyCustomSystemPromptChatAppendsToSystem(t *testing.T) {
-	rc := &RelayContext{
-		IngressPath:               "/v1/chat/completions",
-		IsChatEndpoint:            true,
-		CustomSystemPromptEnabled: true,
-		CustomSystemPrompt:        "BE CONCISE",
+	rc := &Exchange{
+		ingressPath:               "/v1/chat/completions",
+		isChatEndpoint:            true,
+		customSystemPromptEnabled: true,
+		customSystemPrompt:        "BE CONCISE",
 	}
 	body := []byte(`{"messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"hi"}]}`)
 	out := applyCustomSystemPrompt(rc, protocols.ProtocolOpenAI, body)
@@ -53,11 +53,11 @@ func TestApplyCustomSystemPromptChatAppendsToSystem(t *testing.T) {
 }
 
 func TestApplyCustomSystemPromptCountTokensSkipped(t *testing.T) {
-	rc := &RelayContext{
-		IngressPath:               "/v1beta/models/gemini-pro:countTokens",
-		IsChatEndpoint:            false,
-		CustomSystemPromptEnabled: true,
-		CustomSystemPrompt:        "X",
+	rc := &Exchange{
+		ingressPath:               "/v1beta/models/gemini-pro:countTokens",
+		isChatEndpoint:            false,
+		customSystemPromptEnabled: true,
+		customSystemPrompt:        "X",
 	}
 	body := []byte(`{"models":["x"]}`)
 	out := applyCustomSystemPrompt(rc, protocols.ProtocolOpenAI, body)
@@ -67,11 +67,11 @@ func TestApplyCustomSystemPromptCountTokensSkipped(t *testing.T) {
 }
 
 func TestApplyCustomSystemPromptMalformedBodyUnchanged(t *testing.T) {
-	rc := &RelayContext{
-		IngressPath:               "/v1/chat/completions",
-		IsChatEndpoint:            true,
-		CustomSystemPromptEnabled: true,
-		CustomSystemPrompt:        "X",
+	rc := &Exchange{
+		ingressPath:               "/v1/chat/completions",
+		isChatEndpoint:            true,
+		customSystemPromptEnabled: true,
+		customSystemPrompt:        "X",
 	}
 	for _, b := range [][]byte{nil, []byte(``), []byte(`null`), []byte(`not json`), []byte(`{}`)} {
 		out := applyCustomSystemPrompt(rc, protocols.ProtocolOpenAI, b)

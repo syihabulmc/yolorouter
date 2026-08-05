@@ -21,14 +21,14 @@ func SetGatewayAuth(c *gin.Context, apiKey *model.APIKey) {
 // PostChatCompletions is the gin handler for both POST /v1/chat/completions
 // and POST /v1/messages (see router.go — both routes are bound to this same
 // handler). It pulls the APIKey the middleware already resolved and hands
-// the request to RelayService.Handle, which runs the full gateway pipeline
+// the request to Service.Handle, which runs the full gateway pipeline
 // and dispatches by ingress protocol itself.
 //
 // The middleware-only-resolves / handler-enforces split is deliberate (see
 // middleware.APIKeyAuth): state/expiry/budget/concurrency/RPM rejections
 // need to land in the request log and map to specific OpenAI error types,
 // which the handler is in a position to do and the middleware is not.
-func PostChatCompletions(svc *RelayService) gin.HandlerFunc {
+func PostChatCompletions(svc *Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// This guard should be unreachable in practice — APIKeyAuth always
 		// sets gatewayAPIKeyKey before c.Next() on a success path, and this

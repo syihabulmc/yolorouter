@@ -137,7 +137,7 @@ func TestIsContentInspectionRejection(t *testing.T) {
 
 // seedTwoCandidateModel wires one external model onto two providers pointed at
 // upstreamURL, so a failover walks from c1-model to c2-model in sort order.
-func seedTwoCandidateModel(t *testing.T, svc *RelayService, db *gorm.DB, upstreamURL string) *model.APIKey {
+func seedTwoCandidateModel(t *testing.T, svc *Service, db *gorm.DB, upstreamURL string) *model.APIKey {
 	t.Helper()
 	p1 := createProvider(t, db, "p1", upstreamURL)
 	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-1", "k1", 1, true)
@@ -193,7 +193,7 @@ func TestContentInspectionRefusalFailsOver(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := seedTwoCandidateModel(t, svc, db, upstream.URL)
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
@@ -229,7 +229,7 @@ func TestContentInspectionRefusalSurfacesAfterChainExhausted(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := seedTwoCandidateModel(t, svc, db, upstream.URL)
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
@@ -267,7 +267,7 @@ func TestContentInspectionRefusalDoesNotOutliveALaterOutage(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := seedTwoCandidateModel(t, svc, db, upstream.URL)
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
@@ -291,7 +291,7 @@ func TestContentInspectionRefusalDoesNotOutliveASkippedCandidate(t *testing.T) {
 	upstream := moderationOnlyUpstream(t, nil)
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p1 := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-1", "k1", 1, true)
 	// Second provider deliberately gets a DISABLED key, so the candidate is
@@ -373,7 +373,7 @@ func TestContentInspectionRefusalDoesNotOutliveTheRequestBudget(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvcWithGateway(t, db, config.GatewayConfig{
+	svc := newSvcWithGateway(t, db, config.GatewayConfig{
 		AttemptTimeout: time.Second,
 		RequestTimeout: 120 * time.Millisecond,
 	})
@@ -409,7 +409,7 @@ func TestOrdinaryClientErrorStillTerminal(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := seedTwoCandidateModel(t, svc, db, upstream.URL)
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))

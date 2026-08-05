@@ -28,8 +28,8 @@ import (
 // the *http.Request itself — that (and the key-specific auth header via
 // SetupRequest) is per-key work left to attemptOne (relay.go), since this
 // transform is identical across every key attempt for a given candidate.
-func (s *RelayService) buildUpstreamBody(
-	rc *RelayContext,
+func (s *Service) buildUpstreamBody(
+	rc *Exchange,
 	ingress protocols.ProtocolID,
 	egress *EgressDecision,
 ) ([]byte, string, error) {
@@ -37,7 +37,7 @@ func (s *RelayService) buildUpstreamBody(
 		return nil, "", fmt.Errorf("gateway: buildUpstreamBody requires a non-nil egress decision")
 	}
 
-	providerModelName := rc.Candidate.ProviderModelName
+	providerModelName := rc.candidate.ProviderModelName
 	egressCodecs := codecsFor(egress.Protocol)
 
 	var outBody []byte
@@ -49,7 +49,7 @@ func (s *RelayService) buildUpstreamBody(
 		outBody = rewritten
 	} else {
 		dec := codecsFor(ingress).RequestDecoder
-		ir, err := dec.DecodeRequest(json.RawMessage(rc.EffectiveRequestBody()), providerModelName, rc.IsStream)
+		ir, err := dec.DecodeRequest(json.RawMessage(rc.EffectiveRequestBody()), providerModelName, rc.isStream)
 		if err != nil {
 			return nil, "", fmt.Errorf("decode ingress request (%s): %w", ingress, err)
 		}
@@ -61,7 +61,7 @@ func (s *RelayService) buildUpstreamBody(
 	}
 
 	if egress.Protocol == protocols.ProtocolOpenAI {
-		injected, err := EnsureStreamUsageInjection(outBody, rc.IsStream, rc.WantsStreamUsage)
+		injected, err := EnsureStreamUsageInjection(outBody, rc.isStream, rc.wantsStreamUsage)
 		if err != nil {
 			return nil, "", fmt.Errorf("inject stream usage: %w", err)
 		}
@@ -74,9 +74,9 @@ func (s *RelayService) buildUpstreamBody(
 	// returned unchanged by the injector.
 	outBody = applyCustomSystemPrompt(rc, egress.Protocol, outBody)
 
-	path := egressCodecs.RequestEncoder.EgressPath(providerModelName, rc.IsStream)
+	path := egressCodecs.RequestEncoder.EgressPath(providerModelName, rc.isStream)
 	url := protocols.JoinUpstreamURL(egress.BaseURL, path, egress.Protocol)
-	if egress.Protocol == protocols.ProtocolGemini && rc.IsStream {
+	if egress.Protocol == protocols.ProtocolGemini && rc.isStream {
 		url = strings.Replace(url, ":generateContent", ":streamGenerateContent?alt=sse", 1)
 	}
 
@@ -93,7 +93,7 @@ func (s *RelayService) buildUpstreamBody(
 // same as always. A native Gemini request has no such field at all — the
 // model only ever appears in the URL path (EgressPath builds
 // /v1beta/models/{providerModelName}:generateContent, applied by the caller
-// right after this function returns) — so rc.RequestBody is forwarded
+// right after this function returns) — so rc.requestBody is forwarded
 // completely unchanged: injecting a top-level "model" key would add a field
 // the real Gemini API's protojson-based request parser rejects as unknown,
 // turning a passthrough request into a hard failure.
@@ -181,9 +181,9 @@ func (e modelOverrideStreamEncoder) Usage() protocols.IRUsage {
 // to c.Writer, so the capture file ends up byte-for-byte identical to what
 // the client received — never the raw upstream lines (rc.AppendUpstream is a
 // deliberate no-op for this reason, see ir_bridge.go).
-func (s *RelayService) processDispatchResponseStream(
+func (s *Service) processDispatchResponseStream(
 	c *gin.Context,
-	rc *RelayContext,
+	rc *Exchange,
 	ingress protocols.ProtocolID,
 	egress *EgressDecision,
 	cand model.ModelCandidate,
@@ -218,12 +218,12 @@ func (s *RelayService) processDispatchResponseStream(
 	// interface (no IncludeUsage field) to the rest of this function.
 	if ingress == protocols.ProtocolOpenAI {
 		if chatEncoder, ok := innerStreamEncoder.(*chat.StreamEncoder); ok {
-			chatEncoder.IncludeUsage = rc.WantsStreamUsage
+			chatEncoder.IncludeUsage = rc.wantsStreamUsage
 		}
 	}
 	ingressEncoder := modelOverrideStreamEncoder{
 		inner: innerStreamEncoder,
-		model: rc.OriginalModel,
+		model: rc.originalModel,
 	}
 
 	// protocols.IRStreamRelay/IRStreamRelayJSONLines defer the SSE response
@@ -251,7 +251,7 @@ func (s *RelayService) processDispatchResponseStream(
 	// dispatchPassthroughStream. irUsageToUsage nils out an all-zero usage
 	// (unknown, not zero) even though usage itself is never a nil pointer
 	// here.
-	rc.Usage = irUsageToUsage(usage)
+	rc.usage = irUsageToUsage(usage)
 	// If the relay never emitted a single encoded event (a pre-first-event
 	// failure below), the capture file (if any) is empty — remove it so the
 	// detail page never shows an empty "stream body" link, mirroring
@@ -259,11 +259,11 @@ func (s *RelayService) processDispatchResponseStream(
 	removeEmptyStreamBodyFile(c, rc)
 
 	if err == nil {
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
 		s.finalize(rc, http.StatusOK, "", start)
 		return attemptSuccess
 	}
-	if rc.FirstByteSent {
+	if rc.firstByteSent {
 		// Mid-stream failure after the response headers/first bytes went out
 		// — can't switch, can't change HTTP status; same handling as
 		// dispatchPassthroughStream's mid-stream branch.
@@ -274,7 +274,7 @@ func (s *RelayService) processDispatchResponseStream(
 	// fired), so nothing has been committed yet and this candidate can
 	// still fail over to the next one — mirrors
 	// dispatchPassthroughStream's pre-first-byte failover branch.
-	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
+	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
 	return attemptNextCandidate
 }
 
@@ -287,8 +287,8 @@ func (s *RelayService) processDispatchResponseStream(
 // both the IR and passthrough stream paths), processDispatchResponseNonStream
 // (cross-protocol non-stream), and dispatchPassthroughNonStream (same-
 // protocol non-stream, both its Write and Flush failure branches).
-func (s *RelayService) finalizeClientWrite(rc *RelayContext, err error, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, statusCode int, start time.Time) attemptResult {
-	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, statusCode, AttemptConnError, "client write timeout: "+err.Error()))
+func (s *Service) finalizeClientWrite(rc *Exchange, err error, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, statusCode int, start time.Time) attemptResult {
+	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, statusCode, AttemptConnError, "client write timeout: "+err.Error()))
 	s.finalize(rc, 499, "client_write_timeout", start)
 	return attemptSuccess
 }
@@ -334,17 +334,17 @@ func (s *RelayService) finalizeClientWrite(rc *RelayContext, err error, cand mod
 // dispatchPassthroughStream (passthrough path) — with case 2 now covering
 // the caller-disconnect gap that used to make the two paths diverge, their
 // mid-stream handling really is otherwise identical.
-func (s *RelayService) finalizeClientWriteOrPartial(c *gin.Context, rc *RelayContext, err error, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+func (s *Service) finalizeClientWriteOrPartial(c *gin.Context, rc *Exchange, err error, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
 	if isClientWriteError(err) {
 		return s.finalizeClientWrite(rc, err, cand, provider, pk, resp.StatusCode, start)
 	}
 	if isClientDisconnected(c) || errors.Is(err, context.Canceled) {
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
 		s.finalize(rc, 499, "client_disconnected", start)
 		return attemptSuccess
 	}
 	_ = writeStreamErrorEvent(c, rc)
-	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
+	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
 	s.finalize(rc, http.StatusOK, "stream_partial: "+err.Error(), start)
 	return attemptSuccess
 }
@@ -366,9 +366,9 @@ func (s *RelayService) finalizeClientWriteOrPartial(c *gin.Context, rc *RelayCon
 // protocol's ResponseEncoder. IRNonStreamRelay writes the client body (and
 // records the raw upstream body into rc via SetBody) itself; this function
 // only translates its outcome into an attemptResult.
-func (s *RelayService) processDispatchResponseNonStream(
+func (s *Service) processDispatchResponseNonStream(
 	c *gin.Context,
-	rc *RelayContext,
+	rc *Exchange,
 	ingress protocols.ProtocolID,
 	egress *EgressDecision,
 	cand model.ModelCandidate,
@@ -387,7 +387,7 @@ func (s *RelayService) processDispatchResponseNonStream(
 	// decoded IR carries whatever model name the *upstream* echoed back
 	// (the candidate's provider_model_name), which must never leak to the
 	// caller.
-	encoder := modelOverrideResponseEncoder{inner: codecsFor(ingress).ResponseEncoder, model: rc.OriginalModel}
+	encoder := modelOverrideResponseEncoder{inner: codecsFor(ingress).ResponseEncoder, model: rc.originalModel}
 	usage, err := protocols.IRNonStreamRelay(c, resp, decoder, encoder, rc, nil)
 	if err != nil {
 		if isClientWriteError(err) {
@@ -401,10 +401,10 @@ func (s *RelayService) processDispatchResponseNonStream(
 			// returns it even on a write/flush failure, since the upstream
 			// itself was already fully consumed regardless of delivery
 			// outcome.
-			rc.Usage = irUsageToUsage(usage)
+			rc.usage = irUsageToUsage(usage)
 			return s.finalizeClientWrite(rc, err, cand, provider, pk, resp.StatusCode, start)
 		}
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "ir decode: "+err.Error()))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "ir decode: "+err.Error()))
 		// IRNonStreamRelay's documented contract is to write nothing to the
 		// client when the 2xx upstream body fails IR decode, so — like the
 		// buildDispatchRequest error above — this candidate can still fail
@@ -420,8 +420,8 @@ func (s *RelayService) processDispatchResponseNonStream(
 		return attemptNextCandidate
 	}
 
-	rc.Usage = irUsageToUsage(usage)
-	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
+	rc.usage = irUsageToUsage(usage)
+	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
 	s.finalize(rc, resp.StatusCode, "", start)
 	return attemptSuccess
 }
@@ -437,11 +437,11 @@ func (s *RelayService) processDispatchResponseNonStream(
 //
 // Both layer in three behaviors a plain byte-for-byte passthrough would
 // otherwise lack: the response model field is rewritten back to
-// rc.OriginalModel (upstream only ever sees rc.Candidate.ProviderModelName,
+// rc.originalModel (upstream only ever sees rc.candidate.ProviderModelName,
 // which must never reach the caller); the usage field the gateway injects
 // upstream purely for its own cost accounting is stripped from what the
 // caller receives unless the caller actually asked for it
-// (rc.WantsStreamUsage); and the caller-facing (post-rewrite/strip) bytes,
+// (rc.wantsStreamUsage); and the caller-facing (post-rewrite/strip) bytes,
 // not the raw upstream bytes, are what land in the request/stream body
 // capture used for audit and debugging.
 
@@ -466,7 +466,7 @@ func (s *RelayService) processDispatchResponseNonStream(
 // reports promptTokenCount/candidatesTokenCount under "usageMetadata",
 // neither of which extractUsage's prompt_tokens/completion_tokens field
 // names ever match, so without this branch a non-OpenAI passthrough
-// response was byte-forwarded correctly but silently left rc.Usage nil (no
+// response was byte-forwarded correctly but silently left rc.usage nil (no
 // billing).
 //
 // A decode error here does NOT fail the request: the caller-facing bytes are
@@ -525,7 +525,7 @@ func rewriteGeminiResponseModelVersion(body []byte, externalModel string) ([]byt
 // completion_tokens shape -- without this, a non-OpenAI passthrough response
 // was byte-forwarded correctly but silently never billed (extractUsage always
 // returned nil against a Claude usage object).
-func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayContext, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+func (s *Service) dispatchPassthroughNonStream(c *gin.Context, rc *Exchange, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
 	defer func() { _ = resp.Body.Close() }()
 	// Now committed to this 2xx candidate: drop any error body a prior failed
 	// candidate stashed in these fields. The three failover returns below
@@ -546,36 +546,36 @@ func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayCon
 		// is gone), not a candidate failure — recognize it to avoid a
 		// wasted failover attempt and to log 499, not bad_status.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
+			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
 			s.finalize(rc, 499, "client_disconnected", start)
 			return attemptTerminal
 		}
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "read body: "+err.Error()))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "read body: "+err.Error()))
 		return attemptNextCandidate
 	}
 	if int64(len(body)) > maxNonStreamResponseBytes {
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "response too large"))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "response too large"))
 		return attemptNextCandidate
 	}
-	rewritten, usage, err := passthroughRewriteNonStreamResponse(egressProtocol, body, rc.OriginalModel)
+	rewritten, usage, err := passthroughRewriteNonStreamResponse(egressProtocol, body, rc.originalModel)
 	if err != nil {
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "rewrite: "+err.Error()))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "rewrite: "+err.Error()))
 		return attemptNextCandidate
 	}
 	// Raw upstream (pre-rewrite, provider model name) is recorded regardless
 	// of whether the write to the client below succeeds — it's what the
 	// gateway actually consumed from upstream, useful for debugging even
-	// when delivery fails. rc.ResponseBody (the caller-facing body) is only
+	// when delivery fails. rc.responseBody (the caller-facing body) is only
 	// set once the write below actually succeeds — see the write-failure
 	// branch's comment for why.
-	rc.UpstreamResponseBody = body
-	rc.Usage = usage
+	rc.upstreamResponseBody = body
+	rc.usage = usage
 	c.Header("Content-Type", "application/json")
 	c.Writer.WriteHeader(resp.StatusCode)
 	if _, werr := c.Writer.Write(rewritten); werr != nil {
 		// Status + headers are already committed, so this candidate cannot
 		// fail over. The client never (fully) received these bytes — leave
-		// rc.ResponseBody unset (cleared by rc.clearResponseBodies() above)
+		// rc.responseBody unset (cleared by rc.clearResponseBodies() above)
 		// so the audit never records an undelivered response as "sent", and
 		// settle this as a client write failure (499), not a delivered 2xx
 		// success — mirrors the streaming mid-write handling
@@ -593,8 +593,8 @@ func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayCon
 	if ferr := flushAndCheckError(c); ferr != nil {
 		return s.finalizeClientWrite(rc, ferr, cand, provider, pk, resp.StatusCode, start)
 	}
-	rc.ResponseBody = rewritten
-	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
+	rc.responseBody = rewritten
+	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
 	s.finalize(rc, resp.StatusCode, "", start)
 	return attemptSuccess
 }
@@ -614,10 +614,10 @@ func (s *RelayService) dispatchPassthroughNonStream(c *gin.Context, rc *RelayCon
 // protocol's own StreamDecoder rather than the OpenAI-specific
 // prompt_tokens/completion_tokens usage shape and `data: [DONE]` terminator
 // — without this, a non-OpenAI passthrough stream was byte-forwarded
-// correctly but never billed (rc.Usage stayed nil) and always finalized as
+// correctly but never billed (rc.usage stayed nil) and always finalized as
 // "stream_no_done" (the [DONE] literal never appears on a Claude stream)
 // even when the upstream completed cleanly with message_stop.
-func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContext, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+func (s *Service) dispatchPassthroughStream(c *gin.Context, rc *Exchange, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
 	// A prior failed candidate may have stashed its non-2xx error body in
 	// these fields. A stream request persists its response through the SSE
 	// capture file, not these fields — the types.go contract is that both
@@ -639,7 +639,7 @@ func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContex
 	// every exit path.
 	defer closeStreamBodyFile(rc)
 	if usage != nil {
-		rc.Usage = usage // preserve partial usage even on error paths
+		rc.usage = usage // preserve partial usage even on error paths
 	}
 	// If the stream never produced a sent byte, the capture file (if any)
 	// is empty — remove it so the detail page never shows an empty "stream
@@ -647,12 +647,12 @@ func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContex
 	// early client-disconnect).
 	removeEmptyStreamBodyFile(c, rc)
 	if err == nil {
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
 		s.finalize(rc, http.StatusOK, "", start)
 		return attemptSuccess
 	}
 	if errors.Is(err, errClientDisconnected) {
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
 		s.finalize(rc, 499, "client_disconnected", start)
 		return attemptSuccess // already streamed partial content, terminal
 	}
@@ -663,18 +663,18 @@ func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContex
 		// EOF gracefully. Injecting an error event would break a possibly-
 		// complete completion (some upstreams stably omit [DONE]). Only
 		// mark the log row partial so the missing terminator is traceable.
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream ended without [DONE]"))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream ended without [DONE]"))
 		s.finalize(rc, http.StatusOK, "stream_no_done", start)
 		return attemptSuccess
 	}
-	if rc.FirstByteSent {
+	if rc.firstByteSent {
 		// Mid-stream failure after the first byte — can't switch, can't
 		// change HTTP status; same handling as
 		// processDispatchResponseStream's mid-stream branch.
 		return s.finalizeClientWriteOrPartial(c, rc, err, cand, provider, pk, resp, start)
 	}
 	// Pre-first-byte failure: nothing written yet, can still failover.
-	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
+	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
 	return attemptNextCandidate
 }
 
@@ -688,7 +688,7 @@ func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContex
 // the client yet and the relay loop can still failover to the next candidate
 // (lifecycle table — "received upstream response, first chunk not
 // yet sent to caller → failover allowed"). Once a data frame is forwarded,
-// rc.FirstByteSent flips true and no more switching is allowed.
+// rc.firstByteSent flips true and no more switching is allowed.
 //
 // Leading non-data lines before the first data frame (commentary / SSE
 // preamble) are skipped — OpenAI chat streams open with `data:` directly, so
@@ -704,7 +704,7 @@ func (s *RelayService) dispatchPassthroughStream(c *gin.Context, rc *RelayContex
 // gateway injected it upstream (EnsureStreamUsageInjection), the usage field
 // is stripped from forwarded frames (injected usage is for the
 // gateway's internal cost accounting only).
-func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *RelayContext) (*Usage, error) {
+func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *Exchange) (*Usage, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	// Append every SENT SSE line (post-rewrite, post-usage-strip =
@@ -758,7 +758,7 @@ func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *RelayCon
 		case headerWritten:
 			// Slide the per-write deadline before each forwarded line so
 			// a slow-reading client is bounded by streamWriteWindow.
-			applyStreamWriteDeadline(c, rc.RequestID)
+			applyStreamWriteDeadline(c, rc.requestID)
 			// A downstream Write/Flush error here (deadline exceeded, broken
 			// pipe) must be wrapped in protocols.ErrClientWrite and returned
 			// immediately: this is the production streaming path (every
@@ -781,7 +781,7 @@ func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *RelayCon
 		case isDataLine(line):
 			// First data frame — commit the SSE headers, flush any buffered
 			// preamble in order, then forward the data line.
-			applyStreamWriteDeadline(c, rc.RequestID)
+			applyStreamWriteDeadline(c, rc.requestID)
 			writeSSEHeader(c)
 			// The 200 status + SSE headers are committed the moment
 			// writeSSEHeader returns — mark first-byte-sent now, before the
@@ -1072,7 +1072,7 @@ func rewritePassthroughStreamModel(egressProtocol protocols.ProtocolID, line []b
 	return line
 }
 
-func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *RelayContext, egressProtocol protocols.ProtocolID) (*Usage, error) {
+func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *Exchange, egressProtocol protocols.ProtocolID) (*Usage, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	// Same capture-file lifecycle as passthroughStreamToClient: opened here,
@@ -1124,7 +1124,7 @@ func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *R
 		// so the client, the usage decoder, and the stream capture file all
 		// see the rewritten bytes. See rewritePassthroughStreamModel's doc
 		// comment for how each egress protocol's stream shape carries it.
-		line = rewritePassthroughStreamModel(egressProtocol, line, rc.OriginalModel, &claudeModelRewritten)
+		line = rewritePassthroughStreamModel(egressProtocol, line, rc.originalModel, &claudeModelRewritten)
 		deltas, _ := decoder.DecodeChunk(string(line))
 		accumulate(deltas)
 
@@ -1136,7 +1136,7 @@ func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *R
 			// passthroughStreamToClient's identical headerWritten branch for
 			// the full rationale (this is the production streaming path for
 			// every non-OpenAI passthrough egress).
-			applyStreamWriteDeadline(c, rc.RequestID)
+			applyStreamWriteDeadline(c, rc.requestID)
 			if _, err := c.Writer.Write(line); err != nil {
 				return currentUsage(), fmt.Errorf("%w: passthrough write to client: %w", protocols.ErrClientWrite, err)
 			}
@@ -1148,7 +1148,7 @@ func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *R
 			// First data frame — commit the SSE headers, flush any buffered
 			// preamble in order, then forward the data line. Mirrors
 			// passthroughStreamToClient's identical first-data-frame handling.
-			applyStreamWriteDeadline(c, rc.RequestID)
+			applyStreamWriteDeadline(c, rc.requestID)
 			writeSSEHeader(c)
 			// The 200 status + SSE headers are committed the moment
 			// writeSSEHeader returns — mark first-byte-sent now, before the

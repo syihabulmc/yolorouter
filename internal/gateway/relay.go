@@ -73,30 +73,30 @@ func ReadAuditBodyCapped(r io.Reader, limit int64) []byte {
 // records the request body even when the request is rejected before
 // the normal body read (revoked/expired/budget/concurrency/RPM, all before
 // io.ReadAll in Handle).
-func captureRejectedBody(c *gin.Context, rc *RelayContext) {
-	if rc.RequestBody != nil {
+func captureRejectedBody(c *gin.Context, rc *Exchange) {
+	if rc.requestBody != nil {
 		return // already captured (e.g. body read succeeded then a later check failed)
 	}
 	if c.Request == nil {
 		return
 	}
 	if body := ReadAuditBody(c.Request.Body); body != nil {
-		rc.RequestBody = body
+		rc.requestBody = body
 	}
 }
 
-// testHookHandleDone, when non-nil, is invoked with the RelayContext at the
+// testHookHandleDone, when non-nil, is invoked with the Exchange at the
 // end of every Handle call (success or failure). Test-only wiring — Handle
-// intentionally doesn't expose its internal RelayContext in its public
+// intentionally doesn't expose its internal Exchange in its public
 // signature, so tests needing to inspect it (e.g. the captured request/
 // response bodies) set this hook instead. Always nil in production.
-var testHookHandleDone func(*RelayContext)
+var testHookHandleDone func(*Exchange)
 
-// RelayService is the gateway orchestrator. One instance lives for the
+// Service is the gateway orchestrator. One instance lives for the
 // process lifetime (created in router.New); it owns the DB, the master key
 // for decrypting provider keys, an upstream HTTP client, and the in-memory
 // rate limiter.
-type RelayService struct {
+type Service struct {
 	db        *gorm.DB
 	masterKey []byte
 	client    *UpstreamClient
@@ -113,7 +113,7 @@ type RelayService struct {
 	gateway config.GatewayConfig
 }
 
-// NewRelayService wires the gateway with the already-decoded AES master key
+// NewService wires the gateway with the already-decoded AES master key
 // (the same one provider_service uses to decrypt the keys it now routes to).
 // allowPrivate is forwarded to the upstream client's SSRF transport (config.
 // SecurityConfig.AllowPrivateUpstreams) so LAN/localhost providers relay.
@@ -123,8 +123,8 @@ type RelayService struct {
 // the upstream transport's TCP dial bound and its HeaderTimeout seeds the
 // ResponseHeaderTimeout, while the remaining fields are read by the
 // per-attempt timeout orchestration.
-func NewRelayService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp SettingsProvider, gatewayCfg config.GatewayConfig) *RelayService {
-	return &RelayService{
+func NewService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp SettingsProvider, gatewayCfg config.GatewayConfig) *Service {
+	return &Service{
 		db:               db,
 		masterKey:        masterKey,
 		client:           NewUpstreamClient(allowPrivate, gatewayCfg.HeaderTimeout, gatewayCfg.ConnectTimeout, gatewayCfg.TLSHandshakeTimeout),
@@ -138,7 +138,7 @@ func NewRelayService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp Settin
 // generated (uuid, set on the gin context + X-Request-Id header), so the
 // gateway's error messages and request_logs row share ONE id with the
 // access log — not a second unrelated id. Falls back to a fresh hex id only
-// if some route mounted RelayService without the RequestID middleware.
+// if some route mounted Service without the RequestID middleware.
 func requestIDFor(c *gin.Context) string {
 	if id := c.GetString("request_id"); id != "" {
 		return id
@@ -147,7 +147,7 @@ func requestIDFor(c *gin.Context) string {
 }
 
 // isClientDisconnected reports whether the CALLER's own connection was
-// canceled, as opposed to a derived context (e.g. rc.RequestCtx, which also
+// canceled, as opposed to a derived context (e.g. rc.requestCtx, which also
 // expires when the request-level budget in RequestDeadline runs out).
 // Checking c.Request.Context().Err() directly — rather than inspecting the
 // error a failing DB call returns — is what makes this distinction
@@ -165,51 +165,51 @@ func isClientDisconnected(c *gin.Context) bool {
 // runs the full pipeline: pre-checks → model lookup → allowlist →
 // validate → candidate chain with Key rotation + failover → response rewrite
 // → log. Every exit path writes exactly one request_logs row via finalize.
-func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
+func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	start := time.Now()
-	rc := &RelayContext{
-		RequestID: requestIDFor(c),
-		APIKeyID:  apiKey.ID,
+	rc := &Exchange{
+		requestID: requestIDFor(c),
+		apiKeyID:  apiKey.ID,
 	}
 	// Stamp the per-request total-budget deadline up front, before any
 	// attempt logic, so every exit path (including early rejections below)
 	// carries a consistent RequestDeadline. Each upstream attempt
 	// derives its own cap as min(attempt_timeout, time.Until(RequestDeadline)).
-	rc.RequestDeadline = time.Now().Add(s.gateway.RequestTimeout)
+	rc.requestDeadline = time.Now().Add(s.gateway.RequestTimeout)
 	// Derive a context carrying the total-budget deadline so candidate
 	// queries (model/candidate/key GORM reads) and each per-attempt context
 	// are all bounded by RequestDeadline. Without this, the GORM calls used
 	// s.db with no deadline and a stuck query could block past the request
 	// cap. The per-attempt ctx in attemptOne derives from this, so
 	// RequestCtx deadline => attempt ctx deadline too.
-	requestCtx, requestCancel := context.WithDeadline(c.Request.Context(), rc.RequestDeadline)
+	requestCtx, requestCancel := context.WithDeadline(c.Request.Context(), rc.requestDeadline)
 	defer requestCancel()
-	rc.RequestCtx = requestCtx
+	rc.requestCtx = requestCtx
 	// The ingress protocol is a property of the request path, computed once
 	// up front so every error write in this function (and the pre-candidate
 	// validation below) uses the wire envelope the caller actually expects
 	// instead of always assuming OpenAI.
 	ingress := IngressProtocol(c.Request.URL.Path)
-	rc.Ingress = ingress
+	rc.ingress = ingress
 	// Capture the raw path for the custom system prompt injection allowlist.
 	// Gemini's route is a wildcard :modelaction, so the path (not the resolved
 	// protocol) is the only thing that distinguishes generateContent from
 	// countTokens / embedContent.
-	rc.IngressPath = c.Request.URL.Path
+	rc.ingressPath = c.Request.URL.Path
 	// Compute once so the compression gate and the CSP injection gate read
 	// the bool instead of recomputing IsChatEndpoint(path) per call site.
-	rc.IsChatEndpoint = IsChatEndpoint(rc.IngressPath)
+	rc.isChatEndpoint = IsChatEndpoint(rc.ingressPath)
 	// Put rc on the gin context so WriteOpenAIError*
 	// (called from many exit paths below, and potentially from further down
-	// the chain) can stash the local error JSON into rc.ResponseBody without
-	// every call site threading an *RelayContext parameter through.
+	// the chain) can stash the local error JSON into rc.responseBody without
+	// every call site threading an *Exchange parameter through.
 	c.Set(relayContextKey, rc)
 	// Capture the caller's request headers once at entry (masked
 	// via SanitizeHeaders) so even an early rejection below still records
 	// them. c.Request is always non-nil here (gin populates it), but guard
 	// anyway for direct-call tests.
 	if c.Request != nil {
-		rc.RequestHeaders = SanitizeHeaders(c.Request.Header)
+		rc.requestHeaders = SanitizeHeaders(c.Request.Header)
 	}
 	// Panic-recovery safety net: if any sub-call panics (nil
 	// deref, index OOB, type assertion), gin's Recovery middleware catches
@@ -221,7 +221,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 		if !rc.logWritten.Load() {
 			s.finalize(rc, http.StatusInternalServerError, "panic_recovered", start)
 		}
-		// Test-only hook: Handle doesn't return its internal RelayContext, so
+		// Test-only hook: Handle doesn't return its internal Exchange, so
 		// tests that need to assert on the captured bodies (RequestBody/
 		// UpstreamRequestBody/ResponseBody/UpstreamResponseBody)
 		// hook in here instead of depending on DB persistence. Never
@@ -239,7 +239,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if apiKey.ConcurrencyLimit != nil && *apiKey.ConcurrencyLimit > 0 {
 		if !s.limiter.AcquireConcurrency(apiKey.ID, *apiKey.ConcurrencyLimit) {
 			captureRejectedBody(c, rc)
-			WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeRateLimit, "concurrency limit exceeded", rc.RequestID)
+			WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeRateLimit, "concurrency limit exceeded", rc.requestID)
 			s.finalize(rc, http.StatusTooManyRequests, "concurrency_limit", start)
 			return
 		}
@@ -252,7 +252,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if apiKey.RPMLimit != nil && *apiKey.RPMLimit > 0 {
 		if !s.limiter.CheckRPM(apiKey.ID, *apiKey.RPMLimit, time.Now()) {
 			captureRejectedBody(c, rc)
-			WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeRateLimit, "rate limit exceeded (requests per minute)", rc.RequestID)
+			WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeRateLimit, "rate limit exceeded (requests per minute)", rc.requestID)
 			s.finalize(rc, http.StatusTooManyRequests, "rpm_exceeded", start)
 			return
 		}
@@ -278,13 +278,13 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 			message = "request body exceeds the size limit"
 			reason = "body_too_large"
 		}
-		WriteIngressError(c, ingress, status, errTypeInvalidRequest, message, rc.RequestID)
+		WriteIngressError(c, ingress, status, errTypeInvalidRequest, message, rc.requestID)
 		s.finalize(rc, status, reason, start)
 		return
 	}
 	// Stash the caller-facing request body for the
 	// request_log_bodies row, verbatim (v0.1 does not scrub body content).
-	rc.RequestBody = body
+	rc.requestBody = body
 
 	// Gemini carries neither model nor stream in the body -- both are
 	// encoded in the URL path
@@ -300,7 +300,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if ingress == protocols.ProtocolGemini {
 		gm, gs, ok := parseGeminiPath(c.Request.URL.Path)
 		if !ok {
-			WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request path", rc.RequestID)
+			WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request path", rc.requestID)
 			s.finalize(rc, http.StatusBadRequest, "invalid_gemini_path", start)
 			return
 		}
@@ -319,18 +319,18 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// body itself and ignores these two parameters.
 	meta, err := peekIngress(ingress, body, pathModel, pathStream)
 	if err != nil {
-		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body", rc.requestID)
 		s.finalize(rc, http.StatusBadRequest, "parse: "+err.Error(), start)
 		return
 	}
 	if meta.Model == "" {
-		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "model is required", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "model is required", rc.requestID)
 		s.finalize(rc, http.StatusBadRequest, "empty_model", start)
 		return
 	}
-	rc.OriginalModel = meta.Model
-	rc.IsStream = meta.Stream
-	rc.WantsStreamUsage = meta.WantsStreamUsage
+	rc.originalModel = meta.Model
+	rc.isStream = meta.Stream
+	rc.wantsStreamUsage = meta.WantsStreamUsage
 
 	// Streaming relay loops (IRStreamRelay / IRStreamRelayJSONLines /
 	// passthrough pumps) call ApplyStreamWriteDeadline before each
@@ -347,8 +347,8 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// On global read error leave the prompt disabled — fail-open behavior
 	// guidance, never block the request on a settings hiccup.
 	if apiKey.CustomSystemPromptEnabledOverride {
-		rc.CustomSystemPromptEnabled = apiKey.CustomSystemPromptEnabled
-		rc.CustomSystemPrompt = apiKey.CustomSystemPrompt
+		rc.customSystemPromptEnabled = apiKey.CustomSystemPromptEnabled
+		rc.customSystemPrompt = apiKey.CustomSystemPrompt
 	} else if s.settingsProvider != nil {
 		g, _, err := s.settingsProvider.CustomSystemPrompt(c.Request.Context())
 		if err != nil {
@@ -358,10 +358,10 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 			// observability. The negative-TTL in the service ensures this
 			// log fires at most once per failure window, not per request.
 			logger.Warn("gateway: custom system prompt read failed",
-				zap.String("request_id", rc.RequestID), zap.Error(err))
+				zap.String("request_id", rc.requestID), zap.Error(err))
 		}
-		rc.CustomSystemPromptEnabled = g.Enabled
-		rc.CustomSystemPrompt = g.Text
+		rc.customSystemPromptEnabled = g.Enabled
+		rc.customSystemPrompt = g.Text
 	}
 
 	// Two-level resolve for input compression, mirroring the custom system
@@ -371,14 +371,14 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// compression disabled — fail-open, never block the request on a settings
 	// hiccup.
 	if apiKey.CompressEnabledOverride {
-		rc.CompressEnabled = apiKey.CompressEnabled
+		rc.compressEnabled = apiKey.CompressEnabled
 	} else if s.settingsProvider != nil {
 		enabled, _, err := s.settingsProvider.GetInputCompression(c.Request.Context())
 		if err != nil {
 			logger.Warn("gateway: input compression read failed",
-				zap.String("request_id", rc.RequestID), zap.Error(err))
+				zap.String("request_id", rc.requestID), zap.Error(err))
 		}
-		rc.CompressEnabled = enabled
+		rc.compressEnabled = enabled
 	}
 
 	// Step 4: model exists and is enabled. A model disabled by an admin
@@ -393,17 +393,17 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 			return
 		}
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			WriteIngressError(c, ingress, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.RequestID)
+			WriteIngressError(c, ingress, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.requestID)
 			s.finalize(rc, http.StatusNotFound, "model_not_found", start)
 			return
 		}
-		logger.Error("gateway: find model", zap.String("request_id", rc.RequestID), zap.Error(err))
-		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
+		logger.Error("gateway: find model", zap.String("request_id", rc.requestID), zap.Error(err))
+		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.requestID)
 		s.finalize(rc, http.StatusInternalServerError, "db_model: "+err.Error(), start)
 		return
 	}
 	if m.ManagementStatus != model.ModelStatusEnabled {
-		WriteIngressError(c, ingress, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.requestID)
 		s.finalize(rc, http.StatusNotFound, "model_disabled", start)
 		return
 	}
@@ -417,13 +417,13 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 				s.finalize(rc, 499, "client_disconnected", start)
 				return
 			}
-			logger.Error("gateway: allowlist", zap.String("request_id", rc.RequestID), zap.Error(err))
-			WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
+			logger.Error("gateway: allowlist", zap.String("request_id", rc.requestID), zap.Error(err))
+			WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.requestID)
 			s.finalize(rc, http.StatusInternalServerError, "db_allowlist: "+err.Error(), start)
 			return
 		}
 		if !allowed {
-			WriteIngressError(c, ingress, http.StatusForbidden, errTypePermission, "model is not in this API key's allowlist", rc.RequestID)
+			WriteIngressError(c, ingress, http.StatusForbidden, errTypePermission, "model is not in this API key's allowlist", rc.requestID)
 			s.finalize(rc, http.StatusForbidden, "model_not_allowed", start)
 			return
 		}
@@ -432,7 +432,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// Step 6: top-level structural validation (messages non-empty, Claude's
 	// max_tokens invariant, OpenAI's parsedRequest.validate() rules).
 	if err := meta.validate(); err != nil {
-		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, err.Error(), rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, err.Error(), rc.requestID)
 		s.finalize(rc, http.StatusBadRequest, "validate: "+err.Error(), start)
 		return
 	}
@@ -443,8 +443,8 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// candidate is picked, so a malformed body is rejected as a 400 client
 	// error instead of surfacing later as a misleading "all upstream
 	// candidates failed" 502 once relayCandidates has already started.
-	if err := validateIngressBody(ingress, body, rc.OriginalModel, rc.IsStream); err != nil {
-		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body: "+err.Error(), rc.RequestID)
+	if err := validateIngressBody(ingress, body, rc.originalModel, rc.isStream); err != nil {
+		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body: "+err.Error(), rc.requestID)
 		s.finalize(rc, http.StatusBadRequest, "invalid_request: "+err.Error(), start)
 		return
 	}
@@ -456,17 +456,17 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// injection subsequently runs inside buildUpstreamBody. A skipped result
 	// (no live zone, timeout, parse error, ...) leaves the body untouched; the
 	// engine also recovers panics internally and returns the original body.
-	if rc.CompressEnabled && rc.IsChatEndpoint {
+	if rc.compressEnabled && rc.isChatEndpoint {
 		opts := compress.DefaultOptions()
 		cctx, cancel := context.WithTimeout(c.Request.Context(), opts.Timeout)
 		newBody, cres := compressByIngress(ingress, cctx, body, opts)
 		cancel()
 		if cres.Skipped {
-			rc.CompressSkipReason = string(cres.SkipReason)
+			rc.compressSkipReason = string(cres.SkipReason)
 		} else {
-			rc.RequestBodyCompressed = newBody
-			rc.CompressEstimatedTokensSaved = cres.EstimatedTokensSaved
-			rc.CompressorsApplied = cres.CompressorsApplied
+			rc.requestBodyCompressed = newBody
+			rc.compressEstimatedTokensSaved = cres.EstimatedTokensSaved
+			rc.compressorsApplied = cres.CompressorsApplied
 		}
 	}
 
@@ -477,8 +477,8 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 			s.finalize(rc, 499, "client_disconnected", start)
 			return
 		}
-		logger.Error("gateway: list candidates", zap.String("request_id", rc.RequestID), zap.Error(err))
-		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.RequestID)
+		logger.Error("gateway: list candidates", zap.String("request_id", rc.requestID), zap.Error(err))
+		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.requestID)
 		s.finalize(rc, http.StatusInternalServerError, "db_candidates: "+err.Error(), start)
 		return
 	}
@@ -488,7 +488,7 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 		if anyEnabled {
 			reason = "no_verified_candidate"
 		}
-		WriteIngressError(c, ingress, http.StatusServiceUnavailable, errTypeUnavailable, "model is not available", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusServiceUnavailable, errTypeUnavailable, "model is not available", rc.requestID)
 		s.finalize(rc, http.StatusServiceUnavailable, reason, start)
 		return
 	}
@@ -504,23 +504,23 @@ func (s *RelayService) Handle(c *gin.Context, apiKey *model.APIKey) {
 // called on each rejection (these three checks all run
 // before Handle's normal body read, so the audit row would otherwise have an
 // empty request_body).
-func (s *RelayService) checkKeyStateAndLimits(c *gin.Context, rc *RelayContext, apiKey *model.APIKey, start time.Time) bool {
-	ingress := rc.Ingress
+func (s *Service) checkKeyStateAndLimits(c *gin.Context, rc *Exchange, apiKey *model.APIKey, start time.Time) bool {
+	ingress := rc.ingress
 	if apiKey.Status == model.APIKeyStatusRevoked {
 		captureRejectedBody(c, rc)
-		WriteIngressError(c, ingress, http.StatusUnauthorized, errTypeAuthentication, "API key revoked", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusUnauthorized, errTypeAuthentication, "API key revoked", rc.requestID)
 		s.finalize(rc, http.StatusUnauthorized, "revoked", start)
 		return false
 	}
 	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(time.Now().UTC()) {
 		captureRejectedBody(c, rc)
-		WriteIngressError(c, ingress, http.StatusUnauthorized, errTypeAuthentication, "API key expired", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusUnauthorized, errTypeAuthentication, "API key expired", rc.requestID)
 		s.finalize(rc, http.StatusUnauthorized, "expired", start)
 		return false
 	}
 	if apiKey.BudgetLimitMicros != nil && apiKey.BudgetSpentMicros >= *apiKey.BudgetLimitMicros {
 		captureRejectedBody(c, rc)
-		WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeInsufficientQuota, "budget limit exceeded", rc.RequestID)
+		WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeInsufficientQuota, "budget limit exceeded", rc.requestID)
 		s.finalize(rc, http.StatusTooManyRequests, "budget_exceeded", start)
 		return false
 	}
@@ -531,11 +531,11 @@ func (s *RelayService) checkKeyStateAndLimits(c *gin.Context, rc *RelayContext, 
 // candidate it loads the provider's enabled keys, decrypts them one at a
 // time, and sends the upstream request; Key rotation and candidate failover
 // decisions come back from tryKeys.
-func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candidates []model.ModelCandidate, start time.Time) {
+func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, candidates []model.ModelCandidate, start time.Time) {
 	// The ingress protocol is a property of the request path, not of any
 	// individual candidate — threaded through every candidate/key attempt
 	// below.
-	ingress := rc.Ingress
+	ingress := rc.ingress
 	for i := range candidates {
 		cand := candidates[i]
 		// Cleared ABOVE the budget gate below, not with the other per-candidate
@@ -545,8 +545,8 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 		// refusal when what actually ended it was running out of time. Normal
 		// exhaustion is unaffected: the last candidate clears these on entry and
 		// sets them again itself if it is refused.
-		rc.ContentInspectionStatus = 0
-		rc.ContentInspectionErrType = ""
+		rc.contentInspectionStatus = 0
+		rc.contentInspectionErrType = ""
 		// Per-request total-budget gate: RequestDeadline is the hard cap that
 		// spans every candidate and key rotation. Checking it only at the
 		// first attempt left later candidates reachable after the budget had
@@ -554,47 +554,47 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 		// succeed. Stop walking as soon as the budget is gone and fall
 		// through to allCandidatesFailed so the caller sees the same 502
 		// without the extra latency.
-		if !rc.RequestDeadline.IsZero() && time.Until(rc.RequestDeadline) <= 0 {
+		if !rc.requestDeadline.IsZero() && time.Until(rc.requestDeadline) <= 0 {
 			break
 		}
-		rc.Candidate = &cand
-		// Reset per iteration: rc.Provider is set only when this candidate's
+		rc.candidate = &cand
+		// Reset per iteration: rc.provider is set only when this candidate's
 		// provider is usable, so a `continue` path (provider missing/disabled,
 		// load-keys failed, no enabled key, rewrite failed) doesn't leave a
 		// stale provider from a previous iteration on rc — which finalize
 		// would otherwise record as the "final hit provider" of an all-failed
-		// request. rc.UpstreamURL is reset the same way so a candidate that
+		// request. rc.upstreamURL is reset the same way so a candidate that
 		// fails before sending (negotiate / build) never inherits the previous
 		// candidate's URL in its AttemptRecord or the upstream_url column. The
 		// content-inspection fields belong to the same family — see their reset
 		// above the budget gate, which is why they are not repeated here.
-		rc.Provider = nil
-		rc.UpstreamURL = ""
+		rc.provider = nil
+		rc.upstreamURL = ""
 
 		provider := cand.Provider
 		if provider == nil {
-			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, nil, nil, 0, AttemptBadStatus, "provider missing (preload)"))
+			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, nil, nil, 0, AttemptBadStatus, "provider missing (preload)"))
 			continue
 		}
 		if provider.ManagementStatus != model.ProviderStatusEnabled {
-			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "provider disabled"))
+			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "provider disabled"))
 			continue
 		}
-		rc.Provider = provider
+		rc.provider = provider
 
-		keys, err := repository.ListProviderKeysByProvider(s.db.WithContext(rc.RequestCtx), provider.ID)
+		keys, err := repository.ListProviderKeysByProvider(s.db.WithContext(rc.requestCtx), provider.ID)
 		if err != nil {
 			if isClientDisconnected(c) {
 				// The client is gone — stop walking the candidate chain
 				// entirely rather than burning the remaining candidates
 				// only to land on allCandidatesFailed's 502; record 499
 				// instead, mirroring attemptOne's disconnect handling.
-				rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptConnError, "client disconnected"))
+				rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptConnError, "client disconnected"))
 				s.finalize(rc, 499, "client_disconnected", start)
 				return
 			}
-			logger.Error("gateway: list provider keys", zap.String("request_id", rc.RequestID), zap.Error(err))
-			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "load keys failed"))
+			logger.Error("gateway: list provider keys", zap.String("request_id", rc.requestID), zap.Error(err))
+			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "load keys failed"))
 			continue
 		}
 		enabled, anyEnabledKey := filterEnabledKeys(keys)
@@ -603,7 +603,7 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 			if anyEnabledKey {
 				reason = "no verified key"
 			}
-			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, reason))
+			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, reason))
 			continue
 		}
 
@@ -614,7 +614,7 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 		// processDispatchResponseNonStream do the IR decode/encode).
 		egress, err := Negotiate(ingress, provider)
 		if err != nil {
-			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "negotiate egress: "+err.Error()))
+			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "negotiate egress: "+err.Error()))
 			continue // mapping failure -> skip candidate
 		}
 
@@ -625,7 +625,7 @@ func (s *RelayService) relayCandidates(c *gin.Context, rc *RelayContext, candida
 		// rebuilding them.
 		outBody, url, err := s.buildUpstreamBody(rc, ingress, egress)
 		if err != nil {
-			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "build request: "+err.Error()))
+			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "build request: "+err.Error()))
 			continue // build failure -> skip candidate, nothing sent yet
 		}
 
@@ -652,7 +652,7 @@ const (
 // has been written to the client, or outcomeNextCandidate when every key on
 // this provider failed with a key-rotation error and the chain should move
 // to the next candidate (same-provider no usable key, THEN failover).
-func (s *RelayService) tryKeys(c *gin.Context, rc *RelayContext, cand *model.ModelCandidate, provider *model.Provider, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
+func (s *Service) tryKeys(c *gin.Context, rc *Exchange, cand *model.ModelCandidate, provider *model.Provider, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
 	for i := range keys {
 		pk := keys[i]
 		// Destination-version guard (credential-scope mechanism): a key
@@ -663,14 +663,14 @@ func (s *RelayService) tryKeys(c *gin.Context, rc *RelayContext, cand *model.Mod
 		// to an unapproved destination. Skip and rotate to the next key,
 		// matching the destination-matched select in provider_repository.go.
 		if pk.AuthorizedDestinationVersion != provider.DestinationVersion {
-			rc.Attempts = append(rc.Attempts, rc.makeAttempt(*cand, provider, &pk, 0, AttemptAuthFailed, "destination version mismatch"))
+			rc.attempts = append(rc.attempts, rc.makeAttempt(*cand, provider, &pk, 0, AttemptAuthFailed, "destination version mismatch"))
 			continue
 		}
 		plaintext, derr := crypto.Decrypt(s.masterKey, pk.EncryptedKey)
 		if derr != nil {
 			logger.Warn("gateway: decrypt provider key failed",
-				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.RequestID), zap.Error(derr))
-			rc.Attempts = append(rc.Attempts, rc.makeAttempt(*cand, provider, &pk, 0, AttemptBadStatus, "decrypt failed"))
+				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID), zap.Error(derr))
+			rc.attempts = append(rc.attempts, rc.makeAttempt(*cand, provider, &pk, 0, AttemptBadStatus, "decrypt failed"))
 			continue
 		}
 		switch s.attemptOne(c, rc, *cand, provider, pk, plaintext, egress, outBody, url, start) {
@@ -703,35 +703,35 @@ const (
 // and pre-first-byte stream failures are candidate-level (failover); 401/429
 // are key-level (rotate); 2xx is success; other 4xx is terminal (caller's
 // problem).
-func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time) attemptResult {
+func (s *Service) attemptOne(c *gin.Context, rc *Exchange, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time) attemptResult {
 	// Per-attempt deadline = min(attempt_timeout, remaining request budget).
 	// The request-level budget (RequestDeadline, set at Handle entry) spans
 	// all failover candidates; each attempt gets at most its own attempt_timeout,
 	// capped by whatever budget remains so a long chain of slow candidates
 	// cannot overrun the request cap.
-	remaining := time.Until(rc.RequestDeadline)
+	remaining := time.Until(rc.requestDeadline)
 	if remaining <= 0 {
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, "request budget exhausted"))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, "request budget exhausted"))
 		return attemptNextCandidate
 	}
 	attemptBudget := min(s.gateway.AttemptTimeout, remaining)
-	// Derive from rc.RequestCtx (carries RequestDeadline) rather than
+	// Derive from rc.requestCtx (carries RequestDeadline) rather than
 	// c.Request.Context() directly, so the request-level deadline
 	// propagates: when RequestCtx expires, the attempt ctx expires too,
 	// cutting the upstream request even mid-stream.
-	ctx, cancel := context.WithTimeout(rc.RequestCtx, attemptBudget)
+	ctx, cancel := context.WithTimeout(rc.requestCtx, attemptBudget)
 	defer cancel()
 
 	// Record the rewritten (provider_model_name) request
 	// actually sent upstream, verbatim. Overwritten on every attempt — the
 	// last write wins, matching the "successful attempt, else the last
 	// attempt" rule.
-	rc.UpstreamRequestBody = outBody
+	rc.upstreamRequestBody = outBody
 	// Record the dispatched URL for the log row and each AttemptRecord.
 	// Redacted (userinfo/query/fragment stripped) so a base URL that embeds
 	// credentials never reaches the audit log or UI; the raw url is used
 	// only for the actual HTTP request below.
-	rc.UpstreamURL = protocols.RedactURL(url)
+	rc.upstreamURL = protocols.RedactURL(url)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(outBody))
 	if err != nil {
@@ -740,7 +740,7 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 		// over. Every key on this candidate would fail identically (url is
 		// candidate-invariant), so the first key attempt already exhausts
 		// this candidate via tryKeys' immediate return on attemptNextCandidate.
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptBadStatus, "build request: "+err.Error()))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptBadStatus, "build request: "+err.Error()))
 		return attemptNextCandidate
 	}
 	codecsFor(egress.Protocol).RequestEncoder.SetupRequest(req, plaintext)
@@ -753,11 +753,11 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 		// is candidate-level, not a disconnect) so the log labels the right
 		// failure class. Any other transport failure is candidate-level.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, "client disconnected"))
+			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, "client disconnected"))
 			s.finalize(rc, 499, "client_disconnected", start) // nginx-style 499
 			return attemptTerminal
 		}
-		rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, err.Error()))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, err.Error()))
 		return attemptNextCandidate
 	}
 
@@ -805,8 +805,8 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		// 2xx — dispatch directly instead of through a one-line trampoline.
-		ingress := rc.Ingress
-		if rc.IsStream {
+		ingress := rc.ingress
+		if rc.isStream {
 			return s.processDispatchResponseStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
 		}
 		return s.processDispatchResponseNonStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
@@ -832,10 +832,10 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 		defer casCancel()
 		if applied, mErr := repository.MarkProviderKeyVerificationFailedIfCurrent(s.db.WithContext(casCtx), pk.ID, provider.DestinationVersion, time.Now()); mErr != nil {
 			logger.Warn("gateway: mark provider key failed",
-				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.RequestID), zap.Error(mErr))
+				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID), zap.Error(mErr))
 		} else if !applied {
 			logger.Debug("gateway: provider key invalidation CAS lost race",
-				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.RequestID))
+				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID))
 		}
 	}
 
@@ -843,7 +843,7 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 	// Error bodies are small; cap at 1MiB — beyond that is
 	// truncation of an error diagnostic, not a response body, and 1MiB is
 	// ample for debugging. Unconditionally overwritten (even when empty) so
-	// this matches rc.UpstreamRequestBody's "last attempt wins" rule above —
+	// this matches rc.upstreamRequestBody's "last attempt wins" rule above —
 	// an empty errBody from THIS attempt must clear out a stale non-empty body
 	// left by an earlier failed candidate, not leave it looking current.
 	// A subsequent SUCCESSFUL stream candidate clears
@@ -853,7 +853,7 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 	// (errorBodyTotalBudget) so a slow-trickle upstream cannot hold this read
 	// open beyond that window.
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	rc.UpstreamResponseBody = errBody
+	rc.upstreamResponseBody = errBody
 	_ = resp.Body.Close()
 
 	// A content-inspection refusal is reclassified from terminal to failover.
@@ -867,11 +867,11 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 		class.Category = statusFailover
 		class.Outcome = AttemptContentFiltered
 		note = fmt.Sprintf("upstream %d content inspection", statusCode)
-		rc.ContentInspectionStatus = statusCode
-		rc.ContentInspectionErrType = class.ErrorType
+		rc.contentInspectionStatus = statusCode
+		rc.contentInspectionErrType = class.ErrorType
 	}
 
-	rc.Attempts = append(rc.Attempts, rc.makeAttempt(cand, provider, &pk, statusCode, class.Outcome, note))
+	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, statusCode, class.Outcome, note))
 	switch class.Category {
 	case statusRotateKey:
 		// 401 CAS was already performed above, before the error body read.
@@ -880,7 +880,7 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 		return attemptNextCandidate
 	default: // statusTerminalClient — caller's request is the problem, no switch.
 		if !c.Writer.Written() {
-			WriteIngressError(c, rc.Ingress, statusCode, class.ErrorType, safeUpstreamMessage(statusCode), rc.RequestID)
+			WriteIngressError(c, rc.ingress, statusCode, class.ErrorType, safeUpstreamMessage(statusCode), rc.requestID)
 		}
 		s.finalize(rc, statusCode, fmt.Sprintf("upstream_client_error_%d", statusCode), start)
 		return attemptTerminal
@@ -890,9 +890,9 @@ func (s *RelayService) attemptOne(c *gin.Context, rc *RelayContext, cand model.M
 // allCandidatesFailed is reached only when every candidate was tried without
 // a response being written — the writer is guaranteed not yet written, but
 // the guard is kept defensively in case a future caller changes that.
-func (s *RelayService) allCandidatesFailed(c *gin.Context, rc *RelayContext, start time.Time) {
+func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.Time) {
 	if c.Writer.Written() {
-		status := rc.StatusCode
+		status := rc.statusCode
 		if status == 0 {
 			status = http.StatusBadGateway
 		}
@@ -907,18 +907,18 @@ func (s *RelayService) allCandidatesFailed(c *gin.Context, rc *RelayContext, sta
 	// candidate was refused": a chain that ends on a 5xx, or on a candidate
 	// that could not even be dispatched to, really is a fault on our side of
 	// the wire, whatever an earlier candidate thought of the payload.
-	if rc.ContentInspectionStatus != 0 {
-		errType := rc.ContentInspectionErrType
+	if rc.contentInspectionStatus != 0 {
+		errType := rc.contentInspectionErrType
 		if errType == "" {
 			errType = errTypeInvalidRequest
 		}
-		WriteIngressError(c, rc.Ingress, rc.ContentInspectionStatus, errType,
-			"request was refused by upstream content inspection", rc.RequestID)
-		s.finalize(rc, rc.ContentInspectionStatus, "content_inspection_refused", start)
+		WriteIngressError(c, rc.ingress, rc.contentInspectionStatus, errType,
+			"request was refused by upstream content inspection", rc.requestID)
+		s.finalize(rc, rc.contentInspectionStatus, "content_inspection_refused", start)
 		return
 	}
 	status := http.StatusBadGateway
-	WriteIngressError(c, rc.Ingress, status, errTypeUpstream, "all upstream candidates failed", rc.RequestID)
+	WriteIngressError(c, rc.ingress, status, errTypeUpstream, "all upstream candidates failed", rc.requestID)
 	s.finalize(rc, status, "all_candidates_failed", start)
 }
 
@@ -988,19 +988,19 @@ func filterEnabledKeys(keys []model.ProviderKey) (out []model.ProviderKey, anyEn
 // marks a candidate-level failure before any key was tried (load failed, no
 // enabled key, rewrite failed).
 //
-// It is a RelayContext method so it can stamp the attempt with rc.UpstreamURL
+// It is a Exchange method so it can stamp the attempt with rc.upstreamURL
 // — the URL the gateway dispatched to for this attempt — without every caller
-// threading the URL through. rc.UpstreamURL is reset per candidate in
+// threading the URL through. rc.upstreamURL is reset per candidate in
 // relayCandidates and set in attemptOne, so it reflects the current attempt:
 // empty for attempts that failed before any request was sent.
-func (rc *RelayContext) makeAttempt(cand model.ModelCandidate, provider *model.Provider, key *model.ProviderKey, status int, outcome, failReason string) AttemptRecord {
+func (rc *Exchange) makeAttempt(cand model.ModelCandidate, provider *model.Provider, key *model.ProviderKey, status int, outcome, failReason string) AttemptRecord {
 	rec := AttemptRecord{
 		CandidateID:       cand.ID,
 		ProviderModelName: cand.ProviderModelName,
 		StatusCode:        status,
 		Outcome:           outcome,
 		FailReason:        failReason,
-		UpstreamURL:       rc.UpstreamURL,
+		UpstreamURL:       rc.upstreamURL,
 	}
 	if provider != nil {
 		rec.ProviderID = provider.ID
