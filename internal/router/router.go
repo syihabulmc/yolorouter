@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
 	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/gateway"
 	"github.com/yolorouter/yolorouter/internal/handler"
@@ -341,6 +342,14 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// path (gateway.IngressProtocol) to pick the caller's actual wire
 	// protocol.
 	relaySvc := gateway.NewService(db, providerMasterKey, allowPrivateUpstreams, settingsSvc, gatewayCfg)
+
+	// Assembly is the only place that sees both the kernel and the capabilities
+	// it runs, which is what lets a capability stay unaware of the kernel
+	// entirely. The binding function is the compile-time proof that an Exchange
+	// satisfies the view its capability asked for: were the inspector to need a
+	// getter the Exchange does not have, this line would fail to compile.
+	gateway.RegisterUpstreamErrorObserver(relaySvc, contentinspect.New(),
+		func(e *gateway.Exchange) contentinspect.View { return e })
 
 	v1 := gatewayGroup(r, "/v1", bodiesDir, db)
 	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))

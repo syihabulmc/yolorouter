@@ -15,6 +15,7 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/compress"
 	"github.com/yolorouter/yolorouter/internal/config"
+	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
@@ -111,6 +112,13 @@ type Service struct {
 	// orchestration (attemptOne, RequestDeadline) reads the individual fields
 	// off this struct instead of re-deriving them per call.
 	gateway config.GatewayConfig
+
+	// upstreamErrorObservers are wired in by the assembly layer. They see
+	// non-2xx upstream responses and report what they recognise; they never
+	// decide what happens next. Order is irrelevant by construction — reported
+	// judgements fold together by a rule that does not depend on who reported
+	// first.
+	upstreamErrorObservers []upstreamErrorObserver
 }
 
 // NewService wires the gateway with the already-decoded AES master key
@@ -856,19 +864,38 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, cand model.ModelCandi
 	rc.upstreamResponseBody = errBody
 	_ = resp.Body.Close()
 
-	// A content-inspection refusal is reclassified from terminal to failover.
-	// Status alone cannot tell it apart from a malformed request — only the
-	// body can — so the upgrade happens here, after the read above, and before
-	// the attempt record is appended so the log shows why the chain continued.
-	// The refusal is remembered for allCandidatesFailed: if every candidate
+	// Observers get the response and report what they recognise in it; the
+	// decision table turns those reports into a verdict. A terminal
+	// classification can be upgraded to a failover this way — status alone
+	// cannot tell a moderated payload apart from a malformed one, only the body
+	// can — so the upgrade happens here, after the read above, and before the
+	// attempt record is appended, so the log shows why the chain continued.
+	// The verdict is remembered for allCandidatesFailed: if every candidate
 	// moderates the payload, the caller must still get that verdict rather than
 	// a generic 502 that reads like an outage.
-	if class.Category == statusTerminalClient && isContentInspectionRejection(statusCode, string(errBody)) {
+	observed := s.observeUpstreamError(ctx, rc, fact.Upstream{
+		StatusCode: statusCode,
+		Header:     resp.Header,
+		Body:       errBody,
+		Elapsed:    time.Since(start),
+	})
+	// Only the refusal verdict is executed here. The table describes more than
+	// this call site acts on, so a verdict that is understood but not yet
+	// wired is logged rather than silently dropped: a reported judgement that
+	// vanishes without trace is the one failure mode that looks exactly like
+	// everything working.
+	switch {
+	case observed.loopFrom == fact.KindPayloadRefused && class.Category == statusTerminalClient:
 		class.Category = statusFailover
 		class.Outcome = AttemptContentFiltered
 		note = fmt.Sprintf("upstream %d content inspection", statusCode)
 		rc.contentInspectionStatus = statusCode
 		rc.contentInspectionErrType = class.ErrorType
+	case observed.Loop > LoopContinue:
+		logger.Warn("gateway: reported verdict is not executed on this path",
+			zap.String("request_id", rc.requestID),
+			zap.String("verdict", observed.loopFrom.String()),
+			zap.Int("upstream_status", statusCode))
 	}
 
 	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, statusCode, class.Outcome, note))

@@ -19,6 +19,7 @@ import (
 
 	ycrypto "github.com/yolorouter/yolorouter/pkg/crypto"
 
+	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
 	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
@@ -133,6 +134,12 @@ func newSvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProv
 	masterKey := bytes.Repeat([]byte{0x42}, 32)
 	svc := NewService(db, masterKey, false, sp, gateway)
 	svc.client.httpClient.Transport = &http.Transport{}
+	// Mirror the assembly the router performs. A bare Service runs no
+	// capabilities at all, which is the point of the split — so a test that
+	// expects capability-driven behaviour has to wire that capability in, just
+	// as production does.
+	RegisterUpstreamErrorObserver(svc, contentinspect.New(),
+		func(e *Exchange) contentinspect.View { return e })
 	return svc
 }
 

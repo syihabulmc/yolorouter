@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
@@ -117,6 +118,12 @@ type Exchange struct {
 
 	// attempts records every candidate try in order.
 	attempts []AttemptRecord
+
+	// timeline is the append-only log of everything capabilities reported
+	// during this exchange. The kernel owns it: capabilities report through a
+	// sink and never hold it, which is what keeps provenance stamping and
+	// ordering in one place.
+	timeline fact.Timeline
 
 	// firstByteSent flips true once any byte has been written to the client
 	// (after this, no more Key/candidate switching is allowed).
