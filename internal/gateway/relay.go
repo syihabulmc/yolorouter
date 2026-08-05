@@ -253,7 +253,15 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// exactly one row either way.
 	defer func() {
 		if !rc.logWritten.Load() {
-			s.finalize(rc, http.StatusInternalServerError, "panic_recovered", start)
+			d := fact.Undelivered(http.StatusInternalServerError, fact.VerdictSettled,
+				fact.FaultGateway, "panic_recovered", nil)
+			if c != nil && c.Writer != nil && c.Writer.Written() {
+				// Something already went out, so the caller saw a status and
+				// this cannot claim nothing was committed.
+				d = fact.Truncated(c.Writer.Status(), http.StatusInternalServerError,
+					fact.FaultGateway, "panic_recovered", nil)
+			}
+			s.settle(rc, d, start)
 		}
 		// Test-only hook: Handle doesn't return its internal Exchange, so
 		// tests that need to assert on the captured bodies (RequestBody/
@@ -286,8 +294,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if verdict.Loop >= LoopNextCandidate {
 		captureRejectedBody(c, rc)
 		status, errType := admissionRejectionResponse(verdict)
-		WriteIngressError(c, ingress, status, errType, verdict.rejectDetail, rc.requestID)
-		s.finalize(rc, status, verdict.failReason(), start)
+		s.rejectRequest(c, rc, status, errType, verdict.rejectDetail, verdict.failReason(), fact.FaultClient, start)
 		return
 	}
 
@@ -296,7 +303,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		// Caller disconnect during body upload is terminal 499 (mirrors the
 		// stream/non-stream response paths), not a malformed-request 400.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			s.finalize(rc, 499, "client_disconnected", start)
+			s.abandonRequest(rc, "client_disconnected", start)
 			return // caller is gone; no response to write
 		}
 		// http.MaxBytesReader (BodySizeLimit middleware) rejects an oversized
@@ -311,8 +318,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 			message = "request body exceeds the size limit"
 			reason = "body_too_large"
 		}
-		WriteIngressError(c, ingress, status, errTypeInvalidRequest, message, rc.requestID)
-		s.finalize(rc, status, reason, start)
+		s.rejectRequest(c, rc, status, errTypeInvalidRequest, message, reason, fact.FaultClient, start)
 		return
 	}
 	// Stash the caller-facing request body for the
@@ -333,8 +339,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if ingress == protocols.ProtocolGemini {
 		gm, gs, ok := parseGeminiPath(c.Request.URL.Path)
 		if !ok {
-			WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request path", rc.requestID)
-			s.finalize(rc, http.StatusBadRequest, "invalid_gemini_path", start)
+			s.rejectRequest(c, rc, http.StatusBadRequest, errTypeInvalidRequest, "invalid request path", "invalid_gemini_path", fact.FaultClient, start)
 			return
 		}
 		pathModel, pathStream = gm, gs
@@ -352,13 +357,11 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// body itself and ignores these two parameters.
 	meta, err := peekIngress(ingress, body, pathModel, pathStream)
 	if err != nil {
-		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body", rc.requestID)
-		s.finalize(rc, http.StatusBadRequest, "parse: "+err.Error(), start)
+		s.rejectRequest(c, rc, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body", "parse: "+err.Error(), fact.FaultClient, start)
 		return
 	}
 	if meta.Model == "" {
-		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "model is required", rc.requestID)
-		s.finalize(rc, http.StatusBadRequest, "empty_model", start)
+		s.rejectRequest(c, rc, http.StatusBadRequest, errTypeInvalidRequest, "model is required", "empty_model", fact.FaultClient, start)
 		return
 	}
 	rc.originalModel = meta.Model
@@ -422,22 +425,19 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 			// The client hung up while this query was in flight — a
 			// context.Canceled from the DB driver here is a disconnect, not
 			// a server-side DB fault; nothing to write back to a gone caller.
-			s.finalize(rc, 499, "client_disconnected", start)
+			s.abandonRequest(rc, "client_disconnected", start)
 			return
 		}
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			WriteIngressError(c, ingress, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.requestID)
-			s.finalize(rc, http.StatusNotFound, "model_not_found", start)
+			s.rejectRequest(c, rc, http.StatusNotFound, errTypeNotFound, "model does not exist", "model_not_found", fact.FaultClient, start)
 			return
 		}
 		logger.Error("gateway: find model", zap.String("request_id", rc.requestID), zap.Error(err))
-		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.requestID)
-		s.finalize(rc, http.StatusInternalServerError, "db_model: "+err.Error(), start)
+		s.rejectRequest(c, rc, http.StatusInternalServerError, errTypeServer, "internal error", "db_model: "+err.Error(), fact.FaultGateway, start)
 		return
 	}
 	if m.ManagementStatus != model.ModelStatusEnabled {
-		WriteIngressError(c, ingress, http.StatusNotFound, errTypeNotFound, "model does not exist", rc.requestID)
-		s.finalize(rc, http.StatusNotFound, "model_disabled", start)
+		s.rejectRequest(c, rc, http.StatusNotFound, errTypeNotFound, "model does not exist", "model_disabled", fact.FaultClient, start)
 		return
 	}
 
@@ -447,17 +447,15 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		allowed, err := repository.HasAPIKeyModelAccess(s.db.WithContext(requestCtx), apiKey.ID, m.ID)
 		if err != nil {
 			if isClientDisconnected(c) {
-				s.finalize(rc, 499, "client_disconnected", start)
+				s.abandonRequest(rc, "client_disconnected", start)
 				return
 			}
 			logger.Error("gateway: allowlist", zap.String("request_id", rc.requestID), zap.Error(err))
-			WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.requestID)
-			s.finalize(rc, http.StatusInternalServerError, "db_allowlist: "+err.Error(), start)
+			s.rejectRequest(c, rc, http.StatusInternalServerError, errTypeServer, "internal error", "db_allowlist: "+err.Error(), fact.FaultGateway, start)
 			return
 		}
 		if !allowed {
-			WriteIngressError(c, ingress, http.StatusForbidden, errTypePermission, "model is not in this API key's allowlist", rc.requestID)
-			s.finalize(rc, http.StatusForbidden, "model_not_allowed", start)
+			s.rejectRequest(c, rc, http.StatusForbidden, errTypePermission, "model is not in this API key's allowlist", "model_not_allowed", fact.FaultClient, start)
 			return
 		}
 	}
@@ -465,8 +463,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// Step 6: top-level structural validation (messages non-empty, Claude's
 	// max_tokens invariant, OpenAI's parsedRequest.validate() rules).
 	if err := meta.validate(); err != nil {
-		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, err.Error(), rc.requestID)
-		s.finalize(rc, http.StatusBadRequest, "validate: "+err.Error(), start)
+		s.rejectRequest(c, rc, http.StatusBadRequest, errTypeInvalidRequest, err.Error(), "validate: "+err.Error(), fact.FaultClient, start)
 		return
 	}
 
@@ -477,8 +474,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// error instead of surfacing later as a misleading "all upstream
 	// candidates failed" 502 once relayCandidates has already started.
 	if err := validateIngressBody(ingress, body, rc.originalModel, rc.isStream); err != nil {
-		WriteIngressError(c, ingress, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body: "+err.Error(), rc.requestID)
-		s.finalize(rc, http.StatusBadRequest, "invalid_request: "+err.Error(), start)
+		s.rejectRequest(c, rc, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body: "+err.Error(), "invalid_request: "+err.Error(), fact.FaultClient, start)
 		return
 	}
 
@@ -507,12 +503,11 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	allCandidates, err := repository.ListModelCandidatesByModelID(s.db.WithContext(requestCtx), m.ID)
 	if err != nil {
 		if isClientDisconnected(c) {
-			s.finalize(rc, 499, "client_disconnected", start)
+			s.abandonRequest(rc, "client_disconnected", start)
 			return
 		}
 		logger.Error("gateway: list candidates", zap.String("request_id", rc.requestID), zap.Error(err))
-		WriteIngressError(c, ingress, http.StatusInternalServerError, errTypeServer, "internal error", rc.requestID)
-		s.finalize(rc, http.StatusInternalServerError, "db_candidates: "+err.Error(), start)
+		s.rejectRequest(c, rc, http.StatusInternalServerError, errTypeServer, "internal error", "db_candidates: "+err.Error(), fact.FaultGateway, start)
 		return
 	}
 	routable, anyEnabled := filterCandidates(allCandidates)
@@ -521,8 +516,10 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		if anyEnabled {
 			reason = "no_verified_candidate"
 		}
-		WriteIngressError(c, ingress, http.StatusServiceUnavailable, errTypeUnavailable, "model is not available", rc.requestID)
-		s.finalize(rc, http.StatusServiceUnavailable, reason, start)
+		// No candidate was usable, so no provider was ever contacted. Blaming
+		// upstream here would point an operator at a provider that had no part
+		// in it; what is actually wrong is on our side of the wire.
+		s.rejectRequest(c, rc, http.StatusServiceUnavailable, errTypeUnavailable, "model is not available", reason, fact.FaultGateway, start)
 		return
 	}
 
@@ -538,23 +535,19 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 // before Handle's normal body read, so the audit row would otherwise have an
 // empty request_body).
 func (s *Service) checkKeyStateAndLimits(c *gin.Context, rc *Exchange, apiKey *model.APIKey, start time.Time) bool {
-	ingress := rc.ingress
 	if apiKey.Status == model.APIKeyStatusRevoked {
 		captureRejectedBody(c, rc)
-		WriteIngressError(c, ingress, http.StatusUnauthorized, errTypeAuthentication, "API key revoked", rc.requestID)
-		s.finalize(rc, http.StatusUnauthorized, "revoked", start)
+		s.rejectRequest(c, rc, http.StatusUnauthorized, errTypeAuthentication, "API key revoked", "revoked", fact.FaultClient, start)
 		return false
 	}
 	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(time.Now().UTC()) {
 		captureRejectedBody(c, rc)
-		WriteIngressError(c, ingress, http.StatusUnauthorized, errTypeAuthentication, "API key expired", rc.requestID)
-		s.finalize(rc, http.StatusUnauthorized, "expired", start)
+		s.rejectRequest(c, rc, http.StatusUnauthorized, errTypeAuthentication, "API key expired", "expired", fact.FaultClient, start)
 		return false
 	}
 	if apiKey.BudgetLimitMicros != nil && apiKey.BudgetSpentMicros >= *apiKey.BudgetLimitMicros {
 		captureRejectedBody(c, rc)
-		WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeInsufficientQuota, "budget limit exceeded", rc.requestID)
-		s.finalize(rc, http.StatusTooManyRequests, "budget_exceeded", start)
+		s.rejectRequest(c, rc, http.StatusTooManyRequests, errTypeInsufficientQuota, "budget limit exceeded", "budget_exceeded", fact.FaultClient, start)
 		return false
 	}
 	return true
@@ -623,7 +616,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, candidates []mod
 				// only to land on allCandidatesFailed's 502; record 499
 				// instead, mirroring attemptOne's disconnect handling.
 				rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptConnError, "client disconnected"))
-				s.finalize(rc, 499, "client_disconnected", start)
+				s.abandonRequestAfterAttempt(rc, "client_disconnected", start)
 				return
 			}
 			logger.Error("gateway: list provider keys", zap.String("request_id", rc.requestID), zap.Error(err))
@@ -726,14 +719,21 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, cand *model.ModelCandida
 			rc.attempts = append(rc.attempts, rc.makeAttempt(*cand, provider, &pk, 0, AttemptBadStatus, "decrypt failed"))
 			continue
 		}
-		switch s.attemptOne(c, rc, *cand, provider, pk, plaintext, egress, outBody, url, start) {
-		case attemptSuccess, attemptTerminal:
+		result := s.attemptOne(c, rc, *cand, provider, pk, plaintext, egress, outBody, url, start)
+		if result == attemptSuccess || result == attemptTerminal {
 			return outcomeDone
-		case attemptRotateKey:
-			continue // next key on the same provider
-		case attemptNextCandidate:
-			return outcomeNextCandidate
 		}
+		// This attempt is over and served nothing. Drop what it reported here
+		// rather than at the next send, because there may not be one: the chain
+		// can end without another attempt ever running, and settlement would
+		// then read those values as if they described the request's outcome.
+		// One call rather than one per branch — "the attempt was given up on"
+		// is the same event whichever way the loop goes next.
+		rc.abandonUpstreamAttempt()
+		if result == attemptRotateKey {
+			continue // next key on the same provider
+		}
+		return outcomeNextCandidate
 	}
 	// Every key failed with a key-rotation error → failover.
 	return outcomeNextCandidate
@@ -757,6 +757,9 @@ const (
 // are key-level (rotate); 2xx is success; other 4xx is terminal (caller's
 // problem).
 func (s *Service) attemptOne(c *gin.Context, rc *Exchange, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time) attemptResult {
+	// Whatever the previous send left behind describes that send, not this one.
+	rc.beginUpstreamAttempt()
+
 	// Per-attempt deadline = min(attempt_timeout, remaining request budget).
 	// The request-level budget (RequestDeadline, set at Handle entry) spans
 	// all failover candidates; each attempt gets at most its own attempt_timeout,
@@ -807,7 +810,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, cand model.ModelCandi
 		// failure class. Any other transport failure is candidate-level.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
 			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, "client disconnected"))
-			s.finalize(rc, 499, "client_disconnected", start) // nginx-style 499
+			s.abandonRequestAfterAttempt(rc, "client_disconnected", start) // nginx-style 499
 			return attemptTerminal
 		}
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, err.Error()))
@@ -858,11 +861,18 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, cand model.ModelCandi
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		// 2xx — dispatch directly instead of through a one-line trampoline.
+		// The dispatch side reports what the delivery did; settling it is this
+		// side's job, which is what keeps "how a response is delivered" and
+		// "what the request cost and how it is recorded" from having to be
+		// known in the same place.
 		ingress := rc.ingress
+		var d fact.Delivery
 		if rc.isStream {
-			return s.processDispatchResponseStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
+			d = s.processDispatchResponseStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
+		} else {
+			d = s.processDispatchResponseNonStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
 		}
-		return s.processDispatchResponseNonStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
+		return s.settleDelivery(c, rc, d, start)
 	}
 
 	statusCode := resp.StatusCode
@@ -954,7 +964,8 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, cand model.ModelCandi
 		if !c.Writer.Written() {
 			WriteIngressError(c, rc.ingress, statusCode, class.ErrorType, safeUpstreamMessage(statusCode), rc.requestID)
 		}
-		s.finalize(rc, statusCode, fmt.Sprintf("upstream_client_error_%d", statusCode), start)
+		s.settleAfterAttempt(rc, fact.Rejected(statusCode, fact.FaultUpstream,
+			fmt.Sprintf("upstream_client_error_%d", statusCode), nil), start)
 		return attemptTerminal
 	}
 }
@@ -968,7 +979,8 @@ func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.T
 		if status == 0 {
 			status = http.StatusBadGateway
 		}
-		s.finalize(rc, status, "partial_then_exhausted", start)
+		s.settle(rc, fact.Truncated(status, status, fact.FaultUpstream,
+			"partial_then_exhausted", nil), start)
 		return
 	}
 	// The chain ended on a content-inspection refusal. That is a verdict on the
@@ -984,14 +996,13 @@ func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.T
 		if errType == "" {
 			errType = errTypeInvalidRequest
 		}
-		WriteIngressError(c, rc.ingress, rc.contentInspectionStatus, errType,
-			"request was refused by upstream content inspection", rc.requestID)
-		s.finalize(rc, rc.contentInspectionStatus, "content_inspection_refused", start)
+		s.rejectRequest(c, rc, rc.contentInspectionStatus, errType,
+			"request was refused by upstream content inspection",
+			"content_inspection_refused", fact.FaultUpstream, start)
 		return
 	}
-	status := http.StatusBadGateway
-	WriteIngressError(c, rc.ingress, status, errTypeUpstream, "all upstream candidates failed", rc.requestID)
-	s.finalize(rc, status, "all_candidates_failed", start)
+	s.rejectRequest(c, rc, http.StatusBadGateway, errTypeUpstream,
+		"all upstream candidates failed", "all_candidates_failed", fact.FaultUpstream, start)
 }
 
 // filterCandidates returns the subset of candidates eligible for this request:

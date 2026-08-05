@@ -57,7 +57,8 @@ func TestDispatchPassthroughNonStream_WriteErrorClassifiedAsClientWrite(t *testi
 		Header:     make(http.Header),
 	}
 
-	result := svc.dispatchPassthroughNonStream(c, rc, protocols.ProtocolOpenAI, cand, p, model.ProviderKey{}, resp, time.Now())
+	d := svc.dispatchPassthroughNonStream(c, rc, protocols.ProtocolOpenAI, cand, p, model.ProviderKey{}, resp, time.Now())
+	result := svc.settleDelivery(c, rc, d, time.Now())
 
 	if result != attemptSuccess {
 		t.Errorf("result = %v, want attemptSuccess (status+headers already committed, cannot fail over)", result)
@@ -115,7 +116,8 @@ func TestDispatchPassthroughNonStream_WriteSucceedsRecordsDeliveredResponse(t *t
 		Header:     make(http.Header),
 	}
 
-	result := svc.dispatchPassthroughNonStream(c, rc, protocols.ProtocolOpenAI, cand, p, model.ProviderKey{}, resp, time.Now())
+	d := svc.dispatchPassthroughNonStream(c, rc, protocols.ProtocolOpenAI, cand, p, model.ProviderKey{}, resp, time.Now())
+	result := svc.settleDelivery(c, rc, d, time.Now())
 
 	if result != attemptSuccess {
 		t.Errorf("result = %v, want attemptSuccess", result)

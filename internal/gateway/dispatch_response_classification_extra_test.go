@@ -435,7 +435,7 @@ func TestIsClientWriteError_SentinelOnlyForTimeout(t *testing.T) {
 // TestFinalizeClientWriteOrPartial_CallerDisconnectPrecheck covers the
 // dormant cross-protocol IR path: unlike the passthrough stream pumps
 // (which detect a caller disconnect via ctx.Done()/errClientDisconnected
-// BEFORE ever reaching finalizeClientWriteOrPartial), protocols.IRStreamRelay's
+// BEFORE ever reaching reportMidStreamFailure), protocols.IRStreamRelay's
 // scanner loop returns a caller disconnect as a plain
 // "upstream stream read error: context canceled" — neither wrapped in
 // protocols.ErrClientWrite nor the gateway's own errClientDisconnected
@@ -471,7 +471,8 @@ func TestFinalizeClientWriteOrPartial_CallerDisconnectPrecheck(t *testing.T) {
 	err := fmt.Errorf("upstream stream read error: %w", context.Canceled)
 	resp := &http.Response{StatusCode: http.StatusOK}
 
-	result := svc.finalizeClientWriteOrPartial(c, rc, err, cand, p, model.ProviderKey{}, resp, time.Now())
+	d := svc.reportMidStreamFailure(c, rc, err, cand, p, model.ProviderKey{}, resp, time.Now())
+	result := svc.settleDelivery(c, rc, d, time.Now())
 
 	if result != attemptSuccess {
 		t.Errorf("result = %v, want attemptSuccess (already committed, cannot fail over)", result)
@@ -523,7 +524,8 @@ func TestFinalizeClientWriteOrPartial_GenericErrorStillPartial(t *testing.T) {
 	err := errors.New("upstream stream read error: connection reset by peer")
 	resp := &http.Response{StatusCode: http.StatusOK}
 
-	result := svc.finalizeClientWriteOrPartial(c, rc, err, cand, p, model.ProviderKey{}, resp, time.Now())
+	d := svc.reportMidStreamFailure(c, rc, err, cand, p, model.ProviderKey{}, resp, time.Now())
+	result := svc.settleDelivery(c, rc, d, time.Now())
 
 	if result != attemptSuccess {
 		t.Errorf("result = %v, want attemptSuccess", result)

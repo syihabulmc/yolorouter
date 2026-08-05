@@ -103,3 +103,40 @@ func TestNoOverflowEncodesToEmpty(t *testing.T) {
 		t.Errorf("encodeOverflow(nil) = %q, want empty", got)
 	}
 }
+
+// TestDeliveryObservedReachesTheOverflowColumn proves the audit channel for
+// Delivery.Complete actually exists.
+//
+// Complete is being collected precisely because nobody knows yet how often each
+// kind of incomplete delivery happens. A field that is reported but never
+// persisted answers no question at all, and the failure is silent: the bit sits
+// in memory and the request ends. This test is what stops that from being the
+// outcome.
+func TestDeliveryObservedReachesTheOverflowColumn(t *testing.T) {
+	var tl fact.Timeline
+	tl.Append(fact.Entry{
+		Attempt: 0,
+		Record: fact.Truncated(200, 499, fact.FaultClient, "client_disconnected", nil).
+			Observed(),
+	})
+
+	s := summarise(tl)
+	if len(s.overflow) != 1 {
+		t.Fatalf("want the delivery record collected, got %d: %+v", len(s.overflow), s.overflow)
+	}
+	if s.overflow[0].Name != "delivery_observed" {
+		t.Errorf("overflow name = %q, want %q", s.overflow[0].Name, "delivery_observed")
+	}
+
+	encoded := encodeOverflow(s.overflow, "req-delivery")
+	if encoded == "" {
+		t.Fatal("delivery record encoded to nothing: it would never reach the column")
+	}
+	// The two statuses are the reason the record exists; losing either in
+	// encoding would make the stored row unable to answer the question.
+	for _, want := range []string{"200", "499", "client"} {
+		if !strings.Contains(encoded, want) {
+			t.Errorf("encoded overflow lost %q: %s", want, encoded)
+		}
+	}
+}

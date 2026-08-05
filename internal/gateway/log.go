@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"time"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
@@ -364,4 +367,136 @@ func attemptsRecord(rc *Exchange) fact.AttemptsRecorded {
 		}
 	}
 	return rec
+}
+
+// settleDelivery turns what a delivery reported into what the request costs and
+// how it is recorded, and reports back how far the chain may still go.
+//
+// This is the one place a delivery becomes a settled request. The dispatch side
+// used to do it inline at eleven different points, which meant eleven separate
+// answers to "what status do we settle on", "does this still count as billable",
+// and "may another candidate try". They did not agree, and nothing made them.
+func (s *Service) settleDelivery(c *gin.Context, rc *Exchange, d fact.Delivery, start time.Time) attemptResult {
+	// Check BEFORE reading the verdict. An impossible delivery is replaced with
+	// one that ends the request, and reading the verdict first would decide the
+	// branch from the value being replaced: the substitution would be recorded
+	// as if the request had ended while the chain actually carried on.
+	// A delivery is judged after its own attempt is already on the list, which
+	// is the one case the default numbering gets wrong.
+	s.checkAndNote(rc, &d, newExchangeSink(rc).forRecordedAttempt())
+
+	if d.Verdict != fact.VerdictSettled {
+		// Nothing reached the caller, so the chain continues and there is
+		// nothing to settle yet.
+		return attemptNextCandidate
+	}
+	if d.FailReason == invalidDeliveryReason && c != nil && !c.Writer.Written() {
+		// The substitution above ends the request, but the delivery it replaced
+		// was going to continue the chain — so nobody has written anything to
+		// the caller, and nobody will. Without this they would receive an empty
+		// implicit 200 while the row recorded a 500.
+		WriteIngressError(c, rc.ingress, http.StatusInternalServerError, errTypeServer,
+			"internal error", rc.requestID)
+	}
+	s.settleChecked(rc, d, start)
+	return attemptSuccess
+}
+
+// settle ends a request that was not produced by a delivery attempt.
+//
+// Everything that ends a request goes through here: a delivered response, a
+// rejection before any candidate was tried, a chain that ran out, a caller that
+// hung up. They used to end in twenty-eight separate places, each deciding for
+// itself what status to settle on and what to call the failure, and nothing
+// held them to the same answer.
+//
+// Use this only when nothing was appended to the attempt list in the same
+// breath — a rejection before any candidate ran, or a chain that ended after
+// the loop had already recorded everything it tried. A settlement that follows
+// its own append belongs in settleAfterAttempt.
+func (s *Service) settle(rc *Exchange, d fact.Delivery, start time.Time) {
+	s.checkAndNote(rc, &d, newExchangeSink(rc))
+	s.settleChecked(rc, d, start)
+}
+
+// settleAfterAttempt settles a request whose attempt record was appended
+// immediately before the call, so the settlement is filed against that attempt
+// rather than the one that would have come next.
+//
+// The default numbering assumes the record for the attempt in progress does not
+// exist yet, which is what a capability reporting from inside an attempt sees.
+// A settlement that follows its own append sees the opposite, and the request
+// ends there — so the number the default produces belongs to an attempt that
+// never runs.
+func (s *Service) settleAfterAttempt(rc *Exchange, d fact.Delivery, start time.Time) {
+	s.checkAndNote(rc, &d, newExchangeSink(rc).forRecordedAttempt())
+	s.settleChecked(rc, d, start)
+}
+
+// settleChecked settles a delivery that has already been through checkAndNote.
+// Callers that must read the verdict AFTER the check — because the check can
+// change it — use this instead of settle, so the delivery is not checked and
+// recorded twice.
+func (s *Service) settleChecked(rc *Exchange, d fact.Delivery, start time.Time) {
+	if d.Err != nil {
+		// The reason code is what gets persisted; the error itself only ever
+		// existed to be read by a human, and until now nothing read it.
+		logger.Warn("gateway: request settled on an error",
+			zap.String("request_id", rc.requestID),
+			zap.String("fail_reason", d.FailReason),
+			zap.Int("billing_status", d.BillingStatus),
+			zap.Error(d.Err))
+	}
+	s.finalize(rc, d.BillingStatus, d.FailReason, start)
+}
+
+// invalidDeliveryReason marks a settlement the kernel substituted for one it
+// could not read. Named because two places have to agree on it.
+const invalidDeliveryReason = "invalid_delivery"
+
+// checkAndNote refuses a delivery that cannot describe anything real, and
+// records the shape of the one that survives.
+//
+// A delivery that cannot describe anything real is a bug on the reporting side,
+// and acting on it would settle the request against values that mean nothing.
+// It is replaced by one that blames us and ends the request — the caller has
+// already been served whatever actually went out, so the only open question is
+// what to record. Callers must read the verdict only AFTER calling this: the
+// replacement changes it.
+func (s *Service) checkAndNote(rc *Exchange, d *fact.Delivery, sink *exchangeSink) {
+	if err := d.Validate(); err != nil {
+		logger.Error("gateway: refusing an impossible delivery",
+			zap.String("request_id", rc.requestID), zap.Error(err))
+		*d = fact.Undelivered(http.StatusInternalServerError, fact.VerdictSettled,
+			fact.FaultGateway, invalidDeliveryReason, err)
+	}
+	sink.Note(d.Observed())
+}
+
+// rejectRequest answers a request that never reached an upstream and settles it.
+//
+// The status is given once. It used to be written twice — once into the error
+// the caller sees and once into what the request settles as — with nothing
+// keeping the two the same.
+func (s *Service) rejectRequest(c *gin.Context, rc *Exchange, status int, errType, message, failReason string, at fact.Fault, start time.Time) {
+	WriteIngressError(c, rc.ingress, status, errType, message, rc.requestID)
+	s.settle(rc, fact.Rejected(status, at, failReason, nil), start)
+}
+
+// abandonRequest settles a request whose caller is already gone. Nothing is
+// written, because there is nobody left to write to.
+func (s *Service) abandonRequest(rc *Exchange, failReason string, start time.Time) {
+	s.settle(rc, callerGone(failReason), start)
+}
+
+// abandonRequestAfterAttempt is abandonRequest for the disconnects noticed
+// inside a candidate, which record the attempt they died on before settling.
+func (s *Service) abandonRequestAfterAttempt(rc *Exchange, failReason string, start time.Time) {
+	s.settleAfterAttempt(rc, callerGone(failReason), start)
+}
+
+// callerGone describes a request nobody is waiting for any more: nothing was
+// delivered, and no other candidate would have anywhere to deliver it.
+func callerGone(failReason string) fact.Delivery {
+	return fact.Undelivered(499, fact.VerdictSettled, fact.FaultClient, failReason, nil)
 }

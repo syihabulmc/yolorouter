@@ -13,10 +13,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
+	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/protocols/chat"
+	"github.com/yolorouter/yolorouter/pkg/logger"
 )
 
 // buildUpstreamBody constructs the upstream request body and URL for one
@@ -191,7 +194,7 @@ func (s *Service) processDispatchResponseStream(
 	pk model.ProviderKey,
 	resp *http.Response,
 	start time.Time,
-) attemptResult {
+) fact.Delivery {
 	if egress.Passthrough {
 		return s.dispatchPassthroughStream(c, rc, egress.Protocol, cand, provider, pk, resp, start)
 	}
@@ -260,14 +263,13 @@ func (s *Service) processDispatchResponseStream(
 
 	if err == nil {
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
-		s.finalize(rc, http.StatusOK, "", start)
-		return attemptSuccess
+		return fact.Succeeded(http.StatusOK)
 	}
 	if rc.firstByteSent {
 		// Mid-stream failure after the response headers/first bytes went out
 		// — can't switch, can't change HTTP status; same handling as
 		// dispatchPassthroughStream's mid-stream branch.
-		return s.finalizeClientWriteOrPartial(c, rc, err, cand, provider, pk, resp, start)
+		return s.reportMidStreamFailure(c, rc, err, cand, provider, pk, resp, start)
 	}
 	// Pre-first-byte failure: the IR relay returned before ever writing
 	// headers to the client (onFirstChunk/rc.MarkFirstByteSent never
@@ -275,25 +277,30 @@ func (s *Service) processDispatchResponseStream(
 	// still fail over to the next one — mirrors
 	// dispatchPassthroughStream's pre-first-byte failover branch.
 	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
-	return attemptNextCandidate
+	return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+		"stream start: "+err.Error(), err)
 }
 
-// finalizeClientWrite records a downstream Write/Flush failure (already
+// reportClientWriteFailure records a downstream Write/Flush failure (already
 // classified by the caller — either via isClientWriteError or a direct
-// client-disconnect check) as attempt outcome AttemptConnError and settles
-// the request as 499 client_write_timeout. Shared by every call site that has
+// client-disconnect check) as attempt outcome AttemptConnError and REPORTS it
+// as a delivery the caller was served but never received. Settling is the
+// kernel's job; this only says what happened. Shared by every call site that has
 // already committed a response to the client (status/headers on the wire)
-// and therefore cannot fail over: finalizeClientWriteOrPartial (mid-stream,
+// and therefore cannot fail over: reportMidStreamFailure (mid-stream,
 // both the IR and passthrough stream paths), processDispatchResponseNonStream
 // (cross-protocol non-stream), and dispatchPassthroughNonStream (same-
 // protocol non-stream, both its Write and Flush failure branches).
-func (s *Service) finalizeClientWrite(rc *Exchange, err error, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, statusCode int, start time.Time) attemptResult {
+func (s *Service) reportClientWriteFailure(rc *Exchange, err error, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, statusCode int, start time.Time) fact.Delivery {
 	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, statusCode, AttemptConnError, "client write timeout: "+err.Error()))
-	s.finalize(rc, 499, "client_write_timeout", start)
-	return attemptSuccess
+	// statusCode is what the caller was already served — 200 for a stream, the
+	// upstream's own status for a non-stream. Settlement sees 499 regardless:
+	// the bytes never landed. Those are two different questions and this is the
+	// one call site that used to have to answer both with one number.
+	return fact.Truncated(statusCode, 499, fact.FaultClient, "client_write_timeout", err)
 }
 
-// finalizeClientWriteOrPartial handles a mid-stream failure that occurs after
+// reportMidStreamFailure handles a mid-stream failure that occurs after
 // the first byte has already been sent to the client: the response is
 // already committed, so the attempt can neither switch candidates nor change
 // the HTTP status. It classifies err in priority order:
@@ -314,8 +321,8 @@ func (s *Service) finalizeClientWrite(rc *Exchange, err error, cand model.ModelC
 //  2. The caller's OWN connection was canceled (isClientDisconnected, or err
 //     itself is context.Canceled) and case 1 didn't already match — a
 //     genuine caller disconnect, not an upstream fault. No inline error
-//     frame is attempted (the connection is dead) and this settles as 499
-//     client_disconnected. This case only arises on the IR cross-protocol
+//     frame is attempted (the connection is dead) and this is reported as a
+//     499 settlement. This case only arises on the IR cross-protocol
 //     path: passthrough's own stream pumps already turn a caller disconnect
 //     into errClientDisconnected/499 before ever reaching here (see
 //     dispatchPassthroughStream), and their pre-write ctx.Done() checks mean
@@ -334,19 +341,24 @@ func (s *Service) finalizeClientWrite(rc *Exchange, err error, cand model.ModelC
 // dispatchPassthroughStream (passthrough path) — with case 2 now covering
 // the caller-disconnect gap that used to make the two paths diverge, their
 // mid-stream handling really is otherwise identical.
-func (s *Service) finalizeClientWriteOrPartial(c *gin.Context, rc *Exchange, err error, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+func (s *Service) reportMidStreamFailure(c *gin.Context, rc *Exchange, err error, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) fact.Delivery {
 	if isClientWriteError(err) {
-		return s.finalizeClientWrite(rc, err, cand, provider, pk, resp.StatusCode, start)
+		// A stream's headers are written as a hard-coded 200 (the SSE header
+		// write), so that is what the caller saw — not the upstream's own
+		// status, which the 2xx guard admits anywhere in 200..299.
+		return s.reportClientWriteFailure(rc, err, cand, provider, pk, http.StatusOK, start)
 	}
 	if isClientDisconnected(c) || errors.Is(err, context.Canceled) {
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
-		s.finalize(rc, 499, "client_disconnected", start)
-		return attemptSuccess
+		return fact.Truncated(http.StatusOK, 499, fact.FaultClient, "client_disconnected", err)
 	}
 	_ = writeStreamErrorEvent(c, rc)
 	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
-	s.finalize(rc, http.StatusOK, "stream_partial: "+err.Error(), start)
-	return attemptSuccess
+	// The caller keeps the 200 and the bytes that did arrive; settlement keeps
+	// the 200 too, because this is not a delivery failure on our side. What it
+	// is NOT is complete, and that is the bit nobody could express before.
+	return fact.Truncated(http.StatusOK, http.StatusOK, fact.FaultUpstream,
+		"stream_partial: "+err.Error(), err)
 }
 
 // processDispatchResponseNonStream routes a 2xx non-stream upstream response
@@ -365,7 +377,7 @@ func (s *Service) finalizeClientWriteOrPartial(c *gin.Context, rc *Exchange, err
 // the egress protocol's ResponseDecoder, re-encode via the ingress
 // protocol's ResponseEncoder. IRNonStreamRelay writes the client body (and
 // records the raw upstream body into rc via SetBody) itself; this function
-// only translates its outcome into an attemptResult.
+// only translates its outcome into a Delivery.
 func (s *Service) processDispatchResponseNonStream(
 	c *gin.Context,
 	rc *Exchange,
@@ -376,7 +388,7 @@ func (s *Service) processDispatchResponseNonStream(
 	pk model.ProviderKey,
 	resp *http.Response,
 	start time.Time,
-) attemptResult {
+) fact.Delivery {
 	if egress.Passthrough {
 		return s.dispatchPassthroughNonStream(c, rc, egress.Protocol, cand, provider, pk, resp, start)
 	}
@@ -396,13 +408,13 @@ func (s *Service) processDispatchResponseNonStream(
 			// candidate cannot fail over. Bytes never (fully) reached the
 			// caller, so this must NOT settle as a delivered 2xx success:
 			// record it as a client write failure (499), mirroring the
-			// streaming mid-write handling (finalizeClientWriteOrPartial).
+			// streaming mid-write handling (reportMidStreamFailure).
 			// Usage is still preserved for billing — IRNonStreamRelay
 			// returns it even on a write/flush failure, since the upstream
 			// itself was already fully consumed regardless of delivery
 			// outcome.
 			rc.usage = irUsageToUsage(usage)
-			return s.finalizeClientWrite(rc, err, cand, provider, pk, resp.StatusCode, start)
+			return s.reportClientWriteFailure(rc, err, cand, provider, pk, resp.StatusCode, start)
 		}
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "ir decode: "+err.Error()))
 		// IRNonStreamRelay's documented contract is to write nothing to the
@@ -414,16 +426,24 @@ func (s *Service) processDispatchResponseNonStream(
 		// un-sent or handed to a different candidate, so the only safe move
 		// left is to settle here.
 		if c.Writer.Written() {
-			s.finalize(rc, resp.StatusCode, "ir_decode_partial: "+err.Error(), start)
-			return attemptSuccess
+			// Guard only: IRNonStreamRelay's contract is to write nothing on a
+			// decode failure, so this is unreachable today. It is here to be
+			// LOUD if that contract ever changes — silently settling would hide
+			// the fact that a decode failure had already put bytes on the wire.
+			logger.Error("gateway: IR decode failed after bytes were already sent",
+				zap.String("request_id", rc.requestID),
+				zap.Int("upstream_status", resp.StatusCode),
+				zap.Error(err))
+			return fact.Truncated(resp.StatusCode, resp.StatusCode, fact.FaultUpstream,
+				"ir_decode_partial: "+err.Error(), err)
 		}
-		return attemptNextCandidate
+		return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+			"ir_decode: "+err.Error(), err)
 	}
 
 	rc.usage = irUsageToUsage(usage)
 	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
-	s.finalize(rc, resp.StatusCode, "", start)
-	return attemptSuccess
+	return fact.Succeeded(resp.StatusCode)
 }
 
 // ─────────────────── Same-protocol byte passthrough ───────────────────────
@@ -525,7 +545,7 @@ func rewriteGeminiResponseModelVersion(body []byte, externalModel string) ([]byt
 // completion_tokens shape -- without this, a non-OpenAI passthrough response
 // was byte-forwarded correctly but silently never billed (extractUsage always
 // returned nil against a Claude usage object).
-func (s *Service) dispatchPassthroughNonStream(c *gin.Context, rc *Exchange, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+func (s *Service) dispatchPassthroughNonStream(c *gin.Context, rc *Exchange, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) fact.Delivery {
 	defer func() { _ = resp.Body.Close() }()
 	// Now committed to this 2xx candidate: drop any error body a prior failed
 	// candidate stashed in these fields. The three failover returns below
@@ -547,20 +567,27 @@ func (s *Service) dispatchPassthroughNonStream(c *gin.Context, rc *Exchange, egr
 		// wasted failover attempt and to log 499, not bad_status.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
 			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
-			s.finalize(rc, 499, "client_disconnected", start)
-			return attemptTerminal
+			// Nothing was written yet, so the caller saw no status at all — but
+			// they are gone, so there is nobody left to serve and no point
+			// spending another candidate on it.
+			return fact.Undelivered(499, fact.VerdictSettled, fact.FaultClient, "client_disconnected", err)
 		}
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "read body: "+err.Error()))
-		return attemptNextCandidate
+		return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+			"read_body: "+err.Error(), err)
 	}
 	if int64(len(body)) > maxNonStreamResponseBytes {
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "response too large"))
-		return attemptNextCandidate
+		return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+			"response_too_large", nil)
 	}
 	rewritten, usage, err := passthroughRewriteNonStreamResponse(egressProtocol, body, rc.originalModel)
 	if err != nil {
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptBadStatus, "rewrite: "+err.Error()))
-		return attemptNextCandidate
+		// Our own rewrite, not the provider's response: blaming the upstream
+		// here would put our bug on a provider's record.
+		return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultGateway,
+			"response_rewrite_failed: "+err.Error(), err)
 	}
 	// Raw upstream (pre-rewrite, provider model name) is recorded regardless
 	// of whether the write to the client below succeeds — it's what the
@@ -579,10 +606,10 @@ func (s *Service) dispatchPassthroughNonStream(c *gin.Context, rc *Exchange, egr
 		// so the audit never records an undelivered response as "sent", and
 		// settle this as a client write failure (499), not a delivered 2xx
 		// success — mirrors the streaming mid-write handling
-		// (finalizeClientWriteOrPartial). Usage is still preserved above for
+		// (reportMidStreamFailure). Usage is still preserved above for
 		// billing: the upstream was already fully consumed regardless of
 		// delivery outcome.
-		return s.finalizeClientWrite(rc, werr, cand, provider, pk, resp.StatusCode, start)
+		return s.reportClientWriteFailure(rc, werr, cand, provider, pk, resp.StatusCode, start)
 	}
 	// A few KB of non-stream JSON can land entirely inside net/http's
 	// internal buffer: Write returns nil without the bytes actually
@@ -591,12 +618,11 @@ func (s *Service) dispatchPassthroughNonStream(c *gin.Context, rc *Exchange, egr
 	// buffered Write is still recorded as a delivered 2xx — the same class
 	// of bug the streaming write path already guards against.
 	if ferr := flushAndCheckError(c); ferr != nil {
-		return s.finalizeClientWrite(rc, ferr, cand, provider, pk, resp.StatusCode, start)
+		return s.reportClientWriteFailure(rc, ferr, cand, provider, pk, resp.StatusCode, start)
 	}
 	rc.responseBody = rewritten
 	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
-	s.finalize(rc, resp.StatusCode, "", start)
-	return attemptSuccess
+	return fact.Succeeded(resp.StatusCode)
 }
 
 // dispatchPassthroughStream drives the stream pump (passthroughStreamToClient
@@ -617,7 +643,7 @@ func (s *Service) dispatchPassthroughNonStream(c *gin.Context, rc *Exchange, egr
 // correctly but never billed (rc.usage stayed nil) and always finalized as
 // "stream_no_done" (the [DONE] literal never appears on a Claude stream)
 // even when the upstream completed cleanly with message_stop.
-func (s *Service) dispatchPassthroughStream(c *gin.Context, rc *Exchange, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+func (s *Service) dispatchPassthroughStream(c *gin.Context, rc *Exchange, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) fact.Delivery {
 	// A prior failed candidate may have stashed its non-2xx error body in
 	// these fields. A stream request persists its response through the SSE
 	// capture file, not these fields — the types.go contract is that both
@@ -648,13 +674,19 @@ func (s *Service) dispatchPassthroughStream(c *gin.Context, rc *Exchange, egress
 	removeEmptyStreamBodyFile(c, rc)
 	if err == nil {
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptSuccess, ""))
-		s.finalize(rc, http.StatusOK, "", start)
-		return attemptSuccess
+		return fact.Succeeded(http.StatusOK)
 	}
 	if errors.Is(err, errClientDisconnected) {
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
-		s.finalize(rc, 499, "client_disconnected", start)
-		return attemptSuccess // already streamed partial content, terminal
+		// The pump can report a disconnect BEFORE it ever wrote a header: its
+		// pre-write context check and its scanner-error branch both reach here
+		// with nothing on the wire. Those two cases differ in what the caller
+		// saw, and collapsing them would claim a status the caller never got.
+		// Either way the caller is gone, so neither continues the chain.
+		if rc.firstByteSent {
+			return fact.Truncated(http.StatusOK, 499, fact.FaultClient, "client_disconnected", err)
+		}
+		return fact.Undelivered(499, fact.VerdictSettled, fact.FaultClient, "client_disconnected", err)
 	}
 	if errors.Is(err, errStreamNoDoneTerminator) {
 		// Upstream sent content but closed without the [DONE] terminator.
@@ -664,18 +696,21 @@ func (s *Service) dispatchPassthroughStream(c *gin.Context, rc *Exchange, egress
 		// complete completion (some upstreams stably omit [DONE]). Only
 		// mark the log row partial so the missing terminator is traceable.
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream ended without [DONE]"))
-		s.finalize(rc, http.StatusOK, "stream_no_done", start)
-		return attemptSuccess
+		// The caller may well have the whole completion — some upstreams just
+		// never send the terminator. What we can honestly say is that we did
+		// not see the stream end, so it is not recorded as complete.
+		return fact.Truncated(http.StatusOK, http.StatusOK, fact.FaultUpstream, "stream_no_done", err)
 	}
 	if rc.firstByteSent {
 		// Mid-stream failure after the first byte — can't switch, can't
 		// change HTTP status; same handling as
 		// processDispatchResponseStream's mid-stream branch.
-		return s.finalizeClientWriteOrPartial(c, rc, err, cand, provider, pk, resp, start)
+		return s.reportMidStreamFailure(c, rc, err, cand, provider, pk, resp, start)
 	}
 	// Pre-first-byte failure: nothing written yet, can still failover.
 	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream start: "+err.Error()))
-	return attemptNextCandidate
+	return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+		"stream start: "+err.Error(), err)
 }
 
 // passthroughStreamToClient pipes an SSE stream from upstream to the client,

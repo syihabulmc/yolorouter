@@ -287,6 +287,21 @@ func newExchangeSink(rc *Exchange) *exchangeSink {
 	return s
 }
 
+// forRecordedAttempt renumbers the sink to describe the attempt ALREADY on the
+// list rather than the one about to be added.
+//
+// The default numbering suits a capability reporting from inside an attempt,
+// where the record for it does not exist yet. Settlement is the other way
+// round: the attempt has been appended by the time the delivery is judged, so
+// the default would file it under the attempt that comes next — and under one
+// that never runs when the delivery is the last of a chain.
+func (s *exchangeSink) forRecordedAttempt() *exchangeSink {
+	if s.attempt > 0 {
+		s.attempt--
+	}
+	return s
+}
+
 func (s *exchangeSink) Report(facts ...fact.Fact) {
 	if len(facts) == 0 {
 		return

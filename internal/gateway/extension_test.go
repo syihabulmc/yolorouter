@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
@@ -583,5 +584,162 @@ func TestRecordersCannotEditTheHistoryTheyRead(t *testing.T) {
 	kept := rc.timeline.All()
 	if len(kept) != 1 || kept[0].Reporter != "original" || kept[0].Fact.Reason != "original" {
 		t.Errorf("the kernel's timeline was modified by a recorder: %+v", kept)
+	}
+}
+
+// TestImpossibleDeliveryIsRefusedAndSettled ties the delivery rules to a
+// consequence.
+//
+// fact's own tests prove Validate REPORTS an impossible delivery. This one
+// proves the kernel ACTS on it: without the substitution the rules would be a
+// description with no consequence attached.
+//
+// The delivery here claims the caller both received nothing and saw a status,
+// and asks to continue the chain. Continuing would be the worst outcome: the
+// request would run on against values that describe nothing that happened.
+func TestImpossibleDeliveryIsRefusedAndSettled(t *testing.T) {
+	svc := &Service{}
+	rc := &Exchange{requestID: "req-impossible"}
+
+	// Uncommitted, yet claiming the caller saw a status. BillingStatus is set
+	// so this is rejected by the rule it means to exercise rather than by the
+	// earlier "billing status is unset" one.
+	impossible := fact.Delivery{
+		Verdict:       fact.VerdictNextCandidate,
+		BillingStatus: 502,
+		ClientStatus:  200,
+	}
+	if impossible.Validate() == nil {
+		t.Fatal("the fixture is no longer impossible; pick another shape")
+	}
+
+	got := svc.settleDelivery(nil, rc, impossible, time.Now())
+
+	if got != attemptSuccess {
+		t.Errorf("result = %v, want the request settled: an impossible delivery must not send the chain on", got)
+	}
+	if !rc.logWritten.Load() {
+		t.Error("no row was written: the request was neither settled nor continued")
+	}
+	if rc.statusCode != http.StatusInternalServerError {
+		t.Errorf("settled status = %d, want 500: we cannot blame a provider for a delivery we could not read", rc.statusCode)
+	}
+
+	var noted *fact.DeliveryObserved
+	for _, e := range rc.timeline.All() {
+		if v, ok := e.Record.(fact.DeliveryObserved); ok {
+			noted = &v
+		}
+	}
+	if noted == nil {
+		t.Fatal("the refused delivery was never recorded")
+	}
+	if noted.BillingStatus != http.StatusInternalServerError || noted.Fault != "gateway" {
+		t.Errorf("recorded %+v, want the substitution recorded, not the impossible original", *noted)
+	}
+}
+
+// TestDeliveryIsRecordedAgainstTheAttemptItDescribes pins provenance for the
+// delivery record.
+//
+// The sink numbers an entry by how many attempts have been recorded so far,
+// which is correct for a capability reporting DURING an attempt — the record
+// for that attempt has not been appended yet. A delivery is the opposite case:
+// it is settled after its own attempt is already on the list, so the same rule
+// numbers it as the attempt that comes NEXT. On a failover chain that silently
+// files each delivery under the following candidate, and the last one under a
+// candidate that never ran.
+func TestDeliveryIsRecordedAgainstTheAttemptItDescribes(t *testing.T) {
+	svc := &Service{}
+	rc := &Exchange{requestID: "req-provenance"}
+	// Two attempts already ran; the delivery being settled describes the second.
+	rc.attempts = []AttemptRecord{{ProviderName: "first"}, {ProviderName: "second"}}
+
+	svc.settleDelivery(nil, rc, fact.Succeeded(200), time.Now())
+
+	var noted *fact.Entry
+	for i, e := range rc.timeline.All() {
+		if _, ok := e.Record.(fact.DeliveryObserved); ok {
+			noted = &rc.timeline.All()[i]
+		}
+	}
+	if noted == nil {
+		t.Fatal("the delivery was never recorded")
+	}
+	if noted.Attempt != 1 {
+		t.Errorf("delivery recorded against attempt %d, want 1: it describes the attempt that just finished, not the next one",
+			noted.Attempt)
+	}
+}
+
+// TestASettlementAfterItsOwnAttemptIsRecordedAgainstThatAttempt is the same
+// provenance rule for the endings that no dispatch produces: an upstream 4xx
+// the caller has to own, and the disconnects noticed inside a candidate. Each
+// records the attempt it died on and then settles, so each meets the same
+// off-by-one — and the default numbering is what a settling helper reaches for
+// unless its call site says otherwise.
+//
+// Driven through a terminal 400 because that ending is reachable without racing
+// a live connection shutdown; the disconnect paths settle through the same two
+// helpers.
+func TestASettlementAfterItsOwnAttemptIsRecordedAgainstThatAttempt(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+
+	// 400 is terminal: the caller's own request is what the upstream objected
+	// to, so no other candidate would do better and the chain ends here.
+	refuses := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"no"}}`))
+	}))
+	defer refuses.Close()
+
+	svc := newSvc(t, db)
+	p := createAnthropicProvider(t, db, "refuses", refuses.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+
+	now := time.Now().UTC()
+	m := &model.Model{Name: "gpt-4o", ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatalf("seed model: %v", err)
+	}
+	if err := db.Create(&model.ModelCandidate{
+		ModelID: m.ID, ProviderID: p.ID, ProviderModelName: "claude-3-5-sonnet-20241022",
+		InputPrice: 1.0, OutputPrice: 2.0, MaxOutput: 4096,
+		SupportsStreaming: boolPtr(true), SupportsFunctionCalling: boolPtr(true),
+		ManagementStatus:   model.ModelCandidateStatusEnabled,
+		SortOrder:          1,
+		VerificationStatus: model.ModelVerificationStatusPassed,
+		CreatedAt:          now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed candidate: %v", err)
+	}
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
+	defer func() { testHookHandleDone = nil }()
+
+	c, _ := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+	svc.Handle(c, apiKey)
+
+	if captured == nil {
+		t.Fatal("testHookHandleDone was never invoked")
+	}
+	var noted []fact.Entry
+	for _, e := range captured.timeline.All() {
+		if _, ok := e.Record.(fact.DeliveryObserved); ok {
+			noted = append(noted, e)
+		}
+	}
+	if len(noted) != 1 {
+		t.Fatalf("the settlement was recorded %d times, want once", len(noted))
+	}
+	if len(captured.attempts) != 1 {
+		t.Fatalf("the request made %d attempts, want 1: the test no longer sets up what it claims to",
+			len(captured.attempts))
+	}
+	if want := len(captured.attempts) - 1; noted[0].Attempt != want {
+		t.Errorf("settlement recorded against attempt %d, want %d: it describes the attempt that was just appended, not one that never runs",
+			noted[0].Attempt, want)
 	}
 }

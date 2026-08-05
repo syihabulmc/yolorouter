@@ -393,3 +393,60 @@ type Usage struct {
 	// verdict. Not serialized — internal accounting only.
 	ReasoningTokens int `json:"-"`
 }
+
+// The boundary is the send, not the candidate: a single candidate rotates
+// through its provider's keys, and each rotation is a real request with its own
+// response. Tying invalidation to the candidate would leave one key's leftovers
+// standing while the next key runs.
+//
+// Usage is the field that made this necessary. An upstream can report what it
+// charged before producing anything a caller can see — Anthropic's opening
+// frame carries the input and cache counts — so an attempt can be abandoned
+// while holding real numbers. Nothing downstream distinguishes "these tokens
+// belong to the attempt being settled" from "these tokens are whatever was left
+// on the exchange": billing reads the field unconditionally. Left uncleared,
+// an abandoned candidate's tokens are charged under whatever the request
+// eventually settles as.
+//
+// The captured bodies move on the same boundary and for the same reason. The
+// audit row has one field for them and a request may make several attempts, so
+// whatever ends up stored is read as belonging to the attempt the row describes.
+// Keeping the last body that happened to exist meant a chain whose final
+// attempt never reached an upstream still stored an EARLIER provider's error
+// response, with nothing in the row saying it came from somewhere else. The
+// per-attempt records carry each attempt's own status and error text, so
+// storing nothing here loses the raw payload of an already-recorded failure —
+// while storing the wrong one invites a diagnosis of the wrong provider.
+//
+// Keeping every attempt's body would lose nothing at all, and is the better
+// answer. It is not this change: bodies live in their own table precisely
+// because they are large, so attributing them per attempt is a schema change,
+// not a boundary fix.
+func (rc *Exchange) beginUpstreamAttempt() {
+	rc.usage = nil
+	rc.clearResponseBodies()
+	// The request and the response it produced are one pair. Clearing only the
+	// response left the audit row showing an earlier attempt's request body
+	// with no response beside it — a request that was never the one sent.
+	rc.upstreamRequestBody = nil
+	rc.upstreamURL = ""
+}
+
+// abandonUpstreamAttempt drops what an attempt reported once that attempt has
+// been given up on.
+//
+// Only the usage. Invalidating at the START of the next send is not enough on
+// its own, because the last attempt of a chain has no next send: tokens it
+// reported would sit on the exchange until settlement read them, and be charged
+// under the failure that ended the request.
+//
+// The captured bodies deliberately stay. They describe the attempt that just
+// failed, and that attempt is the one an operator opens this row to understand
+// — a chain-exhausted 502 whose upstream body, request body and URL were all
+// blanked says nothing about why anything failed. Cross-attempt confusion is
+// already prevented at the other end, by beginUpstreamAttempt: whatever is here
+// belongs to the most recent send, and the next send clears it before replacing
+// it.
+func (rc *Exchange) abandonUpstreamAttempt() {
+	rc.usage = nil
+}
