@@ -77,6 +77,11 @@ type Exchange struct {
 	// forwards it when the caller asked).
 	wantsStreamUsage bool
 	apiKeyID         uint
+	// concurrencyLimit / rpmLimit are the caller's allowance, resolved once
+	// from the key. Zero means unlimited, which is also what an absent limit
+	// means — the distinction has no consumer, so it is not preserved.
+	concurrencyLimit int
+	rpmLimit         int
 
 	// requestDeadline is the absolute cutoff for the whole request across all
 	// failover candidates (the request_timeout budget). Set once at Handle
@@ -204,6 +209,17 @@ func (rc *Exchange) MarkFirstByteSent() bool {
 // the narrow view each one declares for itself rather than by reaching into
 // the struct. They are added as capabilities ask for them, not pre-emptively:
 // a getter with no caller is a field that has quietly stayed public.
+
+// APIKeyID identifies the caller's key.
+func (rc *Exchange) APIKeyID() uint { return rc.apiKeyID }
+
+// ConcurrencyLimit is how many of this key's requests may be in flight at once.
+// Zero means unlimited.
+func (rc *Exchange) ConcurrencyLimit() int { return rc.concurrencyLimit }
+
+// RPMLimit is how many requests this key may make per minute. Zero means
+// unlimited.
+func (rc *Exchange) RPMLimit() int { return rc.rpmLimit }
 
 // CustomSystemPromptEnabled reports whether a prompt was resolved for this
 // request, from either the global setting or a per-key override.

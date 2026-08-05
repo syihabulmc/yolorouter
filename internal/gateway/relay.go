@@ -101,7 +101,6 @@ type Service struct {
 	db        *gorm.DB
 	masterKey []byte
 	client    *UpstreamClient
-	limiter   *Limiter
 	// settingsProvider is the read-only window into the cached global custom
 	// system prompt. Nil when no provider is wired in (router passes nil until
 	// the system settings service is registered); Handle nil-checks before
@@ -123,6 +122,10 @@ type Service struct {
 	// egressRewriters rewrite the outbound body, ordered by stage at
 	// registration so no per-request sort is needed.
 	egressRewriters []egressRewriter
+
+	// admissions gate the exchange before any upstream work. Registration
+	// order is acquisition order; release runs in reverse.
+	admissions []admission
 }
 
 // NewService wires the gateway with the already-decoded AES master key
@@ -140,10 +143,19 @@ func NewService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp SettingsPro
 		db:               db,
 		masterKey:        masterKey,
 		client:           NewUpstreamClient(allowPrivate, gatewayCfg.HeaderTimeout, gatewayCfg.ConnectTimeout, gatewayCfg.TLSHandshakeTimeout),
-		limiter:          NewLimiter(),
 		settingsProvider: sp,
 		gateway:          gatewayCfg,
 	}
+}
+
+// derefLimit reads an optional limit. An absent limit and a zero limit both
+// mean unlimited, so they collapse to the same value rather than being carried
+// as two states nothing downstream distinguishes.
+func derefLimit(v *int) int {
+	if v == nil || *v < 0 {
+		return 0
+	}
+	return *v
 }
 
 // requestIDFor returns the request id the RequestID middleware already
@@ -180,8 +192,10 @@ func isClientDisconnected(c *gin.Context) bool {
 func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	start := time.Now()
 	rc := &Exchange{
-		requestID: requestIDFor(c),
-		apiKeyID:  apiKey.ID,
+		requestID:        requestIDFor(c),
+		apiKeyID:         apiKey.ID,
+		concurrencyLimit: derefLimit(apiKey.ConcurrencyLimit),
+		rpmLimit:         derefLimit(apiKey.RPMLimit),
 	}
 	// Stamp the per-request total-budget deadline up front, before any
 	// attempt logic, so every exit path (including early rejections below)
@@ -246,28 +260,27 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if !s.checkKeyStateAndLimits(c, rc, apiKey, start) {
 		return
 	}
-	// Concurrency is the only limit that needs a paired release — acquire it
-	// here and defer the release so every return path below frees the slot.
-	if apiKey.ConcurrencyLimit != nil && *apiKey.ConcurrencyLimit > 0 {
-		if !s.limiter.AcquireConcurrency(apiKey.ID, *apiKey.ConcurrencyLimit) {
-			captureRejectedBody(c, rc)
-			WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeRateLimit, "concurrency limit exceeded", rc.requestID)
-			s.finalize(rc, http.StatusTooManyRequests, "concurrency_limit", start)
-			return
-		}
-		defer s.limiter.ReleaseConcurrency(apiKey.ID)
-	}
-	// RPM is checked AFTER concurrency so a concurrency-rejected request does
-	// NOT also burn an RPM token (the previous order — RPM in
-	// checkKeyStateAndLimits before concurrency — let one served request
-	// exhaust the whole minute's RPM under concurrent load).
-	if apiKey.RPMLimit != nil && *apiKey.RPMLimit > 0 {
-		if !s.limiter.CheckRPM(apiKey.ID, *apiKey.RPMLimit, time.Now()) {
-			captureRejectedBody(c, rc)
-			WriteIngressError(c, ingress, http.StatusTooManyRequests, errTypeRateLimit, "rate limit exceeded (requests per minute)", rc.requestID)
-			s.finalize(rc, http.StatusTooManyRequests, "rpm_exceeded", start)
-			return
-		}
+	// Admissions gate the exchange before any work is done on its behalf.
+	// Whatever they take is released on every exit path below, including the
+	// refusal path and a panic, which is why the release is deferred the moment
+	// the tickets exist rather than at each return.
+	// The release is armed before anything is acquired, not after: an admission
+	// that panics must still give back whatever its predecessors took, and a
+	// defer installed after the call would never run at all.
+	var held []heldTicket
+	defer func() {
+		s.releaseAdmissions(rc.requestCtx, rc, held, fact.Outcome{
+			StatusCode: rc.statusCode,
+			Delivered:  rc.firstByteSent,
+		})
+	}()
+	verdict := s.admit(rc.requestCtx, rc, &held)
+	if verdict.Loop >= LoopNextCandidate {
+		captureRejectedBody(c, rc)
+		status, errType := admissionRejectionResponse(verdict)
+		WriteIngressError(c, ingress, status, errType, verdict.rejectDetail, rc.requestID)
+		s.finalize(rc, status, verdict.failReason(), start)
+		return
 	}
 
 	body, err := io.ReadAll(c.Request.Body)

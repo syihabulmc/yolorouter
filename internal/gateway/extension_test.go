@@ -322,3 +322,192 @@ func TestEgressRefusalFailsOverToNextCandidate(t *testing.T) {
 		t.Fatalf("upstream saw %v, want only [c2-model]: the refused body must never reach the wire", got)
 	}
 }
+
+// trackingAdmission records what it was asked to do, so a test can assert the
+// kernel's acquire/release discipline rather than the capability's own logic.
+type trackingAdmission struct {
+	name     string
+	log      *[]string
+	refuse   bool
+	takeHold bool
+}
+
+func (a trackingAdmission) Name() string { return a.name }
+
+func (a trackingAdmission) Admit(_ context.Context, _ fact.Attempt, sink fact.Sink) (string, bool) {
+	*a.log = append(*a.log, "admit:"+a.name)
+	if a.refuse {
+		sink.Report(fact.Fact{Kind: fact.KindCallerRateLimited, Detail: a.name + " refused"})
+		return a.name, false
+	}
+	return a.name, a.takeHold
+}
+
+func (a trackingAdmission) Release(_ context.Context, _ fact.Attempt, ticket string, _ fact.Outcome, _ fact.Sink) {
+	*a.log = append(*a.log, "release:"+ticket)
+}
+
+// TestAdmissionsReleaseInReverseOrder pins the stack discipline. Whatever was
+// taken last is given back first, which is what makes a later admission safe to
+// depend on an earlier one still holding.
+func TestAdmissionsReleaseInReverseOrder(t *testing.T) {
+	var log []string
+	svc := &Service{}
+	RegisterAdmission(svc, trackingAdmission{name: "first", log: &log, takeHold: true},
+		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+	RegisterAdmission(svc, trackingAdmission{name: "second", log: &log, takeHold: true},
+		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+
+	rc := &Exchange{}
+	var held []heldTicket
+	verdict := svc.admit(context.Background(), rc, &held)
+	if verdict.Loop != LoopNone {
+		t.Fatalf("loop = %v, want LoopNone when nothing refused", verdict.Loop)
+	}
+	svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{})
+
+	want := []string{"admit:first", "admit:second", "release:second", "release:first"}
+	if len(log) != len(want) {
+		t.Fatalf("log = %v, want %v", log, want)
+	}
+	for i := range want {
+		if log[i] != want[i] {
+			t.Fatalf("log = %v, want %v", log, want)
+		}
+	}
+}
+
+// TestAdmissionRefusalStopsLaterAdmissions is why the refusal short-circuits:
+// an admission running after a refusal would take a resource for a request that
+// is already over. For a rate limiter that means charging the caller for a
+// request nobody serves.
+func TestAdmissionRefusalStopsLaterAdmissions(t *testing.T) {
+	var log []string
+	svc := &Service{}
+	RegisterAdmission(svc, trackingAdmission{name: "refuser", log: &log, refuse: true},
+		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+	RegisterAdmission(svc, trackingAdmission{name: "later", log: &log, takeHold: true},
+		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+
+	rc := &Exchange{}
+	var held []heldTicket
+	verdict := svc.admit(context.Background(), rc, &held)
+
+	if verdict.Loop != LoopTerminate {
+		t.Fatalf("loop = %v, want LoopTerminate", verdict.Loop)
+	}
+	if verdict.rejectDetail != "refuser refused" {
+		t.Errorf("rejectDetail = %q, want the reporter's own words", verdict.rejectDetail)
+	}
+	if len(held) != 0 {
+		t.Errorf("held = %v, want nothing held when the first admission refused", held)
+	}
+	for _, e := range log {
+		if e == "admit:later" {
+			t.Fatal("an admission ran after the request had already been refused")
+		}
+	}
+}
+
+// TestAdmissionReleasesOnlyWhatWasHeld covers the unlimited-key shape: an
+// admission that took nothing must not be released, or it gives back a resource
+// it never had.
+func TestAdmissionReleasesOnlyWhatWasHeld(t *testing.T) {
+	var log []string
+	svc := &Service{}
+	RegisterAdmission(svc, trackingAdmission{name: "nothing", log: &log, takeHold: false},
+		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+
+	rc := &Exchange{}
+	var held []heldTicket
+	svc.admit(context.Background(), rc, &held)
+	svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{})
+
+	for _, e := range log {
+		if e == "release:nothing" {
+			t.Fatal("released an admission that reported holding nothing")
+		}
+	}
+}
+
+// panickingAdmission fails in the one way the release contract has to survive.
+type panickingAdmission struct{ log *[]string }
+
+func (panickingAdmission) Name() string { return "panicker" }
+
+func (a panickingAdmission) Admit(context.Context, fact.Attempt, fact.Sink) (string, bool) {
+	*a.log = append(*a.log, "admit:panicker")
+	panic("admission blew up")
+}
+
+func (a panickingAdmission) Release(context.Context, fact.Attempt, string, fact.Outcome, fact.Sink) {
+	*a.log = append(*a.log, "release:panicker")
+}
+
+// TestAdmissionPanicStillReleasesEarlierTickets is why the release is armed
+// before anything is acquired.
+//
+// A panic in a later admission unwinds past any cleanup that would have been
+// installed after the call returned, so an earlier admission's resource — a
+// concurrency slot, say — would be held for the life of the process. The
+// recovering middleware would report a tidy 500 while the caller's allowance
+// quietly shrank by one, which is the kind of leak that only shows up as
+// "throughput degrades over days".
+func TestAdmissionPanicStillReleasesEarlierTickets(t *testing.T) {
+	var log []string
+	svc := &Service{}
+	RegisterAdmission(svc, trackingAdmission{name: "first", log: &log, takeHold: true},
+		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+	RegisterAdmission(svc, panickingAdmission{log: &log},
+		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+
+	rc := &Exchange{}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the panic should still propagate to the caller")
+			}
+		}()
+		// Exactly the shape Handle uses: arm the release, then acquire.
+		//
+		// The closure is load-bearing. Deferring the call directly would
+		// evaluate held at defer time — nil, before anything was acquired — and
+		// release nothing, which is the same leak this test exists to catch.
+		var held []heldTicket
+		defer func() {
+			svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{})
+		}()
+		svc.admit(context.Background(), rc, &held)
+	}()
+
+	var released bool
+	for _, e := range log {
+		if e == "release:first" {
+			released = true
+		}
+	}
+	if !released {
+		t.Fatal("the first admission's ticket was never released after a later panic")
+	}
+}
+
+// TestFailReasonPrefersTheReporterCode pins the boundary between an internal
+// name and a persisted one.
+//
+// Kind names are internal and get renamed as the vocabulary is refined. The
+// failure reason is read by dashboards and log viewers written against specific
+// strings, so deriving one from the other means a rename silently breaks a
+// display nobody is watching.
+func TestFailReasonPrefersTheReporterCode(t *testing.T) {
+	withCode := resolveBatch([]fact.Fact{
+		{Kind: fact.KindCallerRateLimited, Reason: "concurrency_limit"},
+	})
+	if got := withCode.failReason(); got != "concurrency_limit" {
+		t.Errorf("failReason = %q, want the reporter's stable code", got)
+	}
+
+	withoutCode := resolveBatch([]fact.Fact{{Kind: fact.KindCallerRateLimited}})
+	if got := withoutCode.failReason(); got != "caller_rate_limited" {
+		t.Errorf("failReason = %q, want the kind name as fallback", got)
+	}
+}

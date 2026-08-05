@@ -20,6 +20,7 @@ import (
 	ycrypto "github.com/yolorouter/yolorouter/pkg/crypto"
 
 	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
+	"github.com/yolorouter/yolorouter/internal/capability/ratelimit"
 	"github.com/yolorouter/yolorouter/internal/capability/systemprompt"
 	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/model"
@@ -143,7 +144,25 @@ func newSvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProv
 		func(e *Exchange) contentinspect.View { return e })
 	RegisterEgressRewriter(svc, systemprompt.New(), StageCustomPrompt,
 		func(e *Exchange) systemprompt.View { return e })
+	lim := ratelimit.NewLimiter()
+	RegisterAdmission(svc, lim, func(e *Exchange) ratelimit.View { return e })
+	svcLimiters.Store(svc, lim)
 	return svc
+}
+
+// svcLimiters lets a test reach the limiter its fixture registered. The kernel
+// no longer owns one — it is a capability now — so a test that needs to
+// pre-exhaust an allowance has to get at the same instance the service was
+// assembled with.
+var svcLimiters sync.Map // map[*Service]*ratelimit.Limiter
+
+func limiterOf(t *testing.T, svc *Service) *ratelimit.Limiter {
+	t.Helper()
+	v, ok := svcLimiters.Load(svc)
+	if !ok {
+		t.Fatal("no limiter registered for this service")
+	}
+	return v.(*ratelimit.Limiter)
 }
 
 // newSvcWithSettings is newSvc with a caller-built stub, so a test
@@ -699,7 +718,7 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 	cases := []struct {
 		name          string
 		configureKey  func(k *model.APIKey)
-		preRejectHook func(svc *Service, apiKeyID uint)
+		preRejectHook func(lim *ratelimit.Limiter, apiKeyID uint)
 		wantStatus    int
 		wantRespSub   string
 	}{
@@ -734,8 +753,8 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 				limit := 1
 				k.ConcurrencyLimit = &limit
 			},
-			preRejectHook: func(svc *Service, apiKeyID uint) {
-				svc.limiter.AcquireConcurrency(apiKeyID, 1) // exhaust the only slot
+			preRejectHook: func(lim *ratelimit.Limiter, apiKeyID uint) {
+				lim.AcquireConcurrency(apiKeyID, 1) // exhaust the only slot
 			},
 			wantStatus:  http.StatusTooManyRequests,
 			wantRespSub: "concurrency limit exceeded",
@@ -746,8 +765,8 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 				limit := 1
 				k.RPMLimit = &limit
 			},
-			preRejectHook: func(svc *Service, apiKeyID uint) {
-				svc.limiter.CheckRPM(apiKeyID, 1, time.Now()) // consume the only token
+			preRejectHook: func(lim *ratelimit.Limiter, apiKeyID uint) {
+				lim.CheckRPM(apiKeyID, 1, time.Now()) // consume the only token
 			},
 			wantStatus:  http.StatusTooManyRequests,
 			wantRespSub: "rate limit exceeded",
@@ -766,7 +785,7 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 				t.Fatalf("update api key: %v", err)
 			}
 			if tc.preRejectHook != nil {
-				tc.preRejectHook(svc, apiKey.ID)
+				tc.preRejectHook(limiterOf(t, svc), apiKey.ID)
 			}
 
 			var captured *Exchange

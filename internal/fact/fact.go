@@ -41,6 +41,12 @@ const (
 	KindQuotaExhausted
 	// KindBalanceInsufficient: the caller cannot pay for this request.
 	KindBalanceInsufficient
+	// KindCallerRateLimited: the caller is asking faster, or more
+	// concurrently, than their key allows. Distinct from
+	// KindUpstreamRateLimited, which is a provider throttling us: this one is
+	// about the caller's own allowance, and no other candidate or key would
+	// help.
+	KindCallerRateLimited
 
 	// --- Candidate verdicts: this candidate cannot serve this request. ---
 
@@ -128,6 +134,8 @@ func (k Kind) String() string {
 		return "quota_exhausted"
 	case KindBalanceInsufficient:
 		return "balance_insufficient"
+	case KindCallerRateLimited:
+		return "caller_rate_limited"
 	case KindPricingUnavailableTerminal:
 		return "pricing_unavailable_terminal"
 	case KindPricingUnavailableSkip:
@@ -185,6 +193,17 @@ type Fact struct {
 	// Status is the upstream HTTP status that produced this judgement, or 0 when
 	// it did not come from a response.
 	Status int
+	// Reason is the stable, persisted code for why this happened, when the Kind
+	// alone is too coarse. A rate limit refusal is the motivating case: the Kind
+	// says the caller was limited, but "which limit" is what an operator acts
+	// on, and the two answers demand different fixes.
+	//
+	// It exists because the Kind name must NOT be used for this. Kind names are
+	// internal and get renamed as the vocabulary is refined; a persisted column
+	// read by dashboards and log viewers is a contract with everything
+	// downstream. Tying one to the other means a rename silently breaks a
+	// display nobody was looking at.
+	Reason string
 	// Detail is free-form text for the log row. Never parsed.
 	Detail string
 }

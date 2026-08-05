@@ -376,3 +376,113 @@ func isolate(up fact.Upstream) fact.Upstream {
 	}
 	return out
 }
+
+// AdmissionOf gates one exchange before any upstream work, and releases
+// whatever it took once the exchange is over.
+//
+// Admit either takes what the request needs and returns a ticket, or reports
+// why the request cannot proceed. It does not decide what a refusal costs: it
+// says what it found and the table decides, same as every other shape.
+//
+// Release is called exactly once for every ticket Admit handed back, on every
+// exit path including a panic. There is no separate settle-versus-compensate
+// pair: the two differ only in what an implementation does with the outcome it
+// is given, and the outcome is a parameter here, so an implementation that
+// needs to distinguish them can, and the many that do not are not forced to
+// split logic they share.
+type AdmissionOf[V, T any] interface {
+	Name() string
+	Admit(ctx context.Context, view V, sink fact.Sink) (ticket T, held bool)
+	Release(ctx context.Context, view V, ticket T, out fact.Outcome, sink fact.Sink)
+}
+
+// admission is the kernel-side, view-erased form. The ticket travels as an any:
+// the kernel never inspects it, it only hands the same value back.
+type admission interface {
+	name() string
+	admit(ctx context.Context, e *Exchange, sink fact.Sink) (any, bool)
+	release(ctx context.Context, e *Exchange, ticket any, out fact.Outcome, sink fact.Sink)
+}
+
+type admissionAdapter[V, T any] struct {
+	inner AdmissionOf[V, T]
+	bind  func(*Exchange) V
+}
+
+func (a admissionAdapter[V, T]) name() string { return a.inner.Name() }
+
+func (a admissionAdapter[V, T]) admit(ctx context.Context, e *Exchange, sink fact.Sink) (any, bool) {
+	ticket, held := a.inner.Admit(ctx, a.bind(e), sink)
+	return ticket, held
+}
+
+func (a admissionAdapter[V, T]) release(ctx context.Context, e *Exchange, ticket any, out fact.Outcome, sink fact.Sink) {
+	typed, ok := ticket.(T)
+	if !ok {
+		// Unreachable: the kernel hands back the same value it received from
+		// this same adapter. Guarded anyway because a wrong ticket would
+		// otherwise release something another admission is holding.
+		logger.Error("gateway: admission ticket type mismatch on release",
+			zap.String("admission", a.inner.Name()))
+		return
+	}
+	a.inner.Release(ctx, a.bind(e), typed, out, sink)
+}
+
+// RegisterAdmission wires an admission into the service.
+//
+// Registration order is acquisition order, and release runs in reverse — plain
+// stack discipline, which is what makes "release what was taken last, first"
+// true by construction rather than by everyone agreeing on a set of ordinal
+// constants nobody can get wrong only if they are all correct.
+func RegisterAdmission[V, T any](s *Service, a AdmissionOf[V, T], bind func(*Exchange) V) {
+	s.admissions = append(s.admissions, admissionAdapter[V, T]{inner: a, bind: bind})
+}
+
+// heldTicket pairs a ticket with the admission that issued it.
+type heldTicket struct {
+	by     admission
+	ticket any
+}
+
+// admit runs the registered admissions in order and stops at the first refusal.
+//
+// Stopping is not an optimisation: an admission that runs after a refusal would
+// take a resource for a request that is already over, and for a rate limiter
+// that means charging the caller for a request nobody serves.
+//
+// Tickets are appended to *held as they are acquired rather than returned at
+// the end, so the caller can arm its release BEFORE calling this. If a later
+// admission panics, everything taken so far is already recorded where the
+// caller's deferred release can see it; had the tickets only appeared in a
+// return value, that release would never have been installed and the resources
+// would be held until the process restarts.
+func (s *Service) admit(ctx context.Context, rc *Exchange, held *[]heldTicket) resolved {
+	if len(s.admissions) == 0 {
+		return resolved{}
+	}
+	sink := newExchangeSink(rc)
+	for _, a := range s.admissions {
+		sink.reporter = a.name()
+		ticket, ok := a.admit(ctx, rc, sink)
+		if ok {
+			*held = append(*held, heldTicket{by: a, ticket: ticket})
+		}
+		if verdict := sink.resolve(); verdict.Loop >= LoopNextCandidate {
+			return verdict
+		}
+	}
+	return sink.resolve()
+}
+
+// releaseAdmissions returns everything that was taken, most recent first.
+func (s *Service) releaseAdmissions(ctx context.Context, rc *Exchange, held []heldTicket, out fact.Outcome) {
+	if len(held) == 0 {
+		return
+	}
+	sink := newExchangeSink(rc)
+	for i := len(held) - 1; i >= 0; i-- {
+		sink.reporter = held[i].by.name()
+		held[i].by.release(ctx, rc, held[i].ticket, out, sink)
+	}
+}

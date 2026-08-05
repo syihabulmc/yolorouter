@@ -162,6 +162,14 @@ var decisionTable = [fact.NumKinds]Decision{
 		Code: http.StatusPaymentRequired, ErrType: errTypeInsufficientQuota,
 		Settle: SettleReverseAll, Defined: true,
 	},
+	// Nothing was reserved downstream and no upstream was touched, so there is
+	// nothing to reverse beyond the admissions already taken — which the kernel
+	// releases on every exit path regardless of verdict.
+	fact.KindCallerRateLimited: {
+		Loop: LoopTerminate, Status: StatusFixed,
+		Code: http.StatusTooManyRequests, ErrType: errTypeRateLimit,
+		Defined: true,
+	},
 	fact.KindPricingUnavailableTerminal: {
 		Loop: LoopTerminate, Status: StatusFromPeer,
 		Settle: SettleReverseAll, Defined: true,
@@ -284,6 +292,12 @@ type resolved struct {
 	loopFrom fact.Kind
 	// upstreamStatus carries the verbatim status for StatusFromUpstream.
 	upstreamStatus int
+	// rejectDetail is the reporter's own words for a refusal, so the caller is
+	// told which limit they hit rather than a status code alone.
+	rejectDetail string
+	// reason is the stable code persisted as the failure reason. Empty when the
+	// reporter gave none, in which case the Kind name is the fallback.
+	reason string
 }
 
 // combine folds two decisions from the same batch.
@@ -328,6 +342,7 @@ func combine(a, b resolved) resolved {
 	if statusWins(b, a) {
 		out.Status, out.Code, out.ErrType = b.Status, b.Code, b.ErrType
 		out.statusFrom, out.upstreamStatus = b.statusFrom, b.upstreamStatus
+		out.rejectDetail, out.reason = b.rejectDetail, b.reason
 	}
 	return out
 }
@@ -367,8 +382,37 @@ func resolveBatch(facts []fact.Fact) resolved {
 			statusFrom:     f.Kind,
 			loopFrom:       f.Kind,
 			upstreamStatus: f.Status,
+			rejectDetail:   f.Detail,
+			reason:         f.Reason,
 		}
 		out = combine(out, r)
 	}
 	return out
+}
+
+// admissionRejectionResponse turns a refusal verdict into what the caller sees.
+//
+// Only StatusFixed is honoured here: an admission runs before any upstream
+// exists, so there is no upstream status to forward and no peer fact to defer
+// to. A verdict that expressed neither falls back to the generic refusal rather
+// than inventing a specific one, because guessing a status is how a rate limit
+// ends up reported as a server fault.
+func admissionRejectionResponse(v resolved) (status int, errType string) {
+	if v.Status == StatusFixed && v.Code != 0 {
+		return v.Code, v.ErrType
+	}
+	return http.StatusTooManyRequests, errTypeRateLimit
+}
+
+// failReason is the code persisted for a verdict.
+//
+// A reporter-supplied Reason wins because it is the stable one: Kind names are
+// internal and get renamed as the vocabulary is refined, while this string is
+// read by dashboards and log viewers that were written against the old value.
+// The Kind name is only the fallback for verdicts nobody gave a code.
+func (v resolved) failReason() string {
+	if v.reason != "" {
+		return v.reason
+	}
+	return v.loopFrom.String()
 }

@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
+	"github.com/yolorouter/yolorouter/internal/capability/ratelimit"
 	"github.com/yolorouter/yolorouter/internal/capability/systemprompt"
 	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/gateway"
@@ -353,6 +354,8 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 		func(e *gateway.Exchange) contentinspect.View { return e })
 	gateway.RegisterEgressRewriter(relaySvc, systemprompt.New(), gateway.StageCustomPrompt,
 		func(e *gateway.Exchange) systemprompt.View { return e })
+	gateway.RegisterAdmission(relaySvc, ratelimit.NewLimiter(),
+		func(e *gateway.Exchange) ratelimit.View { return e })
 
 	v1 := gatewayGroup(r, "/v1", bodiesDir, db)
 	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))
