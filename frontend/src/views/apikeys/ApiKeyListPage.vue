@@ -83,7 +83,7 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NTag, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption, type PaginationProps } from 'naive-ui'
+import { NButton, NInput, NTag, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption, type PaginationProps } from 'naive-ui'
 import { KeyRound, Plus, Search, MoreHorizontal, Copy } from '@lucide/vue'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { displayMessage } from '../../api/client'
@@ -243,13 +243,17 @@ function confirmRevoke(row: APIKey) {
 }
 
 // copyPlaintext fetches the full key from the reveal endpoint and writes it to
-// the clipboard. One row can be in flight at a time (revealingId gates the
-// button's loading state). The backend returns 11016 for keys that predate the
+// the clipboard. The backend returns 11016 for keys that predate the
 // encrypted_key column — displayMessage surfaces that localized message; other
 // failures fall through to the generic error toast.
+//
+// One reveal at a time across the whole table, not one per row. Two in flight
+// write to the same clipboard in whatever order they come back, so the key the
+// user ends up holding is the slower request's, not the row they clicked last —
+// and either request's finally would clear the other's loading state.
 const revealingId = ref<number | null>(null)
 async function copyPlaintext(row: APIKey) {
-  if (revealingId.value === row.id) return
+  if (revealingId.value !== null) return
   revealingId.value = row.id
   try {
     const res = await store.fetchPlaintext(row.id)
@@ -258,7 +262,7 @@ async function copyPlaintext(row: APIKey) {
     if (await copyToClipboard(res.plaintext_key)) {
       message.success(t('apiKeys.copied'))
     } else {
-      message.error(t('apiKeys.copyFailed'))
+      showPlaintextToCopyByHand(res.plaintext_key)
     }
   } catch (err) {
     // Fetch-side failure (incl. the legacy-key 11016) — distinct from a
@@ -267,6 +271,29 @@ async function copyPlaintext(row: APIKey) {
   } finally {
     revealingId.value = null
   }
+}
+
+// showPlaintextToCopyByHand puts the key somewhere the user can select it.
+//
+// Every automatic path has already failed by the time this runs: the Clipboard
+// API is unavailable or refused, and execCommand did not work either. Telling
+// somebody to "select and copy manually" while the key exists only in a local
+// variable leaves them with a button that does nothing and no way to try again
+// — the reveal itself is repeatable, but they have no reason to think a second
+// click behaves differently.
+function showPlaintextToCopyByHand(plaintext: string) {
+  dialog.warning({
+    title: t('apiKeys.copyFailed'),
+    content: () =>
+      h(NInput, {
+        value: plaintext,
+        readonly: true,
+        type: 'textarea',
+        autosize: { minRows: 2, maxRows: 4 },
+        onFocus: (e: FocusEvent) => (e.target as HTMLTextAreaElement | null)?.select(),
+      }),
+    positiveText: t('common.close'),
+  })
 }
 
 function onCreated() {

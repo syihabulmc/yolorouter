@@ -457,6 +457,20 @@ func TestGetAPIKeyPlaintextEndToEnd(t *testing.T) {
 	if revealEnv.Data.PlaintextKey != createEnv.Data.PlaintextKey {
 		t.Fatalf("revealed plaintext %q != create-time plaintext %q", revealEnv.Data.PlaintextKey, createEnv.Data.PlaintextKey)
 	}
+
+	// Both responses carry a credential in their body, so neither may be kept
+	// by a browser's disk cache or a shared proxy: a stored copy outlives the
+	// session it was fetched in and is readable by whoever has the machine
+	// afterwards. The reveal is a GET, the shape caches are most willing to
+	// store, which is why it is asserted alongside the create.
+	for _, resp := range []struct {
+		name string
+		w    *httptest.ResponseRecorder
+	}{{"create", w}, {"reveal", w2}} {
+		if got := resp.w.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+			t.Errorf("%s response Cache-Control = %q, want it to forbid storing the key", resp.name, got)
+		}
+	}
 }
 
 // TestGetAPIKeyPlaintextLegacyRowReturns11016 seeds a pre-00021 row (no

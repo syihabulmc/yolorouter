@@ -190,11 +190,29 @@ func PostAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			writeAPIKeyServiceError(c, err)
 			return
 		}
+		denyStorage(c)
 		response.Success(c, gin.H{
 			"plaintext_key": result.PlaintextKey,
 			"api_key":       result.APIKey,
 		})
 	}
+}
+
+// denyStorage tells every cache between here and the browser not to keep this
+// response.
+//
+// Both responses that carry a plaintext key go through it. Without it the
+// credential is an ordinary body that a browser's disk cache, or a shared proxy
+// keying on the URL, is free to retain — surviving the logout that was supposed
+// to end the session, and reachable by whoever gets the machine next. The
+// reveal endpoint is a GET, which is the shape caches are most willing to
+// store, so it is the one that needs this most; the create response gets it too
+// because the reason has nothing to do with the method.
+//
+// no-store rather than no-cache: no-cache permits storing the response and only
+// requires revalidation before reuse, which still leaves the key on disk.
+func denyStorage(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 }
 
 func GetAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
@@ -227,6 +245,7 @@ func GetAPIKeyPlaintext(svc *service.APIKeyService) gin.HandlerFunc {
 			writeAPIKeyServiceError(c, err)
 			return
 		}
+		denyStorage(c)
 		response.Success(c, gin.H{"plaintext_key": plaintext})
 	}
 }
