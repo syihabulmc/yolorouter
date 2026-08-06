@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -848,6 +849,24 @@ func (s *Service) recordAndSettle(c *gin.Context, rc *Exchange, adm admitted, d 
 	return s.settleCheckedDelivery(c, rc, d, start)
 }
 
+// redactedFailure renders a transport-layer failure for the audit trail with
+// the upstream URL redacted.
+//
+// net/http wraps its failures in a *url.Error carrying the URL it was handed.
+// url.Error hides the userinfo password and nothing else — a base URL
+// configured with the key in a query parameter comes through intact. That
+// string goes into the attempt record and is persisted, so the credential that
+// RedactURL strips at dispatch time walks straight back in through the error
+// text. Rebuilding the message around the already-redacted URL is what keeps
+// the two in step.
+func redactedFailure(err error, redactedURL string) string {
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		return uerr.Op + " " + redactedURL + ": " + uerr.Err.Error()
+	}
+	return err.Error()
+}
+
 // attemptResult is what one upstream attempt reports back to tryKeys.
 type attemptResult int
 
@@ -905,7 +924,8 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 		// over. Every key on this candidate would fail identically (url is
 		// candidate-invariant), so the first key attempt already exhausts
 		// this candidate via tryKeys' immediate return on attemptNextCandidate.
-		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptBadStatus, "build request: "+err.Error()))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptBadStatus,
+			"build request: "+redactedFailure(err, rc.upstreamURL)))
 		return attemptNextCandidate
 	}
 	codecsFor(egress.Protocol).RequestEncoder.SetupRequest(req, plaintext)
@@ -922,7 +942,8 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 			s.abandonRequestAfterAttempt(rc, "client_disconnected", start) // nginx-style 499
 			return attemptTerminal
 		}
-		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, err.Error()))
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError,
+			redactedFailure(err, rc.upstreamURL)))
 		return attemptNextCandidate
 	}
 
