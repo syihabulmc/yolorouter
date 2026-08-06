@@ -941,6 +941,12 @@ export default {
     streamBodyPreviewTruncated: '此处仅显示前 2MB 预览，',
     streamBodyViewFull: '查看完整文件',
     bodyNotRecorded: '未记录',
+    copyBody: '复制',
+    copyBodySuccess: '已复制内容',
+    copyBodyFailed: '复制失败，请手动选择复制',
+    bodyRawHint: '内容不是 JSON，已按原文展示。',
+    bodyTooLargeHint: '内容较大，已使用原文模式展示。',
+    sseTruncatedHint: 'SSE 片段较多，仅展示前 {shown} / {total} 条。',
 
     // Compression section (shown when compression was relevant for this request)
     sectionCompress: '输入压缩',
