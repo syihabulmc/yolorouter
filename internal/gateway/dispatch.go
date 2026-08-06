@@ -401,6 +401,12 @@ func (s *Service) processDispatchResponseNonStream(
 	// caller.
 	encoder := modelOverrideResponseEncoder{inner: codecsFor(ingress).ResponseEncoder, model: rc.originalModel}
 	usage, err := protocols.IRNonStreamRelay(protocols.NewGinClientWriter(c), resp, decoder, encoder, rc, nil)
+	// Read off the writer rather than inferred from err: the relay commits
+	// before it writes, so a write that then fails still means the caller has
+	// a status. This is what the audit row reports as "delivered".
+	if c.Writer.Written() {
+		rc.MarkFirstByteSent()
+	}
 	if err != nil {
 		if isClientWriteError(err) {
 			// The response was already fully decoded and (partially) written
@@ -599,7 +605,14 @@ func (s *Service) dispatchPassthroughNonStream(c *gin.Context, rc *Exchange, egr
 	rc.usage = usage
 	c.Header("Content-Type", "application/json")
 	c.Writer.WriteHeader(resp.StatusCode)
-	if _, werr := c.Writer.Write(rewritten); werr != nil {
+	_, werr := c.Writer.Write(rewritten)
+	// Read off the writer, not assumed from having chosen a status: WriteHeader
+	// alone only remembers one, and a write that fails immediately leaves the
+	// caller with nothing. This is what the audit row reports as "delivered".
+	if c.Writer.Written() {
+		rc.MarkFirstByteSent()
+	}
+	if werr != nil {
 		// Status + headers are already committed, so this candidate cannot
 		// fail over. The client never (fully) received these bytes — leave
 		// rc.responseBody unset (cleared by rc.clearResponseBodies() above)

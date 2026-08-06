@@ -297,15 +297,9 @@ func (r *ginClientResponse) Commit(status int) error {
 	// is the entire meaning of committing.
 	r.c.Writer.WriteHeaderNow()
 	r.status = status
-	// Deliberately NOT marking the exchange's first-byte-sent flag here.
-	//
-	// It would be true, and one day it should be set: a committed response has
-	// reached the caller by any honest reading. But that flag is also what the
-	// audit record reports as "delivered", and today only the streaming paths
-	// ever set it — so every successful non-streaming response is currently
-	// recorded as undelivered. Setting it here would flip that field for real
-	// traffic in the middle of moving code, and if the numbers then moved,
-	// nobody could tell the move from the fix. Whoever needs the flag sets it.
+	// A committed response has reached the caller, which is what this flag
+	// means and what the audit record reports as "delivered".
+	r.rc.MarkFirstByteSent()
 	return nil
 }
 
