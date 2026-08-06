@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +16,19 @@ import (
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/internal/testutil"
+	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
+
+// apiKeyTestMasterKey returns a deterministic 32-byte AES key for the handler
+// tests, mirroring provider_handler_test.go's recipe. The plaintext-reveal
+// path decrypts with this same key, so create and reveal must share it.
+func apiKeyTestMasterKey() []byte {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	return key
+}
 
 func newAPIKeyTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	t.Helper()
@@ -23,9 +36,10 @@ func newAPIKeyTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 		t.Fatalf("RegisterValidators failed: %v", err)
 	}
 	db := testutil.NewSQLiteDB(t)
-	svc := service.NewAPIKeyService(db)
+	svc := service.NewAPIKeyService(db, apiKeyTestMasterKey())
 	r := gin.New()
 	r.POST("/api/admin/api-keys", PostAPIKey(svc))
+	r.GET("/api/admin/api-keys/:id/plaintext", GetAPIKeyPlaintext(svc))
 	return r, db
 }
 
@@ -90,7 +104,7 @@ func newAPIKeyPatchTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 		t.Fatalf("RegisterValidators failed: %v", err)
 	}
 	db := testutil.NewSQLiteDB(t)
-	svc := service.NewAPIKeyService(db)
+	svc := service.NewAPIKeyService(db, apiKeyTestMasterKey())
 	r := gin.New()
 	r.POST("/api/admin/api-keys", PostAPIKey(svc))
 	r.GET("/api/admin/api-keys/:id", GetAPIKey(svc))
@@ -392,5 +406,86 @@ func TestPostAPIKeyCompressFieldsPersisted(t *testing.T) {
 	}
 	if !createEnv.Data.APIKey.CompressEnabled {
 		t.Fatalf("compress_enabled should be true in create response")
+	}
+}
+
+// TestGetAPIKeyPlaintextEndToEnd exercises the full reveal path: POST creates
+// a key (handing back the plaintext once), then GET /:id/plaintext must return
+// that same plaintext. The plaintext_key field name matches the create
+// response so the frontend reuses one code path.
+func TestGetAPIKeyPlaintextEndToEnd(t *testing.T) {
+	r, db := newAPIKeyTestRouter(t)
+	now := time.Now().UTC()
+	m := &model.Model{Name: "reveal-model", ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatalf("seed model: %v", err)
+	}
+	w := postAPIKey(t, r, map[string]any{"allow_all_models": true})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create key: status %d body %s", w.Code, w.Body.String())
+	}
+	var createEnv struct {
+		Data struct {
+			PlaintextKey string `json:"plaintext_key"`
+			APIKey       struct {
+				ID uint `json:"id"`
+			} `json:"api_key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &createEnv); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if !strings.HasPrefix(createEnv.Data.PlaintextKey, "sk-yr-") {
+		t.Fatalf("create response missing plaintext_key, got %q", createEnv.Data.PlaintextKey)
+	}
+
+	// Reveal: GET /api-keys/:id/plaintext must return the same plaintext.
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/api-keys/"+strconv.Itoa(int(createEnv.Data.APIKey.ID))+"/plaintext", nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("reveal: status %d body %s", w2.Code, w2.Body.String())
+	}
+	var revealEnv struct {
+		Data struct {
+			PlaintextKey string `json:"plaintext_key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &revealEnv); err != nil {
+		t.Fatalf("decode reveal response: %v", err)
+	}
+	if revealEnv.Data.PlaintextKey != createEnv.Data.PlaintextKey {
+		t.Fatalf("revealed plaintext %q != create-time plaintext %q", revealEnv.Data.PlaintextKey, createEnv.Data.PlaintextKey)
+	}
+}
+
+// TestGetAPIKeyPlaintextLegacyRowReturns11016 seeds a pre-00021 row (no
+// encrypted_key) and asserts the reveal endpoint returns the dedicated code,
+// so the frontend can show "this key predates the feature, create a new one".
+func TestGetAPIKeyPlaintextLegacyRowReturns11016(t *testing.T) {
+	r, db := newAPIKeyTestRouter(t)
+	now := time.Now().UTC()
+	// Seed directly — the create path always populates encrypted_key, so a
+	// legacy row must be seeded by hand to exercise the empty-column branch.
+	legacy := &model.APIKey{
+		KeyHash: "a-fixed-sha256-hash-value-here", KeyPrefix: "sk-yr-legacy000",
+		Status: model.APIKeyStatusActive, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(legacy).Error; err != nil {
+		t.Fatalf("seed legacy key: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/api-keys/"+strconv.Itoa(int(legacy.ID))+"/plaintext", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	// 11016 is a client error (the key's state doesn't support reveal), so the
+	// envelope maps it to 4xx — assert the business code in the body, not 200.
+	var env struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode legacy reveal body (status %d): %v body %s", w.Code, err, w.Body.String())
+	}
+	if env.Code != errcode.APIKeyPlaintextUnavailable {
+		t.Fatalf("expected errcode %d for legacy row, got %d (status %d body %s)", errcode.APIKeyPlaintextUnavailable, env.Code, w.Code, w.Body.String())
 	}
 }

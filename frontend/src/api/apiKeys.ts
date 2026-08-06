@@ -128,6 +128,15 @@ export function getAPIKey(id: number): Promise<APIKey> {
   return apiFetch(`/api/admin/api-keys/${id}`)
 }
 
+// Reveal the full plaintext key for the list-page copy button. Returns the
+// same plaintext_key field name as createAPIKey so the caller can reuse one
+// code path. The backend returns 11016 when the key predates the
+// encrypted_key column (its plaintext was never stored); that surfaces as an
+// APIError the UI displays via displayMessage.
+export function getAPIKeyPlaintext(id: number): Promise<{ plaintext_key: string }> {
+  return apiFetch(`/api/admin/api-keys/${id}/plaintext`)
+}
+
 export function updateAPIKey(id: number, input: UpdateAPIKeyInput): Promise<APIKey> {
   return apiFetch(`/api/admin/api-keys/${id}`, { method: 'PATCH', body: JSON.stringify(input) })
 }

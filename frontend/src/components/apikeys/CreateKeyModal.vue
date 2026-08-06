@@ -105,7 +105,6 @@
         </template>
       </n-input>
     </div>
-    <input type="text" id="copy" style="opacity: 0;">
     <template #footer>
       <n-space justify="end">
         <n-button v-if="step === 'form'" @click="emit('update:show', false)">{{ t('apiKeys.cancel') }}</n-button>
@@ -126,6 +125,7 @@ import { displayMessage } from '../../api/client'
 import type { CreateAPIKeyInput } from '../../api/apiKeys'
 import { toMicros } from '../../utils/money'
 import { modelIdsRule } from '../../utils/apiKeyValidators'
+import { copyToClipboard } from '../../utils/clipboard'
 import HelpLabel from '../HelpLabel.vue'
 import ModalDrawer from '../common/ModalDrawer.vue'
 import FilterSelectField from '../common/FilterSelectField.vue'
@@ -232,33 +232,20 @@ async function onGenerate() {
 // Returns whether the clipboard write succeeded so callers that close on copy
 // can keep the modal open when it fails (e.g. permission denied, or a
 // non-secure HTTP context where navigator.clipboard is undefined) — otherwise
-// the one-time key would be lost with no way to retrieve it.
+// the one-time key would be lost with no way to retrieve it. The clipboard
+// recipe (incl. the execCommand fallback) lives in utils/clipboard.ts, shared
+// with the list-page copy button.
 async function onCopy(): Promise<boolean> {
-  try {
-    if (isMobile) {
-      const oInput = document.getElementById('copy') as HTMLInputElement | null
-      if (!oInput) {
-        message.error(t('apiKeys.copyFailed'))
-        return false
-      }
-      oInput.value = plaintext.value
-      oInput.select()
-      if (!document.execCommand('Copy')) {
-        message.error(t('apiKeys.copyFailed'))
-        return false
-      }
-    } else {
-      await navigator.clipboard.writeText(plaintext.value)
-    }
-    copied.value = true
-    setTimeout(() => {
-      copied.value = false
-    }, 2000)
-    return true
-  } catch {
+  const ok = await copyToClipboard(plaintext.value)
+  if (!ok) {
     message.error(t('apiKeys.copyFailed'))
     return false
   }
+  copied.value = true
+  setTimeout(() => {
+    copied.value = false
+  }, 2000)
+  return true
 }
 
 // The plaintext step's primary button is labelled "Copy and close": copy the
