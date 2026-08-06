@@ -431,16 +431,76 @@ func (s *Service) settleAfterAttempt(rc *Exchange, d fact.Delivery, start time.T
 // change it — use this instead of settle, so the delivery is not checked and
 // recorded twice.
 func (s *Service) settleChecked(rc *Exchange, d fact.Delivery, start time.Time) {
+	s.logSettlement(rc, d)
+	s.finalize(rc, usageFromReport(d.Usage), d.BillingStatus, d.FailReason, start)
+}
+
+// logSettlement records how a request ended, at the level its ending deserves.
+//
+// What decides that is the delivery's own account of itself — who is at fault
+// and what the request is billed as — not whether the constructor that built it
+// happened to have an error in hand. Keying on the error made two ordinary
+// endings shout: a provider that reliably omits the stream terminator produced
+// a warning per SUCCESSFUL request, and a caller pressing stop produced one per
+// cancellation. It also made the same event log at two different levels
+// depending on which construction site it came through, since the other
+// disconnect path builds its delivery without an error at all.
+//
+// The routine half goes to debug, which a default deployment does not print at
+// all — deliberately, because the audit row is where every request is recorded
+// whatever its ending. What this function decides is only which endings are
+// worth interrupting somebody over.
+func (s *Service) logSettlement(rc *Exchange, d fact.Delivery) {
+	fields := []zap.Field{
+		zap.String("request_id", rc.requestID),
+		zap.String("fail_reason", d.FailReason),
+		zap.Int("billing_status", d.BillingStatus),
+		zap.String("fault", d.Fault.String()),
+	}
 	if d.Err != nil {
 		// The reason code is what gets persisted; the error itself only ever
-		// existed to be read by a human, and until now nothing read it.
-		logger.Warn("gateway: request settled on an error",
-			zap.String("request_id", rc.requestID),
-			zap.String("fail_reason", d.FailReason),
-			zap.Int("billing_status", d.BillingStatus),
-			zap.Error(d.Err))
+		// existed to be read by a human.
+		fields = append(fields, zap.Error(d.Err))
 	}
-	s.finalize(rc, usageFromReport(d.Usage), d.BillingStatus, d.FailReason, start)
+	if settlementIsRoutine(d) {
+		logger.Debug("gateway: request settled", fields...)
+		return
+	}
+	logger.Warn("gateway: request settled on a failure", fields...)
+}
+
+// settlementIsRoutine reports whether an ending is one an operator has no
+// reason to look at.
+//
+// A caller who leaves is not a malfunction — it is the most common way a
+// streaming request ends, and their leaving says nothing about this gateway or
+// the provider. Below that, a request billed under 500 was answered, and a
+// refusal the caller received whole is as much an answer as a completion: an
+// upstream 400 describes the request, not an outage, and one warning per
+// malformed request is one per caller mistake.
+//
+// What that leaves — and what is deliberately NOT routine — is the ending in
+// between: a caller shown a success status who then did not get the rest of it.
+// It is billed 200, settles 200, and reads like a success in every column that
+// gets persisted, so this line is the only place it can be seen at all. New
+// truncation sites therefore default to loud, which is the safe direction to be
+// wrong in.
+//
+// The one exception is a stream that ended without its terminator. It is not
+// recorded as complete because the end was never seen, but the caller very
+// likely holds the whole completion — some providers simply never send it, and
+// keying on that would produce a warning per SUCCESSFUL request.
+func settlementIsRoutine(d fact.Delivery) bool {
+	if d.Fault == fact.FaultClient {
+		return true
+	}
+	if d.BillingStatus >= 500 {
+		return false
+	}
+	if d.Committed && !d.Complete && d.ClientStatus < 400 {
+		return d.FailReason == noDoneTerminatorReason
+	}
+	return true
 }
 
 // invalidDeliveryReason marks a settlement the kernel substituted for one it

@@ -312,11 +312,11 @@ func (p *textPayload) deliverPassthroughNonStream(tools DeliveryTools, resp *htt
 			// blaming the provider for it would be a lie on their record.
 			return fact.Undelivered(499, fact.VerdictSettled, fact.FaultClient, "client_disconnected", err)
 		}
-		return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+		return fact.HandedOn(fact.FaultUpstream,
 			"read_body: "+err.Error(), err)
 	}
 	if int64(len(body)) > tools.Limits.MaxResponseBytes {
-		return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+		return fact.HandedOn(fact.FaultUpstream,
 			"response_too_large", nil)
 	}
 
@@ -324,7 +324,7 @@ func (p *textPayload) deliverPassthroughNonStream(tools DeliveryTools, resp *htt
 	if err != nil {
 		// Our own rewrite, not the provider's response: blaming the upstream
 		// here would put our bug on their record.
-		return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultGateway,
+		return fact.HandedOn(fact.FaultGateway,
 			"response_rewrite_failed: "+err.Error(), err)
 	}
 
@@ -335,7 +335,24 @@ func (p *textPayload) deliverPassthroughNonStream(tools DeliveryTools, resp *htt
 
 	tools.Client.Inject(http.Header{"Content-Type": {"application/json"}})
 	if cerr := tools.Client.Commit(resp.StatusCode); cerr != nil {
-		return fact.Undelivered(resp.StatusCode, fact.VerdictSettled, fact.FaultGateway,
+		// Billed as ours, not as the provider's 2xx. Commit is the step that
+		// puts a status on the wire, and it refuses before writing anything, so
+		// this response never went out under the upstream's code — filing it
+		// under that code would record a request nobody was served as a served
+		// one. The streaming side of this same failure already settles on 500.
+		//
+		// One of the two refusals means the opposite of the other: Commit also
+		// refuses a writer something else has already written to, and there the
+		// caller does hold a status. Nothing reaches this function after such a
+		// write today — a non-stream delivery only runs on a 2xx upstream, and
+		// every path that writes early ends the request instead — so the
+		// delivery below describes the refusal that is actually reachable, and
+		// says nothing about a caller who was already served.
+		//
+		// Still billed: the provider produced and charged for those tokens
+		// whatever happened to them afterwards, which is the same rule the
+		// write and flush failures below follow.
+		return fact.Undelivered(http.StatusInternalServerError, fact.VerdictSettled, fact.FaultGateway,
 			"commit_failed: "+cerr.Error(), cerr).WithUsage(report)
 	}
 	if _, werr := tools.Client.Write(rewritten); werr != nil {
@@ -384,7 +401,7 @@ func (p *textPayload) deliverTranslatedNonStream(tools DeliveryTools, resp *http
 		return fact.Truncated(resp.StatusCode, resp.StatusCode, fact.FaultUpstream,
 			"ir_decode_partial: "+err.Error(), err).WithUsage(report)
 	}
-	return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+	return fact.HandedOn(fact.FaultUpstream,
 		"ir_decode: "+err.Error(), err).WithUsage(report)
 }
 

@@ -20,8 +20,8 @@ func TestConstructorsProduceValidDeliveries(t *testing.T) {
 		{"stream died mid-flight", fact.Truncated(200, 200, fact.FaultUpstream, "stream_partial", errors.New("eof"))},
 		{"caller left mid-stream", fact.Truncated(200, 499, fact.FaultClient, "client_disconnected", errors.New("gone"))},
 		{"caller left before any byte", fact.Undelivered(499, fact.VerdictSettled, fact.FaultClient, "client_disconnected", errors.New("gone"))},
-		{"upstream failed, try next", fact.Undelivered(502, fact.VerdictNextCandidate, fact.FaultUpstream, "upstream_server_error", errors.New("boom"))},
-		{"our own encoder failed", fact.Undelivered(500, fact.VerdictNextCandidate, fact.FaultGateway, "egress_rewrite_failed", errors.New("encode"))},
+		{"upstream failed, try next", fact.HandedOn(fact.FaultUpstream, "upstream_server_error", errors.New("boom"))},
+		{"our own encoder failed", fact.HandedOn(fact.FaultGateway, "egress_rewrite_failed", errors.New("encode"))},
 	}
 
 	for _, tc := range cases {
@@ -98,6 +98,18 @@ func TestValidateRejectsImpossibleDeliveries(t *testing.T) {
 				Complete: true, Verdict: fact.VerdictSettled, Fault: fact.FaultUpstream,
 			},
 			want: "complete but blamed on upstream",
+		},
+		{
+			// The shape five call sites used to produce: they sit in the 2xx
+			// branch, the upstream's own status is the only number in reach,
+			// and it means nothing here because this delivery is not the one
+			// the caller is charged against.
+			name: "handed on, yet carrying a number to bill",
+			d: fact.Delivery{
+				Committed: false, BillingStatus: 200,
+				Verdict: fact.VerdictNextCandidate, Fault: fact.FaultUpstream,
+			},
+			want: "billing status 200 on a delivery that ends nothing",
 		},
 	}
 

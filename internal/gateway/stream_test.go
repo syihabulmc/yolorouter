@@ -227,16 +227,59 @@ func TestStreamUpstreamWithDoneSucceeds(t *testing.T) {
 }
 
 // TestStreamUpstreamNoDoneReturnsTruncationError: a stream that emits at
-// least one data frame but closes WITHOUT `data: [DONE]` must report
-// errStreamNoDoneTerminator so the delivery is recorded as partial rather than
-// a clean success (the client already received bytes, so it's a silent
-// truncation, not a clean completion).
+// least one data frame but closes WITHOUT `data: [DONE]` must report a
+// truncation so the delivery is recorded as partial rather than a clean success
+// — the client already received bytes, so it is a silent truncation, not a
+// clean completion.
+//
+// Which truncation it is depends on whether anything else vouched for the
+// completion; the pair below is what says so.
 func TestStreamUpstreamNoDoneReturnsTruncationError(t *testing.T) {
 	body := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
 	_, err := runStreamPump(t, body, true)
-	if !errors.Is(err, errStreamNoDoneTerminator) {
-		t.Fatalf("expected errStreamNoDoneTerminator, got %v", err)
+	if !errors.Is(err, errStreamEndedUnannounced) {
+		t.Fatalf("expected errStreamEndedUnannounced, got %v", err)
 	}
+}
+
+// TestAStreamMissingOnlyItsTerminatorIsToldFromOneCutShort pins the split that
+// decides whether an operator hears about a stream.
+//
+// Both bodies end without `data: [DONE]`, and until they were told apart both
+// produced the same reason code. One of them is a provider quirk that costs
+// nothing — several upstreams never send the sentinel — and warning on it means
+// a warning per SUCCESSFUL request, which is how a warning stops being read.
+// The other is a completion that stopped in the middle: billed 200, committed
+// 200, recorded as delivered, indistinguishable from a success in every column
+// that gets persisted. Collapse the two and one of those outcomes is guaranteed
+// to be wrong.
+//
+// The usage frame is what separates them, and it is available because this
+// gateway asks every upstream for usage whether or not the caller wanted it. A
+// stream that produced its final usage got to its end; one that produced
+// neither usage nor terminator said nothing about having finished at all.
+func TestAStreamMissingOnlyItsTerminatorIsToldFromOneCutShort(t *testing.T) {
+	const delta = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+	const usageFrame = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7}}\n\n"
+
+	t.Run("the provider that never sends [DONE]", func(t *testing.T) {
+		usage, err := runStreamPump(t, delta+usageFrame, true)
+		if !errors.Is(err, errStreamNoDoneTerminator) {
+			t.Fatalf("err = %v, want errStreamNoDoneTerminator: the final usage arrived, "+
+				"so the only thing missing is a sentinel this provider does not send", err)
+		}
+		if usage == nil {
+			t.Fatal("no usage reported; then the two cases were not actually told apart here")
+		}
+	})
+
+	t.Run("the completion that stopped in the middle", func(t *testing.T) {
+		_, err := runStreamPump(t, delta, true)
+		if !errors.Is(err, errStreamEndedUnannounced) {
+			t.Fatalf("err = %v, want errStreamEndedUnannounced: nothing in this stream "+
+				"said it had finished", err)
+		}
+	})
 }
 
 // cancelAfterReader delivers all of its bytes on the first Read, then cancels

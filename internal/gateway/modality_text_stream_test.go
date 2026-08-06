@@ -434,27 +434,65 @@ func TestTheModalityStreamsWhatItPromises(t *testing.T) {
 // TestAStreamThatEndsWithoutItsTerminatorIsNotCalledComplete pins the case an
 // equal-bytes assertion alone would let through.
 //
-// The caller may well hold the whole answer — some upstreams simply never send
-// the terminator — so nothing is injected into their stream and the status
-// stays 200. What cannot be said is that the end of the response was seen, and
-// a delivery reported complete here is one the audit trail would later claim
-// finished when nobody knows that it did.
+// Neither of these streams sends its terminator, so neither can be called
+// complete: what cannot be said is that the end of the response was seen, and a
+// delivery reported complete here is one the audit trail would later claim
+// finished when nobody knows that it did. Nothing is injected into the caller's
+// stream and the status stays 200 either way — a caller who turned out to hold
+// the whole answer must not have it broken to make a point.
+//
+// The two carry different reasons because they are different facts, and the
+// reason is the only field that differs. The first still produced its final
+// usage, which only a stream that reached its end produces; the second said
+// nothing at all about having finished.
 func TestAStreamThatEndsWithoutItsTerminatorIsNotCalledComplete(t *testing.T) {
-	const truncated = `data: {"id":"c1","model":"gpt-4o-real","choices":[{"delta":{"content":"hi"}}]}` + "\n\n"
+	const delta = `data: {"id":"c1","model":"gpt-4o-real","choices":[{"delta":{"content":"hi"}}]}` + "\n\n"
+	const usageFrame = `data: {"id":"c1","model":"gpt-4o-real","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}` + "\n\n"
 	const caller = `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	const forwarded = `data: {"choices":[{"delta":{"content":"hi"}}],"id":"c1","model":"gpt-4o"}` + "\n\n"
 
-	got := runStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", caller, upstreamStream(t, truncated))
-	checkStream(t, streamWant{
-		clientBody:    `data: {"choices":[{"delta":{"content":"hi"}}],"id":"c1","model":"gpt-4o"}` + "\n\n",
-		captureExists: true, firstByteSent: true,
-		clientStatus: http.StatusOK, verdict: fact.VerdictSettled, committed: true, complete: false,
-	}, got)
-
-	if got.delivery.Fault != fact.FaultUpstream {
-		t.Errorf("fault = %v, want upstream; the provider is the one that stopped short", got.delivery.Fault)
+	cases := []struct {
+		name       string
+		upstream   string
+		clientBody string
+		promptSeen int
+		completion int
+		wantReason string
+	}{
+		{
+			name:     "a provider that never sends the terminator",
+			upstream: delta + usageFrame,
+			// The caller did not ask for usage, so the frame the gateway
+			// requested on its own behalf is stripped back out of it.
+			clientBody: forwarded + `data: {"choices":[],"id":"c1","model":"gpt-4o"}` + "\n\n",
+			promptSeen: 3, completion: 4,
+			wantReason: "stream_no_done",
+		},
+		{
+			name:       "a completion that stopped in the middle",
+			upstream:   delta,
+			clientBody: forwarded,
+			wantReason: "stream_ended_unannounced",
+		},
 	}
-	if got.delivery.FailReason != "stream_no_done" {
-		t.Errorf("fail reason = %q, want %q", got.delivery.FailReason, "stream_no_done")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", caller, upstreamStream(t, tc.upstream))
+			checkStream(t, streamWant{
+				clientBody:    tc.clientBody,
+				captureExists: true, firstByteSent: true,
+				promptSeen: tc.promptSeen, completion: tc.completion,
+				clientStatus: http.StatusOK, verdict: fact.VerdictSettled, committed: true, complete: false,
+			}, got)
+
+			if got.delivery.Fault != fact.FaultUpstream {
+				t.Errorf("fault = %v, want upstream; the provider is the one that stopped short", got.delivery.Fault)
+			}
+			if got.delivery.FailReason != tc.wantReason {
+				t.Errorf("fail reason = %q, want %q", got.delivery.FailReason, tc.wantReason)
+			}
+		})
 	}
 }
 

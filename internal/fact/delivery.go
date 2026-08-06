@@ -180,6 +180,27 @@ func Undelivered(billingStatus int, next Verdict, at Fault, failReason string, e
 	}
 }
 
+// HandedOn reports an attempt that served nothing and leaves the request to
+// the next candidate.
+//
+// No billing status, because this delivery does not end the request and
+// therefore never reaches settlement — whichever delivery does will carry the
+// number the caller is charged against. The five sites that build one of these
+// used to pass the upstream's own status, which is 2xx on every one of them:
+// they sit in the 2xx branch, and a 2xx was the only number in reach. The
+// resulting record read "nothing was committed, the provider is at fault, and
+// the request billed 200", which is three statements that cannot all be true.
+func HandedOn(at Fault, failReason string, err error) Delivery {
+	return Delivery{
+		Committed:  false,
+		Verdict:    VerdictNextCandidate,
+		Complete:   false,
+		Fault:      at,
+		Err:        err,
+		FailReason: failReason,
+	}
+}
+
 // WithUsage attaches what this attempt reported as billable.
 //
 // A method rather than a parameter on every constructor: most deliveries have
@@ -219,7 +240,7 @@ func (d Delivery) Validate() error {
 	if d.Verdict == VerdictUnset {
 		return fmt.Errorf("delivery: verdict is unset")
 	}
-	if d.BillingStatus == 0 {
+	if d.Verdict == VerdictSettled && d.BillingStatus == 0 {
 		return fmt.Errorf("delivery: billing status is unset, settlement has nothing to reason about")
 	}
 	if d.Committed && d.Verdict != VerdictSettled {
@@ -240,6 +261,14 @@ func (d Delivery) Validate() error {
 	if d.Complete && d.Fault != FaultNone {
 		return fmt.Errorf("delivery: complete but blamed on %s", d.Fault)
 	}
+	// Last, deliberately. Every rule above describes a sharper contradiction,
+	// and a delivery that trips one of those usually carries a status too — put
+	// this first and it answers for all of them, telling the reader about the
+	// number instead of about the thing that is actually wrong.
+	if d.Verdict != VerdictSettled && d.BillingStatus != 0 {
+		return fmt.Errorf("delivery: billing status %d on a delivery that ends nothing: "+
+			"the request goes on and will be billed by whichever delivery settles it", d.BillingStatus)
+	}
 	return nil
 }
 
@@ -257,6 +286,17 @@ type DeliveryObserved struct {
 	ClientStatus  int
 	BillingStatus int
 	Fault         string
+	// Verdict and FailReason are what the kernel decided and why.
+	//
+	// Fault alone says who is to blame without saying what was done about it,
+	// and for a delivery that hands the request to the next candidate this
+	// record is the only place either question is ever answered: those never
+	// reach settlement, so nothing else writes a reason code for them. The
+	// codes are assembled with some care at the point of failure — response
+	// bodies that would not decode, rewrites that could not proceed, responses
+	// over the cap — and until now every one of them was built and dropped.
+	Verdict    string
+	FailReason string
 }
 
 // RecordName implements Record.
@@ -270,5 +310,7 @@ func (d Delivery) Observed() DeliveryObserved {
 		ClientStatus:  d.ClientStatus,
 		BillingStatus: d.BillingStatus,
 		Fault:         d.Fault.String(),
+		Verdict:       d.Verdict.String(),
+		FailReason:    d.FailReason,
 	}
 }

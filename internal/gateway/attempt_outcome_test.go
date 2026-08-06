@@ -35,7 +35,7 @@ func TestAttemptOutcomeMatchesEveryExistingSite(t *testing.T) {
 		{"ir stream delivered the whole response", true,
 			fact.Succeeded(200), AttemptSuccess},
 		{"ir stream failed before the first byte", true,
-			fact.Undelivered(200, fact.VerdictNextCandidate, fact.FaultUpstream, "stream start: "+boom.Error(), boom),
+			fact.HandedOn(fact.FaultUpstream, "stream start: "+boom.Error(), boom),
 			AttemptServerError},
 		{"caller stopped reading mid-stream", true,
 			fact.Truncated(200, 499, fact.FaultClient, "client_write_timeout", boom), AttemptConnError},
@@ -50,7 +50,7 @@ func TestAttemptOutcomeMatchesEveryExistingSite(t *testing.T) {
 			fact.Truncated(200, 200, fact.FaultUpstream, "ir_decode_partial: "+boom.Error(), boom),
 			AttemptBadStatus},
 		{"ir decode failed with nothing written", false,
-			fact.Undelivered(200, fact.VerdictNextCandidate, fact.FaultUpstream, "ir_decode: "+boom.Error(), boom),
+			fact.HandedOn(fact.FaultUpstream, "ir_decode: "+boom.Error(), boom),
 			AttemptBadStatus},
 		{"ir non-stream delivered the whole response", false,
 			fact.Succeeded(200), AttemptSuccess},
@@ -64,13 +64,13 @@ func TestAttemptOutcomeMatchesEveryExistingSite(t *testing.T) {
 			fact.Undelivered(499, fact.VerdictSettled, fact.FaultClient, "client_disconnected", boom),
 			AttemptConnError},
 		{"reading the upstream body failed", false,
-			fact.Undelivered(200, fact.VerdictNextCandidate, fact.FaultUpstream, "read_body: "+boom.Error(), boom),
+			fact.HandedOn(fact.FaultUpstream, "read_body: "+boom.Error(), boom),
 			AttemptBadStatus},
 		{"upstream response was too large", false,
-			fact.Undelivered(200, fact.VerdictNextCandidate, fact.FaultUpstream, "response_too_large", nil),
+			fact.HandedOn(fact.FaultUpstream, "response_too_large", nil),
 			AttemptBadStatus},
 		{"our own rewrite of the response failed", false,
-			fact.Undelivered(200, fact.VerdictNextCandidate, fact.FaultGateway, "response_rewrite_failed: "+boom.Error(), boom),
+			fact.HandedOn(fact.FaultGateway, "response_rewrite_failed: "+boom.Error(), boom),
 			AttemptBadStatus},
 		{"passthrough non-stream delivered the whole response", false,
 			fact.Succeeded(200), AttemptSuccess},
@@ -86,7 +86,7 @@ func TestAttemptOutcomeMatchesEveryExistingSite(t *testing.T) {
 		{"upstream ended the stream without its terminator", true,
 			fact.Truncated(200, 200, fact.FaultUpstream, "stream_no_done", boom), AttemptServerError},
 		{"passthrough stream failed before the first byte", true,
-			fact.Undelivered(200, fact.VerdictNextCandidate, fact.FaultUpstream, "stream start: "+boom.Error(), boom),
+			fact.HandedOn(fact.FaultUpstream, "stream start: "+boom.Error(), boom),
 			AttemptServerError},
 
 		// ── not a call site: the conjunct no site happens to exercise ────────
@@ -95,10 +95,10 @@ func TestAttemptOutcomeMatchesEveryExistingSite(t *testing.T) {
 		// of the success test is unpinned -- and an attempt that delivered
 		// nothing at all would be free to record itself as a success.
 		{"nothing was delivered and nobody is to blame", false,
-			fact.Undelivered(200, fact.VerdictNextCandidate, fact.FaultNone, "no_delivery", nil),
+			fact.HandedOn(fact.FaultNone, "no_delivery", nil),
 			AttemptBadStatus},
 		{"nothing was delivered and nobody is to blame, streaming", true,
-			fact.Undelivered(200, fact.VerdictNextCandidate, fact.FaultNone, "no_delivery", nil),
+			fact.HandedOn(fact.FaultNone, "no_delivery", nil),
 			AttemptServerError},
 	}
 
@@ -122,7 +122,7 @@ func TestAttemptOutcomeMatchesEveryExistingSite(t *testing.T) {
 // asserting bad_status for it here would hand a passing test to a change that
 // routed status classification through this function.
 func TestStreamingIsWhatSeparatesTheTwoFailureLabels(t *testing.T) {
-	failed := fact.Undelivered(200, fact.VerdictNextCandidate, fact.FaultUpstream, "read_body: eof", nil)
+	failed := fact.HandedOn(fact.FaultUpstream, "read_body: eof", nil)
 
 	if got := attemptOutcomeFor(failed, true); got != AttemptServerError {
 		t.Errorf("streaming failure = %q, want %q", got, AttemptServerError)

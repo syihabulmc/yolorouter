@@ -46,7 +46,7 @@ func (s *stubPayload) Deliver(DeliveryTools, *http.Response) fact.Delivery {
 	if s.deliver.Verdict != fact.VerdictUnset {
 		return s.deliver
 	}
-	return fact.Undelivered(502, fact.VerdictNextCandidate, fact.FaultUpstream, "upstream_server_error", nil)
+	return fact.HandedOn(fact.FaultUpstream, "upstream_server_error", nil)
 }
 func (s *stubPayload) NormalizeUpstreamError(int, []byte, string) ErrorEnvelope {
 	return ErrorEnvelope{}
@@ -98,7 +98,7 @@ func TestTheDocumentedOrderIsAccepted(t *testing.T) {
 	// request -- and a happy-path test written that way pins the very sequence
 	// the assertion is supposed to refuse.
 	deliveries := []fact.Delivery{
-		fact.Undelivered(502, fact.VerdictNextCandidate, fact.FaultUpstream, "upstream_server_error", nil),
+		fact.HandedOn(fact.FaultUpstream, "upstream_server_error", nil),
 		fact.Succeeded(200),
 	}
 	stub := &stubPayload{}
@@ -241,7 +241,7 @@ func TestASettledDeliveryEndsTheChain(t *testing.T) {
 // request instead.
 func TestUsageTravelsWithTheDeliveryThatEarnedIt(t *testing.T) {
 	u := &fact.UsageReported{Unit: fact.UnitToken, Source: fact.UsageFromUpstream, Prompt: 1234}
-	failed := fact.Undelivered(502, fact.VerdictNextCandidate, fact.FaultUpstream, "upstream_server_error", nil).WithUsage(u)
+	failed := fact.HandedOn(fact.FaultUpstream, "upstream_server_error", nil).WithUsage(u)
 	if failed.Usage == nil || failed.Usage.Prompt != 1234 {
 		t.Fatalf("Usage = %+v, want the 1234 prompt tokens this attempt reported", failed.Usage)
 	}
@@ -333,7 +333,7 @@ func (f *fakeResponse) CommittedStatus() int { return f.status }
 // response already sent. Only the thing that wrote the bytes can catch it.
 func TestADeliveryCannotDenyAResponseTheCallerReceived(t *testing.T) {
 	stub := &stubPayload{
-		deliver: fact.Undelivered(502, fact.VerdictNextCandidate, fact.FaultUpstream, "upstream_server_error", nil),
+		deliver: fact.HandedOn(fact.FaultUpstream, "upstream_server_error", nil),
 	}
 	p := newOrderedPayload(stub, "req-dishonest")
 	tools := DeliveryTools{Client: &fakeResponse{status: 200}}
@@ -486,7 +486,7 @@ func (b *bareWriteResponse) CommittedStatus() int { return b.status }
 // type never recorded is the normal case, not the exotic one.
 func TestReconcileCatchesAResponseWrittenOutsideTheSink(t *testing.T) {
 	client := &bareWriteResponse{written: true, status: 200}
-	d := fact.Undelivered(502, fact.VerdictNextCandidate, fact.FaultUpstream, "upstream_server_error", nil)
+	d := fact.HandedOn(fact.FaultUpstream, "upstream_server_error", nil)
 
 	got := reconcileWithResponse(client, d, "req-bare")
 
@@ -521,7 +521,7 @@ func TestReconcileCorrectsTheStatusToo(t *testing.T) {
 func TestReconcileKeepsTheUsageItRefuses(t *testing.T) {
 	u := &fact.UsageReported{Unit: fact.UnitToken, Source: fact.UsageFromUpstream, Prompt: 777}
 	client := &bareWriteResponse{written: true, status: 200}
-	d := fact.Undelivered(502, fact.VerdictNextCandidate, fact.FaultUpstream, "upstream_server_error", nil).WithUsage(u)
+	d := fact.HandedOn(fact.FaultUpstream, "upstream_server_error", nil).WithUsage(u)
 
 	got := reconcileWithResponse(client, d, "req-usage")
 

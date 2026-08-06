@@ -193,7 +193,9 @@ func TestDeliverNonStreamRendersTheWholeAccount(t *testing.T) {
 			// got no status at all, which is the answer that counts.
 			want: deliveryWant{
 				clientStatus: 200,
-				verdict:      fact.VerdictNextCandidate, billingStatus: 200, fault: fact.FaultGateway,
+				// No billing status: this delivery ends nothing, so the number
+				// the caller is charged against belongs to whichever one does.
+				verdict: fact.VerdictNextCandidate, fault: fact.FaultGateway,
 				failReason:     "response_rewrite_failed: parse json object: invalid character 'n' looking for beginning of object key string",
 				attemptOutcome: "bad_status",
 			},
@@ -221,7 +223,7 @@ func TestDeliverNonStreamRendersTheWholeAccount(t *testing.T) {
 			// contract, and the bytes are the only evidence of that.
 			want: deliveryWant{
 				clientStatus: 200, upstreamBody: `{not json`,
-				verdict: fact.VerdictNextCandidate, billingStatus: 200, fault: fact.FaultUpstream,
+				verdict: fact.VerdictNextCandidate, fault: fact.FaultUpstream,
 				failReason:     "ir_decode: invalid character 'n' looking for beginning of object key string",
 				attemptOutcome: "bad_status",
 			},

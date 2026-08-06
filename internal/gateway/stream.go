@@ -42,12 +42,29 @@ func clientDisconnectOutcome(usage *Usage, doneSeen bool) (*Usage, error) {
 	return usage, errClientDisconnected
 }
 
-// errStreamNoDoneTerminator is returned when the upstream sent at least one
-// data frame but closed the stream without the `data: [DONE]` terminator.
-// The completion is silently truncated — the caller already received bytes
-// (so the HTTP status stays 200), but the passthrough dispatch path logs a
-// partial row, not clean success (stream-integrity fix).
+// errStreamNoDoneTerminator is returned when a stream closed without its
+// `data: [DONE]` terminator but did deliver what only a finished stream
+// delivers — the final usage frame, which this gateway asks every upstream for
+// whether or not the caller wanted it.
+//
+// So the caller most likely holds the whole completion and the provider simply
+// never sends the sentinel, which several of them do not. It is still not
+// recorded as complete, because the end was never announced; what it is not is
+// something to wake anybody over.
 var errStreamNoDoneTerminator = errors.New("upstream stream ended without [DONE] terminator")
+
+// errStreamEndedUnannounced is the other half of that: the body ended cleanly
+// with nothing at all saying the completion had finished — no terminator, and
+// none of the trailing matter a finished stream carries.
+//
+// Told apart from the case above because they deserve opposite treatment and
+// used to share one code. A caller was handed a 200 and part of an answer,
+// which every column that gets persisted records as a success, so the one
+// warning this produces is all there is to go on. No error frame is injected
+// into the response: a decoder that failed to recognise a terminal event would
+// land here too, and breaking a completion that turned out to be whole is worse
+// than logging one that was not.
+var errStreamEndedUnannounced = errors.New("upstream stream ended without announcing completion")
 
 // errClientCommitRefused is returned by a stream pump when the response it was
 // about to send has already been committed by something else.

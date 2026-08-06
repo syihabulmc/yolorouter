@@ -66,14 +66,26 @@ func (p *textPayload) settleStream(tools DeliveryTools, resp *http.Response, rep
 		// it. What can honestly be said is that the end of the stream was never
 		// seen, so it is not recorded as complete.
 		return fact.Truncated(http.StatusOK, http.StatusOK, fact.FaultUpstream,
-			"stream_no_done", err).WithUsage(report)
+			noDoneTerminatorReason, err).WithUsage(report)
+
+	case errors.Is(err, errStreamEndedUnannounced):
+		// Same shape as above and a different reason on purpose: this one is
+		// the ending that reads like a success everywhere else, so the reason
+		// code is what carries it to somebody's attention.
+		return fact.Truncated(http.StatusOK, http.StatusOK, fact.FaultUpstream,
+			"stream_ended_unannounced", err).WithUsage(report)
 
 	case tools.Client.Committed():
 		return p.midStreamFailure(tools, report, err)
 	}
-	return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+	return fact.HandedOn(fact.FaultUpstream,
 		"stream start: "+err.Error(), err).WithUsage(report)
 }
+
+// noDoneTerminatorReason marks a stream whose end was never announced. Named
+// because two places have to agree on it: this is the one incomplete delivery
+// an operator is not asked to look at, and the log level is decided elsewhere.
+const noDoneTerminatorReason = "stream_no_done"
 
 // midStreamFailure reports a stream that broke after the caller was committed.
 //
@@ -309,9 +321,10 @@ func (p *textPayload) pumpSameProtocol(tools DeliveryTools, resp *http.Response)
 			return usage, ferr
 		}
 	}
-	// Whole means terminator AND usage: OpenAI puts usage in its own frame, so
-	// one that never arrived means the stream stopped short of its end.
-	return usage, pump.end(scanner.Err(), doneSeen, doneSeen && usage != nil)
+	// The usage frame is OpenAI's own trailing matter, and this gateway asks
+	// every upstream for it whether or not the caller wanted it — so its arrival
+	// is a fact about the completion that survives a missing terminator.
+	return usage, pump.end(scanner.Err(), doneSeen, usage != nil)
 }
 
 // pumpSameProtocolDecoded forwards a non-OpenAI stream to a caller who speaks
@@ -383,9 +396,11 @@ func (p *textPayload) pumpSameProtocolDecoded(tools DeliveryTools, resp *http.Re
 			accumulate(deltas)
 		}
 	}
-	// Whole means the completion signal alone. These protocols carry usage
-	// inside their terminal event, and a provider that reports none has still
-	// finished.
+	// One answer to both questions: these protocols carry usage inside their
+	// terminal event, so nothing arrives after it that could vouch for a
+	// completion the terminal event did not announce. There is also no sentinel
+	// for a provider to omit here — unlike `data: [DONE]`, the terminal event is
+	// the completion — so a stream that reaches this without one was cut short.
 	return currentUsage(), pump.end(scanner.Err(), sig.SawDone, sig.SawDone)
 }
 
@@ -397,13 +412,18 @@ func (p *textPayload) pumpSameProtocolDecoded(tools DeliveryTools, resp *http.Re
 // that produced no data at all is a candidate that can still be replaced rather
 // than a response that went wrong.
 //
-// What the two pumps do NOT share is `whole`, and it is a parameter rather than
-// something computed here because each protocol answers it differently. An
-// OpenAI stream reports usage in a frame of its own, so one that reached the
-// terminator without it stopped short even though the terminator arrived. The
-// other protocols carry usage inside their terminal event, where demanding it
-// separately would file whole streams as broken.
-func (s *streamPump) end(scanErr error, sawTerminator, whole bool) error {
+// What the two pumps do NOT share is sawCompletion, and it is a parameter
+// rather than something computed here because each protocol answers it
+// differently. An OpenAI stream reports usage in a frame of its own, so that
+// frame arriving is a fact about the completion separate from the terminator —
+// which is what lets a stream missing only the terminator be told apart from
+// one that was cut short. The other protocols carry usage inside their terminal
+// event, so for them the two questions have one answer and demanding a separate
+// signal would file whole streams as broken.
+func (s *streamPump) end(scanErr error, sawTerminator, sawCompletion bool) error {
+	// Whole means both: the end was announced AND everything the protocol puts
+	// at the end arrived.
+	whole := sawTerminator && sawCompletion
 	if scanErr != nil {
 		if s.tools.Client.CallerGone() {
 			// The caller's departure cancels the upstream read too, so it
@@ -426,7 +446,10 @@ func (s *streamPump) end(scanErr error, sawTerminator, whole bool) error {
 		return errors.New("upstream stream ended before any data chunk")
 	}
 	if !sawTerminator {
-		return errStreamNoDoneTerminator
+		if sawCompletion {
+			return errStreamNoDoneTerminator
+		}
+		return errStreamEndedUnannounced
 	}
 	return nil
 }
