@@ -33,7 +33,11 @@ type stubClient struct {
 	committed bool
 	status    int
 	gone      bool
-	flushErr  error
+	// ourDeadlineExpired closes CallerDone without making CallerGone true,
+	// which is the one state the two answers differ in and the one a stub that
+	// collapsed them could never reach.
+	ourDeadlineExpired bool
+	flushErr           error
 	// pending holds what was written, received what was flushed. The split is
 	// the property most of these tests turn on.
 	pending  bytes.Buffer
@@ -68,13 +72,16 @@ func (s *stubClient) CommittedStatus() int {
 	return s.status
 }
 
-// CallerDone answers the same question as CallerGone, which is what the real
-// one does too — a caller whose context is done is a caller who went. Never nil:
-// a nil channel blocks forever rather than reporting "not done", so a select on
-// it would behave differently here than in production.
+// CallerDone closes when the caller is gone OR when a deadline of our own
+// expired, which is the distinction the real object exists to keep: our own
+// timeout closes this channel while CallerGone stays false, and anything
+// deciding blame has to ask CallerGone instead.
+//
+// Never nil: a nil channel blocks forever rather than reporting "not done", so
+// a select on it would behave differently here than in production.
 func (s *stubClient) CallerDone() <-chan struct{} {
 	ch := make(chan struct{})
-	if s.gone {
+	if s.gone || s.ourDeadlineExpired {
 		close(ch)
 	}
 	return ch
@@ -390,5 +397,46 @@ func TestATranslatedStreamNamesADoubleCommitForWhatItIs(t *testing.T) {
 	}
 	if got.BillingStatus != http.StatusInternalServerError {
 		t.Errorf("billing status = %d, want 500", got.BillingStatus)
+	}
+}
+
+// TestAWriteFailureOutranksACallerWhoAlsoLeft pins the order of the three
+// questions a broken stream is put through.
+//
+// Both are true here: the write failed and the caller is gone. They are not the
+// same finding — one says the bytes died on our side of a caller still nominally
+// there, the other says they had already left — and only the write itself is
+// unambiguous, because a write deadline of ours expiring makes the caller look
+// gone a moment later. Asking in the other order files our own slow writes as
+// somebody else's departure.
+func TestAWriteFailureOutranksACallerWhoAlsoLeft(t *testing.T) {
+	client := &stubClient{committed: true, status: http.StatusOK, gone: true}
+
+	got := settledStream(t, client, protocols.ErrClientWrite)
+
+	if got.FailReason != "client_write_timeout" {
+		t.Errorf("fail reason = %q, want client_write_timeout — the write is what actually failed", got.FailReason)
+	}
+	if client.received.Len() != 0 || client.writes != 0 {
+		t.Errorf("wrote a closing frame down a connection whose write had just failed")
+	}
+}
+
+// TestOurOwnDeadlineIsNotACallerWhoLeft pins the distinction CallerDone and
+// CallerGone exist to keep, on the stub that has to preserve it.
+//
+// A stub whose two answers moved together could never reach the state this
+// checks, and a test written against it would pass while the product filed our
+// own timeout as a 499 against a caller who was still waiting.
+func TestOurOwnDeadlineIsNotACallerWhoLeft(t *testing.T) {
+	client := &stubClient{committed: true, status: http.StatusOK, ourDeadlineExpired: true}
+
+	select {
+	case <-client.CallerDone():
+	default:
+		t.Error("CallerDone is open after our own deadline expired; it closes for that too")
+	}
+	if client.CallerGone() {
+		t.Error("CallerGone is true after OUR deadline expired; the caller never went anywhere")
 	}
 }

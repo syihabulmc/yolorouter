@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
 	"testing"
 	"time"
 
@@ -33,6 +33,7 @@ type streamOutcome struct {
 	captureExists  bool
 	firstByteSent  bool
 	completionSeen int
+	promptSeen     int
 }
 
 func upstreamStream(t *testing.T, body string) *http.Response {
@@ -75,11 +76,17 @@ func runOldStream(t *testing.T, ingress, egress protocols.ProtocolID, passthroug
 			}
 			return rc.usage.CompletionTokens
 		}(),
+		promptSeen: func() int {
+			if rc.usage == nil {
+				return 0
+			}
+			return rc.usage.PromptTokens
+		}(),
 	}
 }
 
 // runNewStream drives the same response through the modality.
-func runNewStream(t *testing.T, ingress, egress protocols.ProtocolID, passthrough bool, callerBody string, resp *http.Response) streamOutcome {
+func runNewStream(t *testing.T, ingress, egress protocols.ProtocolID, passthrough bool, callerPath, callerBody string, resp *http.Response) streamOutcome {
 	t.Helper()
 	dir := t.TempDir()
 	w := httptest.NewRecorder()
@@ -89,7 +96,7 @@ func runNewStream(t *testing.T, ingress, egress protocols.ProtocolID, passthroug
 	c.Set(BodiesDirContextKey, dir)
 
 	payload, rej := NewTextModality().Admit(context.Background(), Ingress{
-		Protocol: ingress, Path: "/v1/chat/completions", Body: []byte(callerBody),
+		Protocol: ingress, Path: callerPath, Body: []byte(callerBody),
 	})
 	if rej != nil {
 		t.Fatalf("Admit refused a valid body: %+v", rej)
@@ -117,6 +124,7 @@ func runNewStream(t *testing.T, ingress, egress protocols.ProtocolID, passthroug
 	}
 	if d.Usage != nil {
 		out.completionSeen = d.Usage.Completion
+		out.promptSeen = d.Usage.Prompt
 	}
 	return out
 }
@@ -139,8 +147,33 @@ func readCapture(t *testing.T, dir, requestID string) (content string, exists bo
 	return string(b), true
 }
 
+// generatedID matches the identifier the gateway mints for a response whose
+// provider did not supply one.
+var generatedID = regexp.MustCompile(`gen-[A-Za-z0-9]+`)
+
+// steady replaces what is freshly minted on every run with a fixed token, after
+// checking the one property worth keeping about it: that a response uses ONE id
+// throughout. Without that check the substitution would also hide chunks
+// disagreeing about which response they belong to.
+func steady(t *testing.T, body string) string {
+	t.Helper()
+	if ids := generatedID.FindAllString(body, -1); len(ids) > 0 {
+		for _, id := range ids[1:] {
+			if id != ids[0] {
+				t.Errorf("one response carries two identifiers, %q and %q", ids[0], id)
+				break
+			}
+		}
+	}
+	return generatedID.ReplaceAllString(body, "gen-*")
+}
+
 func compareStream(t *testing.T, old, got streamOutcome) {
 	t.Helper()
+	// A provider that supplies no identifier gets one minted per run, so the
+	// two implementations cannot be compared on it — only on everything else.
+	old.clientBody, got.clientBody = steady(t, old.clientBody), steady(t, got.clientBody)
+	old.captured, got.captured = steady(t, old.captured), steady(t, got.captured)
 	if got.clientStatus != old.clientStatus {
 		t.Errorf("caller received status %d, previously %d", got.clientStatus, old.clientStatus)
 	}
@@ -171,6 +204,25 @@ func compareStream(t *testing.T, old, got streamOutcome) {
 	if got.delivery.Complete != old.delivery.Complete {
 		t.Errorf("complete = %v, previously %v", got.delivery.Complete, old.delivery.Complete)
 	}
+	if got.promptSeen != old.promptSeen {
+		t.Errorf("prompt tokens = %d, previously %d", got.promptSeen, old.promptSeen)
+	}
+}
+
+// requireDelivered fails a comparison that compared two nothings.
+//
+// Two implementations agreeing is worth nothing when what they agree on is that
+// the fixture produced no response — the assertions all pass on empty strings,
+// and the case reads as covered while exercising none of the path it was added
+// for.
+func requireDelivered(t *testing.T, got streamOutcome) {
+	t.Helper()
+	if got.clientBody == "" {
+		t.Fatalf("this case delivered nothing (verdict %v); it proves only that both sides fail alike", got.delivery.Verdict)
+	}
+	if !got.delivery.Complete {
+		t.Fatalf("this case did not complete (fail reason %q)", got.delivery.FailReason)
+	}
 }
 
 // TestTheModalityStreamsWhatTheServiceStreamed runs one upstream stream through
@@ -200,8 +252,11 @@ func TestTheModalityStreamsWhatTheServiceStreamed(t *testing.T) {
 		egress      protocols.ProtocolID
 		passthrough bool
 		callerModel string
-		caller      string
-		upstream    string
+		// callerPath matters for protocols that carry the model in the URL
+		// rather than the body.
+		callerPath string
+		caller     string
+		upstream   string
 	}{
 		{
 			name:        "openai caller, claude provider",
@@ -237,28 +292,49 @@ func TestTheModalityStreamsWhatTheServiceStreamed(t *testing.T) {
 				"data: [DONE]\n\n",
 		},
 		{
-			// Gemini's stream is newline-delimited JSON, not SSE, and the relay
-			// reaches it through a different entry point. Nothing else in this
-			// table goes through that one.
+			// Gemini reaches the relay through a different entry point, the one
+			// that splits on newlines rather than scanning SSE frames. Nothing
+			// else in this table goes through it.
 			name:        "openai caller, gemini provider",
 			ingress:     protocols.ProtocolOpenAI,
 			egress:      protocols.ProtocolGemini,
 			callerModel: "gpt-4o",
 			caller:      `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
-			upstream:    `{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10},"modelVersion":"gemini-2.0-flash-real"}` + "\n",
+			upstream: `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"modelVersion":"gemini-2.0-flash-real"}` + "\n\n" +
+				`data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10},"modelVersion":"gemini-2.0-flash-real"}` + "\n\n",
 		},
 		{
-			// The last event has no trailing blank line, so its terminal delta
-			// only appears once the decoder is asked to finish. A stream that
-			// ends this way is complete; one whose decoder was never flushed
-			// reads as having stopped short.
-			name:        "claude caller, claude provider, no trailing blank line",
+			// The completion signal is the LAST event and it has no trailing
+			// blank line, so the decoder holds it until asked to finish. Any
+			// earlier terminated signal would make that flush unnecessary and
+			// the case would pass without it.
+			name:        "claude caller, claude provider, completion held back",
 			ingress:     protocols.ProtocolClaude,
 			egress:      protocols.ProtocolClaude,
 			passthrough: true,
 			callerModel: "claude-3-5-sonnet",
 			caller:      `{"model":"claude-3-5-sonnet","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
-			upstream:    strings.TrimSuffix(claudeUpstream, "\n"),
+			upstream: "event: message_start\n" +
+				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":7,"output_tokens":0}}}` + "\n\n" +
+				"event: content_block_delta\n" +
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+				"event: message_delta\n" +
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`,
+		},
+		{
+			// Gemini's decoder holds a frame until a blank line closes it, so a
+			// stream whose last frame arrives without one is only completed by
+			// the flush at the end. Claude's decodes per line and would pass
+			// without it.
+			name:        "gemini caller, gemini provider, completion held back",
+			ingress:     protocols.ProtocolGemini,
+			egress:      protocols.ProtocolGemini,
+			passthrough: true,
+			callerModel: "gemini-2.0-flash",
+			callerPath:  "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
+			caller:      `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			upstream: `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"modelVersion":"gemini-2.0-flash-real"}` + "\n\n" +
+				`data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10},"modelVersion":"gemini-2.0-flash-real"}`,
 		},
 		{
 			name:        "claude caller, claude provider, forwarded as-is",
@@ -274,7 +350,12 @@ func TestTheModalityStreamsWhatTheServiceStreamed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			old := runOldStream(t, tc.ingress, tc.egress, tc.passthrough, tc.callerModel, upstreamStream(t, tc.upstream))
-			got := runNewStream(t, tc.ingress, tc.egress, tc.passthrough, tc.caller, upstreamStream(t, tc.upstream))
+			path := tc.callerPath
+			if path == "" {
+				path = "/v1/chat/completions"
+			}
+			got := runNewStream(t, tc.ingress, tc.egress, tc.passthrough, path, tc.caller, upstreamStream(t, tc.upstream))
+			requireDelivered(t, got)
 			compareStream(t, old, got)
 		})
 	}
@@ -293,7 +374,7 @@ func TestAStreamThatEndsWithoutItsTerminatorIsNotCalledComplete(t *testing.T) {
 	const caller = `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 
 	old := runOldStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "gpt-4o", upstreamStream(t, truncated))
-	got := runNewStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, caller, upstreamStream(t, truncated))
+	got := runNewStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", caller, upstreamStream(t, truncated))
 	compareStream(t, old, got)
 
 	if got.delivery.Complete {
@@ -318,7 +399,7 @@ func TestAStreamThatNeverSendsDataLeavesTheChainOpen(t *testing.T) {
 	const caller = `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 
 	old := runOldStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "gpt-4o", upstreamStream(t, ""))
-	got := runNewStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, caller, upstreamStream(t, ""))
+	got := runNewStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", caller, upstreamStream(t, ""))
 	compareStream(t, old, got)
 
 	if got.delivery.Verdict != fact.VerdictNextCandidate {
@@ -330,4 +411,87 @@ func TestAStreamThatNeverSendsDataLeavesTheChainOpen(t *testing.T) {
 	if got.captureExists {
 		t.Errorf("a capture file was left behind holding %q; nothing was ever sent, and an empty one renders as a capture worth opening", got.captured)
 	}
+}
+
+// brokenAfter hands over its bytes and then fails, the way a provider that
+// closes its connection non-standardly does. A buffer cannot do this, and a
+// buffer is what every other fixture here is — which is why the branch below
+// went unguarded: it is only read when the read itself failed.
+type brokenAfter struct {
+	data []byte
+	err  error
+}
+
+func (r *brokenAfter) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func upstreamStreamThatBreaks(t *testing.T, body string, err error) *http.Response {
+	t.Helper()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"text/event-stream"}},
+		Body:       io.NopCloser(&brokenAfter{data: []byte(body), err: err}),
+	}
+}
+
+// TestWhatCountsAsAWholeStreamDiffersByProtocol pins the one thing the two
+// pumps deliberately disagree about.
+//
+// Both forgive a transport error that arrives after the response was already
+// whole — an upstream closing badly on its way out interrupts nothing. They do
+// not agree on what whole means. OpenAI reports usage in a frame of its own, so
+// a stream that reached the terminator without one stopped short; the other
+// protocols carry usage inside their terminal event, and demanding it
+// separately would file finished streams as broken.
+//
+// Both fixtures deliberately omit usage. That is the case where one condition
+// for both would quietly change an answer.
+func TestWhatCountsAsAWholeStreamDiffersByProtocol(t *testing.T) {
+	const openAIStream = `data: {"id":"c1","model":"gpt-4o-real","choices":[{"delta":{"content":"hi"}}]}` + "\n\n" +
+		"data: [DONE]\n\n"
+	const openAICaller = `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	const claudeCaller = `{"model":"claude-3-5-sonnet","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	claudeStream := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-3-5-sonnet-20241022"}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+		// The completion signal, carrying no usage: that omission is the whole
+		// point of this fixture.
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	t.Run("openai wants its usage frame", func(t *testing.T) {
+		old := runOldStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "gpt-4o",
+			upstreamStreamThatBreaks(t, openAIStream, io.ErrUnexpectedEOF))
+		got := runNewStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", openAICaller,
+			upstreamStreamThatBreaks(t, openAIStream, io.ErrUnexpectedEOF))
+		compareStream(t, old, got)
+
+		if got.delivery.Complete {
+			t.Error("reported complete; the terminator arrived but the usage frame never did, so the stream stopped short")
+		}
+		if got.delivery.Fault != fact.FaultUpstream {
+			t.Errorf("fault = %v, want upstream", got.delivery.Fault)
+		}
+	})
+
+	t.Run("claude does not", func(t *testing.T) {
+		old := runOldStream(t, protocols.ProtocolClaude, protocols.ProtocolClaude, true, "claude-3-5-sonnet",
+			upstreamStreamThatBreaks(t, claudeStream, io.ErrUnexpectedEOF))
+		got := runNewStream(t, protocols.ProtocolClaude, protocols.ProtocolClaude, true, "/v1/messages", claudeCaller,
+			upstreamStreamThatBreaks(t, claudeStream, io.ErrUnexpectedEOF))
+		compareStream(t, old, got)
+
+		if !got.delivery.Complete {
+			t.Errorf("reported incomplete (%q); this stream reached its terminal event, and usage is not what ends it", got.delivery.FailReason)
+		}
+	})
 }
