@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -111,6 +112,12 @@ type Service struct {
 	// orchestration (attemptOne, RequestDeadline) reads the individual fields
 	// off this struct instead of re-deriving them per call.
 	gateway config.GatewayConfig
+
+	// secondaryFetch is the shared client for downloading responses an upstream
+	// referred to rather than returned. Built once, on first use: a transport
+	// per request would pool connections nobody ever reuses or closes.
+	secondaryFetchOnce sync.Once
+	secondaryFetch     *http.Client
 
 	// upstreamErrorObservers are wired in by the assembly layer. They see
 	// non-2xx upstream responses and report what they recognise; they never

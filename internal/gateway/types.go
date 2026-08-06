@@ -188,6 +188,13 @@ type Exchange struct {
 	streamBodyFile      *os.File
 	streamBodyCaptured  bool
 	streamBodyTruncated bool
+	// upstreamBodyTruncated/clientBodyTruncated mark a captured non-stream body
+	// that hit its cap. Stored separately from the bytes because a body cut off
+	// at the limit and one that simply was that long are indistinguishable once
+	// only the bytes survive — and only one of them means the row is missing
+	// evidence.
+	upstreamBodyTruncated bool
+	clientBodyTruncated   bool
 	// streamBodyBytesWritten mirrors the capture file's current size so
 	// appendStreamBodyLine can check the 1GiB backstop with a plain integer
 	// comparison instead of an os.File.Stat() syscall per appended line
@@ -303,6 +310,12 @@ func (rc *Exchange) StreamBodyPath() string {
 
 // StreamBodyTruncated reports whether the stream capture hit its cap.
 func (rc *Exchange) StreamBodyTruncated() bool { return rc.streamBodyTruncated }
+
+// UpstreamBodyTruncated reports whether the captured upstream body hit its cap.
+func (rc *Exchange) UpstreamBodyTruncated() bool { return rc.upstreamBodyTruncated }
+
+// ClientBodyTruncated reports whether the captured client-facing body hit its cap.
+func (rc *Exchange) ClientBodyTruncated() bool { return rc.clientBodyTruncated }
 
 // EffectiveRequestBody returns the body that upstream encoding should use as
 // its input: the compressed body when a successful compression pass produced

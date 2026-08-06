@@ -41,6 +41,16 @@ type Delivery struct {
 	// a 200 that the caller never finished reading is the caller's fault, and
 	// a 200 whose stream died mid-flight is the upstream's.
 	Fault Fault
+	// Usage is what this delivery's own attempt reported as billable.
+	//
+	// It belongs to the Delivery rather than to the exchange because an attempt
+	// can report what it charged before producing anything a caller can see,
+	// and then fail. Left on the exchange, those numbers outlive the attempt
+	// that earned them and are charged under whatever the request eventually
+	// settles as — a later candidate's success, or the 502 that ends the chain.
+	// Carried here, they can only ever be read together with the attempt they
+	// describe. Nil when nothing was reported.
+	Usage *UsageReported
 	// Err is the underlying failure. Logged when the request settles; never
 	// persisted — FailReason is the code downstream reads.
 	Err error
@@ -168,6 +178,27 @@ func Undelivered(billingStatus int, next Verdict, at Fault, failReason string, e
 		Err:           err,
 		FailReason:    failReason,
 	}
+}
+
+// WithUsage attaches what this attempt reported as billable.
+//
+// A method rather than a parameter on every constructor: most deliveries have
+// nothing to report, and threading a nil through six signatures would put the
+// field in front of every call site that has no use for it while saying
+// nothing about the one invariant that matters — that the numbers travel with
+// the attempt that produced them.
+func (d Delivery) WithUsage(u *UsageReported) Delivery {
+	if u == nil {
+		d.Usage = nil
+		return d
+	}
+	// Copied, not aliased. A payload that accumulates usage across attempts
+	// hands out the same pointer every time, and a later attempt writing into
+	// it would retroactively change what an earlier delivery reported — which
+	// is the exact invariant this field exists to hold.
+	snapshot := *u
+	d.Usage = &snapshot
+	return d
 }
 
 // Validate reports why a Delivery cannot describe anything that could actually
