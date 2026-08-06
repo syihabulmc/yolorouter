@@ -359,7 +359,10 @@ func (s *Service) reportMidStreamFailure(c *gin.Context, rc *Exchange, err error
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptConnError, "client disconnected"))
 		return fact.Truncated(http.StatusOK, 499, fact.FaultClient, "client_disconnected", err)
 	}
-	_ = writeStreamErrorEvent(c, rc)
+	// The stream's own response object, not the plain writer: this frame has to
+	// land in the capture file alongside everything else the caller received,
+	// and recording what was sent is that object's job now.
+	_ = writeStreamErrorEvent(s.streamResponse(c, rc), rc.ingress, rc.requestID)
 	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "stream mid: "+err.Error()))
 	// The caller keeps the 200 and the bytes that did arrive; settlement keeps
 	// the 200 too, because this is not a delivery failure on our side. What it

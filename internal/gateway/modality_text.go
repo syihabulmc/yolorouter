@@ -16,16 +16,13 @@ import (
 // counted in tokens. It is stateless and shared by every request.
 type textModality struct{}
 
+var (
+	_ Modality = textModality{}
+	_ Payload  = (*textPayload)(nil)
+)
+
 // NewTextModality returns the modality that serves text payloads.
-//
-// The return type is concrete, and the Modality/Payload assertions are absent,
-// because Deliver has not moved yet: the delivery paths still live on the
-// service, and claiming the interface before they arrive would be exactly the
-// shell this whole step is meant not to produce — an adapter that names itself
-// an adapter while the kernel still does its work. The assertions land with
-// Deliver, and the compiler will then check the eight methods below against
-// the same contract.
-func NewTextModality() textModality { return textModality{} }
+func NewTextModality() Modality { return textModality{} }
 
 func (textModality) ID() ModalityID { return ModalityText }
 
@@ -42,7 +39,7 @@ func (textModality) Limits() TransferLimits { return TransferLimits{} }
 // does not parse, a model the caller did not name, a structure the protocol
 // requires. Anything that depends on WHICH upstream ends up serving it belongs
 // in Supports, where a refusal costs one candidate instead of the request.
-func (textModality) Admit(_ context.Context, in Ingress) (*textPayload, *Rejection) {
+func (textModality) Admit(_ context.Context, in Ingress) (Payload, *Rejection) {
 	// Gemini carries neither model nor stream in the body: both live in the
 	// path, so they have to be recovered before the peek can use them.
 	var pathModel string
@@ -278,12 +275,20 @@ func (b captureBuffer) SetBody(data []byte)        { b.capture.Upstream(data) }
 func (captureBuffer) SetResponseBody([]byte)       {}
 func (captureBuffer) AppendResponse([]byte)        {}
 
-// deliverNonStream gets a whole upstream response to the caller.
+// Deliver gets the upstream's response to the caller.
 //
-// Not yet named Deliver: the streaming half has not moved, and a Deliver that
-// silently mishandled a stream would be worse than one that does not exist.
-// The two become one method, dispatching on Routing().Stream, when streams
-// follow.
+// The split is on how the caller reads it, not on what it contains: a whole
+// response can be checked and rewritten before any of it goes out, while a
+// stream commits to a status on its first frame and lives with it. Everything
+// below follows from that one difference.
+func (p *textPayload) Deliver(tools DeliveryTools, resp *http.Response) fact.Delivery {
+	if p.meta.Stream {
+		return p.deliverStream(tools, resp)
+	}
+	return p.deliverNonStream(tools, resp)
+}
+
+// deliverNonStream gets a whole upstream response to the caller.
 func (p *textPayload) deliverNonStream(tools DeliveryTools, resp *http.Response) fact.Delivery {
 	if p.cand.Passthrough {
 		return p.deliverPassthroughNonStream(tools, resp)

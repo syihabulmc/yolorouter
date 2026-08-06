@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -232,7 +234,8 @@ func TestTheAssembledEnvIsUsable(t *testing.T) {
 	svc := &Service{}
 	rc := &Exchange{requestID: "req-env"}
 
-	tools := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 64}, false)
+	tools, release := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 64}, false)
+	defer release()
 
 	if tools.Limits.MaxResponseBytes != 64 {
 		t.Errorf("MaxResponseBytes = %d, want the modality's 64", tools.Limits.MaxResponseBytes)
@@ -349,12 +352,14 @@ func TestEachAttemptCapturesOnItsOwn(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	rc := &Exchange{requestID: "req-capture"}
 
-	first := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
+	first, releaseFirst := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
+	defer releaseFirst()
 	if kept := first.Capture.Upstream([]byte("AAAAAAAA")); !kept {
 		t.Fatal("the first attempt could not capture its own body")
 	}
 
-	second := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
+	second, releaseSecond := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
+	defer releaseSecond()
 	if kept := second.Capture.Upstream([]byte("BB")); !kept {
 		t.Error("the second attempt was refused room the first attempt had used")
 	}
@@ -500,11 +505,13 @@ func TestAnAttemptWithNoBodyClearsThePreviousOne(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	rc := &Exchange{requestID: "req-empty-attempt"}
 
-	first := svc.newDeliveryTools(c, rc, TransferLimits{}, false)
+	first, releaseFirst := svc.newDeliveryTools(c, rc, TransferLimits{}, false)
+	defer releaseFirst()
 	first.Capture.Upstream([]byte("first provider said this"))
 
 	// The second attempt never captures anything at all.
-	svc.newDeliveryTools(c, rc, TransferLimits{}, false)
+	_, releaseSecond := svc.newDeliveryTools(c, rc, TransferLimits{}, false)
+	defer releaseSecond()
 
 	if got := string(rc.upstreamResponseBody); got != "" {
 		t.Errorf("upstream body = %q, want empty: this row describes an attempt that produced nothing", got)
@@ -561,7 +568,8 @@ func TestAssemblyNeverHandsOutAZeroLimit(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	rc := &Exchange{requestID: "req-zero"}
 
-	tools := svc.newDeliveryTools(c, rc, TransferLimits{}, false)
+	tools, release := svc.newDeliveryTools(c, rc, TransferLimits{}, false)
+	defer release()
 
 	if tools.Limits.MaxResponseBytes <= 0 || tools.Limits.MaxFrameBytes <= 0 {
 		t.Fatalf("limits = %+v, want positive caps", tools.Limits)
@@ -609,24 +617,49 @@ func TestCallerGoneTracksTheCallersContext(t *testing.T) {
 	}
 }
 
-// TestAProgressiveDeliveryCapturesToFile pins the choice the kernel makes on a
-// modality's behalf.
+// TestAProgressiveDeliveryKeepsNoUpstreamBytes pins the choice the kernel makes
+// on a modality's behalf, and it is a choice to keep nothing.
 //
-// A stream has no size a buffer can be sized for, so its bytes belong in the
-// capture file with its own far larger backstop, not on the heap. The modality
-// calls the same method either way; which capture it got is not something it
-// has an opinion about, and this is the assertion that it never needs one.
-func TestAProgressiveDeliveryCapturesToFile(t *testing.T) {
+// The capture file promises one thing: exactly what the caller received. A
+// stream's raw upstream lines are not that — they are pre-rewrite, and the
+// rewrite is the reason the two differ — so writing them into that file would
+// interleave two accounts of the response and leave neither readable. There is
+// nowhere else sized for a stream either, which is why they are dropped rather
+// than kept smaller. A second file of their own is the way to keep them, and
+// that is a thing to add, not a thing this quietly does.
+//
+// The modality calls the same method either way and is told nothing about which
+// capture it got; this is the assertion that it never needs to know.
+func TestAProgressiveDeliveryKeepsNoUpstreamBytes(t *testing.T) {
+	dir := t.TempDir()
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
+	c.Set(BodiesDirContextKey, dir)
 	svc := &Service{}
+	rc := &Exchange{requestID: "stream"}
 
-	progressive := svc.newDeliveryTools(c, &Exchange{requestID: "stream"}, TransferLimits{}, true)
-	if _, ok := progressive.Capture.(spillingCapture); !ok {
-		t.Errorf("progressive capture is %T, want the one that spills to the capture file", progressive.Capture)
+	progressive, releaseProgressive := svc.newDeliveryTools(c, rc, TransferLimits{}, true)
+	defer releaseProgressive()
+	defer closeStreamBodyFile(rc)
+	progressive.Capture.Upstream([]byte("data: raw upstream line\n\n"))
+	closeStreamBodyFile(rc)
+
+	captured, err := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
+	if err != nil {
+		t.Fatalf("read capture file: %v", err)
+	}
+	if len(captured) != 0 {
+		t.Errorf("capture file holds %q; upstream bytes in there are not what the caller received", captured)
+	}
+	// Nowhere else either. Asserting only on the file let a swap to the
+	// in-memory capture pass: the bytes moved somewhere nothing was looking,
+	// which is the same leak wearing a different hat.
+	if rc.responseBody != nil || rc.upstreamResponseBody != nil {
+		t.Errorf("upstream bytes were kept on the exchange instead (response=%q upstream=%q)", rc.responseBody, rc.upstreamResponseBody)
 	}
 
-	buffered := svc.newDeliveryTools(c, &Exchange{requestID: "whole"}, TransferLimits{}, false)
+	buffered, releaseBuffered := svc.newDeliveryTools(c, &Exchange{requestID: "whole"}, TransferLimits{}, false)
+	defer releaseBuffered()
 	if _, ok := buffered.Capture.(*exchangeCapture); !ok {
 		t.Errorf("non-progressive capture is %T, want the bounded in-memory one", buffered.Capture)
 	}
@@ -654,5 +687,97 @@ func TestCallerDoneAndCallerGoneAnswerDifferentQuestions(t *testing.T) {
 	}
 	if r.CallerGone() {
 		t.Error("CallerGone() = true after OUR deadline expired; the caller never left")
+	}
+}
+
+// TestAProgressiveDeliveryRecordsWhatWasSentToTheCaptureFile pins the other
+// half of the choice newCapture makes.
+//
+// The upstream's bytes and the caller's bytes are recorded separately, and both
+// answers depend on the same fact: a stream has no size the in-memory record was
+// built for. Putting a stream there would truncate it at the non-stream cap and
+// flag every stream as truncated, while the file that exists for exactly this
+// stayed empty. The modality writes the same way either way and is told
+// nothing about where the record lands.
+func TestAProgressiveDeliveryRecordsWhatWasSentToTheCaptureFile(t *testing.T) {
+	dir := t.TempDir()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Set(BodiesDirContextKey, dir)
+	rc := &Exchange{requestID: "progressive-sent"}
+	svc := &Service{}
+
+	tools, release := svc.newDeliveryTools(c, rc, TransferLimits{}, true)
+	defer release()
+	defer closeStreamBodyFile(rc)
+	if err := tools.Client.Commit(http.StatusOK); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := tools.Client.Write([]byte("data: one\n\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := tools.Client.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	closeStreamBodyFile(rc)
+
+	captured, err := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
+	if err != nil {
+		t.Fatalf("read capture file: %v", err)
+	}
+	if string(captured) != "data: one\n\n" {
+		t.Errorf("capture file holds %q, want the bytes the caller received", captured)
+	}
+	if rc.responseBody != nil {
+		t.Errorf("in-memory response body holds %q; a stream's bytes belong in the file, and the cap here would truncate them", rc.responseBody)
+	}
+}
+
+// TestAWholeResponseRecordsWhatWasSentInMemory is the case above's counterpart,
+// and the reason the choice cannot simply become "always the file": a
+// non-stream response has no capture file, and its bytes are what the audit row
+// itself carries.
+func TestAWholeResponseRecordsWhatWasSentInMemory(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rc := &Exchange{requestID: "whole-sent"}
+	svc := &Service{}
+
+	tools, release := svc.newDeliveryTools(c, rc, TransferLimits{}, false)
+	defer release()
+	if err := tools.Client.Commit(http.StatusOK); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := tools.Client.Write([]byte(`{"ok":true}`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := tools.Client.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	if string(rc.responseBody) != `{"ok":true}` {
+		t.Errorf("response body holds %q, want the bytes the caller received", rc.responseBody)
+	}
+}
+
+// TestTheToolboxCarriesTheKernelSNameForTheRequest pins the one field a
+// modality cannot supply for itself.
+//
+// It reaches the caller in the text of a mid-stream error, so that what they
+// quote when they report a problem is the string the logs are indexed by. An
+// empty one still renders a perfectly well-formed frame — naming nothing.
+func TestTheToolboxCarriesTheKernelSNameForTheRequest(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rc := &Exchange{requestID: "req-named"}
+
+	tools, release := (&Service{}).newDeliveryTools(c, rc, TransferLimits{}, false)
+	defer release()
+
+	if tools.RequestID != rc.requestID {
+		t.Errorf("toolbox reports request id %q, want %q — a modality has no other way to name this request", tools.RequestID, rc.requestID)
 	}
 }

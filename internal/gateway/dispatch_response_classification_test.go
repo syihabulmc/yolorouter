@@ -23,11 +23,11 @@ import (
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
 
-// ───────────────────── Fix 1: writeStreamErrorEvent / writeAndCaptureSSE ────
+// ───────────────────── Fix 1: writeStreamErrorEvent / sendSSEFrame ────
 
 // failingWriteCloser is an http.ResponseWriter whose Write always returns an
 // error, simulating a dead client connection. Used to verify
-// writeAndCaptureSSE propagates the Write error and does NOT append to the
+// sendSSEFrame propagates the Write error and does NOT append to the
 // stream capture file when the write failed.
 type failingWriteCloser struct {
 	headers http.Header
@@ -46,7 +46,7 @@ func (w *failingWriteCloser) Write(b []byte) (int, error) {
 func (w *failingWriteCloser) WriteHeader(code int) { w.status = code }
 
 // TestWriteAndCaptureSSE_FailureDoesNotAppend verifies that when the client
-// Write fails, writeAndCaptureSSE returns the error AND does NOT append the
+// Write fails, sendSSEFrame returns the error AND does NOT append the
 // undelivered bytes to the stream capture file — the capture contract is
 // "exactly what the client received", and recording bytes that were never
 // sent would mislead audit operators.
@@ -57,12 +57,15 @@ func TestWriteAndCaptureSSE_FailureDoesNotAppend(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Set(BodiesDirContextKey, dir)
 	rc := &Exchange{requestID: "req-fail-write", ingress: protocols.ProtocolOpenAI}
+	// The stream is already underway where this runs, so its capture is already
+	// open; the response object built below writes into it rather than opening
+	// one of its own.
 	openStreamBodyFile(c, rc)
 	defer closeStreamBodyFile(rc)
 
-	err := writeAndCaptureSSE(c, rc, []byte("data: test\n\n"))
+	err := sendSSEFrame(committedStreamClient(t, c, rc), []byte("data: test\n\n"))
 	if err == nil {
-		t.Fatal("expected a Write error from writeAndCaptureSSE, got nil")
+		t.Fatal("expected a Write error from sendSSEFrame, got nil")
 	}
 	// The capture file must NOT contain the undelivered bytes.
 	captured, readErr := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
@@ -87,7 +90,7 @@ func TestWriteAndCaptureSSE_SuccessAppends(t *testing.T) {
 	defer closeStreamBodyFile(rc)
 
 	data := []byte("data: hello\n\n")
-	if err := writeAndCaptureSSE(c, rc, data); err != nil {
+	if err := sendSSEFrame(committedStreamClient(t, c, rc), data); err != nil {
 		t.Fatalf("expected nil error on successful write, got %v", err)
 	}
 	if !bytes.Equal(rec.Body.Bytes(), data) {
@@ -112,7 +115,7 @@ func TestWriteStreamErrorEvent_FailureReturnsError(t *testing.T) {
 	openStreamBodyFile(c, rc)
 	defer closeStreamBodyFile(rc)
 
-	err := writeStreamErrorEvent(c, rc)
+	err := writeStreamErrorEvent(committedStreamClient(t, c, rc), rc.ingress, rc.requestID)
 	if err == nil {
 		t.Fatal("expected a Write error from writeStreamErrorEvent, got nil")
 	}
@@ -509,4 +512,17 @@ func TestProcessDispatchResponseStream_ServerErrorStillClassifiedAsPartial(t *te
 	if strings.Contains(last.FailReason, "client write timeout") {
 		t.Errorf("upstream read error was misclassified as client_write_timeout: fail_reason=%q", last.FailReason)
 	}
+}
+
+// committedStreamClient builds the response object a mid-stream write goes
+// through, already committed — which is the only state these frames are ever
+// written in, since a stream that has not committed has no error frame to add
+// to.
+func committedStreamClient(t *testing.T, c *gin.Context, rc *Exchange) ClientResponse {
+	t.Helper()
+	w := (&Service{}).streamResponse(c, rc)
+	if err := w.Commit(http.StatusOK); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return w
 }

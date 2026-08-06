@@ -309,7 +309,7 @@ func TestUnauthorized401_CASSurvivesClientCancel(t *testing.T) {
 	}
 }
 
-// ───────────────────── Fix 3: FlushError timing in writeAndCaptureSSE ────────
+// ───────────────────── Fix 3: FlushError timing in sendSSEFrame ────────
 
 // flushErrorWriter is an http.ResponseWriter whose Write succeeds but whose
 // FlushError returns an error. This simulates the net/http behavior where a
@@ -344,7 +344,7 @@ func (w *flushErrorWriter) FlushError() error {
 
 // TestWriteAndCaptureSSE_FlushErrorDoesNotAppend verifies that when Write
 // succeeds but Flush fails (buffered bytes never reached the client),
-// writeAndCaptureSSE returns the flush error AND does NOT append the
+// sendSSEFrame returns the flush error AND does NOT append the
 // undelivered bytes to the stream capture file.
 func TestWriteAndCaptureSSE_FlushErrorDoesNotAppend(t *testing.T) {
 	dir := t.TempDir()
@@ -356,9 +356,9 @@ func TestWriteAndCaptureSSE_FlushErrorDoesNotAppend(t *testing.T) {
 	openStreamBodyFile(c, rc)
 	defer closeStreamBodyFile(rc)
 
-	err := writeAndCaptureSSE(c, rc, []byte("data: test\n\n"))
+	err := sendSSEFrame(committedStreamClient(t, c, rc), []byte("data: test\n\n"))
 	if err == nil {
-		t.Fatal("expected a Flush error from writeAndCaptureSSE, got nil")
+		t.Fatal("expected a Flush error from sendSSEFrame, got nil")
 	}
 	// The capture file must NOT contain the undelivered bytes.
 	captured, readErr := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
@@ -386,7 +386,7 @@ func TestWriteAndCaptureSSE_FlushSuccessAppends(t *testing.T) {
 	defer closeStreamBodyFile(rc)
 
 	data := []byte("data: hello\n\n")
-	if err := writeAndCaptureSSE(c, rc, data); err != nil {
+	if err := sendSSEFrame(committedStreamClient(t, c, rc), data); err != nil {
 		t.Fatalf("expected nil error on successful write+flush, got %v", err)
 	}
 	if !bytes.Equal(rec.Body.Bytes(), data) {

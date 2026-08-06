@@ -439,7 +439,7 @@ func TestWriteStreamErrorEventOpenAIIngress(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	rc := &Exchange{requestID: "req-openai-mid", ingress: protocols.ProtocolOpenAI}
 
-	_ = writeStreamErrorEvent(c, rc)
+	_ = writeStreamErrorEvent(committedStreamClient(t, c, rc), rc.ingress, rc.requestID)
 
 	body := rec.Body.String()
 	if !strings.Contains(body, `"type":"upstream_error"`) {
@@ -467,7 +467,7 @@ func TestWriteStreamErrorEventClaudeIngress(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	rc := &Exchange{requestID: "req-claude-mid", ingress: protocols.ProtocolClaude}
 
-	_ = writeStreamErrorEvent(c, rc)
+	_ = writeStreamErrorEvent(committedStreamClient(t, c, rc), rc.ingress, rc.requestID)
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: error") {
@@ -512,7 +512,7 @@ func TestWriteStreamErrorEventCapturesToStreamFile(t *testing.T) {
 			openStreamBodyFile(c, rc)
 			defer closeStreamBodyFile(rc)
 
-			_ = writeStreamErrorEvent(c, rc)
+			_ = writeStreamErrorEvent(committedStreamClient(t, c, rc), rc.ingress, rc.requestID)
 
 			captured, err := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 			if err != nil {

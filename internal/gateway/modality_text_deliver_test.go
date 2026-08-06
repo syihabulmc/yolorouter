@@ -85,8 +85,9 @@ func runNew(t *testing.T, ingress protocols.ProtocolID, egress protocols.Protoco
 	}
 
 	rc := &Exchange{requestID: "new", ingress: ingress}
-	tools := (&Service{}).newDeliveryTools(c, rc, TransferLimits{}, false)
-	d := payload.deliverNonStream(tools, resp)
+	tools, release := (&Service{}).newDeliveryTools(c, rc, TransferLimits{}, false)
+	defer release()
+	d := payload.Deliver(tools, resp)
 
 	out := deliveryOutcome{delivery: d, clientStatus: w.Code, clientBody: w.Body.String(),
 		upstreamBody: string(rc.upstreamResponseBody)}
@@ -182,8 +183,9 @@ func TestDeliverRefusesABodyOverTheLimit(t *testing.T) {
 	}
 
 	rc := &Exchange{requestID: "too-big"}
-	tools := (&Service{}).newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
-	d := payload.deliverNonStream(tools, upstreamResponse(t, 200, `{"aaaaaaaaaaaaaaaaaaaa":1}`))
+	tools, release := (&Service{}).newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
+	defer release()
+	d := payload.Deliver(tools, upstreamResponse(t, 200, `{"aaaaaaaaaaaaaaaaaaaa":1}`))
 
 	if d.Committed || d.Verdict != fact.VerdictNextCandidate {
 		t.Errorf("delivery = %+v, want an uncommitted failover", d)
@@ -236,8 +238,9 @@ func TestAFailedReadIsBlamedOnWhoeverCausedIt(t *testing.T) {
 			t.Fatalf("PrepareUpstream = %v", err)
 		}
 
-		tools := (&Service{}).newDeliveryTools(c, &Exchange{requestID: "read-fail"}, TransferLimits{}, false)
-		return payload.deliverNonStream(tools, &http.Response{
+		tools, release := (&Service{}).newDeliveryTools(c, &Exchange{requestID: "read-fail"}, TransferLimits{}, false)
+		defer release()
+		return payload.Deliver(tools, &http.Response{
 			StatusCode: 200,
 			Header:     http.Header{"Content-Type": {"application/json"}},
 			Body:       failingBody{err: io.ErrUnexpectedEOF},

@@ -36,6 +36,12 @@ type DeliveryTools struct {
 	Facts   FactSink
 	Limits  TransferLimits
 	Fetch   SecondaryFetcher
+	// RequestID identifies this request wherever a modality has to name it to
+	// somebody outside. It reaches the caller in the text of an error, so that
+	// what they quote when they report a problem is the same string the logs
+	// are indexed by. A modality cannot mint one: it is the kernel's name for
+	// the request, and one made up here would point at nothing.
+	RequestID string
 }
 
 // ClientResponse is the only way to the caller: header staging, the commit
@@ -100,10 +106,29 @@ type ClientResponse interface {
 	// is a report, and a report can be wrong; this is the fact.
 	CommittedStatus() int
 	// Write sends body bytes. It refuses before Commit rather than letting the
-	// framework commit a 200 nobody chose. Failures wrap protocols.ErrClientWrite.
+	// framework commit a 200 nobody chose. A failed write wraps
+	// protocols.ErrClientWrite; the refusal does not, because it is a bug here
+	// rather than a caller who left.
 	Write(p []byte) (int, error)
+	// WatchCaller closes upstream when the caller goes away, and returns the
+	// function that disarms it.
+	//
+	// It is here rather than left to a modality because noticing takes more
+	// than watching CallerDone: under HTTP/1.x the framework only begins
+	// propagating a client FIN once the connection has been asked about, and
+	// asking is something only this side of it can do. A modality that tried
+	// would get a channel that never closes and an upstream that keeps
+	// generating for a caller who left.
+	//
+	// Which is why a delivery that spends itself inside one long read has to
+	// arm this. One that comes up for air between frames polls CallerDone
+	// instead and is left with the weaker signal — it still notices, but only
+	// once something else ends the read.
+	WatchCaller(upstream io.Closer) (stop func())
 	// Flush pushes buffered bytes onto the socket and reports the failure a
-	// buffered Write can hide. Failures wrap protocols.ErrClientWrite.
+	// buffered Write can hide. A failed write to the caller wraps
+	// protocols.ErrClientWrite so blame lands on the right side; being called
+	// before Commit is a programming error instead, and says so plainly.
 	//
 	// It is also where written bytes become part of the audit trail: a
 	// buffered Write returns nil without the caller having received anything,
@@ -259,6 +284,11 @@ type ginClientResponse struct {
 	pending []byte
 	sent    []byte
 	limit   int64
+	// progressive selects where flushed bytes are recorded, the same question
+	// newCapture answers for the upstream's. It is the kernel's because it is
+	// about storage: a modality that chose would be one that could put a stream
+	// somewhere sized for a single response.
+	progressive bool
 }
 
 func (r *ginClientResponse) Inject(h http.Header) {
@@ -286,7 +316,11 @@ func (r *ginClientResponse) Commit(status int) error {
 		return fmt.Errorf("gateway: cannot commit a response with status %d", status)
 	}
 	if r.Committed() {
-		return errors.New("gateway: response is already committed")
+		// Carries the sentinel because the relays wrap whatever Commit returns
+		// in their own client-write error, and a refusal that arrived wearing
+		// that would be read as a caller who stopped reading — putting a
+		// double-commit of ours on their record.
+		return fmt.Errorf("%w: %w", errClientCommitRefused, errAlreadyCommitted)
 	}
 	for name, values := range r.staged {
 		r.c.Writer.Header().Del(name)
@@ -314,6 +348,10 @@ func (r *ginClientResponse) Committed() bool { return r.c.Writer.Written() }
 func (r *ginClientResponse) CallerGone() bool { return isClientDisconnected(r.c) }
 
 func (r *ginClientResponse) CallerDone() <-chan struct{} { return r.c.Request.Context().Done() }
+
+func (r *ginClientResponse) WatchCaller(upstream io.Closer) (stop func()) {
+	return protocols.WatchClientClose(r.c, upstream)
+}
 
 func (r *ginClientResponse) CommittedStatus() int {
 	if !r.Committed() {
@@ -357,6 +395,15 @@ func (r *ginClientResponse) Flush() error {
 	}
 	// The bytes are gone now, so this is the first moment they can honestly be
 	// recorded as received.
+	if r.progressive {
+		// Same reasoning as the upstream half, on the caller's side of it: a
+		// stream has no size the in-memory record was built for. Kept there it
+		// would hit the non-stream cap, flag every stream as truncated, and
+		// leave the file that exists for this empty.
+		appendStreamBodyLine(r.rc, r.pending)
+		r.pending = nil
+		return nil
+	}
 	room := r.limit - int64(len(r.sent))
 	if int64(len(r.pending)) > room {
 		r.rc.clientBodyTruncated = true
@@ -407,22 +454,22 @@ type exchangeCapture struct {
 }
 
 // newCapture picks where this attempt's upstream bytes are kept, and opens the
-// file if that is where they go.
+// capture file when the delivery will need one.
 //
-// A progressive response spills to the exchange's capture file; anything else
-// is bounded and fits in memory. The choice is the kernel's because it is about
-// storage, not about what the bytes are — and so is the file's lifetime: it has
-// to outlive the delivery, because a stream that fails mid-flight writes one
-// last error frame to the caller and that frame belongs in the capture too.
+// A whole response is bounded and fits in memory. A stream's upstream bytes are
+// kept nowhere at all — the file is for what the CALLER received, and the raw
+// pre-rewrite lines are a different account of the same response that would
+// leave neither readable. The file is still opened here because the caller's
+// half needs it, and choosing storage is the kernel's job either way.
 //
-// The streaming pumps still open it themselves as well, and will until they are
-// handed these tools; opening is idempotent within an attempt so that the two
-// callers cannot cost a descriptor. Closing has not moved here yet: it stays
-// where the last of those writes happens, which is one frame above the pumps.
+// The streaming pumps also open it themselves, and will until they are handed
+// these tools; opening is idempotent within an attempt so the two callers
+// cannot cost a descriptor between them. Closing belongs to the release this
+// toolbox came with.
 func (s *Service) newCapture(c *gin.Context, rc *Exchange, limit int64, progressive bool) UpstreamCapture {
 	if progressive {
 		openStreamBodyFile(c, rc)
-		return spillingCapture{rc: rc}
+		return droppedCapture{}
 	}
 	return newExchangeCapture(rc, limit)
 }
@@ -475,21 +522,24 @@ func (e *exchangeCapture) Upstream(p []byte) bool {
 
 func (e *exchangeCapture) Truncated() bool { return e.truncated }
 
-// spillingCapture is the capture a progressive delivery gets.
+// droppedCapture is the upstream capture a progressive delivery gets: one that
+// keeps nothing.
 //
-// A stream has no size a buffer can be sized for, so its bytes go to the
-// exchange's capture file — which has its own far larger backstop — instead of
-// the heap. The modality calls the same method either way and never learns
-// which one it got: where the bytes are kept, and how many, is not something a
-// modality has an opinion about.
-type spillingCapture struct{ rc *Exchange }
+// The exchange's capture file promises exactly what the caller received, and a
+// stream's raw upstream lines are not that — they are the pre-rewrite version
+// of the same response, so putting both in one file leaves neither account
+// readable. Keeping them in memory is out for the reason streams get a file in
+// the first place. So they are dropped, and the caller-facing half is recorded
+// where it can be recorded honestly: by the response object, which is the only
+// thing that knows when bytes actually left.
+//
+// Truncated is false because nothing was cut short: nothing was kept at all,
+// and saying "truncated" would describe a partial record where there is none.
+type droppedCapture struct{}
 
-func (s spillingCapture) Upstream(p []byte) bool {
-	appendStreamBodyLine(s.rc, p)
-	return !s.rc.streamBodyTruncated
-}
+func (droppedCapture) Upstream([]byte) bool { return true }
 
-func (s spillingCapture) Truncated() bool { return s.rc.streamBodyTruncated }
+func (droppedCapture) Truncated() bool { return false }
 
 // safeFetcher is the kernel's SecondaryFetcher.
 type safeFetcher struct {
@@ -584,24 +634,73 @@ func hostAllowed(u *url.URL, allowed []string) bool {
 // deadline lets a slow host consume whatever is left.
 const secondaryFetchTimeout = 30 * time.Second
 
-// newDeliveryTools assembles the toolbox for one delivery, with limits narrowed
-// by whatever the modality asked for.
-func (s *Service) newDeliveryTools(c *gin.Context, rc *Exchange, want TransferLimits, progressive bool) DeliveryTools {
-	limits := TransferLimits{
+// resolveLimits narrows the kernel's own budgets by what a modality asked for.
+func (s *Service) resolveLimits(want TransferLimits) TransferLimits {
+	return TransferLimits{
 		MaxResponseBytes: maxNonStreamResponseBytes,
 		MaxFrameBytes:    maxStreamLineBytes,
 		WriteWindow:      protocols.StreamWriteWindow(),
 		TotalBudget:      s.gateway.RequestTimeout,
 	}.resolveAgainst(want).withPositiveBuffers()
+}
+
+// newDeliveryTools assembles the toolbox for one delivery and returns the
+// function that takes it back.
+//
+// The release comes back with the toolbox rather than being left for the caller
+// to remember, because this opens a capture file for a progressive delivery.
+// A descriptor whose close lives somewhere the compiler cannot see is correct
+// only for as long as every caller remembers it.
+//
+// Prior attempts' bodies are dropped here too. The fields say what THIS attempt
+// received, and a delivery that fails before writing them would otherwise leave
+// the last candidate's error body standing as this one's answer.
+func (s *Service) newDeliveryTools(c *gin.Context, rc *Exchange, want TransferLimits, progressive bool) (DeliveryTools, func()) {
+	limits := s.resolveLimits(want)
+	rc.clearResponseBodies()
 
 	return DeliveryTools{
 		Client: &ginClientResponse{
 			c: c, rc: rc, window: limits.WriteWindow, limit: limits.MaxResponseBytes,
+			progressive: progressive,
 		},
-		Capture: s.newCapture(c, rc, limits.MaxResponseBytes, progressive),
-		Facts:   newExchangeSink(rc),
-		Limits:  limits,
-		Fetch:   &safeFetcher{client: s.secondaryFetchClient(), limit: limits.MaxResponseBytes},
+		Capture:   s.newCapture(c, rc, limits.MaxResponseBytes, progressive),
+		Facts:     newExchangeSink(rc),
+		Limits:    limits,
+		Fetch:     &safeFetcher{client: s.secondaryFetchClient(), limit: limits.MaxResponseBytes},
+		RequestID: rc.requestID,
+	}, func() { s.releaseDelivery(c, rc) }
+}
+
+// releaseDelivery closes out the capture a delivery was given.
+//
+// A stream that never sent a byte leaves a file with nothing in it, and left
+// there it shows up as a capture worth opening. Removing it before the close is
+// deliberate — removal also closes and forgets the handle, so the close that
+// follows finds nothing left to do rather than racing it.
+func (s *Service) releaseDelivery(c *gin.Context, rc *Exchange) {
+	removeEmptyStreamBodyFile(c, rc)
+	closeStreamBodyFile(rc)
+}
+
+// streamResponse builds the response object for a stream that is already
+// underway, for the kernel's own remaining writes to it.
+//
+// It exists because the streaming paths have not moved behind these tools yet,
+// and until they do the kernel still writes the last frame of a broken stream
+// itself. Building one here rather than threading it through keeps that a
+// temporary detail of the paths that have not moved, instead of a parameter
+// every caller learns and then has to unlearn.
+//
+// Built directly rather than by asking for a toolbox. A toolbox opens a capture
+// file and drops the previous attempt's bodies, and this is called in the
+// middle of a stream that already has both — it needs a way to write, not a
+// fresh start.
+func (s *Service) streamResponse(c *gin.Context, rc *Exchange) ClientResponse {
+	limits := s.resolveLimits(TransferLimits{})
+	return &ginClientResponse{
+		c: c, rc: rc, window: limits.WriteWindow, limit: limits.MaxResponseBytes,
+		progressive: true,
 	}
 }
 

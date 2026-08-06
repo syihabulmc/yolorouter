@@ -64,8 +64,8 @@ func TestPrepareUpstreamMatchesTheExistingBuilder(t *testing.T) {
 				ingress:          tc.ingress,
 				requestBody:      []byte(tc.body),
 				candidate:        &cand,
-				isStream:         payload.meta.Stream,
-				wantsStreamUsage: payload.meta.WantsStreamUsage,
+				isStream:         payload.Routing().Stream,
+				wantsStreamUsage: payload.(*textPayload).meta.WantsStreamUsage,
 			}
 			egress := &EgressDecision{Protocol: tc.egress, BaseURL: baseURL, Passthrough: tc.through}
 
