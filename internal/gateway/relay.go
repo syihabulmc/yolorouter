@@ -375,10 +375,10 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	rc.isStream = meta.Stream
 	rc.wantsStreamUsage = meta.WantsStreamUsage
 
-	// Streaming relay loops (IRStreamRelay / IRStreamRelayJSONLines /
-	// passthrough pumps) call ApplyStreamWriteDeadline before each
-	// Write/Flush batch to slide the write deadline forward. This bounds a
-	// slow-reading client without clearing the server WriteTimeout entirely.
+	// Every write to the caller slides a deadline forward: the IR relays get
+	// it from the writer they are handed, the passthrough pumps still call
+	// ApplyStreamWriteDeadline themselves. This bounds a slow-reading client
+	// without clearing the server WriteTimeout entirely.
 	// The server WriteTimeout (RequestTimeout + 60s) covers the pre-first-
 	// write gap (e.g. a long TTFT on a reasoning model); once the first
 	// write lands, the sliding per-write deadline takes over. Non-streaming

@@ -243,12 +243,19 @@ func (s *Service) processDispatchResponseStream(
 	// allowed").
 	onFirstChunk := func() { rc.MarkFirstByteSent() }
 
+	// Watching the caller's connection is this side's job now: it owns that
+	// connection, and a relay that watched it would need the framework's
+	// request object back. Registered before the relay runs so a caller who
+	// leaves mid-stream still closes the upstream body under it.
+	defer protocols.WatchClientClose(c, resp.Body)()
+
+	w := protocols.NewGinClientWriter(c)
 	var usage *protocols.IRUsage
 	var err error
 	if egress.Protocol == protocols.ProtocolGemini {
-		usage, err = protocols.IRStreamRelayJSONLines(c, resp, egressDecoder, ingressEncoder, rc, onFirstChunk, nil)
+		usage, err = protocols.IRStreamRelayJSONLines(w, resp, egressDecoder, ingressEncoder, rc, onFirstChunk, nil)
 	} else {
-		usage, err = protocols.IRStreamRelay(c, resp, egressDecoder, ingressEncoder, rc, onFirstChunk, nil)
+		usage, err = protocols.IRStreamRelay(w, resp, egressDecoder, ingressEncoder, rc, onFirstChunk, nil)
 	}
 	// Preserve partial usage even on an error path, mirroring
 	// dispatchPassthroughStream. irUsageToUsage nils out an all-zero usage

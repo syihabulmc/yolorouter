@@ -99,7 +99,7 @@ func TestIRStreamRelayJSONLines_CapsIncompleteLineBuffer(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	_, err := IRStreamRelayJSONLines(c, resp, fakeStreamDecoder{}, fakeStreamEncoder{}, nil, nil, nil)
+	_, err := IRStreamRelayJSONLines(NewGinClientWriter(c), resp, fakeStreamDecoder{}, fakeStreamEncoder{}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected a read error when the upstream never emits a newline past maxJSONLineBytes, got nil")
 	}

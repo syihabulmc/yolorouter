@@ -148,7 +148,7 @@ func TestIRStreamRelay_WriteErrorClassifiedAsClientWrite(t *testing.T) {
 	}
 
 	buf := &recordingBuf{}
-	_, err := protocols.IRStreamRelay(c, resp, controlStreamDecoder{}, controlStreamEncoder{}, buf, nil, nil)
+	_, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp, controlStreamDecoder{}, controlStreamEncoder{}, buf, nil, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, protocols.ErrClientWrite),
 		"a downstream Write failure must be classified via protocols.ErrClientWrite, got %v", err)
@@ -174,7 +174,7 @@ func TestIRStreamRelay_FlushErrorClassifiedAsClientWriteAndNotCaptured(t *testin
 	}
 
 	buf := &recordingBuf{}
-	_, err := protocols.IRStreamRelay(c, resp, controlStreamDecoder{}, controlStreamEncoder{}, buf, nil, nil)
+	_, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp, controlStreamDecoder{}, controlStreamEncoder{}, buf, nil, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, protocols.ErrClientWrite),
 		"a Flush failure must be classified via protocols.ErrClientWrite, got %v", err)
@@ -200,7 +200,7 @@ func TestIRStreamRelay_CapturesOnlyAfterSuccessfulFlush(t *testing.T) {
 	}
 
 	buf := &recordingBuf{}
-	_, err := protocols.IRStreamRelay(c, resp, controlStreamDecoder{}, controlStreamEncoder{}, buf, nil, nil)
+	_, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp, controlStreamDecoder{}, controlStreamEncoder{}, buf, nil, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, buf.responses)
 	var captured strings.Builder
@@ -232,7 +232,7 @@ func TestIRStreamRelayJSONLines_EmitFailureReturnsImmediately(t *testing.T) {
 	}
 
 	buf := &recordingBuf{}
-	_, err := protocols.IRStreamRelayJSONLines(c, resp, controlStreamDecoder{}, controlStreamEncoder{}, buf, nil, nil)
+	_, err := protocols.IRStreamRelayJSONLines(protocols.NewGinClientWriter(c), resp, controlStreamDecoder{}, controlStreamEncoder{}, buf, nil, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, protocols.ErrClientWrite),
 		"the write failure must be classified via protocols.ErrClientWrite, got %v", err)
@@ -258,7 +258,7 @@ func TestIRStreamRelayJSONLines_FlushErrorNotCaptured(t *testing.T) {
 	}
 
 	buf := &recordingBuf{}
-	_, err := protocols.IRStreamRelayJSONLines(c, resp, controlStreamDecoder{}, controlStreamEncoder{}, buf, nil, nil)
+	_, err := protocols.IRStreamRelayJSONLines(protocols.NewGinClientWriter(c), resp, controlStreamDecoder{}, controlStreamEncoder{}, buf, nil, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, protocols.ErrClientWrite))
 	assert.NotEmpty(t, fw.written)

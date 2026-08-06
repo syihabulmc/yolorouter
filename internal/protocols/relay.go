@@ -339,7 +339,7 @@ func WatchClientClose(c *gin.Context, upstream io.Closer) (stop func()) {
 // reason, whether a tool call was seen, and whether any content was produced
 // (pass nil to skip); used for finish_reason collection.
 func IRStreamRelay(
-	c *gin.Context,
+	w ClientWriter,
 	resp *http.Response,
 	decoder StreamDecoder,
 	encoder StreamEncoder,
@@ -348,10 +348,13 @@ func IRStreamRelay(
 	onFinish func(rawReason string, sawToolCall, produced bool),
 ) (*IRUsage, error) {
 	defer func() { _ = resp.Body.Close() }()
-	defer WatchClientClose(c, resp.Body)()
-	// The relay loop uses ApplyStreamWriteDeadline to slide the write
-	// deadline forward on each Write/Flush batch, bounding a slow-reading
-	// client without clearing the server WriteTimeout entirely.
+	// Watching the caller's connection is the caller's own job: it owns that
+	// connection, and doing it here would need the framework's request object
+	// back. See WatchClientClose.
+	//
+	// A slow-reading client is bounded by the writer, which slides a deadline
+	// forward on every write and flush, rather than by this loop doing it per
+	// batch — so every path through this interface gets the same protection.
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -368,19 +371,19 @@ func IRStreamRelay(
 		if len(events) == 0 {
 			return nil
 		}
-		// Slide the write deadline before each write batch so a slow-reading
-		// client is cut within streamWriteWindow instead of blocking the
-		// handler beyond the request timeout. Ignore SetWriteDeadline errors:
-		// on writers that do not support it (e.g. httptest.ResponseRecorder
-		// in unit tests) writes still work, just without deadline protection.
-		// In production (*http.response) the call always succeeds.
-		_ = ApplyStreamWriteDeadline(c)
 		if !headerWritten {
-			c.Header("Content-Type", "text/event-stream")
-			c.Header("Cache-Control", "no-cache")
-			c.Header("Connection", "keep-alive")
-			c.Header("X-Accel-Buffering", "no")
-			c.Writer.WriteHeader(http.StatusOK)
+			w.Inject(http.Header{
+				"Content-Type":      {"text/event-stream"},
+				"Cache-Control":     {"no-cache"},
+				"Connection":        {"keep-alive"},
+				"X-Accel-Buffering": {"no"},
+			})
+			// A refused commit means the response was already committed by
+			// somebody else. Carrying on would set headerWritten and stream a
+			// body under a status this call did not choose.
+			if cerr := w.Commit(http.StatusOK); cerr != nil {
+				return fmt.Errorf("%w: commit stream to client: %w", ErrClientWrite, cerr)
+			}
 			headerWritten = true
 			if onFirstChunk != nil {
 				onFirstChunk()
@@ -396,14 +399,14 @@ func IRStreamRelay(
 		var written [][]byte
 		for _, event := range events {
 			s := event.String()
-			if _, err := fmt.Fprint(c.Writer, s); err != nil {
+			if _, err := w.Write([]byte(s)); err != nil {
 				return fmt.Errorf("%w: write to client: %w", ErrClientWrite, err)
 			}
 			if buf != nil {
 				written = append(written, []byte(s))
 			}
 		}
-		if err := FlushAndCheckError(c); err != nil {
+		if err := w.Flush(); err != nil {
 			return fmt.Errorf("%w: flush to client: %w", ErrClientWrite, err)
 		}
 		for _, s := range written {
@@ -665,7 +668,7 @@ func IRNonStreamRelay(
 // reason, whether a tool call was seen, and whether any content was produced
 // (pass nil to skip); used for finish_reason collection.
 func IRStreamRelayJSONLines(
-	c *gin.Context,
+	w ClientWriter,
 	resp *http.Response,
 	decoder StreamDecoder,
 	encoder StreamEncoder,
@@ -674,10 +677,13 @@ func IRStreamRelayJSONLines(
 	onFinish func(rawReason string, sawToolCall, produced bool),
 ) (*IRUsage, error) {
 	defer func() { _ = resp.Body.Close() }()
-	defer WatchClientClose(c, resp.Body)()
-	// The relay loop uses ApplyStreamWriteDeadline to slide the write
-	// deadline forward on each Write/Flush batch, bounding a slow-reading
-	// client without clearing the server WriteTimeout entirely.
+	// Watching the caller's connection is the caller's own job: it owns that
+	// connection, and doing it here would need the framework's request object
+	// back. See WatchClientClose.
+	//
+	// A slow-reading client is bounded by the writer, which slides a deadline
+	// forward on every write and flush, rather than by this loop doing it per
+	// batch — so every path through this interface gets the same protection.
 
 	buf2 := make([]byte, 4096)
 	var lineBuf []byte
@@ -694,16 +700,19 @@ func IRStreamRelayJSONLines(
 		if len(events) == 0 {
 			return nil
 		}
-		// Slide the write deadline before each write batch — see
-		// IRStreamRelay's emit() for the full rationale. Ignore
-		// SetWriteDeadline errors on unsupported writers (unit tests).
-		_ = ApplyStreamWriteDeadline(c)
 		if !headerWritten {
-			c.Header("Content-Type", "text/event-stream")
-			c.Header("Cache-Control", "no-cache")
-			c.Header("Connection", "keep-alive")
-			c.Header("X-Accel-Buffering", "no")
-			c.Writer.WriteHeader(http.StatusOK)
+			w.Inject(http.Header{
+				"Content-Type":      {"text/event-stream"},
+				"Cache-Control":     {"no-cache"},
+				"Connection":        {"keep-alive"},
+				"X-Accel-Buffering": {"no"},
+			})
+			// A refused commit means the response was already committed by
+			// somebody else. Carrying on would set headerWritten and stream a
+			// body under a status this call did not choose.
+			if cerr := w.Commit(http.StatusOK); cerr != nil {
+				return fmt.Errorf("%w: commit stream to client: %w", ErrClientWrite, cerr)
+			}
 			headerWritten = true
 			if onFirstChunk != nil {
 				onFirstChunk()
@@ -716,14 +725,14 @@ func IRStreamRelayJSONLines(
 		var written [][]byte
 		for _, event := range events {
 			b := []byte(event.String())
-			if _, err := c.Writer.Write(b); err != nil {
+			if _, err := w.Write(b); err != nil {
 				return fmt.Errorf("%w: write to client: %w", ErrClientWrite, err)
 			}
 			if buf != nil {
 				written = append(written, b)
 			}
 		}
-		if err := FlushAndCheckError(c); err != nil {
+		if err := w.Flush(); err != nil {
 			return fmt.Errorf("%w: flush to client: %w", ErrClientWrite, err)
 		}
 		for _, b := range written {
