@@ -18,12 +18,13 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	Log      LogConfig      `yaml:"log"`
-	Security SecurityConfig `yaml:"security"`
-	Update   UpdateConfig   `yaml:"update"`
-	Gateway  GatewayConfig  `yaml:"gateway"`
+	Server       ServerConfig       `yaml:"server"`
+	Database     DatabaseConfig     `yaml:"database"`
+	Log          LogConfig          `yaml:"log"`
+	Security     SecurityConfig     `yaml:"security"`
+	Update       UpdateConfig       `yaml:"update"`
+	Gateway      GatewayConfig      `yaml:"gateway"`
+	PriceCatalog PriceCatalogConfig `yaml:"price_catalog"`
 }
 
 type ServerConfig struct {
@@ -108,6 +109,26 @@ type UpdateConfig struct {
 	GitHubProxy string `yaml:"github_proxy"`
 }
 
+// PriceCatalogConfig controls the background refresh of the built-in model
+// price seed (internal/pricecatalog). The seed is //go:embed-ded into the
+// binary as a compile-time fallback; this section launches a background
+// goroutine (pricecatalog.StartRefresh) that fetches a fresher catalog from the
+// distribution endpoint (a Cloudflare Worker) and atomically swaps it in.
+// A failed fetch never wipes a warm index — the worst case is "stays as it was"
+// (only cover, never delete).
+//
+// Endpoint defaults to the live distribution Worker (prices.yolorouter.com), so
+// every instance refreshes daily with zero config. Set it to "" to disable
+// refresh and stay on the embedded seed, or to your own URL to self-host the
+// distribution source.
+//
+// RefreshInterval bounds the gap between successful refreshes. The first fetch
+// happens immediately on start, so a restart warms without waiting for a tick.
+type PriceCatalogConfig struct {
+	Endpoint        string        `yaml:"endpoint"`
+	RefreshInterval time.Duration `yaml:"refresh_interval"`
+}
+
 func defaults() *Config {
 	return &Config{
 		Server: ServerConfig{Port: 8080},
@@ -127,6 +148,14 @@ func defaults() *Config {
 		// values to disk instead of five zero-value 0s that diverge from the
 		// actual runtime behaviour and from configs/config.example.yaml.
 		Gateway: DefaultGatewayConfig(),
+		// The distribution Worker (prices.yolorouter.com) is live, so every
+		// instance refreshes by default — no opt-in config needed. An operator
+		// who wants a different source (self-hosted, or to disable refresh
+		// entirely) overrides Endpoint with "" or their own URL.
+		PriceCatalog: PriceCatalogConfig{
+			Endpoint:        "https://prices.yolorouter.com/catalog.json",
+			RefreshInterval: 24 * time.Hour,
+		},
 	}
 }
 
@@ -578,6 +607,20 @@ func validate(cfg *Config) error {
 	}
 	if err := validateGatewayTimeouts(&cfg.Gateway); err != nil {
 		return err
+	}
+	if err := validatePriceCatalog(&cfg.PriceCatalog); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validatePriceCatalog rejects only the one genuinely broken combination: an
+// endpoint configured (so the operator wants live refresh) with a non-positive
+// refresh interval (which would make the ticker fire constantly or never). An
+// empty endpoint is valid — it means "stay on the embedded seed", the default.
+func validatePriceCatalog(p *PriceCatalogConfig) error {
+	if p.Endpoint != "" && p.RefreshInterval <= 0 {
+		return fmt.Errorf("price_catalog: refresh_interval must be > 0 when endpoint is set, got %v", p.RefreshInterval)
 	}
 	return nil
 }

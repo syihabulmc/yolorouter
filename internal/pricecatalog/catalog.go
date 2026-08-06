@@ -64,12 +64,18 @@ type Catalog struct {
 // instead of a case-insensitive scan of every host and every model.
 type index map[string]map[string]Price
 
-// UpdatedAt is the date the embedded catalog was last synced from vendor pricing
-// pages, in YYYY-MM-DD form, or "" if the catalog failed to load. It is shown
-// alongside a suggested price: the figures are a snapshot compiled by hand, and
-// how old that snapshot is decides whether "from the official catalog" means
-// "verify this" or "trust this".
+// UpdatedAt reports the date of the prices currently in effect, in YYYY-MM-DD
+// form. When the background refresh has warmed a live index fetched from the
+// distribution endpoint, this is that snapshot's date — what an admin
+// sees next to a suggested price, so it reads "today's cron" rather than "the
+// day this binary compiled". With no live index it falls back to the embedded
+// seed's sync date, or "" if even that failed to load. The freshness this string
+// expresses decides whether "from the official catalog" means "verify this" or
+// "trust this".
 func UpdatedAt() string {
+	if d := liveDate.Load(); d != nil && *d != "" {
+		return *d
+	}
 	if _, err := load(); err != nil {
 		return ""
 	}
@@ -161,15 +167,36 @@ func hostOf(baseURL string) string {
 	return strings.ToLower(strings.TrimSpace(baseURL))
 }
 
-// Lookup returns the seed price for a provider (by base_url) and model name,
-// case-insensitively. ok is false when the catalog failed to load, or no entry
-// matches — the caller then falls back to leaving the field empty.
+// Lookup returns the price for a provider (by base_url) and model name,
+// case-insensitively, from the warm live index when one exists, and
+// otherwise from the embedded seed. ok is false when neither source has a
+// matching entry — the caller then falls back to leaving the field empty.
+//
+// Live and embed UNION, not shadow: a Lookup checks the live index first, and
+// on a miss falls back to the embedded seed rather than returning false. This
+// lets the daily cron refresh a subset of providers (e.g. while a fetcher is
+// being fixed) without "losing" the un-refreshed ones — they keep their
+// embedded price. See TestLiveUnionsWithEmbed.
 func Lookup(baseURL, modelName string) (Price, bool) {
+	if p, ok := lookupLive(baseURL, modelName); ok {
+		return p, true
+	}
 	idx, err := load()
 	if err != nil {
 		return Price{}, false
 	}
 	return lookupIn(idx, baseURL, modelName)
+}
+
+// lookupLive is the warm-index branch of Lookup. Returning false for an empty
+// live index is what makes the embed fallback fire: a freshly started instance,
+// or one whose endpoint is unreachable, keeps serving the embedded seed.
+func lookupLive(baseURL, modelName string) (Price, bool) {
+	p := live.Load()
+	if p == nil {
+		return Price{}, false
+	}
+	return lookupIn(*p, baseURL, modelName)
 }
 
 func lookupIn(idx index, baseURL, modelName string) (Price, bool) {
