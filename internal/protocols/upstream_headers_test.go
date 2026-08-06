@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -93,4 +94,49 @@ func TestInjectReplacesButCopyUpstreamHeadersMerges(t *testing.T) {
 			t.Errorf("Cache-Control = %v, want the relay's own directive kept and the upstream's added", got)
 		}
 	})
+}
+
+// deadlineRecorder records the write deadlines set on it. httptest's own
+// recorder does not support them, so a writer that quietly stopped setting one
+// would look identical to a writer that never could.
+type deadlineRecorder struct {
+	gin.ResponseWriter
+	deadlines []time.Time
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
+	d.deadlines = append(d.deadlines, t)
+	return nil
+}
+
+// TestEveryWriteToTheCallerIsBounded pins the promise both implementations of
+// ClientWriter now make.
+//
+// A caller that stops reading holds the handler open for as long as it likes —
+// a connection and a concurrency slot spent on somebody who left. The streaming
+// loops used to set this themselves, so the protection depended on which loop
+// you were in; a non-streaming response had none at all.
+func TestEveryWriteToTheCallerIsBounded(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	rec := &deadlineRecorder{ResponseWriter: c.Writer}
+	c.Writer = rec
+
+	w := protocols.NewGinClientWriter(c)
+	if err := w.Commit(200); err != nil {
+		t.Fatalf("Commit = %v", err)
+	}
+	if _, err := w.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write = %v", err)
+	}
+	_ = w.Flush()
+
+	if len(rec.deadlines) < 2 {
+		t.Fatalf("write deadlines set: %d, want one per write and one per flush", len(rec.deadlines))
+	}
+	for i, d := range rec.deadlines {
+		if !d.After(time.Now()) {
+			t.Errorf("deadline %d is %v, already in the past", i, d)
+		}
+	}
 }

@@ -923,9 +923,28 @@ func (g ginClientWriter) Commit(status int) error {
 	return nil
 }
 
-func (g ginClientWriter) Write(p []byte) (int, error) { return g.c.Writer.Write(p) }
+func (g ginClientWriter) Write(p []byte) (int, error) {
+	g.slideDeadline()
+	return g.c.Writer.Write(p)
+}
 
-func (g ginClientWriter) Flush() error { return FlushAndCheckError(g.c) }
+func (g ginClientWriter) Flush() error {
+	g.slideDeadline()
+	return FlushAndCheckError(g.c)
+}
+
+// slideDeadline bounds how long one write to the caller may take.
+//
+// A caller that stops reading otherwise holds the handler open for as long as
+// it likes, which is a connection and a concurrency slot spent on somebody who
+// left. The streaming loops used to do this themselves, one call per batch;
+// doing it here means both writers this interface has make the same promise
+// instead of the protection depending on which one a path happened to get.
+//
+// The error is ignored deliberately: writers that cannot take a deadline
+// (a test recorder, say) still write correctly, and production's does support
+// it.
+func (g ginClientWriter) slideDeadline() { _ = ApplyStreamWriteDeadline(g.c) }
 
 // UpstreamHeadersToCopy is the subset of an upstream's response headers that
 // may be passed on to the caller.
