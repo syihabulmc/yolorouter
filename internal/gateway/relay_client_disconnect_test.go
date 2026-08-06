@@ -20,7 +20,7 @@ import (
 // contract directly: it must report true only when the CALLER's own request
 // context (c.Request.Context()) is context.Canceled, and false for a
 // deadline-derived context (context.DeadlineExceeded) or a live context —
-// the exact distinction the P2 fix depends on (a client disconnect must
+// the exact distinction this rests on (a client disconnect must
 // settle as 499, while the gateway's own request-budget expiry must not be
 // misclassified as one).
 func TestIsClientDisconnected(t *testing.T) {
@@ -105,7 +105,7 @@ func newCtxDisconnectAfterBodyRead(body []byte) (*gin.Context, *httptest.Respons
 // s.db.WithContext(requestCtx) query in Handle (repository.FindModelByName):
 // when the caller has disconnected, database/sql sees the already-canceled
 // context and returns context.Canceled from the query BEFORE it ever
-// reaches the driver. Before the P2 fix, this landed in the generic
+// reaches the driver. Classified naively, this lands in the generic
 // "internal error" branch and was logged as a 500 db_model fault; it must
 // instead settle as 499 client_disconnected, matching the disconnect
 // handling already used around the body read and the upstream send.
@@ -151,7 +151,7 @@ func TestHandleFindModelDBCanceledContextReturns499(t *testing.T) {
 }
 
 // TestHandleFindModelDBRealErrorStays500 is the negative-control pin for the
-// P2 fix above: a genuine DB fault (not a canceled context) at the exact
+// case above: a genuine DB fault (not a canceled context) at the exact
 // same FindModelByName query point must still settle as a 500 db_model
 // failure, not be swept up into the new disconnect branch. Closing the
 // underlying sqlite connection produces a real driver error
@@ -190,7 +190,7 @@ func TestHandleFindModelDBRealErrorStays500(t *testing.T) {
 
 // TestRelayCandidatesProviderKeyLoadCanceledContextReturns499 covers the
 // candidate-loop provider-key-load query (repository.ListProviderKeysByProvider,
-// via s.db.WithContext(rc.requestCtx) in relayCandidates): before the P2 fix,
+// via s.db.WithContext(rc.requestCtx) in relayCandidates): unguarded,
 // a client disconnect here was indistinguishable from a genuine load
 // failure, so the candidate loop kept walking the (now-pointless) remaining
 // candidates and eventually settled as a 502 all_candidates_failed instead

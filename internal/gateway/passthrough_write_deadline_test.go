@@ -6,8 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,34 +13,32 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
 
 // This file covers the gap the earlier sliding-write-deadline regression
-// suite (dispatch_response_classification_test.go and its _extra counterpart)
+// suite (response_classification_test.go and its _extra counterpart)
 // left open: those tests only drove the cross-protocol IR streaming path
-// (protocols.IRStreamRelay, reached via a
-// Claude/Anthropic-typed provider). In production every configured provider
-// is provider_type=openai, so every real stream goes through the
-// same-protocol byte-passthrough pumps in dispatch.go
-// (passthroughStreamToClient / passthroughStreamToClientDecoded) instead —
-// which, before this fix, silently discarded every downstream Write/Flush
-// error and never enforced the sliding write deadline at all. The tests
-// below drive those two pumps directly through the full production dispatch
-// path (svc.Handle over a real *http.Server, exactly like a real client).
+// (protocols.IRStreamRelay, reached via a Claude/Anthropic-typed provider). In
+// production every configured provider is provider_type=openai, so every real
+// stream goes through the same-protocol byte-passthrough pumps instead. Those
+// pumps must report a downstream Write/Flush failure rather than swallow it,
+// and must enforce the sliding write deadline. The tests below drive them
+// through the full production path (svc.Handle over a real *http.Server,
+// exactly like a real client).
 
-// TestPassthroughStreamToClient_ClientWriteTimeoutClassification drives the
-// production OpenAI same-protocol passthrough stream pump
-// (passthroughStreamToClient) with a client that connects but never reads
-// the response body. Once the kernel's TCP send buffer fills, the gateway's
+// TestASlowCallerOnAForwardedStreamIsBlamedForTheirOwnTimeout drives the
+// production OpenAI same-protocol passthrough stream pump with a client that
+// connects but never reads the response body. Once the kernel's TCP send buffer fills, the gateway's
 // Write blocks; the sliding write deadline (streamWriteWindow, shrunk here)
 // must cut it, and the resulting error must be classified as a client-side
 // write timeout (AttemptConnError + "client_write_timeout"), not an upstream
 // server fault — and the handler must actually return (concurrency slot
 // released), not hang.
-func TestPassthroughStreamToClient_ClientWriteTimeoutClassification(t *testing.T) {
+func TestASlowCallerOnAForwardedStreamIsBlamedForTheirOwnTimeout(t *testing.T) {
 	prevWindow := protocols.StreamWriteWindow()
 	protocols.SetStreamWriteWindow(150 * time.Millisecond)
 	t.Cleanup(func() { protocols.SetStreamWriteWindow(prevWindow) })
@@ -133,13 +129,12 @@ func TestPassthroughStreamToClient_ClientWriteTimeoutClassification(t *testing.T
 	}
 }
 
-// TestPassthroughStreamToClientDecoded_ClientWriteTimeoutClassification is
-// TestPassthroughStreamToClient_ClientWriteTimeoutClassification's
-// counterpart for the non-OpenAI same-protocol passthrough pump
-// (passthroughStreamToClientDecoded), reached by a native Gemini ingress
-// request against a provider_type=gemini provider (createGeminiProvider —
-// same protocol both sides, so no IR round trip).
-func TestPassthroughStreamToClientDecoded_ClientWriteTimeoutClassification(t *testing.T) {
+// TestASlowCallerOnADecodedStreamIsBlamedForTheirOwnTimeout is
+// TestASlowCallerOnAForwardedStreamIsBlamedForTheirOwnTimeout's
+// counterpart for the non-OpenAI same-protocol passthrough pump, reached by a
+// native Gemini ingress request against a provider_type=gemini provider
+// (createGeminiProvider — same protocol both sides, so no IR round trip).
+func TestASlowCallerOnADecodedStreamIsBlamedForTheirOwnTimeout(t *testing.T) {
 	prevWindow := protocols.StreamWriteWindow()
 	protocols.SetStreamWriteWindow(150 * time.Millisecond)
 	t.Cleanup(func() { protocols.SetStreamWriteWindow(prevWindow) })
@@ -245,87 +240,82 @@ func (w *failingPassthroughWriter) Write(b []byte) (int, error) {
 }
 func (w *failingPassthroughWriter) WriteHeader(code int) { w.status = code }
 
-// TestPassthroughStreamToClient_WriteErrorPropagatedAsClientWrite is a fast,
-// deterministic unit test for the write-deadline fix: a downstream Write
-// failure
-// inside passthroughStreamToClient's forward loop must be wrapped in
-// protocols.ErrClientWrite and returned (not silently swallowed), and the
-// undelivered bytes must not land in the stream capture file.
-func TestPassthroughStreamToClient_WriteErrorPropagatedAsClientWrite(t *testing.T) {
-	dir := t.TempDir()
-	fw := &failingPassthroughWriter{}
-	c, _ := gin.CreateTestContext(fw)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	c.Set(BodiesDirContextKey, dir)
-	rc := &Exchange{requestID: "req-passthrough-write-fail", originalModel: "ext", isStream: true}
+// TestAStreamTheCallerCannotReceiveIsReportedNotSwallowed pins what a
+// downstream write failure must do to a stream in flight.
+//
+// A Write that fails is the only sign the caller is gone; swallowing it lets
+// the pump keep reading upstream and file the request as delivered. The failure
+// has to come back classified as the caller's, and the bytes that never left
+// the process must not appear in the capture file, which is read as a record of
+// what the caller actually received.
+func TestAStreamTheCallerCannotReceiveIsReportedNotSwallowed(t *testing.T) {
+	// One case per pump: the OpenAI-shaped one that forwards frames as it scans
+	// them, and the one that decodes first. They classify failures separately.
+	cases := []struct {
+		name      string
+		protocol  protocols.ProtocolID
+		path      string
+		caller    string
+		upstream  string
+		requestID string
+	}{
+		{
+			name:      "frames forwarded as scanned",
+			protocol:  protocols.ProtocolOpenAI,
+			path:      "/v1/chat/completions",
+			caller:    `{"model":"ext","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+			upstream:  `data: {"model":"real","choices":[{"delta":{"content":"hi"}}]}` + "\n\n",
+			requestID: "req-passthrough-write-fail",
+		},
+		{
+			name:     "frames decoded first",
+			protocol: protocols.ProtocolClaude,
+			path:     "/v1/messages",
+			caller:   `{"model":"ext","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+			upstream: `event: message_start` + "\n" +
+				`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"real-model","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}` + "\n\n",
+			requestID: "req-passthrough-decoded-write-fail",
+		},
+	}
 
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(`data: {"model":"real","choices":[{"delta":{"content":"hi"}}]}` + "\n\n")),
-		Header:     make(http.Header),
-	}
-	// The pump leaves the capture file open for its caller to close
-	// (dispatchPassthroughStream does, on every exit path). Calling it directly
-	// means standing in for that caller: an unclosed handle outlives the test
-	// and t.TempDir() cleanup fails on Windows, which will not delete a file
-	// that is still open.
-	defer func() { closeStreamBodyFile(rc) }()
-	_, err := passthroughStreamToClient(c, protocols.NewGinClientWriter(c), resp, rc)
-	if err == nil {
-		t.Fatal("expected a write error, got nil")
-	}
-	if !errors.Is(err, protocols.ErrClientWrite) {
-		t.Errorf("error must be classified via protocols.ErrClientWrite, got %v", err)
-	}
-	if !isClientWriteError(err) {
-		t.Errorf("isClientWriteError(%v) = false, want true", err)
-	}
-	captured, readErr := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
-	if readErr != nil {
-		t.Fatalf("read capture file: %v", readErr)
-	}
-	if len(captured) > 0 {
-		t.Errorf("capture file must be empty when the write never reached the client, got %q", captured)
-	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fw := &failingPassthroughWriter{}
+			c, _ := gin.CreateTestContext(fw)
+			c.Request = httptest.NewRequest(http.MethodPost, tc.path, nil)
+			c.Set(BodiesDirContextKey, dir)
 
-// TestPassthroughStreamToClientDecoded_WriteErrorPropagatedAsClientWrite is
-// TestPassthroughStreamToClient_WriteErrorPropagatedAsClientWrite's
-// counterpart for passthroughStreamToClientDecoded (the non-OpenAI
-// same-protocol pump), using a Claude-shaped upstream body.
-func TestPassthroughStreamToClientDecoded_WriteErrorPropagatedAsClientWrite(t *testing.T) {
-	dir := t.TempDir()
-	fw := &failingPassthroughWriter{}
-	c, _ := gin.CreateTestContext(fw)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-	c.Set(BodiesDirContextKey, dir)
-	rc := &Exchange{requestID: "req-passthrough-decoded-write-fail", originalModel: "ext", isStream: true}
+			rc := &Exchange{requestID: tc.requestID, ingress: tc.protocol, originalModel: "ext", isStream: true}
+			adm := admitFor(t, tc.protocol, tc.path, tc.caller, Candidate{
+				ProviderModelName: "real", EgressProtocol: tc.protocol, Passthrough: true,
+			})
 
-	body := `event: message_start` + "\n" +
-		`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"real-model","content":[],"usage":{"input_tokens":10,"output_tokens":0}}}` + "\n\n"
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     make(http.Header),
-	}
-	// The pump leaves the capture file open for its caller to close
-	// (dispatchPassthroughStream does, on every exit path). Calling it directly
-	// means standing in for that caller: an unclosed handle outlives the test
-	// and t.TempDir() cleanup fails on Windows, which will not delete a file
-	// that is still open.
-	defer func() { closeStreamBodyFile(rc) }()
-	_, err := passthroughStreamToClientDecoded(c, protocols.NewGinClientWriter(c), resp, rc, protocols.ProtocolClaude)
-	if err == nil {
-		t.Fatal("expected a write error, got nil")
-	}
-	if !errors.Is(err, protocols.ErrClientWrite) {
-		t.Errorf("error must be classified via protocols.ErrClientWrite, got %v", err)
-	}
-	captured, readErr := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
-	if readErr != nil {
-		t.Fatalf("read capture file: %v", readErr)
-	}
-	if len(captured) > 0 {
-		t.Errorf("capture file must be empty when the write never reached the client, got %q", captured)
+			tools, release := (&Service{}).newDeliveryTools(c, rc, TransferLimits{}, true)
+			d := adm.payload.Deliver(tools, &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(tc.upstream)),
+				Header:     make(http.Header),
+			})
+			// Hands the capture file back: it is closed here, and removed if it
+			// was never written to.
+			release()
+
+			if d.Err == nil {
+				t.Fatal("delivery reports no error; the write to the caller failed")
+			}
+			if !errors.Is(d.Err, protocols.ErrClientWrite) {
+				t.Errorf("error must be classified via protocols.ErrClientWrite, got %v", d.Err)
+			}
+			if !isClientWriteError(d.Err) {
+				t.Errorf("isClientWriteError(%v) = false, want true", d.Err)
+			}
+			if d.Fault != fact.FaultClient {
+				t.Errorf("fault = %v, want client: the provider sent a well-formed stream", d.Fault)
+			}
+			if _, exists := readCapture(t, dir, rc.requestID); exists {
+				t.Error("a capture file was left behind; nothing reached the caller, and the file is read as what they received")
+			}
+		})
 	}
 }

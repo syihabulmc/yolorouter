@@ -23,7 +23,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
 
-// ───────────────────── Fix 1: writeStreamErrorEvent / sendSSEFrame ────
+// ─────────────────── writeStreamErrorEvent / sendSSEFrame ────
 
 // failingWriteCloser is an http.ResponseWriter whose Write always returns an
 // error, simulating a dead client connection. Used to verify
@@ -45,12 +45,12 @@ func (w *failingWriteCloser) Write(b []byte) (int, error) {
 }
 func (w *failingWriteCloser) WriteHeader(code int) { w.status = code }
 
-// TestWriteAndCaptureSSE_FailureDoesNotAppend verifies that when the client
+// TestAFrameThatFailedToSendIsNotRecordedAsSent verifies that when the client
 // Write fails, sendSSEFrame returns the error AND does NOT append the
 // undelivered bytes to the stream capture file — the capture contract is
 // "exactly what the client received", and recording bytes that were never
 // sent would mislead audit operators.
-func TestWriteAndCaptureSSE_FailureDoesNotAppend(t *testing.T) {
+func TestAFrameThatFailedToSendIsNotRecordedAsSent(t *testing.T) {
 	dir := t.TempDir()
 	fw := &failingWriteCloser{}
 	c, _ := gin.CreateTestContext(fw)
@@ -77,9 +77,9 @@ func TestWriteAndCaptureSSE_FailureDoesNotAppend(t *testing.T) {
 	}
 }
 
-// TestWriteAndCaptureSSE_SuccessAppends verifies the success path is
+// TestAFrameThatWentOutIsRecordedAsSent verifies the success path is
 // unchanged: a successful Write still appends to the capture file.
-func TestWriteAndCaptureSSE_SuccessAppends(t *testing.T) {
+func TestAFrameThatWentOutIsRecordedAsSent(t *testing.T) {
 	dir := t.TempDir()
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -126,7 +126,7 @@ func TestWriteStreamErrorEvent_FailureReturnsError(t *testing.T) {
 	}
 }
 
-// ───────────────────── Fix 2: non-2xx error body slow trickle ────────────────
+// ─────────────────── non-2xx error body slow trickle ────────────────
 
 // TestNon2xxErrorBodySlowTrickle503_BoundedByShortBudget verifies that a
 // non-2xx error body whose upstream trickles one byte at a short interval is
@@ -267,7 +267,7 @@ func TestUnauthorized401_CASPersistsKeyFailureBeforeBodyRead(t *testing.T) {
 	}
 }
 
-// ───────────────────── Fix 3: IR downstream write timeout classification ─────
+// ─────────────────── IR downstream write timeout classification ─────
 
 // TestIsClientWriteError_ClassifiesDeadlineAndDisconnect is a table-driven
 // unit test for the classifier that distinguishes downstream (client-side)
@@ -309,13 +309,13 @@ func TestIsClientWriteError_ClassifiesDeadlineAndDisconnect(t *testing.T) {
 	}
 }
 
-// TestProcessDispatchResponseStream_ClientWriteTimeoutClassification drives
+// TestASlowCallerOnACrossProtocolStreamIsBlamedForTheirOwnTimeout drives
 // the cross-protocol IR streaming path with a slow client writer that fills
 // its buffer and then blocks until the sliding write deadline fires. The
 // resulting write error must be classified as a client-side timeout
 // (AttemptConnError + "client write timeout"), NOT AttemptServerError, and
 // no second error frame may be emitted.
-func TestProcessDispatchResponseStream_ClientWriteTimeoutClassification(t *testing.T) {
+func TestASlowCallerOnACrossProtocolStreamIsBlamedForTheirOwnTimeout(t *testing.T) {
 	// Shrink streamWriteWindow so the test is fast.
 	prevWindow := protocols.StreamWriteWindow()
 	protocols.SetStreamWriteWindow(150 * time.Millisecond)
@@ -425,11 +425,11 @@ func TestProcessDispatchResponseStream_ClientWriteTimeoutClassification(t *testi
 	}
 }
 
-// TestProcessDispatchResponseStream_ServerErrorStillClassifiedAsPartial is the
+// TestABrokenProviderOnACrossProtocolStreamIsStillFiledAsPartial is the
 // complement: an upstream read error (not a client write error) after the
 // first byte must still be classified as AttemptServerError + stream_partial,
 // proving the classifier does not over-classify.
-func TestProcessDispatchResponseStream_ServerErrorStillClassifiedAsPartial(t *testing.T) {
+func TestABrokenProviderOnACrossProtocolStreamIsStillFiledAsPartial(t *testing.T) {
 	prevWindow := protocols.StreamWriteWindow()
 	protocols.SetStreamWriteWindow(150 * time.Millisecond)
 	t.Cleanup(func() { protocols.SetStreamWriteWindow(prevWindow) })
@@ -509,7 +509,7 @@ func TestProcessDispatchResponseStream_ServerErrorStillClassifiedAsPartial(t *te
 		t.Fatal("expected at least one attempt record")
 	}
 	last := rc.attempts[len(rc.attempts)-1]
-	if strings.Contains(last.FailReason, "client write timeout") {
+	if strings.Contains(last.FailReason, "client_write_timeout") {
 		t.Errorf("upstream read error was misclassified as client_write_timeout: fail_reason=%q", last.FailReason)
 	}
 }
@@ -520,7 +520,7 @@ func TestProcessDispatchResponseStream_ServerErrorStillClassifiedAsPartial(t *te
 // to.
 func committedStreamClient(t *testing.T, c *gin.Context, rc *Exchange) ClientResponse {
 	t.Helper()
-	w := (&Service{}).streamResponse(c, rc)
+	w := realStreamClient(&Service{}, c, rc)
 	if err := w.Commit(http.StatusOK); err != nil {
 		t.Fatalf("commit: %v", err)
 	}

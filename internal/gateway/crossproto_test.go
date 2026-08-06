@@ -21,8 +21,8 @@ import (
 // createAnthropicProvider seeds a provider whose provider_type is
 // "anthropic" — the negotiate.go egress switch maps that to
 // protocols.ProtocolClaude, so a request against this provider takes the
-// cross-protocol IR round trip (buildDispatchRequest / processDispatchResponse*)
-// instead of the same-protocol byte passthrough every other gateway test
+// cross-protocol IR round trip instead of the same-protocol byte passthrough
+// every other gateway test
 // exercises. Mirrors createProvider (relay_test.go) with the type field
 // overridden.
 func createAnthropicProvider(t *testing.T, db *gorm.DB, name, baseURL string) *model.Provider {
@@ -43,9 +43,8 @@ func createAnthropicProvider(t *testing.T, db *gorm.DB, name, baseURL string) *m
 // provider_type="gemini" maps (negotiate.go's primaryProtocol) to
 // protocols.ProtocolGemini, so a request against this provider from a native
 // Gemini ingress caller (/v1beta/...) is same-protocol passthrough — no IR
-// round trip — exercising passthroughStreamToClientDecoded's Gemini branch
-// and, on a mid-stream upstream failure, writeStreamErrorEvent's Gemini
-// branch.
+// round trip — exercising the decoding pump's Gemini branch and, on a
+// mid-stream upstream failure, writeStreamErrorEvent's Gemini branch.
 func createGeminiProvider(t *testing.T, db *gorm.DB, name, baseURL string) *model.Provider {
 	t.Helper()
 	now := time.Now().UTC()
@@ -408,7 +407,7 @@ func TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody(t *testing
 // the first candidate's upstream never emits a single event. Before the fix,
 // protocols.IRStreamRelay committed the SSE response headers (200 +
 // text/event-stream) unconditionally before reading any upstream bytes, and
-// dispatch.go called rc.MarkFirstByteSent() before invoking the relay at
+// the dispatch layer called rc.MarkFirstByteSent() before invoking the relay at
 // all — so a pre-first-event failure (here, an upstream that returns 200
 // with a completely empty body) was indistinguishable from a genuine
 // mid-stream failure and could never fail over, unlike the same-protocol

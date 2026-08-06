@@ -17,9 +17,9 @@ import (
 // the client), yanking the raw connection out from under the client mid-body
 // surfaces to the reading side as a genuine transport-level read error
 // (io.ErrUnexpectedEOF from the chunked decoder, not io.EOF) — modeling a
-// real "upstream connection died mid-stream" failure, so
-// passthroughStreamToClient/dispatchPassthroughStream take the mid-stream
-// error branch (rc.firstByteSent=true, err != nil) that calls
+// real "upstream connection died mid-stream" failure, so the passthrough
+// delivery takes the mid-stream error branch (rc.firstByteSent=true,
+// err != nil) that calls
 // writeStreamErrorEvent, instead of the clean-EOF-without-[DONE] branch
 // (errStreamNoDoneTerminator) which deliberately does NOT inject a
 // synthetic error event.

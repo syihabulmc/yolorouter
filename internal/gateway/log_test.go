@@ -105,7 +105,7 @@ func TestFinalizeWritesBodyRow(t *testing.T) {
 		upstreamResponseBody: []byte(`{"model":"gpt-4o-real","choices":[]}`),
 	}
 
-	svc.finalize(rc, 200, "", time.Now())
+	svc.finalize(rc, nil, 200, "", time.Now())
 
 	svc.recordTerminal(rc)
 
@@ -165,7 +165,7 @@ func TestFinalizeBodyWriteFailureDoesNotRollbackBilling(t *testing.T) {
 			t.Fatalf("finalize panicked on request_log_bodies write failure: %v", r)
 		}
 	}()
-	svc.finalize(rc, 200, "", time.Now())
+	svc.finalize(rc, nil, 200, "", time.Now())
 	svc.recordTerminal(rc)
 
 	var logCount int64
@@ -259,7 +259,6 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 		requestID:                    "req-compress-1",
 		apiKeyID:                     apiKey.ID,
 		candidate:                    cand,
-		usage:                        &Usage{PromptTokens: 100, CompletionTokens: 50},
 		compressEstimatedTokensSaved: 1500,
 		compressorsApplied:           []string{"whitespace", "whitespace", "contractions"},
 		requestBodyCompressed:        []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
@@ -270,7 +269,7 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 			Outcome: AttemptSuccess, StatusCode: 200,
 		}},
 	}
-	svc.finalize(rc, 200, "", time.Now())
+	svc.finalize(rc, &Usage{PromptTokens: 100, CompletionTokens: 50}, 200, "", time.Now())
 	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-compress-1")
@@ -316,7 +315,7 @@ func TestFinalizeWritesCompressSkippedColumns(t *testing.T) {
 		apiKeyID:           apiKey.ID,
 		compressSkipReason: "too_small",
 	}
-	svc.finalize(rc, 200, "", time.Now())
+	svc.finalize(rc, nil, 200, "", time.Now())
 	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-compress-skip-1")
@@ -354,7 +353,7 @@ func TestFinalizeWritesCompressColumnsUncompressed(t *testing.T) {
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
 	rc := &Exchange{requestID: "req-nocompress-1", apiKeyID: apiKey.ID}
-	svc.finalize(rc, 200, "", time.Now())
+	svc.finalize(rc, nil, 200, "", time.Now())
 	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-nocompress-1")
@@ -397,7 +396,7 @@ func TestFinalizeCompressCostSavedZeroWhenPricingUnknown(t *testing.T) {
 		// Usage and Candidate are nil — pricing is unknown, and crucially
 		// Attempts is empty (pre-relay rejection).
 	}
-	svc.finalize(rc, http.StatusInternalServerError, "no_candidate", time.Now())
+	svc.finalize(rc, nil, http.StatusInternalServerError, "no_candidate", time.Now())
 	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-unknown-price-1")
@@ -445,7 +444,7 @@ func TestFinalizeCompressPhantomSavingsZeroedOnPreRelayRejection(t *testing.T) {
 		// candidate after compression already ran on the caller body).
 	}
 	// 503 = no routable candidate, the most common post-compress pre-relay path.
-	svc.finalize(rc, http.StatusServiceUnavailable, "no_enabled_candidate", time.Now())
+	svc.finalize(rc, nil, http.StatusServiceUnavailable, "no_enabled_candidate", time.Now())
 	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-phantom-1")
@@ -867,8 +866,8 @@ func TestFinalizeNormalizesCacheExclusivePrompt(t *testing.T) {
 			cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0, CacheReadPrice: &readPrice}
 
 			reqID := fmt.Sprintf("req-cacheconv-%d", i)
-			rc := &Exchange{requestID: reqID, apiKeyID: apiKey.ID, candidate: cand, usage: tc.usage}
-			svc.finalize(rc, 200, "", time.Now())
+			rc := &Exchange{requestID: reqID, apiKeyID: apiKey.ID, candidate: cand}
+			svc.finalize(rc, tc.usage, 200, "", time.Now())
 			svc.recordTerminal(rc)
 
 			row, err := repository.GetRequestLogByRequestID(db, reqID)

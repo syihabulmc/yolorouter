@@ -115,6 +115,20 @@ func (s *stubClient) Flush() error {
 
 func (s *stubClient) WatchCaller(io.Closer) func() { return func() {} }
 
+// realStreamClient is a ClientResponse backed by a real gin context, for the
+// cases stubClient cannot answer: what the product actually writes to a socket.
+//
+// Built directly rather than by asking for a toolbox. A toolbox opens a capture
+// file and drops the previous attempt's bodies, and these tests hand it a
+// stream that already has both — they need a way to write, not a fresh start.
+func realStreamClient(s *Service, c *gin.Context, rc *Exchange) ClientResponse {
+	limits := s.resolveLimits(TransferLimits{})
+	return &ginClientResponse{
+		c: c, rc: rc, window: limits.WriteWindow, limit: limits.MaxResponseBytes,
+		progressive: true,
+	}
+}
+
 // streamingPayload is a text payload at the point a delivery reports back.
 func streamingPayload(t *testing.T, ingress protocols.ProtocolID, caller string) *textPayload {
 	t.Helper()
@@ -343,7 +357,7 @@ func TestAFrameOnlyCountsAsReceivedOnceItHasBeenFlushed(t *testing.T) {
 	openStreamBodyFile(c, rc)
 	defer closeStreamBodyFile(rc)
 
-	client := (&Service{}).streamResponse(c, rc)
+	client := realStreamClient(&Service{}, c, rc)
 	if err := client.Commit(http.StatusOK); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -376,7 +390,7 @@ func TestATranslatedStreamNamesADoubleCommitForWhatItIs(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	rc := &Exchange{requestID: "double-commit"}
 
-	client := (&Service{}).streamResponse(c, rc)
+	client := realStreamClient(&Service{}, c, rc)
 	if err := client.Commit(http.StatusOK); err != nil {
 		t.Fatalf("first commit: %v", err)
 	}

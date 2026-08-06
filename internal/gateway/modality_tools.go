@@ -683,27 +683,6 @@ func (s *Service) releaseDelivery(c *gin.Context, rc *Exchange) {
 	closeStreamBodyFile(rc)
 }
 
-// streamResponse builds the response object for a stream that is already
-// underway, for the kernel's own remaining writes to it.
-//
-// It exists because the streaming paths have not moved behind these tools yet,
-// and until they do the kernel still writes the last frame of a broken stream
-// itself. Building one here rather than threading it through keeps that a
-// temporary detail of the paths that have not moved, instead of a parameter
-// every caller learns and then has to unlearn.
-//
-// Built directly rather than by asking for a toolbox. A toolbox opens a capture
-// file and drops the previous attempt's bodies, and this is called in the
-// middle of a stream that already has both — it needs a way to write, not a
-// fresh start.
-func (s *Service) streamResponse(c *gin.Context, rc *Exchange) ClientResponse {
-	limits := s.resolveLimits(TransferLimits{})
-	return &ginClientResponse{
-		c: c, rc: rc, window: limits.WriteWindow, limit: limits.MaxResponseBytes,
-		progressive: true,
-	}
-}
-
 // secondaryFetchClient returns the shared client secondary fetches run on.
 //
 // One per Service, not one per delivery. A fresh Transport each time never
@@ -730,6 +709,11 @@ func (s *Service) secondaryFetchClient() *http.Client {
 	})
 	return s.secondaryFetch
 }
+
+// streamWriteDeadlineWarnedKey gates the sliding-deadline warning to once per
+// request: the deadline is slid before every forwarded chunk, so on a writer
+// without SetWriteDeadline support the error would otherwise spam the log.
+const streamWriteDeadlineWarnedKey = "gateway_stream_write_deadline_warned"
 
 // warnWriteDeadlineUnsupported reports a writer that cannot take a write
 // deadline, at most once per request.

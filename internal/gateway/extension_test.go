@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -613,7 +614,7 @@ func TestImpossibleDeliveryIsRefusedAndSettled(t *testing.T) {
 		t.Fatal("the fixture is no longer impossible; pick another shape")
 	}
 
-	got := svc.settleDelivery(nil, rc, impossible, time.Now())
+	got := settleOneDelivery(t, svc, rc, impossible)
 
 	if got != attemptSuccess {
 		t.Errorf("result = %v, want the request settled: an impossible delivery must not send the chain on", got)
@@ -637,25 +638,53 @@ func TestImpossibleDeliveryIsRefusedAndSettled(t *testing.T) {
 	if noted.BillingStatus != http.StatusInternalServerError || noted.Fault != "gateway" {
 		t.Errorf("recorded %+v, want the substitution recorded, not the impossible original", *noted)
 	}
+
+	// The attempt row is built from whatever the labelling step is handed, and
+	// only the substitute carries a reason. Check the delivery after labelling
+	// instead of before and this comes out empty: the row an operator opens to
+	// find out what happened would say nothing at all.
+	if len(rc.attempts) != 1 {
+		t.Fatalf("attempts = %d, want exactly one", len(rc.attempts))
+	}
+	if !strings.HasPrefix(rc.attempts[0].FailReason, "invalid_delivery") {
+		t.Errorf("attempt fail reason = %q, want it to name the refused delivery — "+
+			"an empty reason here means the row was labelled before the delivery was checked",
+			rc.attempts[0].FailReason)
+	}
+}
+
+// settleOneDelivery puts a delivery through the kernel's own recording step,
+// which is where a delivery is checked, labelled, and settled in that order.
+func settleOneDelivery(t *testing.T, svc *Service, rc *Exchange, d fact.Delivery) attemptResult {
+	t.Helper()
+	adm := admitFor(t, protocols.ProtocolOpenAI, "/v1/chat/completions",
+		`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`,
+		Candidate{ProviderModelName: "m", EgressProtocol: protocols.ProtocolOpenAI, Passthrough: true})
+	return svc.recordAndSettle(nil, rc, adm, d, model.ModelCandidate{}, &model.Provider{},
+		model.ProviderKey{}, 200, time.Now())
 }
 
 // TestDeliveryIsRecordedAgainstTheAttemptItDescribes pins provenance for the
 // delivery record.
 //
 // The sink numbers an entry by how many attempts have been recorded so far,
-// which is correct for a capability reporting DURING an attempt — the record
-// for that attempt has not been appended yet. A delivery is the opposite case:
-// it is settled after its own attempt is already on the list, so the same rule
-// numbers it as the attempt that comes NEXT. On a failover chain that silently
-// files each delivery under the following candidate, and the last one under a
-// candidate that never ran.
+// which is correct for anything reporting DURING an attempt — the record for
+// that attempt has not been appended yet. A delivery is checked in exactly that
+// window, before its own attempt is labelled, and the append that follows is
+// what makes the number it was given the right one. Move the check after the
+// append and every delivery is filed under the candidate that comes NEXT, with
+// the last one under a candidate that never ran.
 func TestDeliveryIsRecordedAgainstTheAttemptItDescribes(t *testing.T) {
 	svc := &Service{}
 	rc := &Exchange{requestID: "req-provenance"}
-	// Two attempts already ran; the delivery being settled describes the second.
+	// Two attempts already ran; the one being settled here is the third.
 	rc.attempts = []AttemptRecord{{ProviderName: "first"}, {ProviderName: "second"}}
 
-	svc.settleDelivery(nil, rc, fact.Succeeded(200), time.Now())
+	settleOneDelivery(t, svc, rc, fact.Succeeded(200))
+
+	if len(rc.attempts) != 3 {
+		t.Fatalf("attempts = %d, want the delivery to have appended its own", len(rc.attempts))
+	}
 
 	var noted *fact.Entry
 	for i, e := range rc.timeline.All() {
@@ -666,8 +695,8 @@ func TestDeliveryIsRecordedAgainstTheAttemptItDescribes(t *testing.T) {
 	if noted == nil {
 		t.Fatal("the delivery was never recorded")
 	}
-	if noted.Attempt != 1 {
-		t.Errorf("delivery recorded against attempt %d, want 1: it describes the attempt that just finished, not the next one",
+	if noted.Attempt != 2 {
+		t.Errorf("delivery recorded against attempt %d, want 2: it describes the attempt it just settled, not the next one",
 			noted.Attempt)
 	}
 }

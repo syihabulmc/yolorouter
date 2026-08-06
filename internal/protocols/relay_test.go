@@ -427,7 +427,7 @@ func TestIRStreamRelay_RequiresSawDoneBeforeSynthesizingSuccess(t *testing.T) {
 // [DONE]) must still settle as success and emit [DONE] to the client,
 // confirming the sawDone gate does not regress the normal path — this also
 // pins the shape the existing cross-protocol integration test
-// (dispatch_crossproto_test.go, complete Claude SSE with message_stop)
+// (the gateway's cross-protocol suite, complete Claude SSE with message_stop)
 // depends on.
 func TestIRStreamRelay_CompleteStreamStillSucceeds(t *testing.T) {
 	gin.SetMode(gin.TestMode)

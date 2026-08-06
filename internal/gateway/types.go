@@ -64,19 +64,12 @@ type Exchange struct {
 	compressSkipReason string
 	// compressEstimatedTokensSaved / CompressorsApplied / RequestBodyCompressed
 	// record the outcome of a successful compression pass. RequestBodyCompressed
-	// is the compressed body that upstream encoding (buildUpstreamBody) uses as
-	// its input via EffectiveRequestBody; RequestBody stays the verbatim caller
-	// body for the audit row.
+	// is what admission is handed and the payload encodes from; RequestBody
+	// stays the verbatim caller body for the audit row.
 	compressEstimatedTokensSaved int
 	compressorsApplied           []string
 	requestBodyCompressed        []byte
-	// wantsStreamUsage is true when the caller set
-	// stream_options.include_usage=true. Controls whether usage frames
-	// collected upstream are forwarded to the caller (the gateway always
-	// requests usage upstream for its own cost accounting, but only
-	// forwards it when the caller asked).
-	wantsStreamUsage bool
-	apiKeyID         uint
+	apiKeyID                     uint
 	// concurrencyLimit / rpmLimit are the caller's allowance, resolved once
 	// from the key. Zero means unlimited, which is also what an absent limit
 	// means — the distinction has no consumer, so it is not preserved.
@@ -119,7 +112,6 @@ type Exchange struct {
 	contentInspectionErrType string
 
 	// usage from the successful attempt, if any — drives cost + the log row.
-	usage *Usage
 
 	// attempts records every candidate try in order.
 	attempts []AttemptRecord
@@ -161,7 +153,7 @@ type Exchange struct {
 	// post-usage-strip, including local error JSON); UpstreamResponseBody is
 	// the raw upstream response (non-stream full / non-2xx error body
 	// bounded-read). For stream, the sent SSE is appended to streamBodyFile
-	// instead and dispatchPassthroughStream clears these two so they stay empty.
+	// instead, and a streaming delivery clears these two so they stay empty.
 	// Nil/empty on early failure or body-read failure.
 	requestBody          []byte
 	upstreamRequestBody  []byte
@@ -317,19 +309,6 @@ func (rc *Exchange) UpstreamBodyTruncated() bool { return rc.upstreamBodyTruncat
 // ClientBodyTruncated reports whether the captured client-facing body hit its cap.
 func (rc *Exchange) ClientBodyTruncated() bool { return rc.clientBodyTruncated }
 
-// EffectiveRequestBody returns the body that upstream encoding should use as
-// its input: the compressed body when a successful compression pass produced
-// one, otherwise the verbatim caller body. buildUpstreamBody reads this
-// instead of RequestBody directly so that both the passthrough (model-field
-// rewrite) and cross-protocol (IR decode/encode) paths consume the compressed
-// body without every call site branching.
-func (rc *Exchange) EffectiveRequestBody() []byte {
-	if rc.requestBodyCompressed != nil {
-		return rc.requestBodyCompressed
-	}
-	return rc.requestBody
-}
-
 // AttemptRecord is one candidate try (the log keeps every attempt,
 // not just the final one). Outcome is one of the AttemptOutcome* constants.
 type AttemptRecord struct {
@@ -414,21 +393,15 @@ type Usage struct {
 	ReasoningTokens int `json:"-"`
 }
 
+// beginUpstreamAttempt drops whatever the previous send left on the exchange,
+// so nothing this attempt did not produce is read as belonging to it.
+//
 // The boundary is the send, not the candidate: a single candidate rotates
 // through its provider's keys, and each rotation is a real request with its own
 // response. Tying invalidation to the candidate would leave one key's leftovers
 // standing while the next key runs.
 //
-// Usage is the field that made this necessary. An upstream can report what it
-// charged before producing anything a caller can see — Anthropic's opening
-// frame carries the input and cache counts — so an attempt can be abandoned
-// while holding real numbers. Nothing downstream distinguishes "these tokens
-// belong to the attempt being settled" from "these tokens are whatever was left
-// on the exchange": billing reads the field unconditionally. Left uncleared,
-// an abandoned candidate's tokens are charged under whatever the request
-// eventually settles as.
-//
-// The captured bodies move on the same boundary and for the same reason. The
+// The captured bodies move on this boundary. The
 // audit row has one field for them and a request may make several attempts, so
 // whatever ends up stored is read as belonging to the attempt the row describes.
 // Keeping the last body that happened to exist meant a chain whose final
@@ -443,30 +416,10 @@ type Usage struct {
 // because they are large, so attributing them per attempt is a schema change,
 // not a boundary fix.
 func (rc *Exchange) beginUpstreamAttempt() {
-	rc.usage = nil
 	rc.clearResponseBodies()
 	// The request and the response it produced are one pair. Clearing only the
 	// response left the audit row showing an earlier attempt's request body
 	// with no response beside it — a request that was never the one sent.
 	rc.upstreamRequestBody = nil
 	rc.upstreamURL = ""
-}
-
-// abandonUpstreamAttempt drops what an attempt reported once that attempt has
-// been given up on.
-//
-// Only the usage. Invalidating at the START of the next send is not enough on
-// its own, because the last attempt of a chain has no next send: tokens it
-// reported would sit on the exchange until settlement read them, and be charged
-// under the failure that ended the request.
-//
-// The captured bodies deliberately stay. They describe the attempt that just
-// failed, and that attempt is the one an operator opens this row to understand
-// — a chain-exhausted 502 whose upstream body, request body and URL were all
-// blanked says nothing about why anything failed. Cross-attempt confusion is
-// already prevented at the other end, by beginUpstreamAttempt: whatever is here
-// belongs to the most recent send, and the next send clears it before replacing
-// it.
-func (rc *Exchange) abandonUpstreamAttempt() {
-	rc.usage = nil
 }

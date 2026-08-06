@@ -8,9 +8,8 @@ import (
 
 // TestUpstreamBufferAppendUpstreamNoCaptureFile verifies AppendUpstream is a
 // safe no-op when no stream capture file is open (streamBodyFile is nil) —
-// the common case for a Exchange built outside passthroughStreamToClient's
-// openStreamBodyFile call (e.g. an early failover before any file was
-// opened).
+// the common case for an Exchange built outside a streaming delivery, which is
+// what opens the file (e.g. an early failover before any file was opened).
 func TestUpstreamBufferAppendUpstreamNoCaptureFile(t *testing.T) {
 	rc := &Exchange{requestID: "req-1"}
 	defer func() {

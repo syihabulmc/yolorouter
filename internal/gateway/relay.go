@@ -407,10 +407,11 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	rc.originalModel = routing.Model
 	rc.isStream = routing.Stream
 
-	// Every write to the caller slides a deadline forward: the IR relays get
-	// it from the writer they are handed, the passthrough pumps still call
-	// ApplyStreamWriteDeadline themselves. This bounds a slow-reading client
-	// without clearing the server WriteTimeout entirely.
+	// Every write to the caller slides a deadline forward, from the response
+	// object the delivery was handed rather than from a package-wide default,
+	// so a modality that asked for a shorter window gets the one it asked for.
+	// This bounds a slow-reading client without clearing the server
+	// WriteTimeout entirely.
 	// The server WriteTimeout (RequestTimeout + 60s) covers the pre-first-
 	// write gap (e.g. a long TTFT on a reasoning model); once the first
 	// write lands, the sliding per-write deadline takes over. Non-streaming
@@ -635,8 +636,8 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// Step 9: negotiate the wire protocol to speak to this candidate's
 		// provider — the ingress protocol when the provider accepts it
 		// directly (passthrough, no IR round trip), otherwise the
-		// provider's own primary protocol (buildDispatchRequest/
-		// processDispatchResponseNonStream do the IR decode/encode).
+		// provider's own primary protocol, which the payload decodes to and
+		// encodes back from.
 		egress, err := Negotiate(ingress, provider)
 		if err != nil {
 			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "negotiate egress: "+err.Error()))
@@ -763,8 +764,8 @@ const (
 )
 
 // tryKeys walks one provider's enabled keys, sending the same pre-built
-// upstream body/URL (outBody/url — built once per candidate by
-// relayCandidates via buildUpstreamBody) with each key's own auth header.
+// upstream body/URL (outBody/url — built once per candidate, by asking the
+// payload to prepare it) with each key's own auth header.
 // Returns outcomeDone once a response (success OR a non-switchable failure)
 // has been written to the client, or outcomeNextCandidate when every key on
 // this provider failed with a key-rotation error and the chain should move
@@ -794,13 +795,6 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *mode
 		if result == attemptSuccess || result == attemptTerminal {
 			return outcomeDone
 		}
-		// This attempt is over and served nothing. Drop what it reported here
-		// rather than at the next send, because there may not be one: the chain
-		// can end without another attempt ever running, and settlement would
-		// then read those values as if they described the request's outcome.
-		// One call rather than one per branch — "the attempt was given up on"
-		// is the same event whichever way the loop goes next.
-		rc.abandonUpstreamAttempt()
 		if result == attemptRotateKey {
 			continue // next key on the same provider
 		}
@@ -808,6 +802,50 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *mode
 	}
 	// Every key failed with a key-rotation error → failover.
 	return outcomeNextCandidate
+}
+
+// deliverAndSettle hands a 2xx upstream response to the modality and settles
+// whatever comes back.
+//
+// The modality delivers, this side settles. Keeping those apart is what stops
+// "how a response is delivered" and "what the request cost and how it is
+// recorded" from having to be known in one place.
+func (s *Service) deliverAndSettle(c *gin.Context, rc *Exchange, adm admitted, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+	tools, release := s.newDeliveryTools(c, rc, adm.limits, rc.isStream)
+	defer release()
+	return s.recordAndSettle(c, rc, adm, adm.payload.Deliver(tools, resp), cand, provider, pk, resp.StatusCode, start)
+}
+
+// recordAndSettle turns what a delivery reported into the request's record.
+//
+// Separate from the delivery itself because the two answer to different things:
+// a modality states what happened, and this decides what the request is
+// therefore billed, logged and answered as. Nothing here reads the response
+// body — by this point the only evidence is the Delivery.
+func (s *Service) recordAndSettle(c *gin.Context, rc *Exchange, adm admitted, d fact.Delivery, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, upstreamStatus int, start time.Time) attemptResult {
+	// The order below is not arrangement. A delivery is checked before it is
+	// labelled, because checkAndNote replaces an impossible Delivery with one
+	// that says so, and the attempt row is built from whatever it is handed.
+	// Label first and the row is built from the original: the outcome still
+	// comes out wrong-ish either way, but the fail reason comes out EMPTY,
+	// because the reason only exists on the substitute. An operator opening
+	// that row to find out what happened is told nothing at all, which is
+	// worse than being told the wrong thing.
+	s.checkAndNote(rc, &d, newExchangeSink(rc))
+	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk,
+		upstreamStatus, attemptOutcomeFor(d, rc.isStream), attemptNoteFor(d)))
+	if d.Verdict == fact.VerdictSettled {
+		// The one delivery that ended the request, which is the only one this
+		// question is asked about. Asking per attempt would tell the payload the
+		// request was over while the chain was still walking.
+		//
+		// Folded back into the Delivery rather than stashed on the exchange:
+		// what a request is billed for belongs to the delivery that ended it,
+		// and an attempt that reported tokens and then failed has no way to
+		// leave them lying around for a later settlement to pick up.
+		d = d.WithUsage(adm.payload.FinalizeUsage(d))
+	}
+	return s.settleCheckedDelivery(c, rc, d, start)
 }
 
 // attemptResult is what one upstream attempt reports back to tryKeys.
@@ -822,8 +860,8 @@ const (
 
 // attemptOne sends one upstream request with one decrypted key and routes
 // the response. outBody/url are the pre-built upstream body/URL for this
-// candidate (relayCandidates' buildUpstreamBody call) — this key's only
-// contribution is the auth header (SetupRequest). Transport failures, 5xx,
+// candidate — this key's only contribution is the auth header
+// (SetupRequest). Transport failures, 5xx,
 // and pre-first-byte stream failures are candidate-level (failover); 401/429
 // are key-level (rotate); 2xx is success; other 4xx is terminal (caller's
 // problem).
@@ -931,29 +969,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		// 2xx — the modality delivers, this side settles. Keeping those apart
-		// is what stops "how a response is delivered" and "what the request
-		// cost and how it is recorded" from having to be known in one place.
-		tools, release := s.newDeliveryTools(c, rc, adm.limits, rc.isStream)
-		defer release()
-		d := adm.payload.Deliver(tools, resp)
-		// The order below is not arrangement. A delivery is checked before it
-		// is labelled, because a Delivery about to be judged impossible would
-		// otherwise leave a "success" attempt row behind it and hide the
-		// modality's mistake under a record that reads fine.
-		s.checkAndNote(rc, &d, newExchangeSink(rc))
-		// What THIS attempt reported, kept even when the chain carries on: an
-		// attempt that consumed a provider and then failed still consumed it.
-		rc.usage = usageFromReport(d.Usage)
-		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk,
-			resp.StatusCode, attemptOutcomeFor(d, rc.isStream), attemptNoteFor(d)))
-		if d.Verdict == fact.VerdictSettled {
-			// The one delivery that ended the request, which is the only one
-			// this question is asked about. Asking per attempt would tell the
-			// payload the request was over while the chain was still walking.
-			rc.usage = usageFromReport(adm.payload.FinalizeUsage(d))
-		}
-		return s.settleCheckedDelivery(c, rc, d, start)
+		return s.deliverAndSettle(c, rc, adm, cand, provider, pk, resp, start)
 	}
 
 	statusCode := resp.StatusCode
@@ -990,8 +1006,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	// this matches rc.upstreamRequestBody's "last attempt wins" rule above —
 	// an empty errBody from THIS attempt must clear out a stale non-empty body
 	// left by an earlier failed candidate, not leave it looking current.
-	// A subsequent SUCCESSFUL stream candidate clears
-	// it entirely — see dispatchPassthroughStream (dispatch.go).
+	// A subsequent SUCCESSFUL stream candidate clears it entirely.
 	//
 	// The body is already wrapped with a short total budget
 	// (errorBodyTotalBudget) so a slow-trickle upstream cannot hold this read

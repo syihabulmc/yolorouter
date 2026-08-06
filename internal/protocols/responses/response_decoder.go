@@ -145,7 +145,7 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 	// not a whitelist.
 	//
 	// The risk here is sharply asymmetric. On the same-protocol passthrough path
-	// (ir_dispatch.go passthroughResponseSameProtocol) the upstream's 200 and its
+	// on the same-protocol passthrough path the upstream's 200 and its
 	// full body are written to the client BEFORE this decoder ever runs, so a
 	// false rejection means: the client holds a perfect answer, we bill nothing,
 	// and a healthy provider takes a circuit-breaker failure. A false ACCEPT only

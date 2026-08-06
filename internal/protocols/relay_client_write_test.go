@@ -291,7 +291,7 @@ func (stubResponseEncoder) EncodeResponse(*protocols.IRResponse) json.RawMessage
 // pin for IRNonStreamRelay's success path: before the fix, the final
 // c.Writer.Write(encoded) call discarded its error entirely, so a downstream
 // write failure after a fully-decoded 2xx response was indistinguishable
-// from genuine delivery — the caller (gateway/dispatch.go) would finalize it
+// from genuine delivery — the gateway caller would finalize it
 // as a plain 2xx success. The Write error must instead be wrapped in
 // protocols.ErrClientWrite, and the already-decoded usage must still be
 // returned (the upstream was fully consumed regardless of delivery outcome,

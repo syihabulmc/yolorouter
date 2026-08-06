@@ -33,8 +33,8 @@ func (rc *Exchange) AppendUpstream(data []byte) {
 // IRStreamRelayJSONLines call this at every point an encoded event is
 // actually written to the client, so the capture file ends up byte-for-byte
 // identical to what the client received — mirroring the same-protocol
-// passthrough path's appendStreamBodyLine(rc, sent) calls in
-// passthroughStreamToClient. Delegates to the existing appendStreamBodyLine
+// passthrough pump's own appendStreamBodyLine(rc, sent) calls.
+// Delegates to the existing appendStreamBodyLine
 // helper rather than reimplementing the capture-file bookkeeping (nil-file
 // no-op, 1GiB anti-OOM backstop) here.
 func (rc *Exchange) AppendResponse(data []byte) {
@@ -51,8 +51,8 @@ func (rc *Exchange) SetBody(data []byte) {
 
 // SetResponseBody implements protocols.UpstreamBuffer for the non-streaming
 // IR relay path: it records the caller-facing (post-IR-encode) response
-// bytes actually written to the client, mirroring dispatchPassthroughNonStream's
-// population of rc.responseBody for the same-protocol path.
+// bytes actually written to the client, mirroring how the same-protocol path
+// populates rc.responseBody.
 func (rc *Exchange) SetResponseBody(data []byte) {
 	rc.responseBody = data
 }

@@ -237,7 +237,7 @@ func safeUpstreamMessage(status int) string {
 // atomically (repository.IncrementAPIKeyBudgetSpent is a single
 // budget_spent_micros = budget_spent_micros + ? UPDATE) cannot lose updates to
 // each other.
-func (s *Service) finalize(rc *Exchange, statusCode int, failReason string, start time.Time) {
+func (s *Service) finalize(rc *Exchange, usage *Usage, statusCode int, failReason string, start time.Time) {
 	if rc.logWritten.Swap(true) {
 		return // already finalized (e.g. Handle's panic-recovery defer after a normal finalize)
 	}
@@ -263,10 +263,10 @@ func (s *Service) finalize(rc *Exchange, statusCode int, failReason string, star
 	// doesn't: a partial record whose stated total no longer corroborates the
 	// net reading simply stays inclusive and is rejected as incoherent, exactly
 	// as it was before.
-	normalizeCacheConvention(rc.usage)
-	cost := computeCost(rc.candidate, rc.usage, rc.compressEstimatedTokensSaved)
+	normalizeCacheConvention(usage)
+	cost := computeCost(rc.candidate, usage, rc.compressEstimatedTokensSaved)
 
-	s.reportUsage(rc, sink)
+	s.reportUsage(rc, usage, sink)
 	sink.Note(fact.CostComputed{
 		Known:                   cost.Known,
 		Micros:                  cost.CostMicros,
@@ -330,17 +330,17 @@ func (s *Service) recordTerminal(rc *Exchange) {
 // negative or impossible count poisons every SUM() the dashboard runs, and the
 // same rejection is applied to pricing, so the stored counts can never disagree
 // with the billing decision.
-func (s *Service) reportUsage(rc *Exchange, sink fact.Sink) {
-	if rc.usage == nil {
+func (s *Service) reportUsage(rc *Exchange, usage *Usage, sink fact.Sink) {
+	if usage == nil {
 		return
 	}
-	if !usageIsCoherent(rc.usage) {
+	if !usageIsCoherent(usage) {
 		logger.Warn("gateway: upstream reported incoherent token usage, counts dropped",
 			zap.String("request_id", rc.requestID),
-			zap.Int("prompt_tokens", rc.usage.PromptTokens),
-			zap.Int("completion_tokens", rc.usage.CompletionTokens),
-			zap.Int("cache_read_tokens", rc.usage.CacheReadTokens),
-			zap.Int("cache_write_tokens", rc.usage.CacheWriteTokens))
+			zap.Int("prompt_tokens", usage.PromptTokens),
+			zap.Int("completion_tokens", usage.CompletionTokens),
+			zap.Int("cache_read_tokens", usage.CacheReadTokens),
+			zap.Int("cache_write_tokens", usage.CacheWriteTokens))
 		sink.Note(fact.UsageIncoherent{Reason: "upstream counts do not corroborate each other"})
 		return
 	}
@@ -350,10 +350,10 @@ func (s *Service) reportUsage(rc *Exchange, sink fact.Sink) {
 	sink.Note(fact.UsageReported{
 		Unit:       fact.UnitToken,
 		Source:     fact.UsageFromUpstream,
-		Prompt:     netPromptTokens(rc.usage),
-		Completion: rc.usage.CompletionTokens,
-		CacheRead:  rc.usage.CacheReadTokens,
-		CacheWrite: rc.usage.CacheWriteTokens,
+		Prompt:     netPromptTokens(usage),
+		Completion: usage.CompletionTokens,
+		CacheRead:  usage.CacheReadTokens,
+		CacheWrite: usage.CacheWriteTokens,
 	})
 }
 
@@ -369,32 +369,14 @@ func attemptsRecord(rc *Exchange) fact.AttemptsRecorded {
 	return rec
 }
 
-// settleDelivery turns what a delivery reported into what the request costs and
-// how it is recorded, and reports back how far the chain may still go.
+// settleCheckedDelivery settles a delivery that has already been through
+// checkAndNote, and reports back how far the chain may still go.
 //
-// This is the one place a delivery becomes a settled request. The dispatch side
-// used to do it inline at eleven different points, which meant eleven separate
-// answers to "what status do we settle on", "does this still count as billable",
-// and "may another candidate try". They did not agree, and nothing made them.
-func (s *Service) settleDelivery(c *gin.Context, rc *Exchange, d fact.Delivery, start time.Time) attemptResult {
-	// Check BEFORE reading the verdict. An impossible delivery is replaced with
-	// one that ends the request, and reading the verdict first would decide the
-	// branch from the value being replaced: the substitution would be recorded
-	// as if the request had ended while the chain actually carried on.
-	// A delivery is judged after its own attempt is already on the list, which
-	// is the one case the default numbering gets wrong.
-	s.checkAndNote(rc, &d, newExchangeSink(rc).forRecordedAttempt())
-	return s.settleCheckedDelivery(c, rc, d, start)
-}
-
-// settleCheckedDelivery is settleDelivery for a caller that already put the
-// delivery through checkAndNote.
-//
-// Split out because the check has to happen before the attempt is labelled —
-// a delivery about to be judged impossible would otherwise leave a "success"
-// row behind it — while the numbering of the note differs either side of that
-// moment. Checking twice would be harmless to the verdict and would record the
-// observation twice, which is one audit fact too many.
+// This is the one place a delivery becomes a settled request. The check is left
+// to the caller because it has to happen before the attempt is labelled — a
+// delivery about to be judged impossible would otherwise leave a "success" row
+// behind it. Checking again here would be harmless to the verdict and would
+// record the observation twice, which is one audit fact too many.
 func (s *Service) settleCheckedDelivery(c *gin.Context, rc *Exchange, d fact.Delivery, start time.Time) attemptResult {
 	if d.Verdict != fact.VerdictSettled {
 		// Nothing reached the caller, so the chain continues and there is
@@ -458,7 +440,7 @@ func (s *Service) settleChecked(rc *Exchange, d fact.Delivery, start time.Time) 
 			zap.Int("billing_status", d.BillingStatus),
 			zap.Error(d.Err))
 	}
-	s.finalize(rc, d.BillingStatus, d.FailReason, start)
+	s.finalize(rc, usageFromReport(d.Usage), d.BillingStatus, d.FailReason, start)
 }
 
 // invalidDeliveryReason marks a settlement the kernel substituted for one it

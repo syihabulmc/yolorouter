@@ -85,29 +85,6 @@ const maxStreamLineBytes = 1 * 1024 * 1024 // 1 MiB
 // small value instead of actually writing 1GiB.
 var maxStreamBodyFileBytes int64 = 1 << 30 // 1 GiB
 
-// forwardStreamLine writes one SSE line and folds its outcome back onto rc
-// (first-byte marker), the running usage pointer (final-frame tokens), and
-// the [DONE] terminator flag. It returns the exact bytes written to the
-// client (post model-rewrite, post usage-strip) so the caller can append
-// the same caller-facing bytes to the stream capture file — never the raw
-// pre-rewrite upstream line — and any Write error so the caller can stop the
-// pump and classify the failure instead of silently dropping it (a swallowed
-// downstream Write error left the sliding write-deadline protection
-// unenforced on the production passthrough streaming path).
-func forwardStreamLine(c *gin.Context, rc *Exchange, line []byte, usage **Usage, doneSeen *bool) ([]byte, error) {
-	wroteData, u, done, sent, writeErr := writeStreamLine(c.Writer, line, rc.originalModel, rc.wantsStreamUsage)
-	if wroteData {
-		rc.MarkFirstByteSent()
-	}
-	if u != nil {
-		*usage = u
-	}
-	if done {
-		*doneSeen = true
-	}
-	return sent, writeErr
-}
-
 func writeSSEHeader(w protocols.ClientWriter) error {
 	w.Inject(http.Header{
 		"Content-Type":  {"text/event-stream"},
@@ -280,22 +257,6 @@ func writeStreamErrorEvent(w ClientResponse, ingress protocols.ProtocolID, reque
 		return writeResponsesStreamErrorEvent(w, msg)
 	default:
 		return writeOpenAIStreamErrorEvent(w, msg)
-	}
-}
-
-// streamWriteDeadlineWarnedKey gates the sliding-deadline warning to once per
-// request: ApplyStreamWriteDeadline runs before every forwarded chunk, and on
-// a writer without SetWriteDeadline support the error would otherwise spam the
-// log. Production *http.response always supports it, so a warning means some
-// wrapper disabled the slow-client protection.
-const streamWriteDeadlineWarnedKey = "gateway_stream_write_deadline_warned"
-
-// applyStreamWriteDeadline slides the per-write deadline and logs a warning
-// (at most once per request) when the writer does not support SetWriteDeadline.
-func applyStreamWriteDeadline(c *gin.Context, requestID string) {
-	if err := protocols.ApplyStreamWriteDeadline(c); err != nil && !c.GetBool(streamWriteDeadlineWarnedKey) {
-		c.Set(streamWriteDeadlineWarnedKey, true)
-		logger.Warn("gateway: apply stream write deadline failed", zap.String("request_id", requestID), zap.Error(err))
 	}
 }
 

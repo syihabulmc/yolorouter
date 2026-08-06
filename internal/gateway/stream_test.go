@@ -17,7 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/yolorouter/yolorouter/internal/fact"
-	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/pkg/logger"
 )
@@ -182,20 +181,40 @@ func TestWriteStreamLineNonDataPassthrough(t *testing.T) {
 	}
 }
 
-// runStreamPump wires a minimal gin context + http.Response around
-// passthroughStreamToClient so the truncation/usage tests don't repeat the
-// boilerplate.
+// streamCaller is the request the streams below answer. includeUsage sets the
+// one field that decides whether the upstream's usage frame is passed on to the
+// caller or read and dropped.
+func streamCaller(includeUsage bool) string {
+	if includeUsage {
+		return `{"model":"ext","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`
+	}
+	return `{"model":"ext","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+}
+
+// pumpStream drives the same-protocol pump the way a delivery does: through the
+// toolbox the kernel hands it, which is what opens the capture file and closes
+// it again afterwards.
+func pumpStream(t *testing.T, c *gin.Context, rc *Exchange, upstreamBody string, wantsUsage bool) (*Usage, error) {
+	t.Helper()
+	adm := admitFor(t, protocols.ProtocolOpenAI, "/v1/chat/completions", streamCaller(wantsUsage), Candidate{
+		ProviderModelName: "real", EgressProtocol: protocols.ProtocolOpenAI, Passthrough: true,
+	})
+	tools, release := (&Service{}).newDeliveryTools(c, rc, TransferLimits{}, true)
+	defer release()
+	return adm.payload.(*textPayload).pumpSameProtocol(tools, &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+		Header:     make(http.Header),
+	})
+}
+
+// runStreamPump is pumpStream for the tests that care only about what it
+// reported, not about what the caller received.
 func runStreamPump(t *testing.T, upstreamBody string, wantsUsage bool) (*Usage, error) {
 	t.Helper()
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
-		Header:     make(http.Header),
-	}
-	rc := &Exchange{originalModel: "ext", isStream: true, wantsStreamUsage: wantsUsage}
-	return passthroughStreamToClient(c, protocols.NewGinClientWriter(c), resp, rc)
+	return pumpStream(t, c, &Exchange{ingress: protocols.ProtocolOpenAI, isStream: true}, upstreamBody, wantsUsage)
 }
 
 // TestStreamUpstreamWithDoneSucceeds: a stream that emits a data frame and
@@ -209,9 +228,9 @@ func TestStreamUpstreamWithDoneSucceeds(t *testing.T) {
 
 // TestStreamUpstreamNoDoneReturnsTruncationError: a stream that emits at
 // least one data frame but closes WITHOUT `data: [DONE]` must report
-// errStreamNoDoneTerminator so dispatchPassthroughStream logs a partial row
-// instead of clean success (the client already received bytes, so it's a
-// silent truncation, not a clean completion).
+// errStreamNoDoneTerminator so the delivery is recorded as partial rather than
+// a clean success (the client already received bytes, so it's a silent
+// truncation, not a clean completion).
 func TestStreamUpstreamNoDoneReturnsTruncationError(t *testing.T) {
 	body := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
 	_, err := runStreamPump(t, body, true)
@@ -259,8 +278,13 @@ func TestStreamUpstreamPostDoneDisconnectSucceeds(t *testing.T) {
 		Body:       io.NopCloser(&cancelAfterReader{data: []byte(body), cancel: cancel}),
 		Header:     make(http.Header),
 	}
-	rc := &Exchange{originalModel: "ext", isStream: true, wantsStreamUsage: true}
-	_, err := passthroughStreamToClient(c, protocols.NewGinClientWriter(c), resp, rc)
+	rc := &Exchange{ingress: protocols.ProtocolOpenAI, isStream: true}
+	adm := admitFor(t, protocols.ProtocolOpenAI, "/v1/chat/completions", streamCaller(true), Candidate{
+		ProviderModelName: "real", EgressProtocol: protocols.ProtocolOpenAI, Passthrough: true,
+	})
+	tools, release := (&Service{}).newDeliveryTools(c, rc, TransferLimits{}, true)
+	defer release()
+	_, err := adm.payload.(*textPayload).pumpSameProtocol(tools, resp)
 	if err != nil {
 		t.Fatalf("post-[DONE] disconnect must succeed, got %v", err)
 	}
@@ -275,13 +299,8 @@ func TestStreamUpstreamStripsInjectedUsage(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     make(http.Header),
-	}
-	rc := &Exchange{originalModel: "ext", isStream: true, wantsStreamUsage: false}
-	usage, err := passthroughStreamToClient(c, protocols.NewGinClientWriter(c), resp, rc)
+	rc := &Exchange{ingress: protocols.ProtocolOpenAI, isStream: true}
+	usage, err := pumpStream(t, c, rc, body, false)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -306,20 +325,8 @@ func runStreamPumpCapture(t *testing.T, upstreamBody, requestID, bodiesDir strin
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Set(BodiesDirContextKey, bodiesDir)
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
-		Header:     make(http.Header),
-	}
-	rc := &Exchange{requestID: requestID, originalModel: "ext", isStream: true, wantsStreamUsage: true}
-	usage, err := passthroughStreamToClient(c, protocols.NewGinClientWriter(c), resp, rc)
-	// The pump deliberately leaves the capture file open for its caller to
-	// close (dispatchPassthroughStream does it on every exit path, so a
-	// mid-stream error frame can still be appended). Calling the pump directly
-	// means standing in for that caller: without this the handle outlives the
-	// test and t.TempDir() cleanup fails on Windows, which forbids deleting a
-	// file that is still open.
-	closeStreamBodyFile(rc)
+	rc := &Exchange{requestID: requestID, ingress: protocols.ProtocolOpenAI, isStream: true}
+	usage, err := pumpStream(t, c, rc, upstreamBody, true)
 	return rc, rec, usage, err
 }
 
@@ -525,13 +532,13 @@ func TestWriteStreamErrorEventCapturesToStreamFile(t *testing.T) {
 	}
 }
 
-// TestApplyStreamWriteDeadline_WarnsOnceAcrossRepeatedFailures guards the
-// warn-once gate in applyStreamWriteDeadline: a writer that cannot honor
-// SetWriteDeadline fails identically on every forwarded chunk, so the warning
-// must be logged exactly once per request. Production *http.response always
-// supports it; the warning exists so a wrapper that forgets to unwrap cannot
-// silently disable the slow-client protection.
-func TestApplyStreamWriteDeadline_WarnsOnceAcrossRepeatedFailures(t *testing.T) {
+// TestAWriterThatCannotTakeADeadlineIsReportedOnce guards the warn-once gate on
+// the sliding write deadline: a writer that cannot honor SetWriteDeadline fails
+// identically on every forwarded chunk, so the warning must be logged exactly
+// once per request. Production *http.response always supports it; the warning
+// exists so a wrapper that forgets to unwrap cannot silently disable the
+// slow-client protection.
+func TestAWriterThatCannotTakeADeadlineIsReportedOnce(t *testing.T) {
 	dir := t.TempDir()
 	logFile := filepath.Join(dir, "test.log")
 	logger.Init(logger.Config{Level: "warn", Filename: logFile, Console: false})
@@ -545,8 +552,9 @@ func TestApplyStreamWriteDeadline_WarnsOnceAcrossRepeatedFailures(t *testing.T) 
 	c, _ := gin.CreateTestContext(w)
 	c.Request, _ = http.NewRequest(http.MethodGet, "/x", nil)
 
+	client := &ginClientResponse{c: c, rc: &Exchange{requestID: "req-warn-once"}, window: time.Second}
 	for range 5 {
-		applyStreamWriteDeadline(c, "req-warn-once")
+		client.slideDeadline()
 	}
 	_ = logger.Sync()
 
@@ -554,7 +562,7 @@ func TestApplyStreamWriteDeadline_WarnsOnceAcrossRepeatedFailures(t *testing.T) 
 	if readErr != nil {
 		t.Fatalf("read log file: %v", readErr)
 	}
-	count := strings.Count(string(data), "gateway: apply stream write deadline failed")
+	count := strings.Count(string(data), "gateway: apply write deadline failed")
 	if count != 1 {
 		t.Errorf("expected exactly 1 warning log line despite 5 failing calls, got %d: %s", count, data)
 	}
@@ -627,12 +635,6 @@ func TestANewAttemptReopensTheCaptureFileAndAppends(t *testing.T) {
 // refusingCommitWriter stands in for the response object this pump will be
 // handed once the kernel owns delivery: one that knows whether the response has
 // already been committed, and says no when it has.
-type refusingCommitWriter struct{ protocols.ClientWriter }
-
-func (refusingCommitWriter) Commit(int) error {
-	return errors.New("response is already committed")
-}
-
 // TestARefusedCommitEndsTheRequestInsteadOfTryingAnotherProvider pins the one
 // branch that has to exist before the writer that triggers it does.
 //
@@ -646,16 +648,21 @@ func TestARefusedCommitEndsTheRequestInsteadOfTryingAnotherProvider(t *testing.T
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	rc := &Exchange{requestID: "commit-refused", ingress: protocols.ProtocolOpenAI}
+	rc := &Exchange{requestID: "commit-refused", ingress: protocols.ProtocolOpenAI, isStream: true}
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(strings.NewReader("data: {\"id\":\"x\"}\n\ndata: [DONE]\n\n")),
 	}
-	w := refusingCommitWriter{ClientWriter: protocols.NewGinClientWriter(c)}
+	adm := admitFor(t, protocols.ProtocolOpenAI, "/v1/chat/completions", streamCaller(true), Candidate{
+		ProviderModelName: "m", EgressProtocol: protocols.ProtocolOpenAI, Passthrough: true,
+	})
+	tools, release := (&Service{}).newDeliveryTools(c, rc, TransferLimits{}, true)
+	defer release()
+	// A response somebody else already committed: the stub refuses a second
+	// commit exactly as the real one does.
+	tools.Client = &stubClient{committed: true, status: http.StatusOK}
 
-	got := (&Service{}).dispatchPassthroughStream(c, w, rc, protocols.ProtocolOpenAI,
-		model.ModelCandidate{ProviderModelName: "m"}, &model.Provider{}, model.ProviderKey{},
-		resp, time.Now())
+	got := adm.payload.Deliver(tools, resp)
 
 	if got.Verdict != fact.VerdictSettled {
 		t.Errorf("verdict is %v, want settled — another candidate cannot reach a caller who already has a response", got.Verdict)

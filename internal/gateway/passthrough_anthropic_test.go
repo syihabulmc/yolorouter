@@ -12,18 +12,16 @@ import (
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
 
-// This file is the regression coverage for the passthrough fix: the
-// same-protocol
-// passthrough response helpers (dispatchPassthroughNonStream /
-// dispatchPassthroughStream) used to assume every passthrough egress spoke
-// OpenAI — RewriteNonStreamResponse's extractUsage only recognizes
-// prompt_tokens/completion_tokens, and passthroughStreamToClient's
-// completion detection only recognizes the literal `data: [DONE]` line.
+// This file is the regression coverage for a passthrough egress that does not
+// speak OpenAI. Two OpenAI-shaped assumptions are easy to make and wrong here:
+// RewriteNonStreamResponse's extractUsage only recognizes
+// prompt_tokens/completion_tokens, and OpenAI completion detection only
+// recognizes the literal `data: [DONE]` line.
 // Neither ever appears on an Anthropic wire response, so a same-protocol
 // Claude ingress -> Claude egress passthrough (an Anthropic-type provider,
-// createAnthropicProvider from dispatch_crossproto_test.go, hit via a
+// createAnthropicProvider from crossproto_test.go, hit via a
 // /v1/messages request so ingress==egress==claude and Negotiate reports
-// Passthrough=true) silently lost billing (rc.usage stayed nil) and, on
+// Passthrough=true) silently lost billing (no usage was billed) and, on
 // stream, always finalized as "stream_no_done" even for a stream that
 // completed cleanly with message_stop. These tests drive that exact
 // same-protocol Anthropic passthrough shape and assert both bugs are fixed.
@@ -31,7 +29,7 @@ import (
 // TestPassthroughAnthropicNonStream_UsageAndModelRewrite is the non-stream
 // counterpart. The Claude upstream response is byte-forwarded to the client
 // (content/id/stop_reason preserved verbatim) with only the top-level
-// "model" field rewritten back to the external name, and rc.usage must be
+// "model" field rewritten back to the external name, and the billed usage must be
 // populated from the Anthropic input_tokens/output_tokens fields.
 func TestPassthroughAnthropicNonStream_UsageAndModelRewrite(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -89,27 +87,25 @@ func TestPassthroughAnthropicNonStream_UsageAndModelRewrite(t *testing.T) {
 		t.Errorf("provider model name leaked into the client response: %s", w.Body.String())
 	}
 
-	// --- rc.usage must be populated from the Anthropic usage object (the
+	// --- the billed usage must be populated from the Anthropic usage object (the
 	// bug: RewriteNonStreamResponse's OpenAI-shaped extractUsage never
-	// matches input_tokens/output_tokens, so rc.usage stayed nil) ---
+	// matches input_tokens/output_tokens, so no usage was billed) ---
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.usage == nil {
-		t.Fatal("rc.usage is nil, want it populated from the Anthropic input_tokens/output_tokens")
-	}
-	if captured.usage.PromptTokens != 15 || captured.usage.CompletionTokens != 5 {
-		t.Errorf("captured usage = %+v, want prompt=15 completion=5 (mapped from claude input_tokens/output_tokens)", captured.usage)
+	billed := requireBilled(t, captured)
+	if billed.Prompt != 15 || billed.Completion != 5 {
+		t.Errorf("billed usage = %+v, want prompt=15 completion=5 (mapped from claude input_tokens/output_tokens)", billed)
 	}
 }
 
 // TestPassthroughAnthropicStream_UsageAndCleanCompletion is the streaming
 // counterpart. The Claude upstream sends a normally-completed SSE stream
 // (message_start / content_block_delta / message_delta / message_stop, no
-// OpenAI [DONE] terminator — Claude has no such convention). Before the fix,
-// passthroughStreamToClient's completion check only recognized the literal
-// `data: [DONE]` line, so this exact fixture always finalized as
-// "stream_no_done" with rc.usage nil despite completing cleanly.
+// OpenAI [DONE] terminator — Claude has no such convention). A completion
+// check that recognized only the literal `data: [DONE]` line would finalize
+// this exact fixture as "stream_no_done" with nothing billed despite it
+// completing cleanly.
 func TestPassthroughAnthropicStream_UsageAndCleanCompletion(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 
@@ -177,14 +173,12 @@ func TestPassthroughAnthropicStream_UsageAndCleanCompletion(t *testing.T) {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
 
-	// --- rc.usage must be populated from the Anthropic
+	// --- the billed usage must be populated from the Anthropic
 	// input_tokens/output_tokens accumulated across message_start +
 	// message_delta ---
-	if captured.usage == nil {
-		t.Fatal("rc.usage is nil, want it populated from the Anthropic stream usage")
-	}
-	if captured.usage.PromptTokens != 10 || captured.usage.CompletionTokens != 2 {
-		t.Errorf("captured usage = %+v, want prompt=10 completion=2 (mapped from claude input_tokens/output_tokens)", captured.usage)
+	billed := requireBilled(t, captured)
+	if billed.Prompt != 10 || billed.Completion != 2 {
+		t.Errorf("billed usage = %+v, want prompt=10 completion=2 (mapped from claude input_tokens/output_tokens)", billed)
 	}
 
 	// --- the request must NOT be finalized as stream_no_done: exactly one
@@ -201,8 +195,8 @@ func TestPassthroughAnthropicStream_UsageAndCleanCompletion(t *testing.T) {
 }
 
 // TestPassthroughAnthropicStream_MessageStartModelRewrite is the regression
-// coverage for the stream-side model-name leak: passthroughStreamToClient's
-// per-chunk model rewrite only understands OpenAI's top-level "model" field,
+// coverage for the stream-side model-name leak: OpenAI's per-chunk model
+// rewrite only understands that protocol's top-level "model" field,
 // so a Claude passthrough stream's message_start frame (which nests the
 // model under "message.model") used to be forwarded byte-for-byte, leaking
 // the provider's internal model name to the client. This drives that exact
@@ -302,11 +296,9 @@ func TestPassthroughAnthropicStream_MessageStartModelRewrite(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.usage == nil {
-		t.Fatal("rc.usage is nil, want it populated despite the model rewrite")
-	}
-	if captured.usage.PromptTokens != 10 || captured.usage.CompletionTokens != 2 {
-		t.Errorf("captured usage = %+v, want prompt=10 completion=2", captured.usage)
+	billed := requireBilled(t, captured)
+	if billed.Prompt != 10 || billed.Completion != 2 {
+		t.Errorf("billed usage = %+v, want prompt=10 completion=2", billed)
 	}
 	if len(captured.attempts) != 1 || captured.attempts[0].Outcome != AttemptSuccess {
 		t.Errorf("attempts = %+v, want exactly one AttemptSuccess (model rewrite must not break clean-done classification)", captured.attempts)

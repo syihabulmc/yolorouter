@@ -84,9 +84,9 @@ func TestUsageDoesNotSurviveTheLastCandidate(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.usage != nil && captured.usage.PromptTokens != 0 {
-		t.Fatalf("the only candidate delivered nothing, yet %d prompt tokens are on the exchange at settlement: %+v",
-			captured.usage.PromptTokens, captured.usage)
+	if billed := billedUsage(t, captured); billed != nil && billed.Prompt != 0 {
+		t.Fatalf("the only candidate delivered nothing, yet %d prompt tokens were billed: %+v",
+			billed.Prompt, *billed)
 	}
 }
 
@@ -165,11 +165,11 @@ func TestUsageDoesNotSurviveAFailedCandidate(t *testing.T) {
 		t.Fatalf("attempts = %d, want 2 (both candidates failed)", len(captured.attempts))
 	}
 
-	// Nothing was delivered, so there is nothing to charge for. A non-nil usage
-	// here is the first candidate's, and finalize bills from it unconditionally.
-	if captured.usage != nil && captured.usage.PromptTokens != 0 {
+	// Nothing was delivered, so there is nothing to charge for. Anything billed
+	// here came from the first candidate, which served nobody.
+	if billed := billedUsage(t, captured); billed != nil && billed.Prompt != 0 {
 		t.Fatalf("a failed chain was billed %d prompt tokens left behind by an abandoned candidate: %+v",
-			captured.usage.PromptTokens, captured.usage)
+			billed.Prompt, *billed)
 	}
 }
 

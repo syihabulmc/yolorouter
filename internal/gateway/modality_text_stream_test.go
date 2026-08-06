@@ -10,16 +10,16 @@ import (
 	"path/filepath"
 	"regexp"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/yolorouter/yolorouter/internal/fact"
-	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
-// streamRequestID is shared by both sides of every comparison below.
+// streamRequestID is the request id every stream below is delivered under. It
+// reaches caller bytes only through an error frame, so it is fixed rather than
+// generated: the expected bytes for the mid-stream failure cases quote it.
 const streamRequestID = "stream-under-test"
 
 // streamOutcome is what a streaming delivery is answerable for. It differs from
@@ -36,6 +36,19 @@ type streamOutcome struct {
 	promptSeen     int
 }
 
+// streamWant is that same account, written down.
+type streamWant struct {
+	clientBody    string
+	captureExists bool
+	firstByteSent bool
+	promptSeen    int
+	completion    int
+	clientStatus  int
+	verdict       fact.Verdict
+	committed     bool
+	complete      bool
+}
+
 func upstreamStream(t *testing.T, body string) *http.Response {
 	t.Helper()
 	return &http.Response{
@@ -45,48 +58,8 @@ func upstreamStream(t *testing.T, body string) *http.Response {
 	}
 }
 
-// runOldStream drives a cross-protocol stream the way the service does today.
-func runOldStream(t *testing.T, ingress, egress protocols.ProtocolID, passthrough bool, callerModel string, resp *http.Response) streamOutcome {
-	t.Helper()
-	dir := t.TempDir()
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).
-		WithContext(context.Background())
-	c.Set(BodiesDirContextKey, dir)
-
-	// Both sides carry the same request id. It reaches caller bytes only
-	// through an error frame, so an asymmetry here is invisible today and
-	// would silently defeat the first mid-stream-error case anyone adds.
-	rc := &Exchange{requestID: streamRequestID, ingress: ingress, originalModel: callerModel, isStream: true}
-	d := (&Service{}).processDispatchResponseStream(c, rc, ingress,
-		&EgressDecision{Protocol: egress, Passthrough: passthrough},
-		model.ModelCandidate{ProviderModelName: "provider-model"},
-		&model.Provider{}, model.ProviderKey{}, resp, time.Now())
-
-	captured, exists := readCapture(t, dir, rc.requestID)
-	return streamOutcome{
-		delivery: d, clientStatus: w.Code, clientBody: w.Body.String(),
-		captured:      captured,
-		captureExists: exists,
-		firstByteSent: rc.firstByteSent,
-		completionSeen: func() int {
-			if rc.usage == nil {
-				return 0
-			}
-			return rc.usage.CompletionTokens
-		}(),
-		promptSeen: func() int {
-			if rc.usage == nil {
-				return 0
-			}
-			return rc.usage.PromptTokens
-		}(),
-	}
-}
-
-// runNewStream drives the same response through the modality.
-func runNewStream(t *testing.T, ingress, egress protocols.ProtocolID, passthrough bool, callerPath, callerBody string, resp *http.Response) streamOutcome {
+// runStream delivers one upstream stream through the modality.
+func runStream(t *testing.T, ingress, egress protocols.ProtocolID, passthrough bool, callerPath, callerBody string, resp *http.Response) streamOutcome {
 	t.Helper()
 	dir := t.TempDir()
 	w := httptest.NewRecorder()
@@ -147,93 +120,119 @@ func readCapture(t *testing.T, dir, requestID string) (content string, exists bo
 	return string(b), true
 }
 
-// generatedID matches the identifier the gateway mints for a response whose
-// provider did not supply one.
-var generatedID = regexp.MustCompile(`gen-[A-Za-z0-9]+`)
+var (
+	// generatedID matches the identifier the gateway mints for a response whose
+	// provider did not supply one.
+	generatedID = regexp.MustCompile(`gen-[A-Za-z0-9]+`)
+	// createdAt matches the timestamp the chat encoder stamps on every frame it
+	// builds, taken from the clock when the stream opened.
+	createdAt = regexp.MustCompile(`"created":\d+`)
+)
 
-// steady replaces what is freshly minted on every run with a fixed token, after
-// checking the one property worth keeping about it: that a response uses ONE id
-// throughout. Without that check the substitution would also hide chunks
-// disagreeing about which response they belong to.
+// steady replaces what is minted fresh on every run with a fixed token, so the
+// expected bytes can be written down at all.
+//
+// The identifier check earns its keep: it is a fresh random string per call, so
+// frames disagreeing about which response they belong to would differ and be
+// caught before the substitution hides them.
+//
+// The timestamp check proves much less, and is not claimed to prove more. The
+// clock has one-second resolution and a test stream is written well inside one
+// second, so an encoder re-reading it per frame would still produce identical
+// values here; only a per-frame value drawn from something other than a clock
+// would differ enough to be caught. Nor does it notice a frame missing the
+// field — no match is not a disagreeing match. That case is covered by the
+// expected bytes themselves, which spell out `"created":*` in every frame.
 func steady(t *testing.T, body string) string {
 	t.Helper()
-	if ids := generatedID.FindAllString(body, -1); len(ids) > 0 {
-		for _, id := range ids[1:] {
-			if id != ids[0] {
-				t.Errorf("one response carries two identifiers, %q and %q", ids[0], id)
-				break
-			}
+	requireOneValue(t, generatedID.FindAllString(body, -1), "identifier")
+	requireOneValue(t, createdAt.FindAllString(body, -1), "timestamp")
+	body = generatedID.ReplaceAllString(body, "gen-*")
+	return createdAt.ReplaceAllString(body, `"created":*`)
+}
+
+func requireOneValue(t *testing.T, found []string, what string) {
+	t.Helper()
+	if len(found) == 0 {
+		return
+	}
+	for _, v := range found[1:] {
+		if v != found[0] {
+			t.Errorf("one response carries two values for its %s, %q and %q", what, found[0], v)
+			return
 		}
 	}
-	return generatedID.ReplaceAllString(body, "gen-*")
 }
 
-func compareStream(t *testing.T, old, got streamOutcome) {
-	t.Helper()
-	// A provider that supplies no identifier gets one minted per run, so the
-	// two implementations cannot be compared on it — only on everything else.
-	old.clientBody, got.clientBody = steady(t, old.clientBody), steady(t, got.clientBody)
-	old.captured, got.captured = steady(t, old.captured), steady(t, got.captured)
-	if got.clientStatus != old.clientStatus {
-		t.Errorf("caller received status %d, previously %d", got.clientStatus, old.clientStatus)
-	}
-	if got.clientBody != old.clientBody {
-		t.Errorf("caller received\n got: %q\nwant: %q", got.clientBody, old.clientBody)
-	}
-	if got.captured != old.captured {
-		t.Errorf("capture file holds\n got: %q\nwant: %q", got.captured, old.captured)
-	}
-	if got.captureExists != old.captureExists {
-		t.Errorf("capture file exists = %v, previously %v", got.captureExists, old.captureExists)
-	}
-	if got.captured != got.clientBody {
-		t.Errorf("capture file and caller disagree; the file promises exactly what the caller received\n file: %q\ncaller: %q", got.captured, got.clientBody)
-	}
-	if got.firstByteSent != old.firstByteSent {
-		t.Errorf("first byte recorded as sent = %v, previously %v", got.firstByteSent, old.firstByteSent)
-	}
-	if got.completionSeen != old.completionSeen {
-		t.Errorf("completion tokens = %d, previously %d", got.completionSeen, old.completionSeen)
-	}
-	if got.delivery.Verdict != old.delivery.Verdict {
-		t.Errorf("verdict = %v, previously %v", got.delivery.Verdict, old.delivery.Verdict)
-	}
-	if got.delivery.Committed != old.delivery.Committed {
-		t.Errorf("committed = %v, previously %v", got.delivery.Committed, old.delivery.Committed)
-	}
-	if got.delivery.Complete != old.delivery.Complete {
-		t.Errorf("complete = %v, previously %v", got.delivery.Complete, old.delivery.Complete)
-	}
-	if got.promptSeen != old.promptSeen {
-		t.Errorf("prompt tokens = %d, previously %d", got.promptSeen, old.promptSeen)
-	}
-}
-
-// requireDelivered fails a comparison that compared two nothings.
+// checkStream holds a delivery to the account written down for it.
 //
-// Two implementations agreeing is worth nothing when what they agree on is that
-// the fixture produced no response — the assertions all pass on empty strings,
-// and the case reads as covered while exercising none of the path it was added
-// for.
+// The expected bytes are the ones this path delivers. They are spelled out
+// rather than derived so that a change to any of it — a frame reordered, a
+// rewrite dropped, a terminator no longer sent — shows up here as a diff a
+// reader can judge, instead of passing because both sides of a comparison moved
+// together.
+func checkStream(t *testing.T, want streamWant, got streamOutcome) {
+	t.Helper()
+	wantBody := steady(t, want.clientBody)
+	gotBody, gotCaptured := steady(t, got.clientBody), steady(t, got.captured)
+
+	if got.clientStatus != want.clientStatus {
+		t.Errorf("caller received status %d, want %d", got.clientStatus, want.clientStatus)
+	}
+	if gotBody != wantBody {
+		t.Errorf("caller received\n got: %q\nwant: %q", gotBody, wantBody)
+	}
+	if gotCaptured != gotBody {
+		t.Errorf("capture file and caller disagree; the file promises exactly what the caller received\n file: %q\ncaller: %q", gotCaptured, gotBody)
+	}
+	if got.captureExists != want.captureExists {
+		t.Errorf("capture file exists = %v, want %v", got.captureExists, want.captureExists)
+	}
+	if got.firstByteSent != want.firstByteSent {
+		t.Errorf("first byte recorded as sent = %v, want %v", got.firstByteSent, want.firstByteSent)
+	}
+	if got.completionSeen != want.completion {
+		t.Errorf("completion tokens = %d, want %d", got.completionSeen, want.completion)
+	}
+	if got.promptSeen != want.promptSeen {
+		t.Errorf("prompt tokens = %d, want %d", got.promptSeen, want.promptSeen)
+	}
+	if got.delivery.Verdict != want.verdict {
+		t.Errorf("verdict = %v, want %v", got.delivery.Verdict, want.verdict)
+	}
+	if got.delivery.Committed != want.committed {
+		t.Errorf("committed = %v, want %v", got.delivery.Committed, want.committed)
+	}
+	if got.delivery.Complete != want.complete {
+		t.Errorf("complete = %v, want %v", got.delivery.Complete, want.complete)
+	}
+}
+
+// requireDelivered fails a case that delivered nothing.
+//
+// A case whose expected body is empty asserts nothing about the pump: every
+// byte-level check passes on empty strings, and the row reads as covered while
+// exercising none of the path it was added for. The table below is for streams
+// that arrive; the ones that do not have their own tests.
 func requireDelivered(t *testing.T, got streamOutcome) {
 	t.Helper()
 	if got.clientBody == "" {
-		t.Fatalf("this case delivered nothing (verdict %v); it proves only that both sides fail alike", got.delivery.Verdict)
+		t.Fatalf("this case delivered nothing (verdict %v); it exercises none of the pump", got.delivery.Verdict)
 	}
 	if !got.delivery.Complete {
 		t.Fatalf("this case did not complete (fail reason %q)", got.delivery.FailReason)
 	}
 }
 
-// TestTheModalityStreamsWhatTheServiceStreamed runs one upstream stream through
-// both implementations and holds them to the same account.
+// TestTheModalityStreamsWhatItPromises delivers one upstream stream per shape
+// and holds each to the full account.
 //
 // Equal caller bytes is the loudest of these but not the only one that matters:
-// the capture file has to hold the same thing, the usage has to survive the
-// move, and a failure has to leave the same verdict behind. A refactor that got
+// the capture file has to hold the same thing, the usage has to be read off the
+// frames, and a failure has to leave the right verdict behind. A change that got
 // the bytes right and any of those wrong would look correct from the caller's
 // side and be wrong everywhere the request is later answered for.
-func TestTheModalityStreamsWhatTheServiceStreamed(t *testing.T) {
+func TestTheModalityStreamsWhatItPromises(t *testing.T) {
 	// The provider's own name for the model, deliberately not the caller's: a
 	// rewrite to the same string proves nothing, and that is exactly the fixture
 	// that let a dropped rewrite pass.
@@ -246,42 +245,79 @@ func TestTheModalityStreamsWhatTheServiceStreamed(t *testing.T) {
 		"event: message_stop\n" +
 		`data: {"type":"message_stop"}` + "\n\n"
 
+	// What a caller sees when a claude stream is forwarded to them, up to but
+	// not including the blank line that closes the last frame — the two cases
+	// below differ in whether that frame is the end of the stream. Only
+	// message_start is rewritten (to the caller's name for the model, which
+	// re-serialises its keys); the rest is passed on byte for byte.
+	const claudeForwarded = "event: message_start\n" +
+		`data: {"message":{"id":"msg_1","model":"claude-3-5-sonnet","usage":{"input_tokens":7,"output_tokens":0}},"type":"message_start"}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}` + "\n"
+
 	cases := []struct {
 		name        string
 		ingress     protocols.ProtocolID
 		egress      protocols.ProtocolID
 		passthrough bool
-		callerModel string
 		// callerPath matters for protocols that carry the model in the URL
 		// rather than the body.
 		callerPath string
 		caller     string
 		upstream   string
+		want       streamWant
 	}{
 		{
-			name:        "openai caller, claude provider",
-			ingress:     protocols.ProtocolOpenAI,
-			egress:      protocols.ProtocolClaude,
-			callerModel: "gpt-4o",
-			caller:      `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
-			upstream:    claudeUpstream,
+			name:    "openai caller, claude provider",
+			ingress: protocols.ProtocolOpenAI,
+			egress:  protocols.ProtocolClaude,
+			caller:  `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+			// Re-encoded frame by frame into the caller's protocol, under the
+			// name the caller asked for and the provider's own message id.
+			upstream: claudeUpstream,
+			want: streamWant{
+				clientBody: `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null,"index":0}],"created":*,"id":"msg_1","model":"gpt-4o","object":"chat.completion.chunk"}` + "\n\n" +
+					`data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"created":*,"id":"msg_1","model":"gpt-4o","object":"chat.completion.chunk"}` + "\n\n" +
+					"data: [DONE]\n\n",
+				captureExists: true, firstByteSent: true, promptSeen: 7, completion: 3,
+				clientStatus: 200, verdict: fact.VerdictSettled, committed: true, complete: true,
+			},
 		},
 		{
-			name:        "claude caller, openai provider",
-			ingress:     protocols.ProtocolClaude,
-			egress:      protocols.ProtocolOpenAI,
-			callerModel: "claude-3-5-sonnet",
-			caller:      `{"model":"claude-3-5-sonnet","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+			name:    "claude caller, openai provider",
+			ingress: protocols.ProtocolClaude,
+			egress:  protocols.ProtocolOpenAI,
+			caller:  `{"model":"claude-3-5-sonnet","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 			upstream: `data: {"id":"c1","model":"gpt-4o-real","choices":[{"delta":{"role":"assistant","content":"hi"}}]}` + "\n\n" +
 				`data: {"id":"c1","model":"gpt-4o-real","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}` + "\n\n" +
 				"data: [DONE]\n\n",
+			// Claude's event sequence has frames OpenAI's does not, so the two
+			// content deltas above become six events here: the block open and
+			// close are synthesised, not forwarded.
+			want: streamWant{
+				clientBody: "event: message_start\n" +
+					`data: {"message":{"content":[],"id":"c1","model":"claude-3-5-sonnet","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"}` + "\n\n" +
+					"event: content_block_start\n" +
+					`data: {"content_block":{"text":"","type":"text"},"index":0,"type":"content_block_start"}` + "\n\n" +
+					"event: content_block_delta\n" +
+					`data: {"delta":{"text":"hi","type":"text_delta"},"index":0,"type":"content_block_delta"}` + "\n\n" +
+					"event: content_block_stop\n" +
+					`data: {"index":0,"type":"content_block_stop"}` + "\n\n" +
+					"event: message_delta\n" +
+					`data: {"delta":{"stop_reason":"end_turn","stop_sequence":null},"type":"message_delta","usage":{"input_tokens":7,"output_tokens":3}}` + "\n\n" +
+					"event: message_stop\n" +
+					`data: {"type":"message_stop"}` + "\n\n",
+				captureExists: true, firstByteSent: true, promptSeen: 7, completion: 3,
+				clientStatus: 200, verdict: fact.VerdictSettled, committed: true, complete: true,
+			},
 		},
 		{
 			name:        "openai caller, openai provider, forwarded as-is",
 			ingress:     protocols.ProtocolOpenAI,
 			egress:      protocols.ProtocolOpenAI,
 			passthrough: true,
-			callerModel: "gpt-4o",
 			caller:      `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 			// Opens with a comment heartbeat and a retry directive: lines that
 			// arrive before any data and must reach the caller in order once the
@@ -290,29 +326,49 @@ func TestTheModalityStreamsWhatTheServiceStreamed(t *testing.T) {
 				`data: {"id":"c1","model":"gpt-4o-real","choices":[{"delta":{"role":"assistant","content":"hi"}}]}` + "\n\n" +
 				`data: {"id":"c1","model":"gpt-4o-real","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}` + "\n\n" +
 				"data: [DONE]\n\n",
+			// Forwarded frames keep the provider's own field order; only the
+			// model is rewritten. The usage block is gone because this caller
+			// never asked for it — the tokens are still read off the frame and
+			// reported below, they are just not passed on.
+			want: streamWant{
+				clientBody: ": ping\n\nretry: 1000\n\n" +
+					`data: {"choices":[{"delta":{"role":"assistant","content":"hi"}}],"id":"c1","model":"gpt-4o"}` + "\n\n" +
+					`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"id":"c1","model":"gpt-4o"}` + "\n\n" +
+					"data: [DONE]\n\n",
+				captureExists: true, firstByteSent: true, promptSeen: 7, completion: 3,
+				clientStatus: 200, verdict: fact.VerdictSettled, committed: true, complete: true,
+			},
 		},
 		{
-			// Gemini reaches the relay through a different entry point, the one
-			// that splits on newlines rather than scanning SSE frames. Nothing
-			// else in this table goes through it.
-			name:        "openai caller, gemini provider",
-			ingress:     protocols.ProtocolOpenAI,
-			egress:      protocols.ProtocolGemini,
-			callerModel: "gpt-4o",
-			caller:      `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+			// Gemini is delivered by the pump that splits on newlines rather
+			// than scanning SSE frames. Nothing else in this table goes through
+			// it.
+			name:    "openai caller, gemini provider",
+			ingress: protocols.ProtocolOpenAI,
+			egress:  protocols.ProtocolGemini,
+			caller:  `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 			upstream: `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"modelVersion":"gemini-2.0-flash-real"}` + "\n\n" +
 				`data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10},"modelVersion":"gemini-2.0-flash-real"}` + "\n\n",
+			// This provider supplies no response id, so the gateway mints one —
+			// the same one on every frame.
+			want: streamWant{
+				clientBody: `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null,"index":0}],"created":*,"id":"gen-*","model":"gpt-4o","object":"chat.completion.chunk"}` + "\n\n" +
+					`data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"created":*,"id":"gen-*","model":"gpt-4o","object":"chat.completion.chunk"}` + "\n\n" +
+					"data: [DONE]\n\n",
+				captureExists: true, firstByteSent: true, promptSeen: 7, completion: 3,
+				clientStatus: 200, verdict: fact.VerdictSettled, committed: true, complete: true,
+			},
 		},
 		{
 			// The completion signal is the LAST event and it has no trailing
 			// blank line, so the decoder holds it until asked to finish. Any
 			// earlier terminated signal would make that flush unnecessary and
-			// the case would pass without it.
+			// the case would pass without it. The expected bytes end in a single
+			// newline for the same reason: that frame is closed by the flush.
 			name:        "claude caller, claude provider, completion held back",
 			ingress:     protocols.ProtocolClaude,
 			egress:      protocols.ProtocolClaude,
 			passthrough: true,
-			callerModel: "claude-3-5-sonnet",
 			caller:      `{"model":"claude-3-5-sonnet","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 			upstream: "event: message_start\n" +
 				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":7,"output_tokens":0}}}` + "\n\n" +
@@ -320,6 +376,11 @@ func TestTheModalityStreamsWhatTheServiceStreamed(t *testing.T) {
 				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
 				"event: message_delta\n" +
 				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`,
+			want: streamWant{
+				clientBody:    claudeForwarded,
+				captureExists: true, firstByteSent: true, promptSeen: 7, completion: 3,
+				clientStatus: 200, verdict: fact.VerdictSettled, committed: true, complete: true,
+			},
 		},
 		{
 			// Gemini's decoder holds a frame until a blank line closes it, so a
@@ -330,39 +391,48 @@ func TestTheModalityStreamsWhatTheServiceStreamed(t *testing.T) {
 			ingress:     protocols.ProtocolGemini,
 			egress:      protocols.ProtocolGemini,
 			passthrough: true,
-			callerModel: "gemini-2.0-flash",
 			callerPath:  "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
 			caller:      `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			upstream: `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"modelVersion":"gemini-2.0-flash-real"}` + "\n\n" +
 				`data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10},"modelVersion":"gemini-2.0-flash-real"}`,
+			want: streamWant{
+				clientBody: `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"modelVersion":"gemini-2.0-flash"}` + "\n\n" +
+					`data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"modelVersion":"gemini-2.0-flash","usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10}}` + "\n",
+				captureExists: true, firstByteSent: true, promptSeen: 7, completion: 3,
+				clientStatus: 200, verdict: fact.VerdictSettled, committed: true, complete: true,
+			},
 		},
 		{
 			name:        "claude caller, claude provider, forwarded as-is",
 			ingress:     protocols.ProtocolClaude,
 			egress:      protocols.ProtocolClaude,
 			passthrough: true,
-			callerModel: "claude-3-5-sonnet",
 			caller:      `{"model":"claude-3-5-sonnet","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 			upstream:    claudeUpstream,
+			want: streamWant{
+				clientBody: claudeForwarded + "\nevent: message_stop\n" +
+					`data: {"type":"message_stop"}` + "\n\n",
+				captureExists: true, firstByteSent: true, promptSeen: 7, completion: 3,
+				clientStatus: 200, verdict: fact.VerdictSettled, committed: true, complete: true,
+			},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			old := runOldStream(t, tc.ingress, tc.egress, tc.passthrough, tc.callerModel, upstreamStream(t, tc.upstream))
 			path := tc.callerPath
 			if path == "" {
 				path = "/v1/chat/completions"
 			}
-			got := runNewStream(t, tc.ingress, tc.egress, tc.passthrough, path, tc.caller, upstreamStream(t, tc.upstream))
+			got := runStream(t, tc.ingress, tc.egress, tc.passthrough, path, tc.caller, upstreamStream(t, tc.upstream))
 			requireDelivered(t, got)
-			compareStream(t, old, got)
+			checkStream(t, tc.want, got)
 		})
 	}
 }
 
 // TestAStreamThatEndsWithoutItsTerminatorIsNotCalledComplete pins the case an
-// equal-bytes comparison alone would let through.
+// equal-bytes assertion alone would let through.
 //
 // The caller may well hold the whole answer — some upstreams simply never send
 // the terminator — so nothing is injected into their stream and the status
@@ -373,18 +443,18 @@ func TestAStreamThatEndsWithoutItsTerminatorIsNotCalledComplete(t *testing.T) {
 	const truncated = `data: {"id":"c1","model":"gpt-4o-real","choices":[{"delta":{"content":"hi"}}]}` + "\n\n"
 	const caller = `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 
-	old := runOldStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "gpt-4o", upstreamStream(t, truncated))
-	got := runNewStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", caller, upstreamStream(t, truncated))
-	compareStream(t, old, got)
+	got := runStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", caller, upstreamStream(t, truncated))
+	checkStream(t, streamWant{
+		clientBody:    `data: {"choices":[{"delta":{"content":"hi"}}],"id":"c1","model":"gpt-4o"}` + "\n\n",
+		captureExists: true, firstByteSent: true,
+		clientStatus: http.StatusOK, verdict: fact.VerdictSettled, committed: true, complete: false,
+	}, got)
 
-	if got.delivery.Complete {
-		t.Error("delivery reports complete; the stream ended without its terminator, so nobody saw it finish")
+	if got.delivery.Fault != fact.FaultUpstream {
+		t.Errorf("fault = %v, want upstream; the provider is the one that stopped short", got.delivery.Fault)
 	}
-	if got.delivery.Verdict != fact.VerdictSettled {
-		t.Errorf("verdict = %v, want settled; the caller already has these bytes and no other provider can replace them", got.delivery.Verdict)
-	}
-	if got.clientStatus != http.StatusOK {
-		t.Errorf("caller received status %d, want 200 — the headers went out with the first frame", got.clientStatus)
+	if got.delivery.FailReason != "stream_no_done" {
+		t.Errorf("fail reason = %q, want %q", got.delivery.FailReason, "stream_no_done")
 	}
 }
 
@@ -398,16 +468,11 @@ func TestAStreamThatEndsWithoutItsTerminatorIsNotCalledComplete(t *testing.T) {
 func TestAStreamThatNeverSendsDataLeavesTheChainOpen(t *testing.T) {
 	const caller = `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 
-	old := runOldStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "gpt-4o", upstreamStream(t, ""))
-	got := runNewStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", caller, upstreamStream(t, ""))
-	compareStream(t, old, got)
+	got := runStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", caller, upstreamStream(t, ""))
+	checkStream(t, streamWant{
+		clientStatus: http.StatusOK, verdict: fact.VerdictNextCandidate,
+	}, got)
 
-	if got.delivery.Verdict != fact.VerdictNextCandidate {
-		t.Errorf("verdict = %v, want next_candidate; nothing reached the caller, so another provider can still serve them", got.delivery.Verdict)
-	}
-	if got.delivery.Committed {
-		t.Error("delivery reports committed; no data frame ever arrived, so no status went out")
-	}
 	if got.captureExists {
 		t.Errorf("a capture file was left behind holding %q; nothing was ever sent, and an empty one renders as a capture worth opening", got.captured)
 	}
@@ -469,29 +534,41 @@ func TestWhatCountsAsAWholeStreamDiffersByProtocol(t *testing.T) {
 		`data: {"type":"message_stop"}` + "\n\n"
 
 	t.Run("openai wants its usage frame", func(t *testing.T) {
-		old := runOldStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "gpt-4o",
+		got := runStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", openAICaller,
 			upstreamStreamThatBreaks(t, openAIStream, io.ErrUnexpectedEOF))
-		got := runNewStream(t, protocols.ProtocolOpenAI, protocols.ProtocolOpenAI, true, "/v1/chat/completions", openAICaller,
-			upstreamStreamThatBreaks(t, openAIStream, io.ErrUnexpectedEOF))
-		compareStream(t, old, got)
+		// The caller already holds a terminator, and then gets a second one
+		// after the error frame: the stream is closed off the only way SSE
+		// allows once bytes are out.
+		checkStream(t, streamWant{
+			clientBody: `data: {"choices":[{"delta":{"content":"hi"}}],"id":"c1","model":"gpt-4o"}` + "\n\n" +
+				"data: [DONE]\n\n" +
+				`data: {"error":{"message":"upstream stream interrupted (request: ` + streamRequestID + `)","type":"upstream_error"}}` + "\n\n" +
+				"data: [DONE]\n\n",
+			captureExists: true, firstByteSent: true,
+			clientStatus: http.StatusOK, verdict: fact.VerdictSettled, committed: true, complete: false,
+		}, got)
 
-		if got.delivery.Complete {
-			t.Error("reported complete; the terminator arrived but the usage frame never did, so the stream stopped short")
-		}
 		if got.delivery.Fault != fact.FaultUpstream {
 			t.Errorf("fault = %v, want upstream", got.delivery.Fault)
 		}
 	})
 
 	t.Run("claude does not", func(t *testing.T) {
-		old := runOldStream(t, protocols.ProtocolClaude, protocols.ProtocolClaude, true, "claude-3-5-sonnet",
+		got := runStream(t, protocols.ProtocolClaude, protocols.ProtocolClaude, true, "/v1/messages", claudeCaller,
 			upstreamStreamThatBreaks(t, claudeStream, io.ErrUnexpectedEOF))
-		got := runNewStream(t, protocols.ProtocolClaude, protocols.ProtocolClaude, true, "/v1/messages", claudeCaller,
-			upstreamStreamThatBreaks(t, claudeStream, io.ErrUnexpectedEOF))
-		compareStream(t, old, got)
-
-		if !got.delivery.Complete {
-			t.Errorf("reported incomplete (%q); this stream reached its terminal event, and usage is not what ends it", got.delivery.FailReason)
-		}
+		// No error frame: this stream reached its terminal event, so the read
+		// failure that followed interrupted nothing.
+		checkStream(t, streamWant{
+			clientBody: "event: message_start\n" +
+				`data: {"message":{"id":"msg_1","model":"claude-3-5-sonnet"},"type":"message_start"}` + "\n\n" +
+				"event: content_block_delta\n" +
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}` + "\n\n" +
+				"event: message_delta\n" +
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}` + "\n\n" +
+				"event: message_stop\n" +
+				`data: {"type":"message_stop"}` + "\n\n",
+			captureExists: true, firstByteSent: true,
+			clientStatus: http.StatusOK, verdict: fact.VerdictSettled, committed: true, complete: true,
+		}, got)
 	})
 }

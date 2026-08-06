@@ -186,24 +186,11 @@ type UpstreamBuffer interface {
 // cmd/yolorouter/serve.go's http.Server.WriteTimeout carries a slack on top
 // of gateway.RequestTimeout, derived directly from StreamWriteWindow() (not a
 // separate hard-coded literal) so it can never drift below this value: that
-// slack is what covers a stream's pre-first-write gap before
-// ApplyStreamWriteDeadline gets a chance to slide the deadline forward for
-// the first time.
+// slack is what covers a stream's pre-first-write gap, before anything has
+// slid the deadline forward for the first time.
 //
 // A package var so tests can shrink it to keep the suite sub-second.
 var streamWriteWindow = 60 * time.Second
-
-// ApplyStreamWriteDeadline sets a sliding write deadline of now +
-// streamWriteWindow on the response writer. Streaming relay loops call this
-// before each Write/Flush batch so a slow-reading client is bounded by
-// streamWriteWindow. On a writer that does not support SetWriteDeadline
-// (e.g. httptest.ResponseRecorder), the error is non-nil but benign in
-// production (*http.response always supports it) — the caller still gets the
-// error back so tests can assert on it.
-func ApplyStreamWriteDeadline(c *gin.Context) error {
-	rc := http.NewResponseController(c.Writer)
-	return rc.SetWriteDeadline(time.Now().Add(streamWriteWindow))
-}
 
 // StreamWriteWindow returns the current streamWriteWindow value. Exported
 // for tests that need to shrink it to keep the suite sub-second.
@@ -325,8 +312,7 @@ func WatchClientClose(c *gin.Context, upstream io.Closer) (stop func()) {
 //
 // The client-facing SSE response headers (200 + text/event-stream) are
 // DEFERRED until the first encoded event is actually about to be written —
-// mirroring the same-protocol passthrough pump's (passthroughStreamToClient)
-// deferred-header behavior. If the upstream ends (clean EOF) or errors
+// mirroring the same-protocol passthrough pump's deferred-header behavior. If the upstream ends (clean EOF) or errors
 // before any event is ever emitted, this function returns an error WITHOUT
 // having written anything to the client, so the caller can still fail over
 // to a healthy candidate instead of being stuck with an already-committed
@@ -903,57 +889,6 @@ type ClientWriter interface {
 	// buffered Write can hide.
 	Flush() error
 }
-
-// ginClientWriter is the ClientWriter over a raw gin response, for callers that
-// still hold one.
-type ginClientWriter struct{ c *gin.Context }
-
-// NewGinClientWriter adapts a gin context to ClientWriter.
-func NewGinClientWriter(c *gin.Context) ClientWriter { return ginClientWriter{c: c} }
-
-func (g ginClientWriter) Inject(h http.Header) {
-	for k, vv := range h {
-		// Cleared first, then every value added: replacing by name while
-		// keeping multi-value headers whole. Adding without clearing would put
-		// a second Content-Type on a response that already had one.
-		g.c.Writer.Header().Del(k)
-		for _, v := range vv {
-			g.c.Writer.Header().Add(k, v)
-		}
-	}
-}
-
-// Commit records the status the way gin does: held until the first body write,
-// so the caller's own view of "has anything been sent" is unchanged by moving
-// through this interface. A writer that needs the status on the wire at commit
-// time implements that itself.
-func (g ginClientWriter) Commit(status int) error {
-	g.c.Writer.WriteHeader(status)
-	return nil
-}
-
-func (g ginClientWriter) Write(p []byte) (int, error) {
-	g.slideDeadline()
-	return g.c.Writer.Write(p)
-}
-
-func (g ginClientWriter) Flush() error {
-	g.slideDeadline()
-	return FlushAndCheckError(g.c)
-}
-
-// slideDeadline bounds how long one write to the caller may take.
-//
-// A caller that stops reading otherwise holds the handler open for as long as
-// it likes, which is a connection and a concurrency slot spent on somebody who
-// left. The streaming loops used to do this themselves, one call per batch;
-// doing it here means both writers this interface has make the same promise
-// instead of the protection depending on which one a path happened to get.
-//
-// The error is ignored deliberately: writers that cannot take a deadline
-// (a test recorder, say) still write correctly, and production's does support
-// it.
-func (g ginClientWriter) slideDeadline() { _ = ApplyStreamWriteDeadline(g.c) }
 
 // UpstreamHeadersToCopy is the subset of an upstream's response headers that
 // may be passed on to the caller.

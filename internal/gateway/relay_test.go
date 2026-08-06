@@ -918,8 +918,8 @@ func TestRelayBudgetExceededReturnsInsufficientQuota(t *testing.T) {
 // TestRelayStreamSuccess: a healthy streaming upstream forwards SSE chunks
 // with the model field rewritten to the external name in EVERY chunk
 // (provider name never leaks), terminates with [DONE], and records the
-// final-usage tokens for cost (cost_known=true). Covers
-// dispatchPassthroughStream + passthroughStreamToClient end-to-end.
+// final-usage tokens for cost (cost_known=true). Covers the same-protocol
+// streaming delivery end-to-end.
 func TestRelayStreamSuccess(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -979,9 +979,9 @@ func TestRelayStreamSuccess(t *testing.T) {
 // by validateIngressBody as a 400 Claude error envelope BEFORE any candidate
 // is ever tried — proving the pre-loop full-body validation (added in this
 // task) actually gates the candidate loop, not just ingressMeta.validate().
-// Without it, this malformed body would instead reach buildUpstreamBody
-// (relay.go's decode step) once inside relayCandidates, fail there per
-// candidate, and get misreported as a 502 "all upstream candidates failed"
+// Without it, this malformed body would instead reach the payload's own
+// encode step once inside relayCandidates, fail there per candidate, and get
+// misreported as a 502 "all upstream candidates failed"
 // instead of the correct 400 client error.
 func TestRelayClaudeMalformedBodyRejectedBeforeCandidateLoop(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
