@@ -58,15 +58,6 @@ type costBreakdown struct {
 	Known                   bool
 }
 
-// computeCost returns the cost breakdown in integer micros (major-unit × 1e6,
-// i.e. CNY to 6 decimal places) and whether the cost is "known".
-// Unknown = usage missing — the row records cost_micros=0 with
-// cost_known=false so the dashboard never shows it as a free request.
-// compressTokensSaved is the input-compression estimate (chars-saved/4); the
-// matching CompressCostSavedMicros line prices it at the candidate's input
-// rate so the saving is reported on the same basis as the billed cost. It is
-// forced to 0 whenever usage/pricing is unknown, matching CostKnown=false.
-// Candidate prices are CNY per million tokens.
 // netPromptTokens returns the billable/loggable net input token count: the
 // prompt tokens with the cache-read portion removed. When the source protocol
 // reports prompt tokens inclusive of cache reads (OpenAI/Gemini/Responses,
@@ -153,6 +144,15 @@ func usageIsCoherent(u *Usage) bool {
 	return !u.toIRUsage().IsIncoherent()
 }
 
+// computeCost returns the cost breakdown in integer micros (major-unit × 1e6,
+// i.e. CNY to 6 decimal places) and whether the cost is "known".
+// Unknown = usage missing — the row records cost_micros=0 with
+// cost_known=false so the dashboard never shows it as a free request.
+// compressTokensSaved is the input-compression estimate (chars-saved/4); the
+// matching CompressCostSavedMicros line prices it at the candidate's input
+// rate so the saving is reported on the same basis as the billed cost. It is
+// forced to 0 whenever usage/pricing is unknown, matching CostKnown=false.
+// Candidate prices are CNY per million tokens.
 func computeCost(cand *model.ModelCandidate, usage *Usage, compressTokensSaved int) costBreakdown {
 	if cand == nil || !usageIsCoherent(usage) {
 		return costBreakdown{} // Known=false: no cost recorded, no budget consumed
@@ -384,7 +384,18 @@ func (s *Service) settleDelivery(c *gin.Context, rc *Exchange, d fact.Delivery, 
 	// A delivery is judged after its own attempt is already on the list, which
 	// is the one case the default numbering gets wrong.
 	s.checkAndNote(rc, &d, newExchangeSink(rc).forRecordedAttempt())
+	return s.settleCheckedDelivery(c, rc, d, start)
+}
 
+// settleCheckedDelivery is settleDelivery for a caller that already put the
+// delivery through checkAndNote.
+//
+// Split out because the check has to happen before the attempt is labelled —
+// a delivery about to be judged impossible would otherwise leave a "success"
+// row behind it — while the numbering of the note differs either side of that
+// moment. Checking twice would be harmless to the verdict and would record the
+// observation twice, which is one audit fact too many.
+func (s *Service) settleCheckedDelivery(c *gin.Context, rc *Exchange, d fact.Delivery, start time.Time) attemptResult {
 	if d.Verdict != fact.VerdictSettled {
 		// Nothing reached the caller, so the chain continues and there is
 		// nothing to settle yet.

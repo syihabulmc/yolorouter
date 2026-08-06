@@ -420,8 +420,8 @@ func TestProcessDispatchResponseStream_ClientWriteTimeoutClassification(t *testi
 		t.Errorf("attempt outcome = %q, want %q (client write timeout must not be classified as upstream server fault)",
 			last.Outcome, AttemptConnError)
 	}
-	if !strings.Contains(last.FailReason, "client write timeout") {
-		t.Errorf("fail_reason = %q, want it to contain 'client write timeout'", last.FailReason)
+	if !strings.Contains(last.FailReason, "client_write_timeout") {
+		t.Errorf("fail_reason = %q, want it to name the client write timeout", last.FailReason)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
@@ -224,7 +225,16 @@ func TestRelayCandidatesProviderKeyLoadCanceledContextReturns499(t *testing.T) {
 		apiKeyID:        apiKey.ID,
 	}
 
-	svc.relayCandidates(c, rc, []model.ModelCandidate{cand}, time.Now())
+	// The chain now carries the admitted payload; a caller who left before it
+	// starts is the same either way, but the loop cannot run without one.
+	payload, rej := NewTextModality().Admit(context.Background(), Ingress{
+		Protocol: protocols.ProtocolOpenAI, Path: "/v1/chat/completions",
+		Body: []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
+	})
+	if rej != nil {
+		t.Fatalf("Admit refused a valid body: %+v", rej)
+	}
+	svc.relayCandidates(c, rc, admitted{payload: newOrderedPayload(payload, rc.requestID)}, []model.ModelCandidate{cand}, time.Now())
 	// relayCandidates settles the exchange; Handle is what records it, so a
 	// test that calls the inner function has to do the same.
 	svc.recordTerminal(rc)

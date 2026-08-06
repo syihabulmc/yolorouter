@@ -39,7 +39,7 @@ import (
 // the response body. Once the kernel's TCP send buffer fills, the gateway's
 // Write blocks; the sliding write deadline (streamWriteWindow, shrunk here)
 // must cut it, and the resulting error must be classified as a client-side
-// write timeout (AttemptConnError + "client write timeout"), not an upstream
+// write timeout (AttemptConnError + "client_write_timeout"), not an upstream
 // server fault — and the handler must actually return (concurrency slot
 // released), not hang.
 func TestPassthroughStreamToClient_ClientWriteTimeoutClassification(t *testing.T) {
@@ -128,8 +128,8 @@ func TestPassthroughStreamToClient_ClientWriteTimeoutClassification(t *testing.T
 		t.Errorf("attempt outcome = %q, want %q (client write timeout must not be classified as an upstream server fault)",
 			last.Outcome, AttemptConnError)
 	}
-	if !strings.Contains(last.FailReason, "client write timeout") {
-		t.Errorf("fail_reason = %q, want it to contain 'client write timeout'", last.FailReason)
+	if !strings.Contains(last.FailReason, "client_write_timeout") {
+		t.Errorf("fail_reason = %q, want it to name the client write timeout", last.FailReason)
 	}
 }
 
@@ -221,8 +221,8 @@ func TestPassthroughStreamToClientDecoded_ClientWriteTimeoutClassification(t *te
 		t.Errorf("attempt outcome = %q, want %q (client write timeout must not be classified as an upstream server fault)",
 			last.Outcome, AttemptConnError)
 	}
-	if !strings.Contains(last.FailReason, "client write timeout") {
-		t.Errorf("fail_reason = %q, want it to contain 'client write timeout'", last.FailReason)
+	if !strings.Contains(last.FailReason, "client_write_timeout") {
+		t.Errorf("fail_reason = %q, want it to name the client write timeout", last.FailReason)
 	}
 }
 

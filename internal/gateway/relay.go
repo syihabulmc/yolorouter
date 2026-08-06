@@ -332,48 +332,80 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// request_log_bodies row, verbatim (v0.1 does not scrub body content).
 	rc.requestBody = body
 
-	// Gemini carries neither model nor stream in the body -- both are
-	// encoded in the URL path
-	// (/v1beta/models/{model}:generateContent|:streamGenerateContent) -- so
-	// they must be pulled out here and threaded into peekIngress instead of
-	// being read off the body like every other ingress protocol. A path
-	// parseGeminiPath rejects (missing prefix, no recognized action, empty
-	// model) is a structurally invalid request; reject it as a 400 the same
-	// way an unparseable body is rejected just below, before the body is
-	// even peeked.
-	var pathModel string
-	var pathStream bool
-	if ingress == protocols.ProtocolGemini {
-		gm, gs, ok := parseGeminiPath(c.Request.URL.Path)
-		if !ok {
-			s.rejectRequest(c, rc, http.StatusBadRequest, errTypeInvalidRequest, "invalid request path", "invalid_gemini_path", fact.FaultClient, start)
-			return
+	// Two-level resolve for input compression: a per-key override wins
+	// outright (short-circuit so a stalled settings read can't block an
+	// override key); otherwise fall through to the global cached value. On
+	// global read error leave compression disabled — fail-open, never block
+	// the request on a settings hiccup.
+	//
+	// Resolved here rather than further down because the answer is needed
+	// before the body is handed to a modality, and that is the last moment
+	// anything may change those bytes.
+	if apiKey.CompressEnabledOverride {
+		rc.compressEnabled = apiKey.CompressEnabled
+	} else if s.settingsProvider != nil {
+		enabled, _, err := s.settingsProvider.GetInputCompression(c.Request.Context())
+		if err != nil {
+			logger.Warn("gateway: input compression read failed",
+				zap.String("request_id", rc.requestID), zap.Error(err))
 		}
-		pathModel, pathStream = gm, gs
+		rc.compressEnabled = enabled
 	}
 
-	// One lightweight per-ingress peek of the caller body — meta.Model/Stream
-	// for routing, meta.validate() for the top-level structural checks each
-	// protocol's decoder is lenient about, meta.HasTools for the capability
-	// filter. The body itself (in `body`) is forwarded to buildUpstreamBody
-	// untouched, which rewrites the model field (passthrough) or does the
-	// full IR decode/encode (cross-protocol). The full protocol-specific
-	// structural decode runs later, once, via validateIngressBody below.
-	// pathModel/pathStream are only consumed by the Gemini branch (see
-	// peekIngress); every other ingress protocol reads model/stream from the
-	// body itself and ignores these two parameters.
-	meta, err := peekIngress(ingress, body, pathModel, pathStream)
-	if err != nil {
-		s.rejectRequest(c, rc, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body", "parse: "+err.Error(), fact.FaultClient, start)
+	// Compression runs before the request is admitted, not after it is
+	// validated, because the modality admits ONE body and everything
+	// downstream builds from that one. Running it later would leave the
+	// payload holding the uncompressed bytes while the exchange recorded the
+	// compressed ones. Safe in this order: the engine leaves a body it cannot
+	// parse untouched, so an invalid request is still rejected by the
+	// validation below rather than slipping past a compressor that skipped it.
+	// rc.requestBody keeps what the caller actually sent.
+	admitBody := body
+	if rc.compressEnabled && rc.isChatEndpoint {
+		opts := compress.DefaultOptions()
+		cctx, cancel := context.WithTimeout(c.Request.Context(), opts.Timeout)
+		newBody, cres := compressByIngress(ingress, cctx, body, opts)
+		cancel()
+		if cres.Skipped {
+			rc.compressSkipReason = string(cres.SkipReason)
+		} else {
+			rc.requestBodyCompressed = newBody
+			rc.compressEstimatedTokensSaved = cres.EstimatedTokensSaved
+			rc.compressorsApplied = cres.CompressorsApplied
+			admitBody = newBody
+		}
+	}
+
+	// The modality that serves this ingress protocol decides whether the
+	// request is one it can carry at all, and every refusal it can make is one
+	// no candidate could have changed: a body that does not parse, a field the
+	// protocol requires, a path that names no model.
+	modality, ok := modalityFor(ingress)
+	if !ok {
+		// Nothing routes an unregistered protocol here today. Serving it with
+		// whichever modality was nearest would answer the caller in a shape
+		// they cannot read.
+		logger.Error("gateway: no modality registered", zap.String("request_id", rc.requestID), zap.String("ingress", string(ingress)))
+		s.rejectRequest(c, rc, http.StatusInternalServerError, errTypeServer, "internal error", "no_modality: "+string(ingress), fact.FaultGateway, start)
 		return
 	}
-	if meta.Model == "" {
-		s.rejectRequest(c, rc, http.StatusBadRequest, errTypeInvalidRequest, "model is required", "empty_model", fact.FaultClient, start)
+	payload, rej := modality.Admit(requestCtx, Ingress{
+		Protocol:    ingress,
+		Path:        c.Request.URL.Path,
+		ContentType: c.GetHeader("Content-Type"),
+		Body:        admitBody,
+	})
+	if rej != nil {
+		s.rejectRequest(c, rc, rej.Status, rej.ErrorType, rej.Message, rej.FailReason, rej.Fault, start)
 		return
 	}
-	rc.originalModel = meta.Model
-	rc.isStream = meta.Stream
-	rc.wantsStreamUsage = meta.WantsStreamUsage
+	// Wrapped before anything calls it: the wrapper is what holds the call
+	// order and reconciles what a modality claims against what actually went
+	// out to the caller.
+	adm := admitted{payload: newOrderedPayload(payload, rc.requestID), limits: modality.Limits()}
+	routing := adm.payload.Routing()
+	rc.originalModel = routing.Model
+	rc.isStream = routing.Stream
 
 	// Every write to the caller slides a deadline forward: the IR relays get
 	// it from the writer they are handed, the passthrough pumps still call
@@ -407,26 +439,9 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		rc.customSystemPrompt = g.Text
 	}
 
-	// Two-level resolve for input compression, mirroring the custom system
-	// prompt resolve above: a per-key override wins outright (short-circuit
-	// so a stalled settings read can't block an override key); otherwise fall
-	// through to the global cached value. On global read error leave
-	// compression disabled — fail-open, never block the request on a settings
-	// hiccup.
-	if apiKey.CompressEnabledOverride {
-		rc.compressEnabled = apiKey.CompressEnabled
-	} else if s.settingsProvider != nil {
-		enabled, _, err := s.settingsProvider.GetInputCompression(c.Request.Context())
-		if err != nil {
-			logger.Warn("gateway: input compression read failed",
-				zap.String("request_id", rc.requestID), zap.Error(err))
-		}
-		rc.compressEnabled = enabled
-	}
-
 	// Step 4: model exists and is enabled. A model disabled by an admin
 	// must not route even if its candidates are still enabled.
-	m, err := repository.FindModelByName(s.db.WithContext(requestCtx), meta.Model)
+	m, err := repository.FindModelByName(s.db.WithContext(requestCtx), rc.originalModel)
 	if err != nil {
 		if isClientDisconnected(c) {
 			// The client hung up while this query was in flight — a
@@ -467,45 +482,6 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		}
 	}
 
-	// Step 6: top-level structural validation (messages non-empty, Claude's
-	// max_tokens invariant, OpenAI's parsedRequest.validate() rules).
-	if err := meta.validate(); err != nil {
-		s.rejectRequest(c, rc, http.StatusBadRequest, errTypeInvalidRequest, err.Error(), "validate: "+err.Error(), fact.FaultClient, start)
-		return
-	}
-
-	// Step 6.5: full protocol-specific structural decode (message content
-	// shapes, tool schemas, ...) — the same decode the request will
-	// eventually go through on the hot path. Run once here, BEFORE any
-	// candidate is picked, so a malformed body is rejected as a 400 client
-	// error instead of surfacing later as a misleading "all upstream
-	// candidates failed" 502 once relayCandidates has already started.
-	if err := validateIngressBody(ingress, body, rc.originalModel, rc.isStream); err != nil {
-		s.rejectRequest(c, rc, http.StatusBadRequest, errTypeInvalidRequest, "invalid request body: "+err.Error(), "invalid_request: "+err.Error(), fact.FaultClient, start)
-		return
-	}
-
-	// Run input compression on the validated caller body when enabled and the
-	// ingress path is a chat endpoint. Compression mutates only user/tool
-	// content text — the system field CSP injection later appends to is
-	// orthogonal, so running compress first is safe regardless of whether CSP
-	// injection subsequently runs inside buildUpstreamBody. A skipped result
-	// (no live zone, timeout, parse error, ...) leaves the body untouched; the
-	// engine also recovers panics internally and returns the original body.
-	if rc.compressEnabled && rc.isChatEndpoint {
-		opts := compress.DefaultOptions()
-		cctx, cancel := context.WithTimeout(c.Request.Context(), opts.Timeout)
-		newBody, cres := compressByIngress(ingress, cctx, body, opts)
-		cancel()
-		if cres.Skipped {
-			rc.compressSkipReason = string(cres.SkipReason)
-		} else {
-			rc.requestBodyCompressed = newBody
-			rc.compressEstimatedTokensSaved = cres.EstimatedTokensSaved
-			rc.compressorsApplied = cres.CompressorsApplied
-		}
-	}
-
 	// Step 7: candidates filtered by requested capability.
 	allCandidates, err := repository.ListModelCandidatesByModelID(s.db.WithContext(requestCtx), m.ID)
 	if err != nil {
@@ -530,8 +506,24 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		return
 	}
 
+	// Asked before any candidate is tried, because that is the only window in
+	// which the answer could still change what happens: an estimate produced
+	// after the request was sent is a number nobody can act on.
+	//
+	// The prices come from the first routable candidate, and that is a seam
+	// showing. Prices live on candidates, one per provider, while this question
+	// is asked once for the request — so a modality that priced its work up
+	// front would be pricing it against whichever provider happened to sort
+	// first. Text answers that it cannot say and nothing acts on the estimate
+	// yet, so nothing is wrong today; a modality that CAN answer is the reason
+	// to settle whether this question is per-request or per-candidate.
+	_ = adm.payload.EstimateCost(PricingView{
+		InputPricePerMillion:  routable[0].InputPrice,
+		OutputPricePerMillion: routable[0].OutputPrice,
+	})
+
 	// Steps 8–12.
-	s.relayCandidates(c, rc, routable, start)
+	s.relayCandidates(c, rc, adm, routable, start)
 }
 
 // checkKeyStateAndLimits runs the pre-call checks that don't need a paired
@@ -564,7 +556,7 @@ func (s *Service) checkKeyStateAndLimits(c *gin.Context, rc *Exchange, apiKey *m
 // candidate it loads the provider's enabled keys, decrypts them one at a
 // time, and sends the upstream request; Key rotation and candidate failover
 // decisions come back from tryKeys.
-func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, candidates []model.ModelCandidate, start time.Time) {
+func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, candidates []model.ModelCandidate, start time.Time) {
 	// The ingress protocol is a property of the request path, not of any
 	// individual candidate — threaded through every candidate/key attempt
 	// below.
@@ -651,16 +643,41 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, candidates []mod
 			continue // mapping failure -> skip candidate
 		}
 
-		// Build the upstream body/URL once per candidate — it only depends
-		// on the candidate/egress choice (model rewrite OR IR decode/encode
-		// + stream-usage injection + URL), not on which key ends up sending
-		// it, so every key attempt below reuses the same bytes instead of
-		// rebuilding them.
-		outBody, url, verdict, err := s.buildUpstreamBody(rc, ingress, egress)
+		// The modality answers for this candidate before anything is built for
+		// it. A refusal costs one candidate rather than the request, which is
+		// the difference between this and the refusals Admit makes.
+		offer := Candidate{
+			ProviderModelName: cand.ProviderModelName,
+			EgressProtocol:    egress.Protocol,
+			Passthrough:       egress.Passthrough,
+			BaseURL:           egress.BaseURL,
+			// Unprobed reads as unsupported rather than supported: a capability
+			// nobody has confirmed is one a modality must not be told it has.
+			SupportsStreaming:       cand.SupportsStreaming != nil && *cand.SupportsStreaming,
+			SupportsFunctionCalling: cand.SupportsFunctionCalling != nil && *cand.SupportsFunctionCalling,
+			MaxOutput:               cand.MaxOutput,
+		}
+		if v := adm.payload.Supports(offer); !v.OK {
+			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, v.Reason))
+			continue
+		}
+		// Built once per candidate: it depends on the candidate and the
+		// negotiated protocol, not on which key ends up sending it, so every
+		// key attempt below reuses the same bytes.
+		call, err := adm.payload.PrepareUpstream(offer)
 		if err != nil {
 			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "build request: "+err.Error()))
 			continue // build failure -> skip candidate, nothing sent yet
 		}
+		// The origin and the credentials stay on this side of the interface:
+		// the modality states a path within a provider it was already talking
+		// to, and the kernel decides which host that provider is.
+		url := protocols.JoinUpstreamURL(egress.BaseURL, call.Path, egress.Protocol)
+		// Rewriters run over the finished egress body, after the modality
+		// built it and before anything is sent. A rewriter that refuses comes
+		// back as a verdict for this loop to act on, not as an error: what a
+		// refusal costs the request is the table's call.
+		outBody, verdict := s.rewriteEgress(rc.requestCtx, rc, egress.Protocol, call.Body)
 		// Anything as strong as "abandon this candidate" stops the send. The
 		// full effect may be more than this path can execute — a terminate
 		// verdict also wants a specific status, which the exhausted-chain
@@ -682,12 +699,59 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, candidates []mod
 				zap.String("verdict", verdict.loopFrom.String()))
 		}
 
-		if s.tryKeys(c, rc, &cand, provider, enabled, egress, outBody, url, start) == outcomeDone {
+		if s.tryKeys(c, rc, adm, &cand, provider, enabled, egress, outBody, url, start) == outcomeDone {
 			return
 		}
 		// outcomeNextCandidate: fall through to the next candidate.
 	}
 	s.allCandidatesFailed(c, rc, start)
+}
+
+// admitted is what a modality handed back for one request: the payload it built
+// and the budgets its modality asked for.
+//
+// They travel together because a delivery needs both and neither can be derived
+// from the other — the payload is per-request and the limits belong to the
+// modality that made it.
+type admitted struct {
+	payload Payload
+	limits  TransferLimits
+}
+
+// attemptNoteFor is what one attempt's row says happened, in words.
+//
+// The stable code and the error read differently and both are wanted: a
+// dashboard groups by the first, and whoever opens the row needs the second.
+// Built here rather than by each delivery path, which is what let four paths
+// spell the same failure four ways.
+func attemptNoteFor(d fact.Delivery) string {
+	if d.FailReason == "" {
+		return ""
+	}
+	if d.Err == nil {
+		return d.FailReason
+	}
+	return d.FailReason + ": " + d.Err.Error()
+}
+
+// usageFromReport turns what a modality reported into what the kernel bills on.
+//
+// The two are separate types on purpose: a modality states quantities in the
+// unit it counts, and this is where the kernel decides what to do with them.
+// Nil in, nil out — an attempt that reported nothing is not an attempt that
+// reported zeros, and billing the difference is real money.
+func usageFromReport(u *fact.UsageReported) *Usage {
+	if u == nil {
+		return nil
+	}
+	return &Usage{
+		PromptTokens:          u.Prompt,
+		CompletionTokens:      u.Completion,
+		TotalTokens:           u.Total,
+		CacheReadTokens:       u.CacheRead,
+		CacheWriteTokens:      u.CacheWrite,
+		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
+	}
 }
 
 // relayOutcome is what tryKeys reports back to relayCandidates.
@@ -705,7 +769,7 @@ const (
 // has been written to the client, or outcomeNextCandidate when every key on
 // this provider failed with a key-rotation error and the chain should move
 // to the next candidate (same-provider no usable key, THEN failover).
-func (s *Service) tryKeys(c *gin.Context, rc *Exchange, cand *model.ModelCandidate, provider *model.Provider, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
+func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *model.ModelCandidate, provider *model.Provider, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
 	for i := range keys {
 		pk := keys[i]
 		// Destination-version guard (credential-scope mechanism): a key
@@ -726,7 +790,7 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, cand *model.ModelCandida
 			rc.attempts = append(rc.attempts, rc.makeAttempt(*cand, provider, &pk, 0, AttemptBadStatus, "decrypt failed"))
 			continue
 		}
-		result := s.attemptOne(c, rc, *cand, provider, pk, plaintext, egress, outBody, url, start)
+		result := s.attemptOne(c, rc, adm, *cand, provider, pk, plaintext, egress, outBody, url, start)
 		if result == attemptSuccess || result == attemptTerminal {
 			return outcomeDone
 		}
@@ -763,7 +827,7 @@ const (
 // and pre-first-byte stream failures are candidate-level (failover); 401/429
 // are key-level (rotate); 2xx is success; other 4xx is terminal (caller's
 // problem).
-func (s *Service) attemptOne(c *gin.Context, rc *Exchange, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time) attemptResult {
+func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time) attemptResult {
 	// Whatever the previous send left behind describes that send, not this one.
 	rc.beginUpstreamAttempt()
 
@@ -867,19 +931,29 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, cand model.ModelCandi
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		// 2xx — dispatch directly instead of through a one-line trampoline.
-		// The dispatch side reports what the delivery did; settling it is this
-		// side's job, which is what keeps "how a response is delivered" and
-		// "what the request cost and how it is recorded" from having to be
-		// known in the same place.
-		ingress := rc.ingress
-		var d fact.Delivery
-		if rc.isStream {
-			d = s.processDispatchResponseStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
-		} else {
-			d = s.processDispatchResponseNonStream(c, rc, ingress, egress, cand, provider, pk, resp, start)
+		// 2xx — the modality delivers, this side settles. Keeping those apart
+		// is what stops "how a response is delivered" and "what the request
+		// cost and how it is recorded" from having to be known in one place.
+		tools, release := s.newDeliveryTools(c, rc, adm.limits, rc.isStream)
+		defer release()
+		d := adm.payload.Deliver(tools, resp)
+		// The order below is not arrangement. A delivery is checked before it
+		// is labelled, because a Delivery about to be judged impossible would
+		// otherwise leave a "success" attempt row behind it and hide the
+		// modality's mistake under a record that reads fine.
+		s.checkAndNote(rc, &d, newExchangeSink(rc))
+		// What THIS attempt reported, kept even when the chain carries on: an
+		// attempt that consumed a provider and then failed still consumed it.
+		rc.usage = usageFromReport(d.Usage)
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk,
+			resp.StatusCode, attemptOutcomeFor(d, rc.isStream), attemptNoteFor(d)))
+		if d.Verdict == fact.VerdictSettled {
+			// The one delivery that ended the request, which is the only one
+			// this question is asked about. Asking per attempt would tell the
+			// payload the request was over while the chain was still walking.
+			rc.usage = usageFromReport(adm.payload.FinalizeUsage(d))
 		}
-		return s.settleDelivery(c, rc, d, start)
+		return s.settleCheckedDelivery(c, rc, d, start)
 	}
 
 	statusCode := resp.StatusCode
