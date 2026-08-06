@@ -91,6 +91,7 @@ import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
 import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
 import { copyToClipboard } from '../../utils/clipboard'
+import { listModels, type Model } from '../../api/models'
 import type { APIKey } from '../../api/apiKeys'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
@@ -112,6 +113,7 @@ const showEdit = ref(false)
 const editingId = ref<number | null>(null)
 const showCompress = ref(false)
 const compressKeyId = ref<number | null>(null)
+const models = ref<Model[]>([])
 // Live draft of the filter controls; the server filters only update when the
 // user hits Enter or the Search button, matching the request-logs page.
 const draft = reactive({ query: store.query, owner: store.owner, status: (store.status || null) as string | null })
@@ -128,8 +130,13 @@ const draftValueLength = computed(() => {
 })
 
 onMounted(() => {
-  void store.fetchList().catch((err) => message.error(displayMessage(err, t)))
+  void Promise.all([store.fetchList(), fetchModels()]).catch((err) => message.error(displayMessage(err, t)))
 })
+
+async function fetchModels() {
+  const { list } = await listModels()
+  models.value = list
+}
 
 async function reload() {
   try {
@@ -283,6 +290,19 @@ function onSaved() {
   void reload()
 }
 
+function firstUsableModel(row: APIKey): string | undefined {
+  if (row.allow_all_models) return models.value[0]?.name
+  const firstAllowedModelId = row.model_ids[0]
+  return models.value.find((model) => model.id === firstAllowedModelId)?.name
+}
+
+function importKeyToCCS(row: APIKey) {
+  importToCCS({
+    name: `YoloRouter${row.owner_label ? ` - ${row.owner_label}` : ''}`,
+    model: firstUsableModel(row),
+  })
+}
+
 function rowActions(row: APIKey): DropdownOption[] {
   // Revoked keys only keep cost view; config, optimize, import, and revoke drop out.
   const revoked = row.display_status === 'revoked'
@@ -378,8 +398,7 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
             else if (key === 'look') router.push(`/costs/keys/${row.id}`)
             else if (key === 'optimize') openOptimize(row)
             else if (key === 'delete') confirmRevoke(row)
-            else if (key === 'importCCSImport')
-              importToCCS({ name: `YoloRouter${row.owner_label ? ` - ${row.owner_label}` : ''}` })
+            else if (key === 'importCCSImport') importKeyToCCS(row)
           },
         },
         {
