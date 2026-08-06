@@ -10,18 +10,26 @@ const (
 	APIKeyStatusRevoked = 2
 )
 
-// APIKey is one Yolorouter calling credential. The plaintext key
-// is shown only at create time and never persisted; the row stores just
-// KeyHash (SHA-256) + KeyPrefix (first chars, list-distinguishing only — not
-// enough to reconstruct the full key). Limits are pointer-typed so NULL means
+// APIKey is one Yolorouter calling credential. The plaintext key is persisted
+// as AES-GCM ciphertext in EncryptedKey (migration 00021) so it can be
+// revealed again from the list page; the auth path does NOT use it — gateway
+// auth still looks the key up by KeyHash (SHA-256, indexed). EncryptedKey is
+// NULL for keys created before 00021 landed: their plaintext was never stored,
+// so they cannot be recovered (the reveal endpoint returns a dedicated code).
+// KeyPrefix is the first chars only (list-distinguishing — not enough to
+// reconstruct the full key). Limits are pointer-typed so NULL means
 // "no cap". Budget is integer micros (int64, major-unit × 1e6) to avoid float
-// drift on a cumulative hard cap while keeping 6-decimal precision. KeyHash
-// and RevokedAt are json:"-": the hash must
+// drift on a cumulative hard cap while keeping 6-decimal precision. KeyHash,
+// EncryptedKey and RevokedAt are json:"-": the hash and ciphertext must
 // never serialize back out, and revoked state surfaces via display_status
 // rather than a raw timestamp.
 type APIKey struct {
-	ID                uint       `gorm:"column:id;primaryKey" json:"id"`
-	KeyHash           string     `gorm:"column:key_hash" json:"-"`
+	ID      uint   `gorm:"column:id;primaryKey" json:"id"`
+	KeyHash string `gorm:"column:key_hash" json:"-"`
+	// EncryptedKey is the AES-GCM ciphertext (base64, nonce prepended) of the
+	// full plaintext key, persisted so it can be revealed again. Empty for
+	// pre-00021 keys. Read only on the reveal path; never used for auth.
+	EncryptedKey      string     `gorm:"column:encrypted_key" json:"-"`
 	KeyPrefix         string     `gorm:"column:key_prefix" json:"key_prefix"`
 	OwnerLabel        string     `gorm:"column:owner_label" json:"owner_label"`
 	Remark            string     `gorm:"column:remark" json:"remark"`

@@ -83,9 +83,10 @@ func TestGetCurrentVersionOnFreshSQLiteDB(t *testing.T) {
 	// 00016_input_compression.sql +
 	// 00017_request_endpoints.sql +
 	// 00018_model_candidate_capability_tristate.sql +
-	// 00020_request_logs_facts_json.sql).
-	if version != 20 {
-		t.Fatalf("expected version 20 after all migrations, got %d", version)
+	// 00020_request_logs_facts_json.sql +
+	// 00021_api_keys_encrypted_key.sql).
+	if version != 21 {
+		t.Fatalf("expected version 21 after all migrations, got %d", version)
 	}
 }
 
@@ -487,7 +488,7 @@ func TestMigration00018ModelCandidateCapabilityTristate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrentVersion failed: %v", err)
 	}
-	if version != 20 {
-		t.Fatalf("expected version 20 after re-apply, got %d", version)
+	if version != 21 {
+		t.Fatalf("expected version 21 after re-apply, got %d", version)
 	}
 }

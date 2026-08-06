@@ -273,10 +273,11 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	protected.POST("/models/:id/candidates/:candidateId/test", handler.PostModelCandidateTest(modelSvc))
 	protected.DELETE("/models/:id/candidates/:candidateId", handler.DeleteModelCandidate(modelSvc))
 
-	apiKeySvc := service.NewAPIKeyService(db)
+	apiKeySvc := service.NewAPIKeyService(db, providerMasterKey)
 	protected.GET("/api-keys", handler.GetAPIKeys(apiKeySvc))
 	protected.POST("/api-keys", handler.PostAPIKey(apiKeySvc))
 	protected.GET("/api-keys/:id", handler.GetAPIKey(apiKeySvc))
+	protected.GET("/api-keys/:id/plaintext", handler.GetAPIKeyPlaintext(apiKeySvc))
 	protected.PATCH("/api-keys/:id", handler.PatchAPIKey(apiKeySvc))
 	protected.PATCH("/api-keys/:id/revoke", handler.PatchAPIKeyRevoke(apiKeySvc))
 

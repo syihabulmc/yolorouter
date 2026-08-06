@@ -33,4 +33,5 @@ export const errcodes: Record<number, string> = {
   11013: 'This API key was modified concurrently, please refresh and retry',
   11014: 'The input compression setting was modified concurrently, please refresh and retry',
   11015: 'compress_enabled must be set when compress_enabled_override is true',
+  11016: 'This key was created before the reveal feature and its full value cannot be recovered, please create a new one',
 }

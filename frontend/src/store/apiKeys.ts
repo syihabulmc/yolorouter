@@ -81,5 +81,11 @@ export const useApiKeysStore = defineStore('apiKeys', {
     async revoke(id: number) {
       await apiKeysApi.revokeAPIKey(id)
     },
+    // Fetch the full plaintext for the list-page copy button. Not stored in
+    // state — it's a one-shot read handed back to the caller (same shape as
+    // create's plaintext_key), since there's nothing to cache.
+    async fetchPlaintext(id: number) {
+      return apiKeysApi.getAPIKeyPlaintext(id)
+    },
   },
 })

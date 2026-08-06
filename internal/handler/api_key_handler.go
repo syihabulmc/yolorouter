@@ -122,6 +122,8 @@ func writeAPIKeyServiceError(c *gin.Context, err error) {
 		response.Error(c, errcode.CustomSystemPromptEmpty, errcode.GetMessage(errcode.CustomSystemPromptEmpty))
 	case errors.Is(err, errcode.ErrCompressEnabledRequired):
 		response.Error(c, errcode.CompressEnabledRequired, errcode.GetMessage(errcode.CompressEnabledRequired))
+	case errors.Is(err, errcode.ErrAPIKeyPlaintextUnavailable):
+		response.Error(c, errcode.APIKeyPlaintextUnavailable, errcode.GetMessage(errcode.APIKeyPlaintextUnavailable))
 	case errors.Is(err, errcode.ErrAPIKeyConflict):
 		// 409 is not produced by httpStatusForCode's range mapping; set it
 		// explicitly, mirroring the system_settings CAS-conflict path.
@@ -161,8 +163,9 @@ func GetAPIKeys(svc *service.APIKeyService) gin.HandlerFunc {
 	}
 }
 
-// PostAPIKey creates a key and returns the plaintext exactly once — the
-// "plaintext_key" field is never derivable or re-shown afterwards.
+// PostAPIKey creates a key and returns the plaintext once at create time. The
+// same plaintext is also persisted as AES-GCM ciphertext, so it remains
+// recoverable via GET /api-keys/:id/plaintext (the list-page reveal).
 func PostAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req createAPIKeyRequest
@@ -206,6 +209,25 @@ func GetAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			return
 		}
 		response.Success(c, view)
+	}
+}
+
+// GetAPIKeyPlaintext reveals the full plaintext key for the list-page copy
+// button. The plaintext_key field name matches PostAPIKey's create response so
+// the frontend reuses one code path. Returns 11016 when the key predates the
+// encrypted_key column and cannot be recovered.
+func GetAPIKeyPlaintext(svc *service.APIKeyService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, ok := parseUintParam(c, "id")
+		if !ok {
+			return
+		}
+		plaintext, err := svc.GetAPIKeyPlaintext(id)
+		if err != nil {
+			writeAPIKeyServiceError(c, err)
+			return
+		}
+		response.Success(c, gin.H{"plaintext_key": plaintext})
 	}
 }
 
