@@ -39,7 +39,7 @@ func (stubObserver) ObserveUpstreamError(_ context.Context, _ fact.Attempt, up f
 // would be several changes back.
 func TestObserveUpstreamStampsProvenance(t *testing.T) {
 	svc := &Service{}
-	RegisterUpstreamErrorObserver(svc, stubObserver{}, func(*Exchange) fact.Attempt { return fact.Attempt{} })
+	RegisterUpstreamErrorObserver(svc, stubObserver{}, attemptView)
 
 	rc := &Exchange{
 		candidate: &model.ModelCandidate{ID: 77},
@@ -80,7 +80,7 @@ func TestObserveUpstreamStampsProvenance(t *testing.T) {
 // panic or borrow.
 func TestObserveUpstreamToleratesClearedTarget(t *testing.T) {
 	svc := &Service{}
-	RegisterUpstreamErrorObserver(svc, stubObserver{}, func(*Exchange) fact.Attempt { return fact.Attempt{} })
+	RegisterUpstreamErrorObserver(svc, stubObserver{}, attemptView)
 
 	rc := &Exchange{} // no candidate, no provider
 
@@ -142,8 +142,8 @@ func (m mutatingRewriter) RewriteEgress(_ context.Context, _ fact.Attempt, _ pro
 func TestRewriteEgressRefusalStopsAndReportsAVerdict(t *testing.T) {
 	svc := &Service{}
 	laterRan := false
-	RegisterEgressRewriter(svc, refusingRewriter{}, 10, func(*Exchange) fact.Attempt { return fact.Attempt{} })
-	RegisterEgressRewriter(svc, mutatingRewriter{ran: &laterRan}, 20, func(*Exchange) fact.Attempt { return fact.Attempt{} })
+	RegisterEgressRewriter(svc, refusingRewriter{}, 10, attemptView)
+	RegisterEgressRewriter(svc, mutatingRewriter{ran: &laterRan}, 20, attemptView)
 
 	rc := &Exchange{}
 	body := []byte(`{"a":1}`)
@@ -174,8 +174,8 @@ func TestRewriteEgressRunsInStageOrder(t *testing.T) {
 
 	svc := &Service{}
 	// Registered late-stage first, on purpose.
-	RegisterEgressRewriter(svc, rec("second"), 90, func(*Exchange) fact.Attempt { return fact.Attempt{} })
-	RegisterEgressRewriter(svc, rec("first"), 10, func(*Exchange) fact.Attempt { return fact.Attempt{} })
+	RegisterEgressRewriter(svc, rec("second"), 90, attemptView)
+	RegisterEgressRewriter(svc, rec("first"), 10, attemptView)
 
 	svc.rewriteEgress(context.Background(), &Exchange{}, protocols.ProtocolOpenAI, []byte(`{}`))
 
@@ -207,8 +207,8 @@ func TestDuplicateStagePanicsAtAssembly(t *testing.T) {
 	}()
 	svc := &Service{}
 	var log []string
-	RegisterEgressRewriter(svc, orderingRewriter{name: "a", log: &log}, 10, func(*Exchange) fact.Attempt { return fact.Attempt{} })
-	RegisterEgressRewriter(svc, orderingRewriter{name: "b", log: &log}, 10, func(*Exchange) fact.Attempt { return fact.Attempt{} })
+	RegisterEgressRewriter(svc, orderingRewriter{name: "a", log: &log}, 10, attemptView)
+	RegisterEgressRewriter(svc, orderingRewriter{name: "b", log: &log}, 10, attemptView)
 }
 
 // vandalObserver mutates everything it is handed. A well-behaved observer never
@@ -245,8 +245,8 @@ func (w *witnessObserver) ObserveUpstreamError(_ context.Context, _ fact.Attempt
 func TestObserversCannotReachEachOtherOrTheAuditBody(t *testing.T) {
 	svc := &Service{}
 	witness := &witnessObserver{}
-	RegisterUpstreamErrorObserver(svc, vandalObserver{}, func(*Exchange) fact.Attempt { return fact.Attempt{} })
-	RegisterUpstreamErrorObserver(svc, witness, func(*Exchange) fact.Attempt { return fact.Attempt{} })
+	RegisterUpstreamErrorObserver(svc, vandalObserver{}, attemptView)
+	RegisterUpstreamErrorObserver(svc, witness, attemptView)
 
 	captured := []byte(`{"error":"real"}`)
 	header := http.Header{}
@@ -308,7 +308,7 @@ func TestEgressRefusalFailsOverToNextCandidate(t *testing.T) {
 
 	svc := newSvc(t, db)
 	RegisterEgressRewriter(svc, candidateRefusingRewriter{}, 10,
-		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+		attemptView)
 	apiKey := seedTwoCandidateModel(t, svc, db, upstream.URL)
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
@@ -356,9 +356,9 @@ func TestAdmissionsReleaseInReverseOrder(t *testing.T) {
 	var log []string
 	svc := &Service{}
 	RegisterAdmission(svc, trackingAdmission{name: "first", log: &log, takeHold: true},
-		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+		attemptView)
 	RegisterAdmission(svc, trackingAdmission{name: "second", log: &log, takeHold: true},
-		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+		attemptView)
 
 	rc := &Exchange{}
 	var held []heldTicket
@@ -387,9 +387,9 @@ func TestAdmissionRefusalStopsLaterAdmissions(t *testing.T) {
 	var log []string
 	svc := &Service{}
 	RegisterAdmission(svc, trackingAdmission{name: "refuser", log: &log, refuse: true},
-		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+		attemptView)
 	RegisterAdmission(svc, trackingAdmission{name: "later", log: &log, takeHold: true},
-		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+		attemptView)
 
 	rc := &Exchange{}
 	var held []heldTicket
@@ -418,7 +418,7 @@ func TestAdmissionReleasesOnlyWhatWasHeld(t *testing.T) {
 	var log []string
 	svc := &Service{}
 	RegisterAdmission(svc, trackingAdmission{name: "nothing", log: &log, takeHold: false},
-		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+		attemptView)
 
 	rc := &Exchange{}
 	var held []heldTicket
@@ -459,9 +459,9 @@ func TestAdmissionPanicStillReleasesEarlierTickets(t *testing.T) {
 	var log []string
 	svc := &Service{}
 	RegisterAdmission(svc, trackingAdmission{name: "first", log: &log, takeHold: true},
-		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+		attemptView)
 	RegisterAdmission(svc, panickingAdmission{log: &log},
-		func(*Exchange) fact.Attempt { return fact.Attempt{} })
+		attemptView)
 
 	rc := &Exchange{}
 	func() {
