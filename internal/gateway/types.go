@@ -355,6 +355,13 @@ const (
 	AttemptAuthFailed  = "auth_failed"  // 401 from upstream -> rotate Key
 	AttemptRateLimited = "rate_limited" // 429 -> rotate Key
 	AttemptConnError   = "conn_error"   // network/timeout -> failover candidate
+	// AttemptServerError/AttemptBadStatus were coined for the two status classes
+	// named below and have both outgrown those names: they are now also written
+	// for stream cuts, decode failures, disabled providers and undecryptable
+	// keys. What separates them depends on where the record comes from — see
+	// attemptOutcomeFor for the delivery paths, classifyUpstreamStatus for the
+	// status ones. Kept as they are because the attempts table has always shown
+	// these two words.
 	AttemptServerError = "server_error" // 5xx -> failover candidate
 	AttemptClientError = "client_error" // 4xx (non-auth) -> do NOT switch
 	AttemptBadStatus   = "bad_status"   // unmapped non-2xx -> do NOT switch
