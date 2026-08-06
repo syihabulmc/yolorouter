@@ -14,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/yolorouter/yolorouter/internal/pricecatalog"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/router"
 	"github.com/yolorouter/yolorouter/internal/service"
@@ -191,6 +192,35 @@ func runServe(ctx context.Context, args []string) error {
 	// retention) introduces a real background goroutine, it should create its
 	// own cancellable context at that point and register with taskWG here.
 	var taskWG sync.WaitGroup
+
+	// Background price-catalog refresh. The default endpoint (set in config
+	// defaults()) is the live distribution Worker, so every instance warms and
+	// re-fetches on the configured interval with zero opt-in. An operator who
+	// sets the endpoint to "" disables refresh: StartRefresh returns nil, no
+	// goroutine is spawned, and the instance keeps serving the embedded seed.
+	// A failed fetch never wipes a warm index (only cover, never delete), so a
+	// flaky endpoint cannot degrade pricing.
+	//
+	// The refresh runs on a context derived from serve's own ctx, so the same
+	// shutdown signal (SIGTERM / external stop / ctx cancel) that stops the HTTP
+	// server also stops the refresh. The returned stop is awaited via deferred
+	// cancel + stop() so the goroutine exits before the process does rather than
+	// leaking for its lifetime — harmless for the real CLI (which exits right
+	// after) but a real leak for tests/embedders that call runServe repeatedly.
+	priceCtx, priceCancel := context.WithCancel(ctx)
+	stopPriceRefresh := pricecatalog.StartRefresh(
+		priceCtx,
+		app.Config.PriceCatalog.Endpoint,
+		app.Config.PriceCatalog.RefreshInterval,
+	)
+	defer func() {
+		priceCancel()
+		// stop is nil for an empty endpoint (no goroutine to wait on); calling a
+		// nil func would panic, so guard it.
+		if stopPriceRefresh != nil {
+			stopPriceRefresh()
+		}
+	}()
 
 	// Bind the listener up front rather than letting ListenAndServe do it
 	// inside the goroutine: ln.Addr().String() yields the actually-bound

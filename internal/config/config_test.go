@@ -362,6 +362,122 @@ func TestLoadAcceptsUpdateSection(t *testing.T) {
 	}
 }
 
+// TestDefaultsPriceCatalogLiveEndpoint verifies the default endpoint points at
+// the live distribution Worker, so every instance refreshes daily with zero
+// config. An operator opts OUT by setting endpoint to "".
+func TestDefaultsPriceCatalogLiveEndpoint(t *testing.T) {
+	cfg := defaults()
+	const want = "https://prices.yolorouter.com/catalog.json"
+	if cfg.PriceCatalog.Endpoint != want {
+		t.Fatalf("defaults().PriceCatalog.Endpoint = %q, want %q (live distribution Worker)", cfg.PriceCatalog.Endpoint, want)
+	}
+	if cfg.PriceCatalog.RefreshInterval != 24*time.Hour {
+		t.Fatalf("defaults().PriceCatalog.RefreshInterval = %v, want 24h", cfg.PriceCatalog.RefreshInterval)
+	}
+}
+
+// TestLoadOmittedPriceCatalogSectionKeepsDefaults drives a config with NO
+// price_catalog section through Load and asserts the default live endpoint +
+// 24h interval survive. Without this, a typo in defaults() that drops the
+// PriceCatalog field would silently disable refresh for every legacy config.
+func TestLoadOmittedPriceCatalogSectionKeepsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(
+		"server:\n  port: 8080\ndatabase:\n  driver: sqlite\n  sqlite_path: ./data/x.db\n"+
+			"security:\n  provider_master_key: \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n"), 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected load to succeed: %v", err)
+	}
+	if cfg.PriceCatalog.Endpoint != "https://prices.yolorouter.com/catalog.json" {
+		t.Fatalf("omitted price_catalog section must default to the live endpoint, got %q", cfg.PriceCatalog.Endpoint)
+	}
+	if cfg.PriceCatalog.RefreshInterval != 24*time.Hour {
+		t.Fatalf("omitted price_catalog section must default RefreshInterval 24h, got %v", cfg.PriceCatalog.RefreshInterval)
+	}
+}
+
+// TestLoadAcceptsPriceCatalogSection asserts an explicit endpoint + interval
+// round-trip through the strict decoder (KnownFields(true)).
+func TestLoadAcceptsPriceCatalogSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(
+		"server:\n  port: 8080\ndatabase:\n  driver: sqlite\n  sqlite_path: ./data/x.db\n"+
+			"security:\n  provider_master_key: \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n"+
+			"price_catalog:\n  endpoint: \"https://prices.example.test/catalog.json\"\n  refresh_interval: 6h\n"), 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected load to succeed: %v", err)
+	}
+	if cfg.PriceCatalog.Endpoint != "https://prices.example.test/catalog.json" {
+		t.Fatalf("expected endpoint, got %q", cfg.PriceCatalog.Endpoint)
+	}
+	if cfg.PriceCatalog.RefreshInterval != 6*time.Hour {
+		t.Fatalf("expected 6h, got %v", cfg.PriceCatalog.RefreshInterval)
+	}
+}
+
+// TestLoadPriceCatalogEmptyEndpointOverridesDefault pins the documented disable
+// contract: the default endpoint is the live Worker, but an operator who writes
+// `price_catalog: { endpoint: "" }` opts out, and the empty string must reach
+// serve/StartRefresh so no refresh goroutine spawns. The strict decoder overwrites
+// the seeded default with the explicit empty value — this test catches a regression
+// where that override silently keeps the default (and the instance refreshes
+// against the operator's explicit wish to stay on the embedded seed).
+func TestLoadPriceCatalogEmptyEndpointOverridesDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(
+		"server:\n  port: 8080\ndatabase:\n  driver: sqlite\n  sqlite_path: ./data/x.db\n"+
+			"security:\n  provider_master_key: \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n"+
+			"price_catalog:\n  endpoint: \"\"\n"), 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected load to succeed: %v", err)
+	}
+	if cfg.PriceCatalog.Endpoint != "" {
+		t.Fatalf("explicit empty endpoint must override the live default to disable refresh, got %q", cfg.PriceCatalog.Endpoint)
+	}
+}
+
+// TestValidatePriceCatalogRejectsZeroIntervalWithEndpoint is the guard against
+// the one genuinely broken combination: an endpoint set (operator wants live
+// refresh) with a non-positive interval (ticker fires constantly or never).
+// An empty endpoint with any interval stays valid — it's the documented no-op.
+func TestValidatePriceCatalogRejectsZeroIntervalWithEndpoint(t *testing.T) {
+	cases := []struct {
+		name     string
+		endpoint string
+		interval time.Duration
+		wantErr  bool
+	}{
+		{"endpoint set, zero interval", "https://x.test/c.json", 0, true},
+		{"endpoint set, negative interval", "https://x.test/c.json", -time.Hour, true},
+		{"endpoint empty, zero interval (no-op)", "", 0, false},
+		{"endpoint empty, positive interval (no-op)", "", 24 * time.Hour, false},
+		{"endpoint set, positive interval (active)", "https://x.test/c.json", 12 * time.Hour, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePriceCatalog(&PriceCatalogConfig{Endpoint: tc.endpoint, RefreshInterval: tc.interval})
+			if tc.wantErr && err == nil {
+				t.Error("expected validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
 // TestLoadFillsGitHubProxyFromEnvOnExistingConfig covers a mirror installer
 // upgrading a prior direct install: config.yaml already exists (so it is never
 // regenerated), yet the proxy env the installer injects into the service unit
