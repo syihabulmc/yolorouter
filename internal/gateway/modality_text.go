@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 
 	"github.com/yolorouter/yolorouter/internal/fact"
@@ -106,6 +108,10 @@ type textPayload struct {
 	ingress protocols.ProtocolID
 	body    []byte
 	meta    *ingressMeta
+	// cand is the candidate PrepareUpstream built for, read back by the
+	// delivery that follows. The kernel guarantees the two run in that order
+	// and for the same candidate.
+	cand Candidate
 }
 
 func (p *textPayload) Routing() RoutingIntent {
@@ -179,6 +185,7 @@ func (p *textPayload) PrepareUpstream(cand Candidate) (*UpstreamCall, error) {
 		path = strings.Replace(path, ":generateContent", ":streamGenerateContent?alt=sse", 1)
 	}
 
+	p.cand = cand
 	return &UpstreamCall{
 		Path:        path,
 		Body:        out,
@@ -235,4 +242,153 @@ func (p *textPayload) LogPolicy() LogPolicy {
 // logger to know that.
 func (p *textPayload) SanitizeForLog(_ BodyKind, _ string, body []byte) string {
 	return string(body)
+}
+
+// usageReportOf translates what an upstream said it charged into the audit
+// vocabulary, and does nothing else.
+//
+// No coherence check, no cache-convention normalisation: those are settlement
+// policy and stay in the kernel, where they apply to every modality at once.
+// What a modality knows is the raw counts and what they count — tokens here —
+// and stating that is the whole of its job.
+func usageReportOf(u *Usage) *fact.UsageReported {
+	if u == nil {
+		return nil
+	}
+	return &fact.UsageReported{
+		Unit:                  fact.UnitToken,
+		Source:                fact.UsageFromUpstream,
+		Prompt:                u.PromptTokens,
+		Completion:            u.CompletionTokens,
+		Total:                 u.TotalTokens,
+		CacheRead:             u.CacheReadTokens,
+		CacheWrite:            u.CacheWriteTokens,
+		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
+	}
+}
+
+// captureBuffer adapts the delivery's upstream capture to what the relay
+// helpers expect. The relay records two byte streams through one object; the
+// caller-facing half is dropped here because ClientResponse already records it,
+// and only it knows when the bytes actually left.
+type captureBuffer struct{ capture UpstreamCapture }
+
+func (b captureBuffer) AppendUpstream(data []byte) { b.capture.Upstream(data) }
+func (b captureBuffer) SetBody(data []byte)        { b.capture.Upstream(data) }
+func (captureBuffer) SetResponseBody([]byte)       {}
+func (captureBuffer) AppendResponse([]byte)        {}
+
+// deliverNonStream gets a whole upstream response to the caller.
+//
+// Not yet named Deliver: the streaming half has not moved, and a Deliver that
+// silently mishandled a stream would be worse than one that does not exist.
+// The two become one method, dispatching on Routing().Stream, when streams
+// follow.
+func (p *textPayload) deliverNonStream(tools DeliveryTools, resp *http.Response) fact.Delivery {
+	if p.cand.Passthrough {
+		return p.deliverPassthroughNonStream(tools, resp)
+	}
+	return p.deliverTranslatedNonStream(tools, resp)
+}
+
+// deliverPassthroughNonStream forwards a same-protocol response, rewriting only
+// the model name the provider put in it.
+func (p *textPayload) deliverPassthroughNonStream(tools DeliveryTools, resp *http.Response) fact.Delivery {
+	defer func() { _ = resp.Body.Close() }()
+
+	// One byte past the cap, so an oversized body is refused rather than
+	// silently truncated into something that parses.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, tools.Limits.MaxResponseBytes+1))
+	if err != nil {
+		if tools.Client.CallerGone() {
+			// The upstream read runs on the caller's context, so their hanging
+			// up surfaces here as a read failure. Spending another candidate on
+			// a caller who left would be work nobody is waiting for, and
+			// blaming the provider for it would be a lie on their record.
+			return fact.Undelivered(499, fact.VerdictSettled, fact.FaultClient, "client_disconnected", err)
+		}
+		return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+			"read_body: "+err.Error(), err)
+	}
+	if int64(len(body)) > tools.Limits.MaxResponseBytes {
+		return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+			"response_too_large", nil)
+	}
+
+	rewritten, usage, err := passthroughRewriteNonStreamResponse(p.cand.EgressProtocol, body, p.meta.Model)
+	if err != nil {
+		// Our own rewrite, not the provider's response: blaming the upstream
+		// here would put our bug on their record.
+		return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultGateway,
+			"response_rewrite_failed: "+err.Error(), err)
+	}
+
+	// Recorded before the write: this is what the gateway consumed from the
+	// provider, and it is worth having whether or not delivery then succeeds.
+	tools.Capture.Upstream(body)
+	report := usageReportOf(usage)
+
+	tools.Client.Inject(http.Header{"Content-Type": {"application/json"}})
+	if cerr := tools.Client.Commit(resp.StatusCode); cerr != nil {
+		return fact.Undelivered(resp.StatusCode, fact.VerdictSettled, fact.FaultGateway,
+			"commit_failed: "+cerr.Error(), cerr).WithUsage(report)
+	}
+	if _, werr := tools.Client.Write(rewritten); werr != nil {
+		return p.clientWriteFailure(resp.StatusCode, werr, report)
+	}
+	// A few KB of JSON can sit entirely inside net/http's buffer: Write returns
+	// nil without the bytes reaching the socket, and only the flush tells the
+	// truth. Without this a caller who disconnected right after a buffered
+	// write is recorded as having been served.
+	if ferr := tools.Client.Flush(); ferr != nil {
+		return p.clientWriteFailure(resp.StatusCode, ferr, report)
+	}
+	return fact.Succeeded(resp.StatusCode).WithUsage(report)
+}
+
+// deliverTranslatedNonStream takes a response in the provider's protocol and
+// re-encodes it into the caller's.
+func (p *textPayload) deliverTranslatedNonStream(tools DeliveryTools, resp *http.Response) fact.Delivery {
+	decoder := codecsFor(p.cand.EgressProtocol).ResponseDecoder
+	// The encoder puts the caller's own model name back: what the upstream
+	// echoes is the provider's name for it, which must never reach the caller.
+	encoder := modelOverrideResponseEncoder{
+		inner: codecsFor(p.ingress).ResponseEncoder,
+		model: p.meta.Model,
+	}
+
+	usage, err := protocols.IRNonStreamRelay(
+		tools.Client, resp, decoder, encoder, captureBuffer{capture: tools.Capture}, nil)
+	report := usageReportOf(irUsageToUsage(usage))
+
+	if err == nil {
+		return fact.Succeeded(resp.StatusCode).WithUsage(report)
+	}
+	if isClientWriteError(err) {
+		// Status and headers are already out, so this candidate cannot fail
+		// over. The bytes never (fully) landed, so it must not settle as a
+		// delivered success either. Usage survives: the upstream was fully
+		// consumed whatever happened on the way to the caller.
+		return p.clientWriteFailure(resp.StatusCode, err, report)
+	}
+	if tools.Client.Committed() {
+		// The relay's contract is to write nothing when a 2xx body fails to
+		// decode, so this is unreachable. It is here to be loud if that ever
+		// changes: settling quietly would hide a decode failure that had
+		// already put bytes on the wire.
+		return fact.Truncated(resp.StatusCode, resp.StatusCode, fact.FaultUpstream,
+			"ir_decode_partial: "+err.Error(), err).WithUsage(report)
+	}
+	return fact.Undelivered(resp.StatusCode, fact.VerdictNextCandidate, fact.FaultUpstream,
+		"ir_decode: "+err.Error(), err).WithUsage(report)
+}
+
+// clientWriteFailure is what both non-stream paths report when the caller stops
+// receiving after the response was committed.
+//
+// The status is what they were served; settlement sees 499 regardless, because
+// the bytes never landed. Those are two different questions, and one number
+// could not answer both.
+func (p *textPayload) clientWriteFailure(served int, err error, report *fact.UsageReported) fact.Delivery {
+	return fact.Truncated(served, 499, fact.FaultClient, "client_write_timeout", err).WithUsage(report)
 }
