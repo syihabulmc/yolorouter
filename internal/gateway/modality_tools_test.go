@@ -588,3 +588,27 @@ func TestBufferCapsAreAlwaysPositive(t *testing.T) {
 		t.Errorf("limits = %+v, want the positive values left alone", kept)
 	}
 }
+
+// TestCallerGoneTracksTheCallersContext pins the one question a modality
+// cannot answer from an error alone.
+//
+// The upstream request runs on the caller's context, so when the caller hangs
+// up the read from the provider fails too. The two produce the same error and
+// must not produce the same record: one is a caller who left, the other is a
+// provider that broke, and only the second belongs on that provider's health.
+func TestCallerGoneTracksTheCallersContext(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+
+	r := &ginClientResponse{c: c, rc: &Exchange{requestID: "req-gone"}}
+
+	if r.CallerGone() {
+		t.Fatal("CallerGone() = true while the caller is still connected")
+	}
+	cancel()
+	if !r.CallerGone() {
+		t.Error("CallerGone() = false after the caller's context was cancelled")
+	}
+}

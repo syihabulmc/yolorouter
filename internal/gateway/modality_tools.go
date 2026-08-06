@@ -79,6 +79,14 @@ type ClientResponse interface {
 	Commit(status int) error
 	// Committed reports whether the status is on the wire.
 	Committed() bool
+	// CallerGone reports whether the caller has given up on the request.
+	//
+	// It belongs here because the upstream request runs on the caller's own
+	// context: when they hang up, the read from the provider fails too, and the
+	// two failures are indistinguishable from the error alone. They must not be
+	// recorded the same way — one is a caller who left, the other is a provider
+	// that broke, and only the second belongs on that provider's record.
+	CallerGone() bool
 	// CommittedStatus is the status the caller was served, or 0 if none was.
 	//
 	// This is the kernel's own record of what went out, and it exists to be
@@ -302,6 +310,8 @@ func (r *ginClientResponse) Commit(status int) error {
 }
 
 func (r *ginClientResponse) Committed() bool { return r.c.Writer.Written() }
+
+func (r *ginClientResponse) CallerGone() bool { return isClientDisconnected(r.c) }
 
 func (r *ginClientResponse) CommittedStatus() int {
 	if !r.Committed() {
