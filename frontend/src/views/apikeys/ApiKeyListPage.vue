@@ -256,20 +256,19 @@ function onSaved() {
 }
 
 function rowActions(row: APIKey): DropdownOption[] {
-  // Optimize and the destructive Revoke are no-ops on an already-revoked key,
-  // so they drop out for revoked rows; edit/view/import stay available.
+  // Revoked keys only keep cost view; config, optimize, import, and revoke drop out.
   const revoked = row.display_status === 'revoked'
   return [
-    { label: t('apiKeys.editLimits'), key: 'edit' },
+    ...(revoked ? [] : [
+      { label: t('apiKeys.editLimits'), key: 'edit' },
+    ]),
     { label: t('costs.detail.viewCost'), key: 'look' },
-    ...(revoked ? [] : [{ label: t('costOptimization.title'), key: 'optimize' }]),
-    { label: t('ccswitch.importAction'), key: 'importCCSImport' },
-    ...(revoked
-      ? []
-      : [
-          { type: 'divider', key: 'd' },
-          { label: t('apiKeys.revoke'), key: 'delete', props: { style: 'color: var(--color-danger)' } },
-        ]),
+    ...(revoked ? [] : [
+      { label: t('costOptimization.title'), key: 'optimize' },
+      { label: t('ccswitch.importAction'), key: 'importCCSImport' },
+      { type: 'divider', key: 'd' },
+      { label: t('apiKeys.revoke'), key: 'delete', props: { style: 'color: var(--color-danger)' } },
+    ]),
   ]
 }
 
