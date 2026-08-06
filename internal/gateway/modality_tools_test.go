@@ -232,7 +232,7 @@ func TestTheAssembledEnvIsUsable(t *testing.T) {
 	svc := &Service{}
 	rc := &Exchange{requestID: "req-env"}
 
-	tools := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 64})
+	tools := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 64}, false)
 
 	if tools.Limits.MaxResponseBytes != 64 {
 		t.Errorf("MaxResponseBytes = %d, want the modality's 64", tools.Limits.MaxResponseBytes)
@@ -349,12 +349,12 @@ func TestEachAttemptCapturesOnItsOwn(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	rc := &Exchange{requestID: "req-capture"}
 
-	first := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8})
+	first := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
 	if kept := first.Capture.Upstream([]byte("AAAAAAAA")); !kept {
 		t.Fatal("the first attempt could not capture its own body")
 	}
 
-	second := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8})
+	second := svc.newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
 	if kept := second.Capture.Upstream([]byte("BB")); !kept {
 		t.Error("the second attempt was refused room the first attempt had used")
 	}
@@ -500,11 +500,11 @@ func TestAnAttemptWithNoBodyClearsThePreviousOne(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	rc := &Exchange{requestID: "req-empty-attempt"}
 
-	first := svc.newDeliveryTools(c, rc, TransferLimits{})
+	first := svc.newDeliveryTools(c, rc, TransferLimits{}, false)
 	first.Capture.Upstream([]byte("first provider said this"))
 
 	// The second attempt never captures anything at all.
-	svc.newDeliveryTools(c, rc, TransferLimits{})
+	svc.newDeliveryTools(c, rc, TransferLimits{}, false)
 
 	if got := string(rc.upstreamResponseBody); got != "" {
 		t.Errorf("upstream body = %q, want empty: this row describes an attempt that produced nothing", got)
@@ -561,7 +561,7 @@ func TestAssemblyNeverHandsOutAZeroLimit(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	rc := &Exchange{requestID: "req-zero"}
 
-	tools := svc.newDeliveryTools(c, rc, TransferLimits{})
+	tools := svc.newDeliveryTools(c, rc, TransferLimits{}, false)
 
 	if tools.Limits.MaxResponseBytes <= 0 || tools.Limits.MaxFrameBytes <= 0 {
 		t.Fatalf("limits = %+v, want positive caps", tools.Limits)
@@ -606,5 +606,53 @@ func TestCallerGoneTracksTheCallersContext(t *testing.T) {
 	cancel()
 	if !r.CallerGone() {
 		t.Error("CallerGone() = false after the caller's context was cancelled")
+	}
+}
+
+// TestAProgressiveDeliveryCapturesToFile pins the choice the kernel makes on a
+// modality's behalf.
+//
+// A stream has no size a buffer can be sized for, so its bytes belong in the
+// capture file with its own far larger backstop, not on the heap. The modality
+// calls the same method either way; which capture it got is not something it
+// has an opinion about, and this is the assertion that it never needs one.
+func TestAProgressiveDeliveryCapturesToFile(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	svc := &Service{}
+
+	progressive := svc.newDeliveryTools(c, &Exchange{requestID: "stream"}, TransferLimits{}, true)
+	if _, ok := progressive.Capture.(spillingCapture); !ok {
+		t.Errorf("progressive capture is %T, want the one that spills to the capture file", progressive.Capture)
+	}
+
+	buffered := svc.newDeliveryTools(c, &Exchange{requestID: "whole"}, TransferLimits{}, false)
+	if _, ok := buffered.Capture.(*exchangeCapture); !ok {
+		t.Errorf("non-progressive capture is %T, want the bounded in-memory one", buffered.Capture)
+	}
+}
+
+// TestCallerDoneAndCallerGoneAnswerDifferentQuestions pins a distinction that
+// looks like duplication.
+//
+// Done closes for our own deadline too, which is a timeout we caused. Blaming
+// the caller for it would put a 499 on a request they were still waiting for,
+// and spare the provider a failure that was ours.
+func TestCallerDoneAndCallerGoneAnswerDifferentQuestions(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+
+	r := &ginClientResponse{c: c, rc: &Exchange{requestID: "deadline"}}
+
+	select {
+	case <-r.CallerDone():
+	default:
+		t.Fatal("CallerDone() has not closed after the deadline passed")
+	}
+	if r.CallerGone() {
+		t.Error("CallerGone() = true after OUR deadline expired; the caller never left")
 	}
 }

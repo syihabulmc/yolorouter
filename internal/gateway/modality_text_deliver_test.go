@@ -85,7 +85,7 @@ func runNew(t *testing.T, ingress protocols.ProtocolID, egress protocols.Protoco
 	}
 
 	rc := &Exchange{requestID: "new", ingress: ingress}
-	tools := (&Service{}).newDeliveryTools(c, rc, TransferLimits{})
+	tools := (&Service{}).newDeliveryTools(c, rc, TransferLimits{}, false)
 	d := payload.deliverNonStream(tools, resp)
 
 	out := deliveryOutcome{delivery: d, clientStatus: w.Code, clientBody: w.Body.String(),
@@ -182,7 +182,7 @@ func TestDeliverRefusesABodyOverTheLimit(t *testing.T) {
 	}
 
 	rc := &Exchange{requestID: "too-big"}
-	tools := (&Service{}).newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8})
+	tools := (&Service{}).newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
 	d := payload.deliverNonStream(tools, upstreamResponse(t, 200, `{"aaaaaaaaaaaaaaaaaaaa":1}`))
 
 	if d.Committed || d.Verdict != fact.VerdictNextCandidate {
@@ -236,7 +236,7 @@ func TestAFailedReadIsBlamedOnWhoeverCausedIt(t *testing.T) {
 			t.Fatalf("PrepareUpstream = %v", err)
 		}
 
-		tools := (&Service{}).newDeliveryTools(c, &Exchange{requestID: "read-fail"}, TransferLimits{})
+		tools := (&Service{}).newDeliveryTools(c, &Exchange{requestID: "read-fail"}, TransferLimits{}, false)
 		return payload.deliverNonStream(tools, &http.Response{
 			StatusCode: 200,
 			Header:     http.Header{"Content-Type": {"application/json"}},

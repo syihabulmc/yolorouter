@@ -79,6 +79,12 @@ type ClientResponse interface {
 	Commit(status int) error
 	// Committed reports whether the status is on the wire.
 	Committed() bool
+	// CallerDone closes when the request is over from the caller's side, for a
+	// modality that has to wait on that alongside something else. It is not the
+	// same question as CallerGone: this also closes when OUR OWN deadline
+	// expires, which is a timeout we caused rather than a caller who left.
+	// Anything deciding blame must ask CallerGone.
+	CallerDone() <-chan struct{}
 	// CallerGone reports whether the caller has given up on the request.
 	//
 	// It belongs here because the upstream request runs on the caller's own
@@ -307,6 +313,8 @@ func (r *ginClientResponse) Committed() bool { return r.c.Writer.Written() }
 
 func (r *ginClientResponse) CallerGone() bool { return isClientDisconnected(r.c) }
 
+func (r *ginClientResponse) CallerDone() <-chan struct{} { return r.c.Request.Context().Done() }
+
 func (r *ginClientResponse) CommittedStatus() int {
 	if !r.Committed() {
 		return 0
@@ -398,6 +406,18 @@ type exchangeCapture struct {
 	truncated bool
 }
 
+// newCapture picks where this attempt's upstream bytes are kept.
+//
+// A progressive response spills to the exchange's capture file; anything else
+// is bounded and fits in memory. The choice is the kernel's because it is about
+// storage, not about what the bytes are.
+func newCapture(rc *Exchange, limit int64, progressive bool) UpstreamCapture {
+	if progressive {
+		return spillingCapture{rc: rc}
+	}
+	return newExchangeCapture(rc, limit)
+}
+
 // newExchangeCapture starts an attempt's capture and clears what the last one
 // left.
 //
@@ -445,6 +465,22 @@ func (e *exchangeCapture) Upstream(p []byte) bool {
 }
 
 func (e *exchangeCapture) Truncated() bool { return e.truncated }
+
+// spillingCapture is the capture a progressive delivery gets.
+//
+// A stream has no size a buffer can be sized for, so its bytes go to the
+// exchange's capture file — which has its own far larger backstop — instead of
+// the heap. The modality calls the same method either way and never learns
+// which one it got: where the bytes are kept, and how many, is not something a
+// modality has an opinion about.
+type spillingCapture struct{ rc *Exchange }
+
+func (s spillingCapture) Upstream(p []byte) bool {
+	appendStreamBodyLine(s.rc, p)
+	return !s.rc.streamBodyTruncated
+}
+
+func (s spillingCapture) Truncated() bool { return s.rc.streamBodyTruncated }
 
 // safeFetcher is the kernel's SecondaryFetcher.
 type safeFetcher struct {
@@ -541,7 +577,7 @@ const secondaryFetchTimeout = 30 * time.Second
 
 // newDeliveryTools assembles the toolbox for one delivery, with limits narrowed
 // by whatever the modality asked for.
-func (s *Service) newDeliveryTools(c *gin.Context, rc *Exchange, want TransferLimits) DeliveryTools {
+func (s *Service) newDeliveryTools(c *gin.Context, rc *Exchange, want TransferLimits, progressive bool) DeliveryTools {
 	limits := TransferLimits{
 		MaxResponseBytes: maxNonStreamResponseBytes,
 		MaxFrameBytes:    maxStreamLineBytes,
@@ -553,7 +589,7 @@ func (s *Service) newDeliveryTools(c *gin.Context, rc *Exchange, want TransferLi
 		Client: &ginClientResponse{
 			c: c, rc: rc, window: limits.WriteWindow, limit: limits.MaxResponseBytes,
 		},
-		Capture: newExchangeCapture(rc, limits.MaxResponseBytes),
+		Capture: newCapture(rc, limits.MaxResponseBytes, progressive),
 		Facts:   newExchangeSink(rc),
 		Limits:  limits,
 		Fetch:   &safeFetcher{client: s.secondaryFetchClient(), limit: limits.MaxResponseBytes},
