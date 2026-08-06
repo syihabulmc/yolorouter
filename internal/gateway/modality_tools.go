@@ -406,13 +406,22 @@ type exchangeCapture struct {
 	truncated bool
 }
 
-// newCapture picks where this attempt's upstream bytes are kept.
+// newCapture picks where this attempt's upstream bytes are kept, and opens the
+// file if that is where they go.
 //
 // A progressive response spills to the exchange's capture file; anything else
 // is bounded and fits in memory. The choice is the kernel's because it is about
-// storage, not about what the bytes are.
-func newCapture(rc *Exchange, limit int64, progressive bool) UpstreamCapture {
+// storage, not about what the bytes are — and so is the file's lifetime: it has
+// to outlive the delivery, because a stream that fails mid-flight writes one
+// last error frame to the caller and that frame belongs in the capture too.
+//
+// The streaming pumps still open it themselves as well, and will until they are
+// handed these tools; opening is idempotent within an attempt so that the two
+// callers cannot cost a descriptor. Closing has not moved here yet: it stays
+// where the last of those writes happens, which is one frame above the pumps.
+func (s *Service) newCapture(c *gin.Context, rc *Exchange, limit int64, progressive bool) UpstreamCapture {
 	if progressive {
+		openStreamBodyFile(c, rc)
 		return spillingCapture{rc: rc}
 	}
 	return newExchangeCapture(rc, limit)
@@ -589,7 +598,7 @@ func (s *Service) newDeliveryTools(c *gin.Context, rc *Exchange, want TransferLi
 		Client: &ginClientResponse{
 			c: c, rc: rc, window: limits.WriteWindow, limit: limits.MaxResponseBytes,
 		},
-		Capture: newCapture(rc, limits.MaxResponseBytes, progressive),
+		Capture: s.newCapture(c, rc, limits.MaxResponseBytes, progressive),
 		Facts:   newExchangeSink(rc),
 		Limits:  limits,
 		Fetch:   &safeFetcher{client: s.secondaryFetchClient(), limit: limits.MaxResponseBytes},

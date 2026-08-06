@@ -196,7 +196,7 @@ func (s *Service) processDispatchResponseStream(
 	start time.Time,
 ) fact.Delivery {
 	if egress.Passthrough {
-		return s.dispatchPassthroughStream(c, rc, egress.Protocol, cand, provider, pk, resp, start)
+		return s.dispatchPassthroughStream(c, protocols.NewGinClientWriter(c), rc, egress.Protocol, cand, provider, pk, resp, start)
 	}
 
 	// Now committed to this 2xx candidate — a stream request never
@@ -663,7 +663,7 @@ func (s *Service) dispatchPassthroughNonStream(c *gin.Context, rc *Exchange, egr
 // correctly but never billed (rc.usage stayed nil) and always finalized as
 // "stream_no_done" (the [DONE] literal never appears on a Claude stream)
 // even when the upstream completed cleanly with message_stop.
-func (s *Service) dispatchPassthroughStream(c *gin.Context, rc *Exchange, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) fact.Delivery {
+func (s *Service) dispatchPassthroughStream(c *gin.Context, w protocols.ClientWriter, rc *Exchange, egressProtocol protocols.ProtocolID, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) fact.Delivery {
 	// A prior failed candidate may have stashed its non-2xx error body in
 	// these fields. A stream request persists its response through the SSE
 	// capture file, not these fields — the types.go contract is that both
@@ -675,9 +675,9 @@ func (s *Service) dispatchPassthroughStream(c *gin.Context, rc *Exchange, egress
 	var usage *Usage
 	var err error
 	if egressProtocol == protocols.ProtocolOpenAI {
-		usage, err = passthroughStreamToClient(c, resp, rc)
+		usage, err = passthroughStreamToClient(c, w, resp, rc)
 	} else {
-		usage, err = passthroughStreamToClientDecoded(c, resp, rc, egressProtocol)
+		usage, err = passthroughStreamToClientDecoded(c, w, resp, rc, egressProtocol)
 	}
 	// Both pumps deliberately leave the capture file open past their own
 	// return, so the writeStreamErrorEvent call below can still append to
@@ -721,6 +721,22 @@ func (s *Service) dispatchPassthroughStream(c *gin.Context, rc *Exchange, egress
 		// not see the stream end, so it is not recorded as complete.
 		return fact.Truncated(http.StatusOK, http.StatusOK, fact.FaultUpstream, "stream_no_done", err)
 	}
+	if errors.Is(err, errClientCommitRefused) {
+		// Checked ahead of the firstByteSent branch below, which is the whole
+		// point: firstByteSent is false here, and every other way of reaching
+		// that reads as "the caller is still waiting, offer them another
+		// provider". This one is the opposite — the caller already holds a
+		// committed response. Another attempt could not reach them and would
+		// only spend a provider call to find that out.
+		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, resp.StatusCode, AttemptServerError, "client commit refused"))
+		// Committed, but with a status this loop neither chose nor can change,
+		// so the caller's own status is the honest report of what they got.
+		// Billing records our own failure rather than the provider's response:
+		// two writers on one response is a fault of ours, and the provider had
+		// no part in it.
+		return fact.Truncated(c.Writer.Status(), http.StatusInternalServerError, fact.FaultGateway,
+			"client_commit_refused", err)
+	}
 	if rc.firstByteSent {
 		// Mid-stream failure after the first byte — can't switch, can't
 		// change HTTP status; same handling as
@@ -759,7 +775,7 @@ func (s *Service) dispatchPassthroughStream(c *gin.Context, rc *Exchange, egress
 // gateway injected it upstream (EnsureStreamUsageInjection), the usage field
 // is stripped from forwarded frames (injected usage is for the
 // gateway's internal cost accounting only).
-func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *Exchange) (*Usage, error) {
+func passthroughStreamToClient(c *gin.Context, w protocols.ClientWriter, resp *http.Response, rc *Exchange) (*Usage, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	// Append every SENT SSE line (post-rewrite, post-usage-strip =
@@ -837,14 +853,26 @@ func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *Exchange
 			// First data frame — commit the SSE headers, flush any buffered
 			// preamble in order, then forward the data line.
 			applyStreamWriteDeadline(c, rc.requestID)
-			writeSSEHeader(c)
-			// The 200 status + SSE headers are committed the moment
-			// writeSSEHeader returns — mark first-byte-sent now, before the
-			// preamble/data write below, so a write failure in either one is
-			// classified as a mid-stream failure (no failover, inline error
-			// frame skipped in favor of 499) rather than a pre-first-byte one:
-			// the caller already has a 200 on the wire regardless of whether
-			// these particular bytes land.
+			// A refused commit means somebody already committed this response;
+			// carrying on would stream a body under a status this loop did not
+			// choose. The writer production passes never refuses — it records
+			// the status the way gin does and reports no error — so this only
+			// fires once this pump is handed the gateway's own response object,
+			// whose Commit does refuse. The classification is settled ahead of
+			// that because the default for "nothing was sent" is to try another
+			// provider, and that is the one thing this must not do.
+			if cerr := writeSSEHeader(w); cerr != nil {
+				return usage, fmt.Errorf("%w: %w", errClientCommitRefused, cerr)
+			}
+			// Marked here rather than by the commit above, because the writer
+			// production passes only records a status. The gateway's own
+			// response object marks it inside Commit, and this line goes away
+			// when that is the only writer this pump ever sees.
+			//
+			// The 200 status + SSE headers are on the wire now, so a write
+			// failure in the preamble or the data line below is a mid-stream
+			// failure (no failover, inline error frame instead of a 499)
+			// rather than a pre-first-byte one.
 			rc.MarkFirstByteSent()
 			hadPreamble := len(preamble) > 0
 			if hadPreamble {
@@ -917,42 +945,6 @@ func passthroughStreamToClient(c *gin.Context, resp *http.Response, rc *Exchange
 	return usage, nil
 }
 
-// passthroughStreamToClientDecoded is passthroughStreamToClient's non-OpenAI
-// counterpart: it forwards every upstream SSE line to the client
-// byte-for-byte, exactly like passthroughStreamToClient, but deliberately
-// does NOT attempt the OpenAI-specific per-chunk model-field rewrite
-// (rewriteStreamChunk assumes an OpenAI chat.completion.chunk JSON shape,
-// which a Claude/Responses/Gemini SSE event does not have — a Claude
-// message_start event, for instance, nests "model" under "message", not at
-// the top level).
-//
-// Every egress protocol handled here DOES get its own model rewrite, applied
-// per-line via rewritePassthroughStreamModel: Claude nests the model once,
-// in the single message_start frame (rewriteClaudeMessageStartModel, latched
-// via a once-flag at the call site below since a Claude stream only ever
-// sends one); Gemini repeats "modelVersion" at the top level of every single
-// chunk (rewriteGeminiStreamModelVersion, applied to every forwarded line,
-// no once-flag); Responses nests the model at "response.model", but only on
-// the response.created/response.completed/response.in_progress envelope
-// events (rewriteResponsesStreamModel). Every one of these leaves any line
-// it doesn't recognize completely unchanged, so the rest of the stream is
-// still forwarded byte-for-byte regardless of protocol.
-//
-// Every forwarded line is also fed into egressProtocol's own StreamDecoder
-// purely to accumulate usage (DeltaUsage) and detect a clean completion
-// (FinishSignals.SawDone — Claude: message_stop / a message_delta carrying
-// stop_reason) — the same technique protocols.IRStreamRelay uses for the
-// cross-protocol path. The decoded deltas themselves are discarded after
-// accumulation (never re-encoded): the bytes already on the wire, forwarded
-// verbatim above, are the caller-facing response.
-//
-// Returns the accumulated usage and an error only for transport-level
-// failures; reuses errClientDisconnected / errStreamNoDoneTerminator (the
-// SAME sentinel values passthroughStreamToClient returns) so
-// dispatchPassthroughStream's existing error-branch handling (mid-stream vs.
-// pre-first-byte failover, 499 vs. stream_no_done, ...) applies unchanged to
-// both pumps without any caller-side branching beyond picking which pump to
-// run.
 // rewriteSSEDataLineJSON applies mutate to the JSON object carried by a
 // "data: {...}" SSE line. Returns the rewritten line and true only if it was a
 // data line whose payload parsed and mutate reported a change; otherwise
@@ -1127,7 +1119,43 @@ func rewritePassthroughStreamModel(egressProtocol protocols.ProtocolID, line []b
 	return line
 }
 
-func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *Exchange, egressProtocol protocols.ProtocolID) (*Usage, error) {
+// passthroughStreamToClientDecoded is passthroughStreamToClient's non-OpenAI
+// counterpart: it forwards every upstream SSE line to the client
+// byte-for-byte, exactly like passthroughStreamToClient, but deliberately
+// does NOT attempt the OpenAI-specific per-chunk model-field rewrite
+// (rewriteStreamChunk assumes an OpenAI chat.completion.chunk JSON shape,
+// which a Claude/Responses/Gemini SSE event does not have — a Claude
+// message_start event, for instance, nests "model" under "message", not at
+// the top level).
+//
+// Every egress protocol handled here DOES get its own model rewrite, applied
+// per-line via rewritePassthroughStreamModel: Claude nests the model once,
+// in the single message_start frame (rewriteClaudeMessageStartModel, latched
+// via a once-flag at the call site below since a Claude stream only ever
+// sends one); Gemini repeats "modelVersion" at the top level of every single
+// chunk (rewriteGeminiStreamModelVersion, applied to every forwarded line,
+// no once-flag); Responses nests the model at "response.model", but only on
+// the response.created/response.completed/response.in_progress envelope
+// events (rewriteResponsesStreamModel). Every one of these leaves any line
+// it doesn't recognize completely unchanged, so the rest of the stream is
+// still forwarded byte-for-byte regardless of protocol.
+//
+// Every forwarded line is also fed into egressProtocol's own StreamDecoder
+// purely to accumulate usage (DeltaUsage) and detect a clean completion
+// (FinishSignals.SawDone — Claude: message_stop / a message_delta carrying
+// stop_reason) — the same technique protocols.IRStreamRelay uses for the
+// cross-protocol path. The decoded deltas themselves are discarded after
+// accumulation (never re-encoded): the bytes already on the wire, forwarded
+// verbatim above, are the caller-facing response.
+//
+// Returns the accumulated usage and an error only for transport-level
+// failures; reuses errClientDisconnected / errStreamNoDoneTerminator (the
+// SAME sentinel values passthroughStreamToClient returns) so
+// dispatchPassthroughStream's existing error-branch handling (mid-stream vs.
+// pre-first-byte failover, 499 vs. stream_no_done, ...) applies unchanged to
+// both pumps without any caller-side branching beyond picking which pump to
+// run.
+func passthroughStreamToClientDecoded(c *gin.Context, w protocols.ClientWriter, resp *http.Response, rc *Exchange, egressProtocol protocols.ProtocolID) (*Usage, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	// Same capture-file lifecycle as passthroughStreamToClient: opened here,
@@ -1204,12 +1232,16 @@ func passthroughStreamToClientDecoded(c *gin.Context, resp *http.Response, rc *E
 			// preamble in order, then forward the data line. Mirrors
 			// passthroughStreamToClient's identical first-data-frame handling.
 			applyStreamWriteDeadline(c, rc.requestID)
-			writeSSEHeader(c)
-			// The 200 status + SSE headers are committed the moment
-			// writeSSEHeader returns — mark first-byte-sent now, before the
-			// preamble/data write below, so a write failure in either one is
-			// classified as mid-stream (no failover) rather than
-			// pre-first-byte, mirroring passthroughStreamToClient.
+			// A refused commit means somebody already committed this response.
+			// Same sentinel and same reachability as in
+			// passthroughStreamToClient.
+			if cerr := writeSSEHeader(w); cerr != nil {
+				return currentUsage(), fmt.Errorf("%w: %w", errClientCommitRefused, cerr)
+			}
+			// Marked here for the same reason as in passthroughStreamToClient:
+			// the writer production passes only records a status, so a write
+			// failure below would otherwise read as pre-first-byte and try to
+			// fail over on top of a response the caller already has.
 			rc.MarkFirstByteSent()
 			hadPreamble := len(preamble) > 0
 			if hadPreamble {

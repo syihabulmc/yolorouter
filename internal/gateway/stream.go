@@ -49,6 +49,17 @@ func clientDisconnectOutcome(usage *Usage, doneSeen bool) (*Usage, error) {
 // partial row, not clean success (stream-integrity fix).
 var errStreamNoDoneTerminator = errors.New("upstream stream ended without [DONE] terminator")
 
+// errClientCommitRefused is returned by a stream pump when the response it was
+// about to send has already been committed by something else.
+//
+// It is its own sentinel because of what the alternative costs. Nothing of ours
+// reached the caller, so every generic "nothing was sent" path treats this as
+// pre-first-byte and offers the chain another candidate — which would send a
+// second provider's stream into a response that already carries somebody's
+// status. The caller is served either way; the only question left is whether we
+// also spend an upstream call discovering that again.
+var errClientCommitRefused = errors.New("response was already committed elsewhere")
+
 // maxPreambleBytes caps the pre-first-data-frame preamble buffer in the
 // passthrough stream pump — a malicious/buggy upstream could otherwise grow
 // it without bound (the response body has no bodylimit guard the way the
@@ -94,15 +105,16 @@ func forwardStreamLine(c *gin.Context, rc *Exchange, line []byte, usage **Usage,
 	return sent, writeErr
 }
 
-func writeSSEHeader(c *gin.Context) {
-	h := c.Writer.Header()
-	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Connection", "keep-alive")
-	// Disable proxy buffering (nginx X-Accel-Buffering et al) so SSE chunks
-	// reach the client token-by-token instead of in buffered batches.
-	h.Set("X-Accel-Buffering", "no")
-	c.Writer.WriteHeader(http.StatusOK)
+func writeSSEHeader(w protocols.ClientWriter) error {
+	w.Inject(http.Header{
+		"Content-Type":  {"text/event-stream"},
+		"Cache-Control": {"no-cache"},
+		"Connection":    {"keep-alive"},
+		// Disable proxy buffering (nginx X-Accel-Buffering et al) so SSE chunks
+		// reach the client token-by-token instead of in buffered batches.
+		"X-Accel-Buffering": {"no"},
+	})
+	return w.Commit(http.StatusOK)
 }
 
 func isDataLine(line []byte) bool {
@@ -440,8 +452,19 @@ func isClientWriteError(err error) bool {
 // unaffected either way; only the audit capture is skipped (and, for a real
 // OS-level open error, logged so an unwritable data/bodies dir is visible
 // in ops logs instead of silently dropping every stream body forever).
+//
+// Calling it twice for one attempt keeps the first file rather than opening a
+// second one. Two callers is the state of a half-finished move of this
+// decision, and the alternative — overwriting rc.streamBodyFile — drops the
+// only reference to a descriptor nothing will ever close. Re-entry BETWEEN
+// attempts is different and still opens: the previous attempt's file was
+// closed on its way out, and O_APPEND is what lets a failover keep writing
+// into the bytes an earlier attempt already captured.
 func openStreamBodyFile(c *gin.Context, rc *Exchange) {
 	if rc.requestID == "" {
+		return
+	}
+	if rc.streamBodyFile != nil {
 		return
 	}
 	dir := streamBodiesDir(c)

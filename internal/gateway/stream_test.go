@@ -12,9 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yolorouter/yolorouter/internal/fact"
+	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/pkg/logger"
 )
@@ -192,7 +195,7 @@ func runStreamPump(t *testing.T, upstreamBody string, wantsUsage bool) (*Usage, 
 		Header:     make(http.Header),
 	}
 	rc := &Exchange{originalModel: "ext", isStream: true, wantsStreamUsage: wantsUsage}
-	return passthroughStreamToClient(c, resp, rc)
+	return passthroughStreamToClient(c, protocols.NewGinClientWriter(c), resp, rc)
 }
 
 // TestStreamUpstreamWithDoneSucceeds: a stream that emits a data frame and
@@ -257,7 +260,7 @@ func TestStreamUpstreamPostDoneDisconnectSucceeds(t *testing.T) {
 		Header:     make(http.Header),
 	}
 	rc := &Exchange{originalModel: "ext", isStream: true, wantsStreamUsage: true}
-	_, err := passthroughStreamToClient(c, resp, rc)
+	_, err := passthroughStreamToClient(c, protocols.NewGinClientWriter(c), resp, rc)
 	if err != nil {
 		t.Fatalf("post-[DONE] disconnect must succeed, got %v", err)
 	}
@@ -278,7 +281,7 @@ func TestStreamUpstreamStripsInjectedUsage(t *testing.T) {
 		Header:     make(http.Header),
 	}
 	rc := &Exchange{originalModel: "ext", isStream: true, wantsStreamUsage: false}
-	usage, err := passthroughStreamToClient(c, resp, rc)
+	usage, err := passthroughStreamToClient(c, protocols.NewGinClientWriter(c), resp, rc)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -309,7 +312,7 @@ func runStreamPumpCapture(t *testing.T, upstreamBody, requestID, bodiesDir strin
 		Header:     make(http.Header),
 	}
 	rc := &Exchange{requestID: requestID, originalModel: "ext", isStream: true, wantsStreamUsage: true}
-	usage, err := passthroughStreamToClient(c, resp, rc)
+	usage, err := passthroughStreamToClient(c, protocols.NewGinClientWriter(c), resp, rc)
 	// The pump deliberately leaves the capture file open for its caller to
 	// close (dispatchPassthroughStream does it on every exit path, so a
 	// mid-stream error frame can still be appended). Calling the pump directly
@@ -557,5 +560,116 @@ func TestApplyStreamWriteDeadline_WarnsOnceAcrossRepeatedFailures(t *testing.T) 
 	}
 	if !strings.Contains(string(data), "req-warn-once") {
 		t.Error("warning log must carry the request ID")
+	}
+}
+
+// TestOpeningTheCaptureFileTwiceKeepsOneDescriptor pins what happens while two
+// callers both believe they open this file.
+//
+// The kernel decides where an attempt's bytes are kept and opens the file when
+// the answer is "on disk"; the streaming pumps still open it themselves too,
+// and will until they take their tools from the kernel. Overwriting the handle
+// on the second call would drop the only reference to the first descriptor, and
+// nothing would ever close it — one leaked descriptor per stream, invisible
+// until a busy process runs out.
+func TestOpeningTheCaptureFileTwiceKeepsOneDescriptor(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set(BodiesDirContextKey, dir)
+	rc := &Exchange{requestID: "twice-opened"}
+
+	openStreamBodyFile(c, rc)
+	defer closeStreamBodyFile(rc)
+	first := rc.streamBodyFile
+	if first == nil {
+		t.Fatal("first open produced no capture file")
+	}
+
+	openStreamBodyFile(c, rc)
+	if rc.streamBodyFile != first {
+		t.Fatalf("second open replaced the capture file (%v -> %v); the first descriptor is now unreachable and will never be closed", first, rc.streamBodyFile)
+	}
+}
+
+// TestANewAttemptReopensTheCaptureFileAndAppends pins the case the guard above
+// must not break.
+//
+// A pre-first-byte failover closes the file on its way out and opens it again
+// for the next attempt, against the same request ID. That second open has to
+// happen — and has to keep what the first attempt wrote, since the capture is
+// the whole exchange, not the last try at it.
+func TestANewAttemptReopensTheCaptureFileAndAppends(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set(BodiesDirContextKey, dir)
+	rc := &Exchange{requestID: "reopened"}
+
+	openStreamBodyFile(c, rc)
+	appendStreamBodyLine(rc, []byte("data: first\n\n"))
+	closeStreamBodyFile(rc)
+
+	openStreamBodyFile(c, rc)
+	if rc.streamBodyFile == nil {
+		t.Fatal("a closed capture file was not reopened for the next attempt")
+	}
+	appendStreamBodyLine(rc, []byte("data: second\n\n"))
+	closeStreamBodyFile(rc)
+
+	captured, err := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
+	if err != nil {
+		t.Fatalf("read capture file: %v", err)
+	}
+	if want := "data: first\n\ndata: second\n\n"; string(captured) != want {
+		t.Errorf("capture is %q, want %q", captured, want)
+	}
+}
+
+// refusingCommitWriter stands in for the response object this pump will be
+// handed once the kernel owns delivery: one that knows whether the response has
+// already been committed, and says no when it has.
+type refusingCommitWriter struct{ protocols.ClientWriter }
+
+func (refusingCommitWriter) Commit(int) error {
+	return errors.New("response is already committed")
+}
+
+// TestARefusedCommitEndsTheRequestInsteadOfTryingAnotherProvider pins the one
+// branch that has to exist before the writer that triggers it does.
+//
+// A refused commit means the caller already holds a response somebody else
+// wrote. Nothing of ours reached them, which is also what a dead upstream looks
+// like from here — and that reading sends the chain to the next provider. It
+// must not: no second attempt can reach a caller who has already been answered,
+// so the only thing another provider buys is one more upstream call and a
+// second stream aimed at a committed response.
+func TestARefusedCommitEndsTheRequestInsteadOfTryingAnotherProvider(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rc := &Exchange{requestID: "commit-refused", ingress: protocols.ProtocolOpenAI}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("data: {\"id\":\"x\"}\n\ndata: [DONE]\n\n")),
+	}
+	w := refusingCommitWriter{ClientWriter: protocols.NewGinClientWriter(c)}
+
+	got := (&Service{}).dispatchPassthroughStream(c, w, rc, protocols.ProtocolOpenAI,
+		model.ModelCandidate{ProviderModelName: "m"}, &model.Provider{}, model.ProviderKey{},
+		resp, time.Now())
+
+	if got.Verdict != fact.VerdictSettled {
+		t.Errorf("verdict is %v, want settled — another candidate cannot reach a caller who already has a response", got.Verdict)
+	}
+	if got.Fault != fact.FaultGateway {
+		t.Errorf("fault is %v, want gateway — two writers on one response is ours, not the provider's", got.Fault)
+	}
+	if got.Complete {
+		t.Error("delivery reports complete; nothing this pump had to send ever reached the caller")
+	}
+	if got.FailReason != "client_commit_refused" {
+		t.Errorf("fail reason is %q, want client_commit_refused", got.FailReason)
+	}
+	if rc.firstByteSent {
+		t.Error("first byte recorded as sent; the commit that would have sent it was refused")
 	}
 }

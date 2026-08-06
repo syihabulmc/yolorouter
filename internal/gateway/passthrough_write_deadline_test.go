@@ -270,7 +270,7 @@ func TestPassthroughStreamToClient_WriteErrorPropagatedAsClientWrite(t *testing.
 	// and t.TempDir() cleanup fails on Windows, which will not delete a file
 	// that is still open.
 	defer func() { closeStreamBodyFile(rc) }()
-	_, err := passthroughStreamToClient(c, resp, rc)
+	_, err := passthroughStreamToClient(c, protocols.NewGinClientWriter(c), resp, rc)
 	if err == nil {
 		t.Fatal("expected a write error, got nil")
 	}
@@ -314,7 +314,7 @@ func TestPassthroughStreamToClientDecoded_WriteErrorPropagatedAsClientWrite(t *t
 	// and t.TempDir() cleanup fails on Windows, which will not delete a file
 	// that is still open.
 	defer func() { closeStreamBodyFile(rc) }()
-	_, err := passthroughStreamToClientDecoded(c, resp, rc, protocols.ProtocolClaude)
+	_, err := passthroughStreamToClientDecoded(c, protocols.NewGinClientWriter(c), resp, rc, protocols.ProtocolClaude)
 	if err == nil {
 		t.Fatal("expected a write error, got nil")
 	}
