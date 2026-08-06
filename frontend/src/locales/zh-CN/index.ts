@@ -319,7 +319,7 @@ export default {
     retest: '重新测试',
     retest_tip: '重新向上游发送真实请求，一次验证基础文字、流式输出与函数调用。',
     pricePrefilledFromHistory: '价格已按该供应商的历史记录预填，如需可调整。',
-    pricePrefilledFromSeed: '价格已按内置价目表（{date} 同步）预填，请核对。',
+    pricePrefilledFromSeed: '价格已按内置价目表（更新于 {date}）预填，请核对。',
     priceMixedAfterChange: '你手填的部分价格属于上一次选择、已保留，其余已换成新选择的价格。保存前请把四个价格都核对一遍。',
     priceCheckAfterChange: '未找到该供应商与该模型的价格，当前显示的仍是上一次选择的价格，保存前请核对。',
     priceLookupFailed: '价格查询失败，当前显示的仍是上一次选择的价格，保存前请核对。',

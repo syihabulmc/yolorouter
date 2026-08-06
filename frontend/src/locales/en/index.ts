@@ -316,7 +316,7 @@ export default {
     retest: 'Retest',
     retest_tip: 'Send real requests upstream again, verifying basic text, streaming and function calling in one run.',
     pricePrefilledFromHistory: 'Prices prefilled from this provider\u2019s history — adjust if needed.',
-    pricePrefilledFromSeed: 'Prices prefilled from the built-in catalog (synced {date}) — please verify.',
+    pricePrefilledFromSeed: 'Prices prefilled from the built-in catalog (updated {date}) — please verify.',
     priceMixedAfterChange: 'Some prices you entered were for the previous selection and have been kept; the rest now come from the new one. Check all four before saving.',
     priceCheckAfterChange: 'No price is known for this provider and model — the prices shown are the ones from the previous selection. Check them before saving.',
     priceLookupFailed: 'Could not look up a price for this provider and model. The prices shown are the ones from the previous selection — check them before saving.',

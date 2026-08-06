@@ -356,11 +356,12 @@ type SuggestedPrice struct {
 	CacheWritePrice *float64 `json:"cache_write_price"`
 	CacheReadPrice  *float64 `json:"cache_read_price"`
 	Source          string   `json:"source"` // "history" | "seed" | ""
-	// CatalogUpdatedAt is when the built-in catalog was last synced, in
-	// YYYY-MM-DD form, and is set only for Source "seed". The seed is a snapshot
-	// compiled by hand from vendor pricing pages, so its age is the difference
-	// between a figure worth trusting and one that quietly bills last year's
-	// rate; the UI shows it next to the suggestion. Empty for the other sources,
+	// CatalogUpdatedAt is the freshness date of the built-in price catalog, in
+	// YYYY-MM-DD form, set only for Source "seed". The catalog is refreshed
+	// daily by an automated cron (see internal/pricecatalog/live.go), so this
+	// date tracks how current the suggested price is — a stale date means the
+	// auto-refresh has been failing and the figure may bill an outdated rate;
+	// the UI shows it next to the suggestion. Empty for the other sources,
 	// where the price came from this deployment's own records.
 	CatalogUpdatedAt string `json:"catalog_updated_at"`
 }
