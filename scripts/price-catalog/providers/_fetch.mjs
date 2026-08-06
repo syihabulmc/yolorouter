@@ -38,3 +38,22 @@ export async function launchBrowser() {
     return await chromium.launch({ headless: true });
   }
 }
+
+// readTables extracts every <table> on the page as rows-of-cells (text content,
+// trimmed), so the three headless fetchers don't each re-spell the same
+// page.evaluate(() => [...querySelectorAll("table")]...). stripZeroWidth (default
+// false) also removes U+200B, which Volcengine's renderer sprinkles into price
+// cells and which breaks number parsing. Returns one array of rows per table.
+export async function readTables(page, stripZeroWidth = false) {
+  return page.evaluate((zw) => {
+    const strip = zw ? /[\u200b]/g : null;
+    return [...document.querySelectorAll("table")].map((t) =>
+      [...t.querySelectorAll("tr")].map((tr) =>
+        [...tr.querySelectorAll("td,th")].map((td) => {
+          const s = (td.textContent || "").trim();
+          return strip ? s.replace(strip, "") : s;
+        }),
+      ),
+    );
+  }, stripZeroWidth);
+}

@@ -193,13 +193,13 @@ func runServe(ctx context.Context, args []string) error {
 	// own cancellable context at that point and register with taskWG here.
 	var taskWG sync.WaitGroup
 
-	// Background price-catalog refresh. An empty endpoint is the
-	// documented no-op — StartRefresh returns nil and no goroutine is spawned,
-	// so a deployment that hasn't opted in (the default) does zero background
-	// work and keeps serving the embedded seed. When an endpoint is set, the
-	// goroutine warms immediately on start and re-fetches on the configured
-	// interval; a failed fetch never wipes a warm index (only cover, never
-	// delete), so a flaky endpoint cannot degrade pricing.
+	// Background price-catalog refresh. The default endpoint (set in config
+	// defaults()) is the live distribution Worker, so every instance warms and
+	// re-fetches on the configured interval with zero opt-in. An operator who
+	// sets the endpoint to "" disables refresh: StartRefresh returns nil, no
+	// goroutine is spawned, and the instance keeps serving the embedded seed.
+	// A failed fetch never wipes a warm index (only cover, never delete), so a
+	// flaky endpoint cannot degrade pricing.
 	//
 	// The refresh runs on a context derived from serve's own ctx, so the same
 	// shutdown signal (SIGTERM / external stop / ctx cancel) that stops the HTTP

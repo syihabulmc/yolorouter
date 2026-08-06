@@ -16,7 +16,7 @@
 // the SAME column index as its name in the header row.
 
 const HOST = "api.deepseek.com";
-import { launchBrowser, parseYuan } from "./_fetch.mjs";
+import { launchBrowser, parseYuan, readTables } from "./_fetch.mjs";
 
 const PRICING_PAGE = "https://api-docs.deepseek.com/zh-cn/quick_start/pricing";
 
@@ -39,13 +39,10 @@ export async function fetchDeepSeek() {
     await page.waitForSelector("table", { timeout: 15000 });
     await page.waitForTimeout(2000); // let Docusaurus hydrate the table
 
-    const rows = await page.evaluate(() => {
-      const t = document.querySelector("table");
-      if (!t) return null;
-      return [...t.querySelectorAll("tr")].map((tr) =>
-        [...tr.querySelectorAll("td,th")].map((td) => (td.textContent || "").trim()),
-      );
-    });
+    // DeepSeek renders a single pricing table; readTables returns all tables,
+    // so take the first. An empty list means the page didn't hydrate in time.
+    const allTables = await readTables(page);
+    const rows = allTables[0];
     if (!rows || rows.length === 0) throw new Error("deepseek: no table found");
 
     // Header row: the one carrying the canonical model ids. Collect them in

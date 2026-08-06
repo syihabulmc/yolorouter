@@ -11,7 +11,7 @@
 // ("包含输入和输出", no separate 输入/输出) are merged-billing models the seed
 // rules exclude — we skip them.
 
-import { launchBrowser } from "./_fetch.mjs";
+import { launchBrowser, readTables } from "./_fetch.mjs";
 
 const HOST = "api.baichuan-ai.com";
 const PRICING_PAGE = "https://platform.baichuan-ai.com/prices";
@@ -38,13 +38,7 @@ export async function fetchBaichuan() {
     await page.waitForSelector("table", { timeout: 15000 });
     await page.waitForTimeout(2000);
 
-    const tables = await page.evaluate(() =>
-      [...document.querySelectorAll("table")].map((t) =>
-        [...t.querySelectorAll("tr")].map((tr) =>
-          [...tr.querySelectorAll("td,th")].map((td) => (td.textContent || "").trim()),
-        ),
-      ),
-    );
+    const tables = await readTables(page);
 
     const entries = {};
     for (const rows of tables) {

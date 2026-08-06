@@ -423,6 +423,31 @@ func TestLoadAcceptsPriceCatalogSection(t *testing.T) {
 	}
 }
 
+// TestLoadPriceCatalogEmptyEndpointOverridesDefault pins the documented disable
+// contract: the default endpoint is the live Worker, but an operator who writes
+// `price_catalog: { endpoint: "" }` opts out, and the empty string must reach
+// serve/StartRefresh so no refresh goroutine spawns. The strict decoder overwrites
+// the seeded default with the explicit empty value — this test catches a regression
+// where that override silently keeps the default (and the instance refreshes
+// against the operator's explicit wish to stay on the embedded seed).
+func TestLoadPriceCatalogEmptyEndpointOverridesDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(
+		"server:\n  port: 8080\ndatabase:\n  driver: sqlite\n  sqlite_path: ./data/x.db\n"+
+			"security:\n  provider_master_key: \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n"+
+			"price_catalog:\n  endpoint: \"\"\n"), 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("expected load to succeed: %v", err)
+	}
+	if cfg.PriceCatalog.Endpoint != "" {
+		t.Fatalf("explicit empty endpoint must override the live default to disable refresh, got %q", cfg.PriceCatalog.Endpoint)
+	}
+}
+
 // TestValidatePriceCatalogRejectsZeroIntervalWithEndpoint is the guard against
 // the one genuinely broken combination: an endpoint set (operator wants live
 // refresh) with a non-positive interval (ticker fires constantly or never).

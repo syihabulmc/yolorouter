@@ -11,7 +11,7 @@
 // matching the seed's "take the lowest tier" rule. cache_read comes from the
 // "缓存命中(非音频)" column.
 
-import { launchBrowser, parseYuan } from "./_fetch.mjs";
+import { launchBrowser, parseYuan, readTables } from "./_fetch.mjs";
 
 const HOST = "ark.cn-beijing.volces.com";
 const PRICING_PAGE = "https://www.volcengine.com/docs/82379/1099320";
@@ -29,13 +29,9 @@ export async function fetchVolcengine() {
       await page.waitForTimeout(800);
     }
 
-    const tables = await page.evaluate(() =>
-      [...document.querySelectorAll("table")].map((t) =>
-        [...t.querySelectorAll("tr")].map((tr) =>
-          [...tr.querySelectorAll("td,th")].map((td) => (td.textContent || "").replace(/[​\u200b]/g, "").trim()),
-        ),
-      ),
-    );
+    // Volcengine's renderer sprinkles U+200B into price cells, which breaks
+    // number parsing — readTables(page, true) strips them.
+    const tables = await readTables(page, true);
 
     const entries = {};
     for (const rows of tables) {
