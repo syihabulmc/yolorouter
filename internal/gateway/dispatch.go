@@ -400,7 +400,7 @@ func (s *Service) processDispatchResponseNonStream(
 	// (the candidate's provider_model_name), which must never leak to the
 	// caller.
 	encoder := modelOverrideResponseEncoder{inner: codecsFor(ingress).ResponseEncoder, model: rc.originalModel}
-	usage, err := protocols.IRNonStreamRelay(c, resp, decoder, encoder, rc, nil)
+	usage, err := protocols.IRNonStreamRelay(protocols.NewGinClientWriter(c), resp, decoder, encoder, rc, nil)
 	if err != nil {
 		if isClientWriteError(err) {
 			// The response was already fully decoded and (partially) written

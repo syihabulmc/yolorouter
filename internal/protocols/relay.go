@@ -527,7 +527,7 @@ func IRStreamRelay(
 // raw finish reason, whether a tool call occurred, and whether any content
 // was produced (pass nil to skip).
 func IRNonStreamRelay(
-	c *gin.Context,
+	w ClientWriter,
 	resp *http.Response,
 	decoder ResponseDecoder,
 	encoder ResponseEncoder,
@@ -557,11 +557,13 @@ func IRNonStreamRelay(
 		// This is an explicit single-header copy, not subject to the whitelist policy
 		// which targets success responses where the relay sets its own Content-Type.
 		if ct := resp.Header.Get("Content-Type"); ct != "" {
-			c.Header("Content-Type", ct)
+			w.Inject(http.Header{"Content-Type": {ct}})
 		}
-		CopyUpstreamHeaders(c, resp.Header)
-		c.Writer.WriteHeader(resp.StatusCode)
-		if _, werr := c.Writer.Write(body); werr != nil {
+		w.Inject(UpstreamHeadersToCopy(resp.Header))
+		if cerr := w.Commit(resp.StatusCode); cerr != nil {
+			return nil, fmt.Errorf("%w: commit error body to client: %w", ErrClientWrite, cerr)
+		}
+		if _, werr := w.Write(body); werr != nil {
 			return nil, fmt.Errorf("%w: write error body to client: %w", ErrClientWrite, werr)
 		}
 		// A small error body can land entirely inside net/http's internal
@@ -569,7 +571,7 @@ func IRNonStreamRelay(
 		// socket, and the real delivery error only surfaces on Flush.
 		// Without this check a client that disconnects right after a
 		// buffered Write is still recorded as having received the error body.
-		if ferr := FlushAndCheckError(c); ferr != nil {
+		if ferr := w.Flush(); ferr != nil {
 			return nil, fmt.Errorf("%w: flush error body to client: %w", ErrClientWrite, ferr)
 		}
 		return nil, nil
@@ -600,18 +602,20 @@ func IRNonStreamRelay(
 	}
 	// The relay encodes the success body as JSON; set Content-Type explicitly because
 	// Content-Type is excluded from the upstream header allowlist.
-	c.Header("Content-Type", "application/json")
-	CopyUpstreamHeaders(c, resp.Header)
-	c.Writer.WriteHeader(resp.StatusCode)
 	// The body was already fully decoded against the upstream response
 	// (irResp.Usage reflects real upstream consumption), so partial usage is
-	// still returned for correct billing below even if the write/flush that
-	// follows fails — only the delivery outcome is a failure.
+	// still returned for correct billing below even if the commit/write/flush
+	// that follows fails — only the delivery outcome is a failure.
 	var partialUsage *IRUsage
 	if irResp != nil {
 		partialUsage = &irResp.Usage
 	}
-	if _, werr := c.Writer.Write(encoded); werr != nil {
+	w.Inject(http.Header{"Content-Type": {"application/json"}})
+	w.Inject(UpstreamHeadersToCopy(resp.Header))
+	if cerr := w.Commit(resp.StatusCode); cerr != nil {
+		return partialUsage, fmt.Errorf("%w: commit response to client: %w", ErrClientWrite, cerr)
+	}
+	if _, werr := w.Write(encoded); werr != nil {
 		// The error is wrapped in ErrClientWrite so the caller (which also
 		// reaches this same return slot via decErr above) can tell a
 		// downstream write failure apart from an IR decode failure and
@@ -624,7 +628,7 @@ func IRNonStreamRelay(
 	// surfaces on Flush. Without this check, a client that disconnects
 	// right after a buffered Write is still recorded as a delivered 2xx —
 	// the classification this whole function exists to get right.
-	if ferr := FlushAndCheckError(c); ferr != nil {
+	if ferr := w.Flush(); ferr != nil {
 		return partialUsage, fmt.Errorf("%w: flush response to client: %w", ErrClientWrite, ferr)
 	}
 
@@ -861,20 +865,106 @@ func IRStreamRelayJSONLines(
 	return &usage, terminalErr
 }
 
+// ClientWriter is everything the relay helpers need in order to answer the
+// caller. It is declared here, by the package that needs it, rather than taken
+// as a *gin.Context: a relay that holds the framework's request object can do
+// anything to it, and what these functions actually do is stage headers, commit
+// a status, write bytes and flush them.
+//
+// Declaring the need rather than importing the provider is also what lets the
+// gateway hand in its own response object — the one that knows when bytes have
+// really left — without this package having to know that type exists.
+type ClientWriter interface {
+	// Inject stages response headers, REPLACING any already staged under the
+	// same name and keeping every value given for it. Replacing is what the
+	// callers mean: a relay setting Content-Type is stating what the body is,
+	// not adding a second opinion, and two Content-Type values on one response
+	// is a malformed response rather than a richer one.
+	//
+	// Headers may or may not reach the caller immediately; what is guaranteed
+	// is that they are in place by the time Commit returns.
+	Inject(h http.Header)
+	// Commit fixes the status. Whether it is on the wire at that moment is the
+	// implementation's business — a buffering writer may hold it until the
+	// first body write — but nothing may be written before it, and no later
+	// call may change it.
+	Commit(status int) error
+	Write(p []byte) (int, error)
+	// Flush pushes buffered bytes onto the socket and reports the failure a
+	// buffered Write can hide.
+	Flush() error
+}
+
+// ginClientWriter is the ClientWriter over a raw gin response, for callers that
+// still hold one.
+type ginClientWriter struct{ c *gin.Context }
+
+// NewGinClientWriter adapts a gin context to ClientWriter.
+func NewGinClientWriter(c *gin.Context) ClientWriter { return ginClientWriter{c: c} }
+
+func (g ginClientWriter) Inject(h http.Header) {
+	for k, vv := range h {
+		// Cleared first, then every value added: replacing by name while
+		// keeping multi-value headers whole. Adding without clearing would put
+		// a second Content-Type on a response that already had one.
+		g.c.Writer.Header().Del(k)
+		for _, v := range vv {
+			g.c.Writer.Header().Add(k, v)
+		}
+	}
+}
+
+// Commit records the status the way gin does: held until the first body write,
+// so the caller's own view of "has anything been sent" is unchanged by moving
+// through this interface. A writer that needs the status on the wire at commit
+// time implements that itself.
+func (g ginClientWriter) Commit(status int) error {
+	g.c.Writer.WriteHeader(status)
+	return nil
+}
+
+func (g ginClientWriter) Write(p []byte) (int, error) { return g.c.Writer.Write(p) }
+
+func (g ginClientWriter) Flush() error { return FlushAndCheckError(g.c) }
+
+// UpstreamHeadersToCopy is the subset of an upstream's response headers that
+// may be passed on to the caller.
+//
+// A provider's headers can name the provider, the account, or the model behind
+// an alias, so the allowlist is the whole point. It is a plain filter, separate
+// from the writing, so it can be checked on its own — before this split the
+// only way to test the policy was to run a whole relay through it.
+func UpstreamHeadersToCopy(header http.Header) http.Header {
+	var out http.Header
+	for k, vv := range header {
+		if !allowedUpstreamHeaders[k] {
+			continue
+		}
+		if out == nil {
+			out = http.Header{}
+		}
+		for _, v := range vv {
+			out.Add(k, v)
+		}
+	}
+	return out
+}
+
 // CopyUpstreamHeaders copies the headers in the allowlist from the upstream
 // response into the gin response. This uses an allowlist strategy to prevent
 // provider-internal information (organization IDs, server version,
 // diagnostic headers, rate-limit status, Set-Cookie, etc.) from leaking to
 // tenants. Relay-layer compatibility headers (X-Provider, X-Request-Id,
 // x-ratelimit-*, etc.) are injected by each handler itself and are never
-// forwarded from upstream. Uses Add rather than Set to preserve the full
-// semantics of multi-value headers (such as multiple Cache-Control
-// directives).
+// forwarded from upstream.
+//
+// It ADDS rather than replaces, which is not what ClientWriter.Inject does and
+// is deliberate: this is a merge of what the upstream said on top of whatever
+// the relay has already set for itself. A stream sets Cache-Control: no-cache
+// before this runs, and the upstream's own directives are meant to join it, not
+// evict it. Injecting would drop ours.
 func CopyUpstreamHeaders(c *gin.Context, header http.Header) {
-	for k, vv := range header {
-		if !allowedUpstreamHeaders[k] {
-			continue
-		}
+	for k, vv := range UpstreamHeadersToCopy(header) {
 		for _, v := range vv {
 			c.Writer.Header().Add(k, v)
 		}

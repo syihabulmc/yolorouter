@@ -309,7 +309,7 @@ func TestIRNonStreamRelay_2xxWriteErrorClassifiedAsClientWrite(t *testing.T) {
 	}
 
 	buf := &recordingBuf{}
-	usage, err := protocols.IRNonStreamRelay(c, resp,
+	usage, err := protocols.IRNonStreamRelay(protocols.NewGinClientWriter(c), resp,
 		stubResponseDecoder{usage: protocols.IRUsage{PromptTokens: 5, CompletionTokens: 3, TotalTokens: 8}},
 		stubResponseEncoder{}, buf, nil)
 	require.Error(t, err)
@@ -337,7 +337,7 @@ func TestIRNonStreamRelay_NonStreamSuccessWriteSucceeds(t *testing.T) {
 	}
 
 	buf := &recordingBuf{}
-	usage, err := protocols.IRNonStreamRelay(c, resp,
+	usage, err := protocols.IRNonStreamRelay(protocols.NewGinClientWriter(c), resp,
 		stubResponseDecoder{usage: protocols.IRUsage{PromptTokens: 5, CompletionTokens: 3, TotalTokens: 8}},
 		stubResponseEncoder{}, buf, nil)
 	require.NoError(t, err)
@@ -365,7 +365,7 @@ func TestIRNonStreamRelay_NonSuccessErrorBodyWriteErrorClassifiedAsClientWrite(t
 	}
 
 	buf := &recordingBuf{}
-	usage, err := protocols.IRNonStreamRelay(c, resp, stubResponseDecoder{}, stubResponseEncoder{}, buf, nil)
+	usage, err := protocols.IRNonStreamRelay(protocols.NewGinClientWriter(c), resp, stubResponseDecoder{}, stubResponseEncoder{}, buf, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, protocols.ErrClientWrite),
 		"a downstream Write failure while forwarding an error body must be classified via protocols.ErrClientWrite, got %v", err)

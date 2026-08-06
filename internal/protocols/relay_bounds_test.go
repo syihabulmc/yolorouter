@@ -52,7 +52,7 @@ func TestIRNonStreamRelay_BoundsResponseBody(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	_, err := IRNonStreamRelay(c, resp, fakeResponseDecoder{}, fakeResponseEncoder{}, nil, nil)
+	_, err := IRNonStreamRelay(NewGinClientWriter(c), resp, fakeResponseDecoder{}, fakeResponseEncoder{}, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error for an upstream body exceeding maxIRResponseBytes, got nil")
 	}

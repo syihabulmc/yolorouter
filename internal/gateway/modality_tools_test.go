@@ -44,8 +44,12 @@ func TestCommitPutsTheStatusOnTheWire(t *testing.T) {
 	if w.Code != 201 {
 		t.Errorf("the caller received status %d, want 201: the status never left the buffer", w.Code)
 	}
-	if !r.rc.firstByteSent {
-		t.Error("firstByteSent = false after the status went out")
+	// The exchange's first-byte-sent flag is deliberately untouched: it doubles
+	// as the audit record's "delivered" field, which today only the streaming
+	// paths ever set. Committing here must not change what a non-streaming
+	// request reports while its code is being moved.
+	if r.rc.firstByteSent {
+		t.Error("firstByteSent = true after Commit; that flag belongs to whoever needs it, not to committing")
 	}
 }
 
