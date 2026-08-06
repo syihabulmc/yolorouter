@@ -48,6 +48,8 @@ const NON_CHAT_HINTS = [
   "image", "vision", "video", "audio", "tts", "asr", "voice",
   "embed", "rerank", "vl-", "-vl", "ocr", "speech", "dalle", "sora",
   "hailuo", // MiniMax's image/video family, billed per asset not per token
+  "omni",   // multimodal (text+audio+video); per-token text price isn't its real billing unit
+  "realtime", // streaming voice / live-translation realtime SKUs, not chat completions
 ];
 
 function looksLikeChatModel(name) {
