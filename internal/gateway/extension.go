@@ -257,6 +257,20 @@ type exchangeSink struct {
 	batches [][]fact.Fact
 }
 
+// forObserver returns a sink with the same provenance but its own reports.
+//
+// The provenance — which attempt, which candidate, which provider — is a
+// property of where the exchange stands, so it is shared. The batches are not:
+// resolving a sink folds everything reported through it, and one observer must
+// not be answerable for what another reported, nor for what the kernel reported
+// before either of them ran.
+func (s *exchangeSink) forObserver(name string) *exchangeSink {
+	clone := *s
+	clone.reporter = name
+	clone.batches = nil
+	return &clone
+}
+
 // newExchangeSink builds a sink whose provenance describes where the exchange
 // currently stands.
 //
@@ -395,6 +409,168 @@ func isolate(up fact.Upstream) fact.Upstream {
 	return out
 }
 
+// DeliveryObserverOf sees how one exchange ended — including, and especially,
+// when it ended well.
+//
+// This is the success-side counterpart to UpstreamErrorObserverOf, and it is
+// one shape rather than two because of where it runs. A successful streaming
+// response has no complete body anybody could be handed: the bytes are
+// forwarded as they arrive, and what a capability wants from them — the tokens
+// billed, whether the answer finished, what an upstream charged extra for —
+// arrives at the end. A successful non-streaming response has a body, but the
+// same facts are the ones worth reporting. Both now arrive at the single point
+// where a delivery settles, carrying what the attempt reported, so one
+// observation point covers what would otherwise be a streaming shape and a
+// buffered shape with two sets of call sites to keep in step.
+//
+// It observes and cannot steer. By the time it runs the caller has been served
+// and the request is over, so NO effect a report can carry could be acted on —
+// not a Loop, and not the five others either. Reporting any of them is a
+// programming error and is refused loudly rather than ignored quietly.
+type DeliveryObserverOf[V any] interface {
+	Name() string
+	ObserveDelivery(ctx context.Context, view V, d fact.Delivery, sink fact.Sink)
+}
+
+// deliveryObserver is the kernel-side, view-erased form.
+//
+// registeredName is a field rather than a method because it is read on the
+// settlement path, where calling into the observer for it would be one more
+// unguarded call into third-party code. Asked once at registration, it is also
+// asked at a time when a panic is a startup failure rather than a request that
+// loses its row.
+type deliveryObserver struct {
+	registeredName string
+	observe        func(ctx context.Context, e *Exchange, d fact.Delivery, sink fact.Sink)
+}
+
+// RegisterDeliveryObserver wires a delivery observer into the service.
+func RegisterDeliveryObserver[V any](s *Service, o DeliveryObserverOf[V], bind func(*Exchange) V) {
+	s.deliveryObservers = append(s.deliveryObservers, deliveryObserver{
+		registeredName: o.Name(),
+		observe: func(ctx context.Context, e *Exchange, d fact.Delivery, sink fact.Sink) {
+			o.ObserveDelivery(ctx, bind(e), d, sink)
+		},
+	})
+}
+
+// observeDelivery runs every registered observer over the delivery that ended
+// the request.
+//
+// The sink is the settlement's own, so what an observer reports lands on the
+// attempt the delivery describes rather than on whichever one the numbering
+// would default to.
+//
+// Nothing an observer reports here can be acted on. The caller has been served,
+// the status is on the wire, and the row is about to be written — a Loop effect
+// would mean settling the same request twice, and a status effect would name a
+// code nobody can still be shown. So the verdict is computed and refused rather
+// than never computed: a report that cannot be honoured is a mistake somebody
+// should hear about, and dropping it silently is how it stays a mistake. The
+// test is whether a decision was DEFINED at all, not whether it steers, because
+// every one of the six effects is equally unhonourable at this point.
+//
+// A panic in an observer must not take the settlement with it. By the time this
+// runs the caller already has their answer; letting a third-party observation
+// unwind into the request's own panic recovery would turn a request that was
+// served correctly into a recorded 500 with no usage and no cost — losing the
+// row for the one exchange that went fine. Same reasoning as the recorders,
+// same guard.
+func (s *Service) observeDelivery(rc *Exchange, d fact.Delivery, sink *exchangeSink) {
+	if len(s.deliveryObservers) == 0 {
+		return
+	}
+	ctx, done := observationContext(rc)
+	defer done()
+	for _, o := range s.deliveryObservers {
+		// Each observer reports through its own sink. The other extension-point
+		// loops share one and restamp its reporter, which is fine for them —
+		// they resolve nothing, or resolve a sink the kernel has not reported
+		// through. This one does both: it is handed the settlement's sink, and
+		// it reads a verdict back out. Sharing it would fold whatever the kernel
+		// had already reported into the check below, blaming an observer for an
+		// effect no observer asked for, and would leave the last observer's name
+		// stamped on it for whatever the kernel reported next.
+		//
+		// The name comes from the registration record, not from the observer.
+		// Name() is capability code like any other: asking for it outside the
+		// guard puts an unprotected call ahead of the protected one, and asking
+		// again inside the recovery would re-enter the code that just failed.
+		own := sink.forObserver(o.registeredName)
+		func() {
+			defer func() {
+				if v := recover(); v != nil {
+					logger.Error("gateway: delivery observer panicked",
+						zap.String("observer", o.registeredName),
+						zap.String("request_id", rc.requestID),
+						zap.Any("panic", v))
+				}
+			}()
+			o.observe(ctx, rc, isolateDelivery(d), own)
+		}()
+		if v := own.resolve(); v.Defined {
+			// Attributed by observer name rather than by Kind. loopFrom is only
+			// filled when a Loop effect wins the fold, so a report that steers
+			// nothing — which is most of what can be reported here — would name
+			// the zero Kind, which is documented as never reported at all.
+			fields := []zap.Field{
+				zap.String("request_id", rc.requestID),
+				zap.String("observer", o.registeredName),
+			}
+			if v.Loop != LoopNone {
+				fields = append(fields, zap.String("reported_kind", v.loopFrom.String()))
+			}
+			logger.Error("gateway: a delivery observer reported an effect on a settled request", fields...)
+		}
+	}
+}
+
+// observationContext is the context an observation of a finished exchange runs
+// under. It is deliberately NOT the request's own.
+//
+// An observation runs after the caller has been served, and what it is for is
+// accounting: recording what an upstream charged, on an exchange that is over.
+// The request context is cancelled the moment the caller hangs up — and a
+// caller hanging up mid-stream is exactly the case where an upstream has
+// already done, and charged for, its work. Inheriting that cancellation would
+// make every ctx-aware write inside an observer fail with context canceled
+// precisely when there is most to record.
+//
+// The deadline replaces the cancellation it drops rather than adding a new
+// constraint. Observers run inline, ahead of the audit row and the release of
+// whatever admissions are still held, so one that never returns holds those
+// open indefinitely. This bounds a ctx-aware observer; one that ignores its
+// context entirely still blocks, and no deadline here can change that — the
+// only thing that would is running observers off this goroutine, which would
+// trade a bounded stall for reports arriving after the row they belong to.
+func observationContext(rc *Exchange) (context.Context, context.CancelFunc) {
+	parent := rc.requestCtx
+	if parent == nil {
+		// Reached only from a caller that never established a request context.
+		parent = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), observationBudget)
+}
+
+// observationBudget is how long the observers of one exchange get, in total, to
+// do their recording before settlement stops waiting on their context.
+const observationBudget = 5 * time.Second
+
+// isolateDelivery returns a copy whose usage an observer cannot write through.
+//
+// Delivery travels by value, but Usage is a pointer, and it is the pointer
+// settlement is about to bill from. An observer that adjusted the counts it was
+// shown — a surcharge added in the obvious place — would change what the caller
+// is charged from a shape that is documented as unable to change anything, and
+// it would change it for every observer after it too.
+func isolateDelivery(d fact.Delivery) fact.Delivery {
+	if d.Usage != nil {
+		usage := *d.Usage
+		d.Usage = &usage
+	}
+	return d
+}
+
 // AdmissionOf gates one exchange before any upstream work, and releases
 // whatever it took once the exchange is over.
 //
@@ -518,8 +694,26 @@ func (s *Service) releaseAdmissions(ctx context.Context, rc *Exchange, held []he
 	}
 	sink := newExchangeSink(rc)
 	for i := len(held) - 1; i >= 0; i-- {
-		sink.reporter = held[i].by.name()
-		held[i].by.release(ctx, rc, held[i].ticket, out, sink)
+		name := held[i].by.name()
+		sink.reporter = name
+		// Guarded like the other places capability code runs, and for a sharper
+		// reason than most. This is a defer on the way out, after the caller has
+		// been served: a panic here escapes into the HTTP framework's own
+		// recovery, which knows nothing about the tickets still held. Every
+		// reversal that had not run yet is skipped — the money one of them was
+		// holding stays reserved, and the request that was served correctly
+		// takes the row down with it.
+		func() {
+			defer func() {
+				if v := recover(); v != nil {
+					logger.Error("gateway: an admission panicked while releasing",
+						zap.String("admission", name),
+						zap.String("request_id", rc.requestID),
+						zap.Any("panic", v))
+				}
+			}()
+			held[i].by.release(ctx, rc, held[i].ticket, out, sink)
+		}()
 	}
 }
 

@@ -243,11 +243,17 @@ const (
 // bodies stored has to say so, which is the safe direction to be wrong in: a
 // new modality that forgets this logs too little, rather than writing megabytes
 // of binary audio into a text column.
+//
+// NOTE: nothing in the kernel reads a LogPolicy yet. The bodies still reach the
+// audit row raw, through the recording capability's own view of the exchange,
+// so every field below states an intention rather than causing an effect. The
+// wiring lands with the modalities that need it — see the note on
+// orderedPayload's LogPolicy for why it is not done here.
 type LogPolicy struct {
 	// Store lists the bodies that may be persisted at all. Anything absent is
 	// dropped before it reaches storage.
 	Store map[BodyKind]bool
-	// MaxBytes caps each stored body. Zero means the kernel's own limit.
+	// MaxBytes caps each stored body. Zero leaves the cap to whoever stores it.
 	MaxBytes int64
 }
 

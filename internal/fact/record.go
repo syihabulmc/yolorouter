@@ -1,6 +1,9 @@
 package fact
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 // Record is an accounting observation. It never moves the relay loop; it exists
 // so settlement and the audit trail can describe what happened.
@@ -53,6 +56,28 @@ type UsageReported struct {
 	CacheRead             int
 	CacheWrite            int
 	CacheIncludedInPrompt bool
+	// Incoherent marks counts that contradict themselves — a negative token
+	// count, a cache read larger than the prompt it was read from.
+	//
+	// It travels WITH the counts rather than being re-derived downstream,
+	// because the evidence does not survive: a stream folds every frame into
+	// one accumulated record, so the impossible frame that condemned it is
+	// gone by the time anything could look again. A consumer that re-judges
+	// what it receives sees only the plausible-looking remainder and prices it.
+	//
+	// Unknown is not zero. A marked record must not be billed at all — not
+	// billed as free, which is a different claim and one a dashboard adds up.
+	Incoherent bool
+	// WebSearchCount is how many searches the provider performed on its own
+	// initiative during the exchange. Not a token count and not priced here —
+	// it is carried because it is the only evidence that they happened.
+	//
+	// Providers charge for these separately, and the number arrives once, in
+	// the usage the response ends with. A capability that adds the surcharge
+	// sees the exchange after it has been delivered; a quantity dropped on the
+	// way to that point is one nobody downstream can re-derive, because the
+	// frames it came from are gone.
+	WebSearchCount int
 }
 
 func (UsageReported) RecordName() string { return "usage_reported" }
@@ -77,6 +102,32 @@ const (
 	UnitSecond
 )
 
+// String renders a unit for persistence and for logs.
+//
+// Next to the constants on purpose: a switch over them living in whichever
+// package happened to need a name is a switch nobody updates when a unit is
+// added here. The strings are stored, so they must not change once shipped —
+// which is also why the numeric values are not stored, since inserting a unit
+// renumbers every one after it.
+//
+// An unrecognised unit renders as its number rather than falling back to a
+// plausible name. A new unit persisted as "token" is a wrong value that reads
+// as a right one; "unit_4" is obviously something this build did not know.
+func (u Unit) String() string {
+	switch u {
+	case UnitToken:
+		return "token"
+	case UnitCharacter:
+		return "character"
+	case UnitImage:
+		return "image"
+	case UnitSecond:
+		return "second"
+	default:
+		return "unit_" + strconv.Itoa(int(u))
+	}
+}
+
 // UsageSource records where the numbers came from. An upstream-reported count
 // and one the gateway derived from the request are both legitimate, but an
 // audit needs to tell them apart.
@@ -87,6 +138,22 @@ const (
 	UsageFromUpstream
 	UsageFromRequest
 )
+
+// String renders a usage source for persistence, under the same rule as Unit:
+// stored as a name, and an unrecognised one shows as its number rather than
+// borrowing a name that would read as deliberate.
+func (s UsageSource) String() string {
+	switch s {
+	case UsageAbsent:
+		return "absent"
+	case UsageFromUpstream:
+		return "upstream"
+	case UsageFromRequest:
+		return "request"
+	default:
+		return "source_" + strconv.Itoa(int(s))
+	}
+}
 
 // TokensSaved reports a successful input compression pass.
 type TokensSaved struct {

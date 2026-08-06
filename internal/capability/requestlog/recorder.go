@@ -162,6 +162,57 @@ type summary struct {
 	overflow []overflowEntry
 }
 
+// usageNotInColumns is the part of a usage record this row cannot hold.
+//
+// A record type declared here rather than a bare map, for the same reason the
+// vocabulary requires it everywhere else: a renamed field has to be a compile
+// error, not a value that silently stops being written.
+//
+// It lists EVERY field of a usage record that has no column, not only the ones
+// somebody happened to need. Four token counts have columns; what those counts
+// count, where they came from, whether they contradict themselves, the total
+// the upstream stated, and the tally of tool calls it ran on its own do not.
+// The guarantee this row is written under is that the worst case is a fact
+// without a column of its own — never a fact that disappeared.
+type usageNotInColumns struct {
+	fact.Base
+	Unit                  string `json:"unit"`
+	Source                string `json:"source"`
+	Total                 int    `json:"total,omitempty"`
+	CacheIncludedInPrompt bool   `json:"cache_included_in_prompt,omitempty"`
+	Incoherent            bool   `json:"incoherent,omitempty"`
+	WebSearchCount        int    `json:"web_search_count,omitempty"`
+}
+
+func (usageNotInColumns) RecordName() string { return "usage_not_in_columns" }
+
+// usageResidue reports what a usage record carries that this row has no column
+// for, or nil when the columns hold all of it.
+//
+// Nil for the ordinary case — an upstream-reported, coherent, token-counted
+// exchange with no provider-side tool calls and a total the columns already
+// imply — so the common row does not carry a redundant second copy of numbers
+// that are already in their own columns.
+func usageResidue(rec fact.UsageReported) fact.Record {
+	ordinary := rec.Unit == fact.UnitToken &&
+		rec.Source == fact.UsageFromUpstream &&
+		rec.WebSearchCount == 0 &&
+		!rec.Incoherent &&
+		!rec.CacheIncludedInPrompt &&
+		rec.Total == rec.Prompt+rec.Completion+rec.CacheRead+rec.CacheWrite
+	if ordinary {
+		return nil
+	}
+	return usageNotInColumns{
+		Unit:                  rec.Unit.String(),
+		Source:                rec.Source.String(),
+		Total:                 rec.Total,
+		CacheIncludedInPrompt: rec.CacheIncludedInPrompt,
+		Incoherent:            rec.Incoherent,
+		WebSearchCount:        rec.WebSearchCount,
+	}
+}
+
 // overflowEntry is one unrecognised record, kept under its stable name so a
 // build that later grows a column for it can find what was already collected.
 type overflowEntry struct {
@@ -190,6 +241,23 @@ func summarise(tl fact.Timeline) summary {
 			s.outputTokens = rec.Completion
 			s.cacheWriteTokens = rec.CacheWrite
 			s.cacheReadTokens = rec.CacheRead
+			// Recognising a record is not the same as having a column for all
+			// of it. This row holds four token counts; the record also carries
+			// what those counts COUNT, and a tally of provider-side tool calls
+			// that is not a token count at all and is charged separately.
+			//
+			// Without this, being recognised is worse than being unknown: the
+			// default branch below would have kept the whole record, and the
+			// case above quietly drops whatever it did not copy. The residue
+			// goes to the same place an unknown record would, so a build that
+			// later grows a column can find what was already collected.
+			if residue := usageResidue(rec); residue != nil {
+				s.overflow = append(s.overflow, overflowEntry{
+					Attempt: e.Attempt,
+					Name:    residue.RecordName(),
+					Record:  residue,
+				})
+			}
 		case fact.CostComputed:
 			s.costKnown = rec.Known
 			s.costMicros = rec.Micros

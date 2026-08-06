@@ -407,7 +407,7 @@ func TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody(t *testing
 // the first candidate's upstream never emits a single event. Before the fix,
 // protocols.IRStreamRelay committed the SSE response headers (200 +
 // text/event-stream) unconditionally before reading any upstream bytes, and
-// the dispatch layer called rc.MarkFirstByteSent() before invoking the relay at
+// the dispatch layer called rc.markFirstByteSent() before invoking the relay at
 // all — so a pre-first-event failure (here, an upstream that returns 200
 // with a completely empty body) was indistinguishable from a genuine
 // mid-stream failure and could never fail over, unlike the same-protocol

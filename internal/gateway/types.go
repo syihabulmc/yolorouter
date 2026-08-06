@@ -195,11 +195,23 @@ type Exchange struct {
 	streamBodyBytesWritten int64
 }
 
-// MarkFirstByteSent flips FirstByteSent true under the lock. Returns whether
+// markFirstByteSent flips firstByteSent true under the lock. Returns whether
 // this call was the one that flipped it — the stream path uses that to decide
 // whether a mid-stream upstream error can still switch (no) or must be
 // surfaced inline (yes).
-func (rc *Exchange) MarkFirstByteSent() bool {
+//
+// Unexported because nothing outside this package calls it, and what it sets is
+// worth more than most: `Delivered: rc.firstByteSent` is what the admissions are
+// released against, so a caller that flipped it would turn off a refund.
+//
+// This narrows the surface; it does not close it. Capabilities reach an Exchange
+// through a bind function they write themselves, and a bind that hands over the
+// Exchange itself reaches every exported method on it — SetResponseBody and the
+// other body mutators among them, which stay exported because the protocol layer
+// calls them. Nothing here can prevent that. What keeps a capability honest is
+// the narrow view it binds, which is a property of the assembly and not of this
+// file.
+func (rc *Exchange) markFirstByteSent() bool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	if rc.firstByteSent {
@@ -391,6 +403,12 @@ type Usage struct {
 	// used to drop the field and the billing gate could not re-derive the
 	// verdict. Not serialized — internal accounting only.
 	ReasoningTokens int `json:"-"`
+	// WebSearchCount carries protocols.IRUsage.WebSearchCount across the bridge.
+	// It is not a token count and nothing prices it, but it is the only record
+	// that the provider ran searches it charges for, and the frames it was read
+	// from do not survive the delivery. Not serialized — internal accounting
+	// only.
+	WebSearchCount int `json:"-"`
 }
 
 // beginUpstreamAttempt drops whatever the previous send left on the exchange,

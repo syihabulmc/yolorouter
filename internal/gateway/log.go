@@ -354,6 +354,11 @@ func (s *Service) reportUsage(rc *Exchange, usage *Usage, sink fact.Sink) {
 		Completion: usage.CompletionTokens,
 		CacheRead:  usage.CacheReadTokens,
 		CacheWrite: usage.CacheWriteTokens,
+		// Carried even though nothing here prices it. This is the row that gets
+		// persisted, and the searches are stated once, in a response body that
+		// is gone by the time anyone could ask again. A record that omits them
+		// is a record that says none happened.
+		WebSearchCount: usage.WebSearchCount,
 	})
 }
 
@@ -377,7 +382,7 @@ func attemptsRecord(rc *Exchange) fact.AttemptsRecorded {
 // delivery about to be judged impossible would otherwise leave a "success" row
 // behind it. Checking again here would be harmless to the verdict and would
 // record the observation twice, which is one audit fact too many.
-func (s *Service) settleCheckedDelivery(c *gin.Context, rc *Exchange, d fact.Delivery, start time.Time) attemptResult {
+func (s *Service) settleCheckedDelivery(c *gin.Context, rc *Exchange, d fact.Delivery, sink *exchangeSink, start time.Time) attemptResult {
 	if d.Verdict != fact.VerdictSettled {
 		// Nothing reached the caller, so the chain continues and there is
 		// nothing to settle yet.
@@ -391,7 +396,7 @@ func (s *Service) settleCheckedDelivery(c *gin.Context, rc *Exchange, d fact.Del
 		WriteIngressError(c, rc.ingress, http.StatusInternalServerError, errTypeServer,
 			"internal error", rc.requestID)
 	}
-	s.settleChecked(rc, d, start)
+	s.settleChecked(rc, d, sink, start)
 	return attemptSuccess
 }
 
@@ -408,8 +413,9 @@ func (s *Service) settleCheckedDelivery(c *gin.Context, rc *Exchange, d fact.Del
 // the loop had already recorded everything it tried. A settlement that follows
 // its own append belongs in settleAfterAttempt.
 func (s *Service) settle(rc *Exchange, d fact.Delivery, start time.Time) {
-	s.checkAndNote(rc, &d, newExchangeSink(rc))
-	s.settleChecked(rc, d, start)
+	sink := newExchangeSink(rc)
+	s.checkAndNote(rc, &d, sink)
+	s.settleChecked(rc, d, sink, start)
 }
 
 // settleAfterAttempt settles a request whose attempt record was appended
@@ -422,15 +428,17 @@ func (s *Service) settle(rc *Exchange, d fact.Delivery, start time.Time) {
 // ends there — so the number the default produces belongs to an attempt that
 // never runs.
 func (s *Service) settleAfterAttempt(rc *Exchange, d fact.Delivery, start time.Time) {
-	s.checkAndNote(rc, &d, newExchangeSink(rc).forRecordedAttempt())
-	s.settleChecked(rc, d, start)
+	sink := newExchangeSink(rc).forRecordedAttempt()
+	s.checkAndNote(rc, &d, sink)
+	s.settleChecked(rc, d, sink, start)
 }
 
 // settleChecked settles a delivery that has already been through checkAndNote.
 // Callers that must read the verdict AFTER the check — because the check can
 // change it — use this instead of settle, so the delivery is not checked and
 // recorded twice.
-func (s *Service) settleChecked(rc *Exchange, d fact.Delivery, start time.Time) {
+func (s *Service) settleChecked(rc *Exchange, d fact.Delivery, sink *exchangeSink, start time.Time) {
+	s.observeDelivery(rc, d, sink)
 	s.logSettlement(rc, d)
 	s.finalize(rc, usageFromReport(d.Usage), d.BillingStatus, d.FailReason, start)
 }

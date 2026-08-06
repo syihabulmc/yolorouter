@@ -261,6 +261,8 @@ func usageReportOf(u *Usage) *fact.UsageReported {
 		CacheRead:             u.CacheReadTokens,
 		CacheWrite:            u.CacheWriteTokens,
 		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
+		Incoherent:            u.Invalid,
+		WebSearchCount:        u.WebSearchCount,
 	}
 }
 

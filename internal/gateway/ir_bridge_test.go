@@ -97,6 +97,38 @@ func TestIRUsageToUsage(t *testing.T) {
 			in:   &protocols.IRUsage{CompletionTokens: 50},
 			want: &Usage{CompletionTokens: 50},
 		},
+		{
+			// An exchange can spend money without spending tokens. The provider
+			// runs searches on its own initiative and charges for them
+			// separately; the count arrives once, in the usage the response
+			// ends with. Judging emptiness by the token fields alone drops the
+			// record whole, and nothing downstream can re-derive the count
+			// because the body it was read from is gone by then.
+			name: "searches with no tokens is usage, not an empty record",
+			in:   &protocols.IRUsage{WebSearchCount: 3},
+			want: &Usage{WebSearchCount: 3},
+		},
+		{
+			// Same shape, different line: reasoning tokens are their own
+			// dimension and were dropped by the same test.
+			name: "reasoning with no other counts is usage too",
+			in:   &protocols.IRUsage{ReasoningTokens: 12},
+			want: &Usage{ReasoningTokens: 12},
+		},
+		{
+			// An impossible record that states no quantity at all is still
+			// nothing reported. The verdict has nothing to attach to: there are
+			// no counts to withhold from pricing and none to show an operator,
+			// so admitting it would only turn "could not be priced" into
+			// "priced at zero" — a claim a dashboard adds up.
+			//
+			// The verdict matters when it arrives WITH counts, and that case is
+			// covered where it can actually go wrong: the delivery round trip,
+			// in the observer file.
+			name: "an impossible record stating no quantity is still nothing reported",
+			in:   &protocols.IRUsage{Invalid: true},
+			want: nil,
+		},
 		// Regression for the cache-inclusion billing bug: computeCost
 		// (log.go) does PromptTokens - CacheReadTokens, assuming OpenAI
 		// semantics where PromptTokens already includes cache-read. The

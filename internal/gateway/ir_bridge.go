@@ -97,7 +97,24 @@ func irUsageToUsage(u *protocols.IRUsage) *Usage {
 	if u == nil {
 		return nil
 	}
-	if u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0 {
+	// "Nothing was reported" is asked of every dimension the upstream can state
+	// a quantity in, not only the three token counts. Searches the provider ran
+	// on its own initiative and reasoning tokens are each their own line, and a
+	// record carrying one of them and no tokens was being dropped whole: the
+	// usage became nil, no observer was told anything, and the number could not
+	// be re-derived afterwards because the body it was read from is gone.
+	//
+	// Deliberately NOT protocols.HasAnyUsage, which looks like the same
+	// question and is not. That predicate answers "is there anything worth
+	// putting back on the wire", so it folds in the cache counts and returns
+	// false for a record judged impossible. Both of those belong to billing:
+	// admitting cache-only records here would start pricing a shape this gate
+	// used to drop, and treating an impossible record as absent would erase the
+	// verdict instead of carrying it. Whether an upstream SAID something and
+	// whether what it said can be BILLED are different questions, and this one
+	// is the first.
+	if u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0 &&
+		u.ReasoningTokens == 0 && u.WebSearchCount == 0 {
 		return nil
 	}
 	return &Usage{
@@ -109,6 +126,7 @@ func irUsageToUsage(u *protocols.IRUsage) *Usage {
 		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
 		Invalid:               u.Invalid,
 		ReasoningTokens:       u.ReasoningTokens,
+		WebSearchCount:        u.WebSearchCount,
 	}
 }
 
@@ -127,5 +145,6 @@ func (u Usage) toIRUsage() protocols.IRUsage {
 		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
 		Invalid:               u.Invalid,
 		ReasoningTokens:       u.ReasoningTokens,
+		WebSearchCount:        u.WebSearchCount,
 	}
 }

@@ -127,6 +127,12 @@ type Service struct {
 	// first.
 	upstreamErrorObservers []upstreamErrorObserver
 
+	// deliveryObservers see how the exchange ended, successfully or not. This
+	// is where an observation drawn from a SERVED response lands: the streaming
+	// and non-streaming paths both settle here, so there is one call site
+	// rather than one per response shape.
+	deliveryObservers []deliveryObserver
+
 	// egressRewriters rewrite the outbound body, ordered by stage at
 	// registration so no per-request sort is needed.
 	egressRewriters []egressRewriter
@@ -753,6 +759,8 @@ func usageFromReport(u *fact.UsageReported) *Usage {
 		CacheReadTokens:       u.CacheRead,
 		CacheWriteTokens:      u.CacheWrite,
 		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
+		Invalid:               u.Incoherent,
+		WebSearchCount:        u.WebSearchCount,
 	}
 }
 
@@ -832,7 +840,8 @@ func (s *Service) recordAndSettle(c *gin.Context, rc *Exchange, adm admitted, d 
 	// because the reason only exists on the substitute. An operator opening
 	// that row to find out what happened is told nothing at all, which is
 	// worse than being told the wrong thing.
-	s.checkAndNote(rc, &d, newExchangeSink(rc))
+	sink := newExchangeSink(rc)
+	s.checkAndNote(rc, &d, sink)
 	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk,
 		upstreamStatus, attemptOutcomeFor(d, rc.isStream), attemptNoteFor(d)))
 	if d.Verdict == fact.VerdictSettled {
@@ -846,7 +855,7 @@ func (s *Service) recordAndSettle(c *gin.Context, rc *Exchange, adm admitted, d 
 		// leave them lying around for a later settlement to pick up.
 		d = d.WithUsage(adm.payload.FinalizeUsage(d))
 	}
-	return s.settleCheckedDelivery(c, rc, d, start)
+	return s.settleCheckedDelivery(c, rc, d, sink, start)
 }
 
 // redactedFailure renders a transport-layer failure for the audit trail with

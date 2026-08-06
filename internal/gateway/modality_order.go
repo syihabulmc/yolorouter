@@ -325,10 +325,18 @@ func (p *orderedPayload) FinalizeUsage(d fact.Delivery) *fact.UsageReported {
 	return p.inner.FinalizeUsage(d)
 }
 
-// LogPolicy and SanitizeForLog run last, after the request is settled. They are
-// unordered for the same reason NormalizeUpstreamError is: recording happens
+// LogPolicy and SanitizeForLog belong last, after the request is settled. They
+// are unordered for the same reason NormalizeUpstreamError is: recording happens
 // whatever else went wrong, and a payload that refused to describe its own
 // bodies would leave the audit row unable to say anything about them.
+//
+// NOTE: nothing in the kernel calls either one yet. The bodies still reach the
+// audit row raw, through the recording capability's own view of the exchange,
+// and the answers a payload gives here are not consulted on the way. That is
+// not an oversight in this file — routing them through the modality changes
+// what every capability is shown, and it lands with the modalities that
+// actually need it. Until then these two are declared, ordered, and unread, and
+// no test below can pin behaviour that has no call site.
 func (p *orderedPayload) LogPolicy() LogPolicy {
 	release, ok := p.enter("LogPolicy")
 	defer release()

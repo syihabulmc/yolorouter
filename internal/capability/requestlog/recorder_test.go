@@ -49,7 +49,7 @@ func (unfamiliarRecord) RecordName() string { return "unfamiliar" }
 // turns a missing column into something an operator can find.
 func TestUnrecognisedRecordsSurviveIntoOverflow(t *testing.T) {
 	var tl fact.Timeline
-	tl.Append(fact.Entry{Attempt: 1, Record: fact.UsageReported{Prompt: 7, Completion: 3}})
+	tl.Append(fact.Entry{Attempt: 1, Record: fact.UsageReported{Unit: fact.UnitToken, Source: fact.UsageFromUpstream, Prompt: 7, Completion: 3, Total: 10}})
 	tl.Append(fact.Entry{Attempt: 1, Record: unfamiliarRecord{Detail: "kept"}})
 	tl.Append(fact.Entry{Attempt: 1, Record: fact.UsageIncoherent{Reason: "contradictory"}})
 
@@ -81,6 +81,101 @@ func TestUnrecognisedRecordsSurviveIntoOverflow(t *testing.T) {
 	}
 	if !strings.Contains(encoded, "unfamiliar") || !strings.Contains(encoded, "kept") {
 		t.Errorf("encoded overflow lost the record's content: %s", encoded)
+	}
+}
+
+// TestARecognisedRecordDoesNotSwallowWhatThisRowCannotHold is the other half of
+// the openness contract, and the easier half to lose.
+//
+// The unrecognised case above is loud by construction — nothing knows the type,
+// so everything is kept. A recognised type is the dangerous one: the case
+// arm copies the fields that have columns and whatever it did not name is gone,
+// silently, with no default branch left to catch it. Being recognised then
+// costs MORE than being unknown.
+//
+// Web searches are the live instance. The provider runs them on its own
+// initiative and charges for them separately from tokens, states the count once
+// in the usage the response ends with, and this row has no column for it. If
+// the case arm eats the record, the count reaches the timeline and dies there —
+// and nothing can re-derive it, because the response body is long gone.
+func TestARecognisedRecordDoesNotSwallowWhatThisRowCannotHold(t *testing.T) {
+	var tl fact.Timeline
+	tl.Append(fact.Entry{Attempt: 1, Record: fact.UsageReported{
+		Unit: fact.UnitToken, Source: fact.UsageFromUpstream,
+		Prompt: 7, Completion: 3, Total: 10, WebSearchCount: 4,
+	}})
+
+	s := summarise(tl)
+
+	if s.inputTokens != 7 || s.outputTokens != 3 {
+		t.Errorf("the columns lost their counts: input=%d output=%d", s.inputTokens, s.outputTokens)
+	}
+	if len(s.overflow) != 1 {
+		t.Fatalf("want the uncolumned part kept, got %d entries: %+v", len(s.overflow), s.overflow)
+	}
+	encoded := encodeOverflow(s.overflow, "req-searches")
+	if !strings.Contains(encoded, "web_search_count") || !strings.Contains(encoded, "4") {
+		t.Errorf("the search count did not reach the stored row: %s", encoded)
+	}
+}
+
+// TestATokenCountedExchangeStoresNoResidue keeps the ordinary row clean. The
+// residue above exists for what the columns cannot hold; a plain token exchange
+// is entirely held by them, and duplicating those numbers into the overflow
+// would make every row carry a second copy of its own token counts.
+func TestATokenCountedExchangeStoresNoResidue(t *testing.T) {
+	var tl fact.Timeline
+	tl.Append(fact.Entry{Attempt: 1, Record: fact.UsageReported{
+		Unit: fact.UnitToken, Source: fact.UsageFromUpstream,
+		Prompt: 7, Completion: 3, Total: 10,
+	}})
+
+	if s := summarise(tl); len(s.overflow) != 0 {
+		t.Errorf("an ordinary token exchange stored residue: %+v", s.overflow)
+	}
+}
+
+// TestAnExchangeCountedInSomethingOtherThanTokensSaysSo covers the second thing
+// the columns cannot express. Four columns named "tokens" hold the counts but
+// not what was counted, so a character-counted exchange is indistinguishable
+// from a token-counted one at rest — and the unit is spelled out rather than
+// stored as its numeric constant, which renumbers whenever a unit is inserted.
+func TestAnExchangeCountedInSomethingOtherThanTokensSaysSo(t *testing.T) {
+	var tl fact.Timeline
+	tl.Append(fact.Entry{Attempt: 1, Record: fact.UsageReported{
+		Unit: fact.UnitCharacter, Source: fact.UsageFromUpstream, Prompt: 120, Total: 120,
+	}})
+
+	s := summarise(tl)
+	if len(s.overflow) != 1 {
+		t.Fatalf("want the unit kept, got %d entries", len(s.overflow))
+	}
+	if encoded := encodeOverflow(s.overflow, "req-chars"); !strings.Contains(encoded, "character") {
+		t.Errorf("the row cannot say what it counted: %s", encoded)
+	}
+}
+
+// TestAContradictionSurvivesIntoTheStoredRow is the residue field that matters
+// most, because the row otherwise reads as ordinary.
+//
+// An impossible record still has four token counts, and they still land in
+// their columns. What says they cannot be trusted has no column of its own, and
+// the frame that proved it was folded away long before this runs. Losing the
+// verdict here leaves a row that is indistinguishable from a good one — the
+// numbers look fine, and nothing anywhere says otherwise.
+func TestAContradictionSurvivesIntoTheStoredRow(t *testing.T) {
+	var tl fact.Timeline
+	tl.Append(fact.Entry{Attempt: 1, Record: fact.UsageReported{
+		Unit: fact.UnitToken, Source: fact.UsageFromUpstream,
+		Prompt: 1000, Completion: 2000, Total: 3000, Incoherent: true,
+	}})
+
+	s := summarise(tl)
+	if len(s.overflow) != 1 {
+		t.Fatalf("want the verdict kept, got %d entries: %+v", len(s.overflow), s.overflow)
+	}
+	if encoded := encodeOverflow(s.overflow, "req-impossible"); !strings.Contains(encoded, "incoherent") {
+		t.Errorf("the stored row cannot say the counts were judged impossible: %s", encoded)
 	}
 }
 

@@ -339,7 +339,7 @@ func (r *ginClientResponse) Commit(status int) error {
 	r.status = status
 	// A committed response has reached the caller, which is what this flag
 	// means and what the audit record reports as "delivered".
-	r.rc.MarkFirstByteSent()
+	r.rc.markFirstByteSent()
 	return nil
 }
 

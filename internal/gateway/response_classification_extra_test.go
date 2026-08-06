@@ -480,7 +480,7 @@ func TestACallerDisconnectOnTheIRPathIsNotBlamedOnTheProvider(t *testing.T) {
 
 	rc := &Exchange{requestID: "req-ir-mid-stream-disconnect", originalModel: "gpt-4o-mid-disconnect",
 		apiKeyID: apiKey.ID, ingress: protocols.ProtocolOpenAI, isStream: true}
-	rc.MarkFirstByteSent()
+	rc.markFirstByteSent()
 
 	// The exact unwrapped shape the streaming scanner loop returns for a caller
 	// disconnect: `fmt.Errorf("upstream stream read error: %w", err)`, which is
@@ -543,7 +543,7 @@ func TestALiveCallerStillGetsTheStreamClosedOffOnAProviderFailure(t *testing.T) 
 
 	rc := &Exchange{requestID: "req-ir-mid-stream-live-error", originalModel: "gpt-4o-mid-live",
 		apiKeyID: apiKey.ID, ingress: protocols.ProtocolOpenAI, isStream: true}
-	rc.MarkFirstByteSent()
+	rc.markFirstByteSent()
 
 	err := errors.New("upstream stream read error: connection reset by peer")
 	resp := &http.Response{StatusCode: http.StatusOK}
