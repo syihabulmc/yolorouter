@@ -60,6 +60,29 @@ func TestIRUsage_Merge_FieldLevelMergesAcrossPartialChunks(t *testing.T) {
 	}
 }
 
+// TestIRUsage_Merge_CarriesTheSearchCountAndNeverErasesIt covers the one field
+// in Merge that is not a token count.
+//
+// It is here because the searches are billed separately by the provider and
+// stated exactly once, in the usage a response ends with. A merge that drops
+// them loses the only evidence they happened — the frames are gone by the time
+// anything downstream could ask — and a merge that lets a later empty frame
+// overwrite them turns a charge into a zero.
+func TestIRUsage_Merge_CarriesTheSearchCountAndNeverErasesIt(t *testing.T) {
+	dst := IRUsage{}
+	dst.Merge(IRUsage{PromptTokens: 100, WebSearchCount: 3})
+	if dst.WebSearchCount != 3 {
+		t.Fatalf("WebSearchCount = %d, want 3: the merge dropped a quantity nothing "+
+			"downstream can re-derive", dst.WebSearchCount)
+	}
+
+	dst.Merge(IRUsage{CompletionTokens: 50})
+	if dst.WebSearchCount != 3 {
+		t.Errorf("WebSearchCount = %d, want 3: a later frame that says nothing about "+
+			"searches must not be read as saying there were none", dst.WebSearchCount)
+	}
+}
+
 // TestIRUsage_NetAndGrossPromptTokens covers the two conversion directions an
 // egress encoder depends on. The concrete numbers come from a real relayed
 // request: an Anthropic upstream reporting 2 net input + 906 cache write +

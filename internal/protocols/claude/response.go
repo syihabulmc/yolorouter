@@ -8,6 +8,38 @@ import (
 	"strings"
 )
 
+// webSearchesIn reads the provider's count of searches it ran on its own
+// initiative out of a usage object's server_tool_use member.
+//
+// It takes the raw bytes and decodes them separately, rather than the member
+// being typed on the usage struct itself, and that separation is the whole
+// point. Typed inline, a provider sending web_search_requests as "2" or the
+// member as an array fails the enclosing Unmarshal — and the enclosing object
+// is the usage, so the token counts and the stop reason go down with it. A
+// stream frame lost that way settles the request with zero completion tokens
+// and no finish reason. Reading one optional extra must not be able to do that,
+// so a shape this function cannot read is simply no searches.
+//
+// Absent means the provider ran none: "no server_tool_use key" and
+// "web_search_requests: 0" are the same fact and must not be two branches.
+//
+// web_fetch_requests sits alongside web_search_requests in the same object and
+// is deliberately not read: there is no IR field to put it in, and a count
+// nothing downstream can price or record would be worse than the documented
+// absence.
+func webSearchesIn(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var m struct {
+		WebSearchRequests int `json:"web_search_requests"`
+	}
+	if json.Unmarshal(raw, &m) != nil {
+		return 0
+	}
+	return m.WebSearchRequests
+}
+
 // ResponseDecoder decodes a Claude Messages API JSON response into IR.
 type ResponseDecoder struct{}
 
@@ -25,10 +57,11 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 			Thinking string          `json:"thinking,omitempty"`
 		} `json:"content"`
 		Usage struct {
-			InputTokens              int `json:"input_tokens"`
-			OutputTokens             int `json:"output_tokens"`
-			CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
-			CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+			InputTokens              int             `json:"input_tokens"`
+			OutputTokens             int             `json:"output_tokens"`
+			CacheCreationInputTokens int             `json:"cache_creation_input_tokens,omitempty"`
+			CacheReadInputTokens     int             `json:"cache_read_input_tokens,omitempty"`
+			ServerToolUse            json.RawMessage `json:"server_tool_use,omitempty"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -44,6 +77,7 @@ func (ResponseDecoder) DecodeResponse(body json.RawMessage) (*protocols.IRRespon
 			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens + resp.Usage.CacheCreationInputTokens + resp.Usage.CacheReadInputTokens,
 			CacheWriteTokens: resp.Usage.CacheCreationInputTokens,
 			CacheReadTokens:  resp.Usage.CacheReadInputTokens,
+			WebSearchCount:   webSearchesIn(resp.Usage.ServerToolUse),
 		},
 	}
 	// Set the verdict at the IR exit so every consumer reads Invalid instead of
@@ -143,10 +177,11 @@ func (d *StreamDecoder) DecodeChunk(raw string) ([]protocols.IRStreamDelta, erro
 			Input json.RawMessage `json:"input,omitempty"`
 		} `json:"content_block,omitempty"`
 		Usage *struct {
-			InputTokens              *int `json:"input_tokens,omitempty"`
-			OutputTokens             int  `json:"output_tokens"`
-			CacheCreationInputTokens int  `json:"cache_creation_input_tokens,omitempty"`
-			CacheReadInputTokens     int  `json:"cache_read_input_tokens,omitempty"`
+			InputTokens              *int            `json:"input_tokens,omitempty"`
+			OutputTokens             int             `json:"output_tokens"`
+			CacheCreationInputTokens int             `json:"cache_creation_input_tokens,omitempty"`
+			CacheReadInputTokens     int             `json:"cache_read_input_tokens,omitempty"`
+			ServerToolUse            json.RawMessage `json:"server_tool_use,omitempty"`
 		} `json:"usage,omitempty"`
 	}
 	if json.Unmarshal([]byte(payload), &event) != nil {
@@ -246,16 +281,23 @@ func (d *StreamDecoder) DecodeChunk(raw string) ([]protocols.IRStreamDelta, erro
 			if d.usage.TotalTokens == 0 || d.usage.TotalTokens < newTotal {
 				d.usage.TotalTokens = newTotal
 			}
-			// Extract Anthropic web search count from raw payload
-			var wsExtract struct {
-				Usage *struct {
-					ServerToolUse *struct {
-						WebSearchRequests int `json:"web_search_requests"`
-					} `json:"server_tool_use"`
-				} `json:"usage"`
-			}
-			if json.Unmarshal([]byte(payload), &wsExtract) == nil && wsExtract.Usage != nil && wsExtract.Usage.ServerToolUse != nil {
-				d.usage.WebSearchCount = wsExtract.Usage.ServerToolUse.WebSearchRequests
+			// Never regresses to zero, and never silently discards a number
+			// that was actually there.
+			//
+			// The count is cumulative for the whole stream, so a frame that
+			// omits server_tool_use — or carries a shape this cannot read — is
+			// saying nothing new rather than saying no searches happened, and
+			// overwriting with its zero would drop searches already reported.
+			// Both of those arrive here as 0, which is why 0 does not assign.
+			//
+			// A NEGATIVE does assign. It is a count the provider stated and it
+			// cannot be true, and the coherence rules downstream exist to catch
+			// exactly that. Dropping it here would make this path disagree with
+			// the whole-response one, which keeps it — and the disagreement
+			// runs the wrong way: the stream would launder an impossible number
+			// into a record that reads as fine.
+			if n := webSearchesIn(event.Usage.ServerToolUse); n != 0 {
+				d.usage.WebSearchCount = n
 			}
 			deltas = append(deltas, protocols.DeltaUsage{Usage: d.usage})
 		}
