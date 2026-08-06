@@ -348,7 +348,7 @@ func seedAPIKey(t *testing.T, db *gorm.DB, rawKey string) *model.APIKey {
 // (inherits BodySizeLimit + APIKeyAuth + the bodies-dir stash) and actually
 // dispatches into the gateway handler for a caller with a valid key — no
 // provider/model is configured in this test, so the request won't succeed
-// end to end (RelayService.Handle itself replies 404 "model does not exist",
+// end to end (Service.Handle itself replies 404 "model does not exist",
 // a legitimate gateway-generated response, not a routing failure). What this
 // asserts is that the response is the Claude envelope Handle produces for
 // that rejection — proving both that the route dispatched into the gateway
@@ -383,7 +383,7 @@ func TestMessagesRouteReachesGatewayWithValidKey(t *testing.T) {
 // (that's a later task) -- peekIngress falls back to the OpenAI parse for
 // any non-Claude ingress, so an empty JSON body fails its
 // non-empty-messages check -- but that failure is itself proof the request
-// reached RelayService.Handle rather than being rejected at auth or routing
+// reached Service.Handle rather than being rejected at auth or routing
 // (401/404/405).
 func TestResponsesRouteReachesGatewayWithValidKey(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -413,7 +413,7 @@ func TestResponsesRouteReachesGatewayWithValidKey(t *testing.T) {
 // colon. No provider/model is configured in this test, and the Gemini
 // ingress now resolves its external model name from the URL path itself
 // (not the body -- see parseGeminiPath/peekGeminiIngress), so the request
-// reaches RelayService.Handle, resolves the model name from the path, and
+// reaches Service.Handle, resolves the model name from the path, and
 // gets a legitimate gateway-generated 404 "model does not exist" for that
 // unconfigured model -- not a routing failure (401/405), which is what this
 // test asserts.

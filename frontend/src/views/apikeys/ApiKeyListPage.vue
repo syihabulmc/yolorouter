@@ -83,13 +83,14 @@
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NTag, useDialog, useMessage, type DataTableColumns, type DropdownOption, type PaginationProps } from 'naive-ui'
-import { KeyRound, Plus, Search, MoreHorizontal } from '@lucide/vue'
+import { NButton, NTag, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption, type PaginationProps } from 'naive-ui'
+import { KeyRound, Plus, Search, MoreHorizontal, Copy } from '@lucide/vue'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { displayMessage } from '../../api/client'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
 import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
+import { copyToClipboard } from '../../utils/clipboard'
 import type { APIKey } from '../../api/apiKeys'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
@@ -241,6 +242,33 @@ function confirmRevoke(row: APIKey) {
   })
 }
 
+// copyPlaintext fetches the full key from the reveal endpoint and writes it to
+// the clipboard. One row can be in flight at a time (revealingId gates the
+// button's loading state). The backend returns 11016 for keys that predate the
+// encrypted_key column — displayMessage surfaces that localized message; other
+// failures fall through to the generic error toast.
+const revealingId = ref<number | null>(null)
+async function copyPlaintext(row: APIKey) {
+  if (revealingId.value === row.id) return
+  revealingId.value = row.id
+  try {
+    const res = await store.fetchPlaintext(row.id)
+    // copyToClipboard handles the non-secure-context (plain HTTP) fallback to
+    // execCommand internally; a false return means the write truly failed.
+    if (await copyToClipboard(res.plaintext_key)) {
+      message.success(t('apiKeys.copied'))
+    } else {
+      message.error(t('apiKeys.copyFailed'))
+    }
+  } catch (err) {
+    // Fetch-side failure (incl. the legacy-key 11016) — distinct from a
+    // clipboard-write failure, which is handled above.
+    message.error(displayMessage(err, t))
+  } finally {
+    revealingId.value = null
+  }
+}
+
 function onCreated() {
   message.success(t('apiKeys.createSuccess'))
   void reload()
@@ -256,20 +284,19 @@ function onSaved() {
 }
 
 function rowActions(row: APIKey): DropdownOption[] {
-  // Optimize and the destructive Revoke are no-ops on an already-revoked key,
-  // so they drop out for revoked rows; edit/view/import stay available.
+  // Revoked keys only keep cost view; config, optimize, import, and revoke drop out.
   const revoked = row.display_status === 'revoked'
   return [
-    { label: t('apiKeys.editLimits'), key: 'edit' },
+    ...(revoked ? [] : [
+      { label: t('apiKeys.editLimits'), key: 'edit' },
+    ]),
     { label: t('costs.detail.viewCost'), key: 'look' },
-    ...(revoked ? [] : [{ label: t('costOptimization.title'), key: 'optimize' }]),
-    { label: t('ccswitch.importAction'), key: 'importCCSImport' },
-    ...(revoked
-      ? []
-      : [
-          { type: 'divider', key: 'd' },
-          { label: t('apiKeys.revoke'), key: 'delete', props: { style: 'color: var(--color-danger)' } },
-        ]),
+    ...(revoked ? [] : [
+      { label: t('costOptimization.title'), key: 'optimize' },
+      { label: t('ccswitch.importAction'), key: 'importCCSImport' },
+      { type: 'divider', key: 'd' },
+      { label: t('apiKeys.revoke'), key: 'delete', props: { style: 'color: var(--color-danger)' } },
+    ]),
   ]
 }
 
@@ -278,7 +305,29 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
     title: columnTitle(t('apiKeys.keyPrefixColumn'), t('apiKeys.keyPrefixColumn_tip')),
     key: 'key_prefix',
     minWidth: 180,
-    render: (row) => h('span', { class: 'mono-cell' }, `${row.key_prefix}…`),
+    render: (row) =>
+      h('div', { class: 'prefix-cell' }, [
+        h('span', { class: 'mono-cell' }, `${row.key_prefix}…`),
+        h(
+          NTooltip,
+          { trigger: 'hover' },
+          {
+            trigger: () =>
+              h(
+                NButton,
+                {
+                  size: 'tiny',
+                  quaternary: true,
+                  circle: true,
+                  loading: revealingId.value === row.id,
+                  onClick: () => copyPlaintext(row),
+                },
+                { icon: () => h(Copy, { size: 14 }) },
+              ),
+            default: () => t('apiKeys.copyFullKey'),
+          },
+        ),
+      ]),
   },
   {
     title: columnTitle(t('apiKeys.ownerColumn'), t('apiKeys.ownerColumn_tip')),
@@ -347,6 +396,11 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
 </script>
 
 <style scoped>
+:deep(.prefix-cell) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 :deep(.mono-cell) {
   font-family: var(--font-mono, monospace);
   font-weight: 600;

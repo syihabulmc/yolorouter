@@ -8,11 +8,10 @@ import (
 
 // TestUpstreamBufferAppendUpstreamNoCaptureFile verifies AppendUpstream is a
 // safe no-op when no stream capture file is open (streamBodyFile is nil) —
-// the common case for a RelayContext built outside passthroughStreamToClient's
-// openStreamBodyFile call (e.g. an early failover before any file was
-// opened).
+// the common case for an Exchange built outside a streaming delivery, which is
+// what opens the file (e.g. an early failover before any file was opened).
 func TestUpstreamBufferAppendUpstreamNoCaptureFile(t *testing.T) {
-	rc := &RelayContext{RequestID: "req-1"}
+	rc := &Exchange{requestID: "req-1"}
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("AppendUpstream panicked with nil streamBodyFile: %v", r)
@@ -25,34 +24,34 @@ func TestUpstreamBufferAppendUpstreamNoCaptureFile(t *testing.T) {
 }
 
 // TestUpstreamBufferSetBody verifies SetBody stores the raw non-stream
-// upstream body on RelayContext.UpstreamResponseBody.
+// upstream body on Exchange.UpstreamResponseBody.
 func TestUpstreamBufferSetBody(t *testing.T) {
-	rc := &RelayContext{}
+	rc := &Exchange{}
 	body := []byte(`{"id":"resp_1"}`)
 	rc.SetBody(body)
-	if string(rc.UpstreamResponseBody) != string(body) {
-		t.Fatalf("UpstreamResponseBody = %q, want %q", rc.UpstreamResponseBody, body)
+	if string(rc.upstreamResponseBody) != string(body) {
+		t.Fatalf("UpstreamResponseBody = %q, want %q", rc.upstreamResponseBody, body)
 	}
 }
 
 // TestUpstreamBufferSetResponseBody verifies SetResponseBody stores the
-// caller-facing (post-IR-encode) response bytes on RelayContext.ResponseBody
+// caller-facing (post-IR-encode) response bytes on Exchange.ResponseBody
 // — the cross-protocol counterpart of TestUpstreamBufferSetBody, which
 // covers the raw pre-decode upstream body instead.
 func TestUpstreamBufferSetResponseBody(t *testing.T) {
-	rc := &RelayContext{}
+	rc := &Exchange{}
 	body := []byte(`{"id":"chatcmpl-1"}`)
 	rc.SetResponseBody(body)
-	if string(rc.ResponseBody) != string(body) {
-		t.Fatalf("ResponseBody = %q, want %q", rc.ResponseBody, body)
+	if string(rc.responseBody) != string(body) {
+		t.Fatalf("ResponseBody = %q, want %q", rc.responseBody, body)
 	}
 }
 
-// TestRelayContextImplementsUpstreamBuffer is a runtime companion to the
+// TestExchangeImplementsUpstreamBuffer is a runtime companion to the
 // compile-time assertion in ir_bridge.go — kept here too so a future
 // accidental removal of the assertion still fails a test, not just a build.
-func TestRelayContextImplementsUpstreamBuffer(t *testing.T) {
-	var _ protocols.UpstreamBuffer = (*RelayContext)(nil)
+func TestExchangeImplementsUpstreamBuffer(t *testing.T) {
+	var _ protocols.UpstreamBuffer = (*Exchange)(nil)
 }
 
 func TestIRUsageToUsage(t *testing.T) {

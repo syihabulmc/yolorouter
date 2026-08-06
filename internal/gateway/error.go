@@ -8,10 +8,10 @@ import (
 )
 
 // relayContextKey is the gin.Context key Handle stores the in-flight
-// RelayContext under (relay.go: c.Set(relayContextKey, rc)), so
+// Exchange under (relay.go: c.Set(relayContextKey, rc)), so
 // WriteOpenAIError* can stash the local error JSON it is about to return
-// into rc.ResponseBody without threading an
-// *RelayContext parameter through every call site. Absent on paths that
+// into rc.responseBody without threading an
+// *Exchange parameter through every call site. Absent on paths that
 // never call Handle (e.g. unit tests, or middleware.APIKeyAuth's own 401s
 // before Handle ever runs) — stashLocalErrorBody is then a no-op.
 const relayContextKey = "relay_context"
@@ -32,7 +32,7 @@ type openaiError struct {
 // LocalErrorBody serializes the OpenAI-compatible error envelope used by
 // WriteOpenAIError/WriteOpenAIErrorWithRequestID. Exported so
 // middleware.logAuthRejection (a different package, rejecting requests
-// before Handle — and any RelayContext — ever exists) can build the exact
+// before Handle — and any Exchange — ever exists) can build the exact
 // same response_body JSON for its own request_log_bodies row instead of
 // duplicating the envelope shape (single source of truth for
 // shared logic).
@@ -41,24 +41,24 @@ func LocalErrorBody(errType, message string) []byte {
 	return b
 }
 
-// relayContextFrom retrieves the in-flight RelayContext Handle stashed on c
+// relayContextFrom retrieves the in-flight Exchange Handle stashed on c
 // (see relayContextKey), or nil when none is present — e.g. a path that
 // never called Handle (unit tests, or an early 401 in middleware.APIKeyAuth
 // before Handle ever runs). The single lookup + two-step type assertion both
 // stashLocalErrorBody (here) and stashLocalClaudeErrorBody (ingress_error.go)
 // need.
-func relayContextFrom(c *gin.Context) *RelayContext {
+func relayContextFrom(c *gin.Context) *Exchange {
 	v, ok := c.Get(relayContextKey)
 	if !ok {
 		return nil
 	}
-	rc, _ := v.(*RelayContext)
+	rc, _ := v.(*Exchange)
 	return rc
 }
 
 // stashLocalErrorBody records the local error JSON WriteOpenAIError is about
 // to return, as response_body for this request's request_log_bodies row
-// No-op when no RelayContext is on the context. The
+// No-op when no Exchange is on the context. The
 // body is a gateway-generated error envelope (no caller/upstream content), so
 // it is stored verbatim — v0.1 does not scrub body content.
 func stashLocalErrorBody(c *gin.Context, errType, message string) {
@@ -66,7 +66,7 @@ func stashLocalErrorBody(c *gin.Context, errType, message string) {
 	if rc == nil {
 		return
 	}
-	rc.ResponseBody = LocalErrorBody(errType, message)
+	rc.responseBody = LocalErrorBody(errType, message)
 }
 
 // OpenAI error "type" values (each failure class maps to one of
@@ -83,6 +83,13 @@ const (
 	errTypeUnavailable       = "service_unavailable"
 	errTypeInsufficientQuota = "insufficient_quota" // OpenAI's type for budget/quota exhaustion (distinct from rate_limit_error)
 )
+
+// StatusClientClosedRequest is the non-standard status used to record that the
+// caller went away before the response was delivered. It is never written to
+// the wire — there is no caller left to receive it — but it must be
+// distinguishable in the audit row from a gateway fault, because the two demand
+// opposite responses from whoever reads it.
+const StatusClientClosedRequest = 499
 
 // WriteOpenAIError writes one OpenAI-compatible error response and aborts
 // the chain. status is the HTTP status; errType is the error.type string;

@@ -34,7 +34,7 @@ func TestPostChatCompletionsMissingAuthContext_IngressAware(t *testing.T) {
 			c.Set("request_id", "req_missing_auth")
 
 			// Deliberately do NOT set gatewayAPIKeyKey — the guard returns
-			// before svc.Handle is ever called, so a nil *RelayService is
+			// before svc.Handle is ever called, so a nil *Service is
 			// safe here.
 			PostChatCompletions(nil)(c)
 

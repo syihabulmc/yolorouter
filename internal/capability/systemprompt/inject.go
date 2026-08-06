@@ -1,24 +1,14 @@
-package gateway
+package systemprompt
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 
+	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/protocols/claude"
-	"github.com/yolorouter/yolorouter/internal/settings"
 )
-
-// SettingsProvider is the read-only window the gateway has into the cached
-// global custom system prompt and input-compression switch. Implemented by
-// the system settings service and injected into RelayService by the router.
-// The gateway imports only the neutral settings DTO (not the service
-// package), so there is no import cycle.
-type SettingsProvider interface {
-	CustomSystemPrompt(ctx context.Context) (settings.CustomSystemPromptSetting, int64, error)
-	GetInputCompression(ctx context.Context) (bool, int64, error)
-}
 
 const systemPromptSep = "\n\n"
 
@@ -32,30 +22,63 @@ func joinSystemText(orig, custom string) string {
 	return orig + systemPromptSep + custom
 }
 
-// applyCustomSystemPrompt injects the resolved prompt into the egress body
-// when enabled, non-empty, and the ingress path is in the allowlist. It picks
-// the injection format by egress protocol (the body is already egress-encoded).
-// Malformed bodies are returned unchanged: never panic, never silently rewrite
-// a malformed request.
-func applyCustomSystemPrompt(rc *RelayContext, egressProto protocols.ProtocolID, body []byte) []byte {
-	if body == nil || !rc.CustomSystemPromptEnabled || rc.CustomSystemPrompt == "" {
-		return body
+// View is what this capability needs to know about the exchange: whether a
+// prompt was resolved for this request, and whether the caller's route is one
+// where injecting into the system text means anything. Four getters, declared
+// here rather than handed down, so the coupling is visible in the package that
+// actually has it.
+type View interface {
+	CustomSystemPromptEnabled() bool
+	CustomSystemPrompt() string
+	IsChatEndpoint() bool
+}
+
+// Injector adds a configured system prompt to the outbound body.
+type Injector struct{}
+
+// New returns an injector. It is stateless; one instance serves every request.
+func New() Injector { return Injector{} }
+
+// Name identifies the injector in the audit trail.
+func (Injector) Name() string { return "custom_system_prompt" }
+
+// RewriteEgress injects the resolved prompt when one applies. It picks the
+// format by egress protocol because the body has already been encoded for that
+// protocol by the time it arrives here.
+//
+// A malformed body is returned unchanged rather than reported as an error: the
+// request may still be valid for an upstream that is more lenient than our
+// parser, and rewriting a body we could not parse is the one outcome worse than
+// not injecting at all.
+func (Injector) RewriteEgress(_ context.Context, view View, egressProto protocols.ProtocolID, body []byte, sink fact.Sink) ([]byte, error) {
+	if len(body) == 0 || !view.CustomSystemPromptEnabled() || view.CustomSystemPrompt() == "" {
+		return body, nil
 	}
-	if !rc.IsChatEndpoint {
-		return body
+	if !view.IsChatEndpoint() {
+		return body, nil
 	}
+	prompt := view.CustomSystemPrompt()
+	var out []byte
 	switch egressProto {
 	case protocols.ProtocolClaude:
-		return claude.InjectCustomSystemPromptOnly(body, rc.CustomSystemPrompt)
+		out = claude.InjectCustomSystemPromptOnly(body, prompt)
 	case protocols.ProtocolOpenAI:
-		return injectOpenAI(body, rc.CustomSystemPrompt)
+		out = injectOpenAI(body, prompt)
 	case protocols.ProtocolResponses:
-		return injectResponses(body, rc.CustomSystemPrompt)
+		out = injectResponses(body, prompt)
 	case protocols.ProtocolGemini:
-		return injectGemini(body, rc.CustomSystemPrompt)
+		out = injectGemini(body, prompt)
 	default:
-		return body
+		return body, nil
 	}
+	if !changed(body, out) {
+		return body, nil
+	}
+	sink.Note(fact.SystemPromptInjected{
+		Site:       string(egressProto),
+		ExtraChars: len(prompt),
+	})
+	return out, nil
 }
 
 // decodeObjectStrict decodes one JSON object, rejecting null / non-object /
@@ -141,17 +164,35 @@ func injectOpenAI(body []byte, custom string) []byte {
 		if !ok {
 			return false
 		}
-		lastIdx := findLastSystemLikeIndex(msgs)
-		if lastIdx == -1 {
-			m["messages"] = append([]interface{}{map[string]interface{}{"role": "system", "content": custom}}, msgs...)
-			return true
-		}
-		target := msgs[lastIdx].(map[string]interface{})
-		if !appendSystemContent(target, custom, "text") {
-			m["messages"] = append([]interface{}{map[string]interface{}{"role": "system", "content": custom}}, msgs...)
-		}
+		m["messages"] = injectIntoItemList(msgs, custom, "text")
 		return true
 	})
+}
+
+// injectIntoItemList adds the custom text to a role-tagged message list: append
+// to the last system-like item when one exists and its content shape is
+// appendable, otherwise prepend a fresh system message. Shared by every
+// protocol whose request carries such a list — the lists differ only in field
+// name and content-part type, which the caller supplies.
+func injectIntoItemList(items []interface{}, custom, partType string) []interface{} {
+	prepended := func() []interface{} {
+		return append([]interface{}{newSystemMessage(custom)}, items...)
+	}
+	lastIdx := findLastSystemLikeIndex(items)
+	if lastIdx == -1 {
+		return prepended()
+	}
+	target := items[lastIdx].(map[string]interface{})
+	if !appendSystemContent(target, custom, partType) {
+		return prepended()
+	}
+	return items
+}
+
+// newSystemMessage is the one shape a fresh system entry takes, defined once so
+// the three call sites cannot drift apart.
+func newSystemMessage(custom string) map[string]interface{} {
+	return map[string]interface{}{"role": "system", "content": custom}
 }
 
 // injectResponses prefers a top-level instructions field; otherwise appends to
@@ -169,12 +210,8 @@ func injectResponses(body []byte, custom string) []byte {
 			return true
 		}
 		if input, ok := m["input"].([]interface{}); ok {
-			lastIdx := findLastSystemLikeIndex(input)
-			if lastIdx != -1 {
-				target := input[lastIdx].(map[string]interface{})
-				if !appendSystemContent(target, custom, "input_text") {
-					m["input"] = append([]interface{}{map[string]interface{}{"role": "system", "content": custom}}, input...)
-				}
+			if findLastSystemLikeIndex(input) != -1 {
+				m["input"] = injectIntoItemList(input, custom, "input_text")
 				return true
 			}
 		}
@@ -216,4 +253,22 @@ func injectGemini(body []byte, custom string) []byte {
 		si["parts"] = append(parts, map[string]interface{}{"text": custom})
 		return true
 	})
+}
+
+// changed reports whether an injector actually produced a new body.
+//
+// The injectors return the input slice itself when they could not parse it, so
+// identity is the precise test — but it has to be spelled carefully: indexing
+// element zero to compare addresses panics on an empty slice, which is exactly
+// what a malformed-body case hands us. Length is checked first because a real
+// injection always adds text, making the address comparison a guard for the
+// pathological equal-length case rather than the main test.
+func changed(before, after []byte) bool {
+	if len(after) != len(before) {
+		return true
+	}
+	if len(after) == 0 {
+		return false
+	}
+	return &after[0] != &before[0]
 }

@@ -127,20 +127,31 @@ func JoinUpstreamURL(base, egressPath string, proto ProtocolID) string {
 // response format). Credential-bearing parameters under any other name are
 // dropped: redacting by allowlist (default-drop) is safe because an unknown
 // parameter is never silently preserved, so a provider that embeds a token
-// under an unfamiliar name still gets scrubbed. A parse failure passes
-// through unchanged. Use it on any URL before persisting it to a log/audit
-// row or surfacing it in the UI; keep the raw URL only for the actual HTTP
-// request.
+// under an unfamiliar name still gets scrubbed. Use it on any URL before
+// persisting it to a log/audit row or surfacing it in the UI; keep the raw URL
+// only for the actual HTTP request.
+//
+// A URL that will not parse is replaced wholesale rather than passed through.
+// Returning it unchanged is the one case where this function hands back the
+// exact string it exists to sanitize — and it is reachable: a configured base
+// URL with a stray control character fails to parse, fails to build a request,
+// and its error text is what gets persisted. The unparseable form is also the
+// one nobody can reason about, so there is nothing to salvage from it.
 func RedactURL(s string) string {
 	u, err := url.Parse(s)
 	if err != nil {
-		return s
+		return unparseableURL
 	}
 	u.User = nil
 	u.Fragment = ""
 	u.RawQuery = redactQuery(u.RawQuery)
 	return u.String()
 }
+
+// unparseableURL stands in for a URL that could not be parsed. It carries
+// nothing from the input, because anything carried over could be the
+// credential.
+const unparseableURL = "(unparseable url)"
 
 // nonSecretQueryParams is the allowlist of upstream query parameters that
 // carry routing/protocol semantics rather than credentials. Gemini's alt=sse

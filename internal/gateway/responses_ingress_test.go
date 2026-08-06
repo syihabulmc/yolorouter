@@ -37,7 +37,7 @@ func TestResponsesIngressToAnthropicUpstream_NonStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "claude-3-5-sonnet-20241022", true, true, 1)
@@ -145,7 +145,7 @@ func TestResponsesIngressToAnthropicUpstream_Stream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "claude-3-5-sonnet-20241022", true, true, 1)
@@ -240,7 +240,7 @@ func TestResponsesIngressToResponsesProvider_Passthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createResponsesProvider(t, db, "responses-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-responses-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -326,15 +326,15 @@ func TestResponsesIngressToResponsesProvider_PassthroughStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createResponsesProvider(t, db, "responses-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-responses-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
 	dir := t.TempDir()
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"gpt-4o","input":"hi","stream":true}`)
@@ -357,7 +357,7 @@ func TestResponsesIngressToResponsesProvider_PassthroughStream(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.RequestID+".stream"))
+	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.requestID+".stream"))
 	if err != nil {
 		t.Fatalf("read captured stream file: %v", err)
 	}

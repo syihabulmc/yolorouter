@@ -17,88 +17,87 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
-// RelayContext holds per-request relay state for the gateway pass-through,
+// Exchange holds per-request relay state for the gateway pass-through,
 // key rotation, failover, and request logging.
-type RelayContext struct {
-	RequestID     string
-	OriginalModel string // external model name; every response model field is rewritten to this
-	IsStream      bool
-	// Ingress is the wire protocol of the caller's request path, computed
+type Exchange struct {
+	requestID     string
+	originalModel string // external model name; every response model field is rewritten to this
+	isStream      bool
+	// ingress is the wire protocol of the caller's request path, computed
 	// once in Handle from c.Request.URL.Path. Every gateway call site that
 	// already has rc in scope reads this instead of recomputing it.
-	Ingress protocols.ProtocolID
-	// IngressPath is the caller's request path, captured at Handle entry. The
+	ingress protocols.ProtocolID
+	// ingressPath is the caller's request path, captured at Handle entry. The
 	// custom system prompt injection allowlist keys off it: Gemini's route is
 	// a wildcard :modelaction and the ingress protocol falls back to
 	// ProtocolOpenAI for non-generateContent actions, so the path alone
 	// distinguishes countTokens / embedContent from real chat.
-	IngressPath string
-	// UpstreamURL is the full URL the gateway dispatched to for the current
+	ingressPath string
+	// upstreamURL is the full URL the gateway dispatched to for the current
 	// candidate's attempt. Reset to "" at the start of each candidate in
 	// relayCandidates so a build-failed candidate never inherits the previous
 	// candidate's URL; set in attemptOne right before the request is sent.
 	// makeAttempt stamps each AttemptRecord with it, and finalize copies it to
 	// the request_logs.upstream_url column under the same "last attempt wins"
 	// rule as UpstreamRequestBody.
-	UpstreamURL string
-	// IsChatEndpoint is computed once in Handle from IngressPath. Both the
+	upstreamURL string
+	// isChatEndpoint is computed once in Handle from IngressPath. Both the
 	// compression gate and the CSP injection gate read this bool instead of
-	// recomputing IsChatEndpoint(path) independently.
-	IsChatEndpoint bool
-	// CustomSystemPromptEnabled / CustomSystemPrompt are the two-level-resolved
+	// recomputing isChatEndpoint(path) independently.
+	isChatEndpoint bool
+	// customSystemPromptEnabled / CustomSystemPrompt are the two-level-resolved
 	// prompt for this request. Empty or disabled means no injection.
-	CustomSystemPromptEnabled bool
-	CustomSystemPrompt        string
-	// CompressEnabled is the two-level-resolved input-compression switch for
+	customSystemPromptEnabled bool
+	customSystemPrompt        string
+	// compressEnabled is the two-level-resolved input-compression switch for
 	// this request. When true and the ingress path is a chat endpoint, the
 	// caller's body is run through the compress engine before relay.
-	CompressEnabled bool
-	// CompressSkipReason records why compression was skipped (when it was
+	compressEnabled bool
+	// compressSkipReason records why compression was skipped (when it was
 	// enabled but the engine returned Skipped=true). Empty when compression
 	// was disabled, applied successfully, or never attempted.
-	CompressSkipReason string
-	// CompressEstimatedTokensSaved / CompressorsApplied / RequestBodyCompressed
+	compressSkipReason string
+	// compressEstimatedTokensSaved / CompressorsApplied / RequestBodyCompressed
 	// record the outcome of a successful compression pass. RequestBodyCompressed
-	// is the compressed body that upstream encoding (buildUpstreamBody) uses as
-	// its input via EffectiveRequestBody; RequestBody stays the verbatim caller
-	// body for the audit row.
-	CompressEstimatedTokensSaved int
-	CompressorsApplied           []string
-	RequestBodyCompressed        []byte
-	// WantsStreamUsage is true when the caller set
-	// stream_options.include_usage=true. Controls whether usage frames
-	// collected upstream are forwarded to the caller (the gateway always
-	// requests usage upstream for its own cost accounting, but only
-	// forwards it when the caller asked).
-	WantsStreamUsage bool
-	APIKeyID         uint
+	// is what admission is handed and the payload encodes from; RequestBody
+	// stays the verbatim caller body for the audit row.
+	compressEstimatedTokensSaved int
+	compressorsApplied           []string
+	requestBodyCompressed        []byte
+	apiKeyID                     uint
+	// concurrencyLimit / rpmLimit are the caller's allowance, resolved once
+	// from the key. Zero means unlimited, which is also what an absent limit
+	// means — the distinction has no consumer, so it is not preserved.
+	concurrencyLimit int
+	rpmLimit         int
 
-	// RequestDeadline is the absolute cutoff for the whole request across all
+	// requestDeadline is the absolute cutoff for the whole request across all
 	// failover candidates (the request_timeout budget). Set once at Handle
 	// entry as now + gateway.RequestTimeout; each upstream attempt reads it
 	// to derive its own per-attempt cap as min(attempt_timeout,
-	// time.Until(RequestDeadline)) so a request near its total budget can't
+	// time.Until(requestDeadline)) so a request near its total budget can't
 	// start a fresh full-length attempt. Zero before Handle assigns it.
-	RequestDeadline time.Time
+	requestDeadline time.Time
 
-	// RequestCtx is the context carrying RequestDeadline, set once at Handle
+	// requestCtx is the context carrying RequestDeadline, set once at Handle
 	// entry. Candidate queries (model/candidate/key GORM reads) and each
 	// per-attempt context derive from this, so a stalled DB cannot overrun
 	// the total request budget. Without this, the GORM calls used s.db with
 	// no deadline and a stuck query could block past RequestDeadline.
-	RequestCtx context.Context
+	requestCtx context.Context
 
 	// Current-attempt target (overwritten on each candidate switch).
-	Candidate *model.ModelCandidate
-	Provider  *model.Provider
+	candidate *model.ModelCandidate
+	provider  *model.Provider
 
-	StatusCode int // set by finalize when the log row is written
+	statusCode int // set by finalize when the log row is written
 
-	// ContentInspectionStatus / ContentInspectionErrType describe the MOST
+	// contentInspectionStatus / ContentInspectionErrType describe the MOST
 	// RECENT candidate only — relayCandidates clears them at the top of each
 	// iteration, alongside Provider/UpstreamURL and for the same reason, so
 	// they are set if and only if the candidate that just ran was refused by
@@ -109,18 +108,33 @@ type RelayContext struct {
 	// upstream candidates failed" would hide the one thing the caller can act
 	// on. Zero means the last attempt was not such a refusal and the ordinary
 	// terminal applies.
-	ContentInspectionStatus  int
-	ContentInspectionErrType string
+	contentInspectionStatus  int
+	contentInspectionErrType string
 
-	// Usage from the successful attempt, if any — drives cost + the log row.
-	Usage *Usage
+	// usage from the successful attempt, if any — drives cost + the log row.
 
-	// Attempts records every candidate try in order.
-	Attempts []AttemptRecord
+	// attempts records every candidate try in order.
+	attempts []AttemptRecord
 
-	// FirstByteSent flips true once any byte has been written to the client
+	// timeline is the append-only log of everything capabilities reported
+	// during this exchange. The kernel owns it: capabilities report through a
+	// sink and never hold it, which is what keeps provenance stamping and
+	// ordering in one place.
+	timeline fact.Timeline
+
+	// outcome is what finalize settled on, held until every release has run so
+	// the recorders see a timeline nothing will be appended to.
+	outcome        fact.Outcome
+	outcomeSettled bool
+
+	// rewriteSteps records, in order, every egress rewrite that actually
+	// changed the body for the current candidate. Reset alongside the body
+	// it describes.
+	rewriteSteps []rewriteStep
+
+	// firstByteSent flips true once any byte has been written to the client
 	// (after this, no more Key/candidate switching is allowed).
-	FirstByteSent bool
+	firstByteSent bool
 
 	// logWritten guards finalize against double-write: Handle installs a
 	// panic-recovery defer that calls finalize if no normal path did, and
@@ -132,25 +146,25 @@ type RelayContext struct {
 
 	// Bodies captured for the request_log_bodies row.
 	// v0.1 stores them VERBATIM — body content is not scrubbed (only request
-	// headers are masked; see RequestHeaders below). RequestBody is set as
+	// headers are masked; see RequestHeaders below). requestBody is set as
 	// soon as the caller body is read. UpstreamRequestBody is overwritten on
 	// each attempt (success => successful attempt; total failure => last
 	// attempt). ResponseBody is the caller-FACING response (post-rewrite,
 	// post-usage-strip, including local error JSON); UpstreamResponseBody is
 	// the raw upstream response (non-stream full / non-2xx error body
 	// bounded-read). For stream, the sent SSE is appended to streamBodyFile
-	// instead and dispatchPassthroughStream clears these two so they stay empty.
+	// instead, and a streaming delivery clears these two so they stay empty.
 	// Nil/empty on early failure or body-read failure.
-	RequestBody          []byte
-	UpstreamRequestBody  []byte
-	ResponseBody         []byte
-	UpstreamResponseBody []byte
-	// RequestHeaders is the caller's request headers as a JSON object, with
+	requestBody          []byte
+	upstreamRequestBody  []byte
+	responseBody         []byte
+	upstreamResponseBody []byte
+	// requestHeaders is the caller's request headers as a JSON object, with
 	// sensitive headers already masked (SanitizeHeaders). This header-name
 	// masking is the ONLY redaction v0.1 does — body content above is stored
 	// verbatim. Captured once at Handle entry so it survives even an early
 	// rejection.
-	RequestHeaders []byte
+	requestHeaders []byte
 
 	// streamBodyFile/streamBodyCaptured/streamBodyTruncated are the
 	// stream-only counterpart of the four body fields above: the sent SSE
@@ -166,6 +180,13 @@ type RelayContext struct {
 	streamBodyFile      *os.File
 	streamBodyCaptured  bool
 	streamBodyTruncated bool
+	// upstreamBodyTruncated/clientBodyTruncated mark a captured non-stream body
+	// that hit its cap. Stored separately from the bytes because a body cut off
+	// at the limit and one that simply was that long are indistinguishable once
+	// only the bytes survive — and only one of them means the row is missing
+	// evidence.
+	upstreamBodyTruncated bool
+	clientBodyTruncated   bool
 	// streamBodyBytesWritten mirrors the capture file's current size so
 	// appendStreamBodyLine can check the 1GiB backstop with a plain integer
 	// comparison instead of an os.File.Stat() syscall per appended line
@@ -178,28 +199,115 @@ type RelayContext struct {
 // this call was the one that flipped it — the stream path uses that to decide
 // whether a mid-stream upstream error can still switch (no) or must be
 // surfaced inline (yes).
-func (rc *RelayContext) MarkFirstByteSent() bool {
+func (rc *Exchange) MarkFirstByteSent() bool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
-	if rc.FirstByteSent {
+	if rc.firstByteSent {
 		return false
 	}
-	rc.FirstByteSent = true
+	rc.firstByteSent = true
 	return true
 }
 
-// EffectiveRequestBody returns the body that upstream encoding should use as
-// its input: the compressed body when a successful compression pass produced
-// one, otherwise the verbatim caller body. buildUpstreamBody reads this
-// instead of RequestBody directly so that both the passthrough (model-field
-// rewrite) and cross-protocol (IR decode/encode) paths consume the compressed
-// body without every call site branching.
-func (rc *RelayContext) EffectiveRequestBody() []byte {
-	if rc.RequestBodyCompressed != nil {
-		return rc.RequestBodyCompressed
+// The getters below exist for capabilities, which read exchange state through
+// the narrow view each one declares for itself rather than by reaching into
+// the struct. They are added as capabilities ask for them, not pre-emptively:
+// a getter with no caller is a field that has quietly stayed public.
+
+// APIKeyID identifies the caller's key.
+func (rc *Exchange) APIKeyID() uint { return rc.apiKeyID }
+
+// ConcurrencyLimit is how many of this key's requests may be in flight at once.
+// Zero means unlimited.
+func (rc *Exchange) ConcurrencyLimit() int { return rc.concurrencyLimit }
+
+// RPMLimit is how many requests this key may make per minute. Zero means
+// unlimited.
+func (rc *Exchange) RPMLimit() int { return rc.rpmLimit }
+
+// CustomSystemPromptEnabled reports whether a prompt was resolved for this
+// request, from either the global setting or a per-key override.
+func (rc *Exchange) CustomSystemPromptEnabled() bool { return rc.customSystemPromptEnabled }
+
+// CustomSystemPrompt returns the resolved prompt text, empty when none applies.
+func (rc *Exchange) CustomSystemPrompt() string { return rc.customSystemPrompt }
+
+// IsChatEndpoint reports whether the caller's route is one where a system
+// prompt means anything. Computed once from the request path, because the
+// answer cannot change mid-exchange and recomputing it invites two call sites
+// to disagree.
+func (rc *Exchange) IsChatEndpoint() bool { return rc.isChatEndpoint }
+
+// The getters below serve the recorder, which needs the widest view of any
+// capability — an audit row is by nature a summary of everything. That width is
+// not a failure of the split: it is a list, written in the recorder's own
+// package, of exactly what it reads, which is what the previous arrangement
+// (any code in the package reaching for any field) could never produce.
+
+// RequestID is the id shared with the access log and the caller's error
+// messages, so one identifier locates a request everywhere it was recorded.
+func (rc *Exchange) RequestID() string { return rc.requestID }
+
+// OriginalModel is the model name the caller asked for.
+func (rc *Exchange) OriginalModel() string { return rc.originalModel }
+
+// IsStream reports whether the caller asked for a streamed response.
+func (rc *Exchange) IsStream() bool { return rc.isStream }
+
+// IngressPath is the caller's request path.
+func (rc *Exchange) IngressPath() string { return rc.ingressPath }
+
+// UpstreamURL is where the last attempt was dispatched, empty if none was.
+func (rc *Exchange) UpstreamURL() string { return rc.upstreamURL }
+
+// ProviderID identifies the provider of the last attempt, nil when no candidate
+// was reached.
+func (rc *Exchange) ProviderID() *uint {
+	if rc.provider == nil {
+		return nil
 	}
-	return rc.RequestBody
+	id := rc.provider.ID
+	return &id
 }
+
+// CompressSkipReason says why compression declined, empty when it did not.
+func (rc *Exchange) CompressSkipReason() string { return rc.compressSkipReason }
+
+// RequestHeaders is the masked header capture.
+func (rc *Exchange) RequestHeaders() []byte { return rc.requestHeaders }
+
+// RequestBody is the caller's body, verbatim.
+func (rc *Exchange) RequestBody() []byte { return rc.requestBody }
+
+// CompressedRequestBody is the post-compression body, empty when none was made.
+func (rc *Exchange) CompressedRequestBody() []byte { return rc.requestBodyCompressed }
+
+// UpstreamRequestBody is what the last attempt sent.
+func (rc *Exchange) UpstreamRequestBody() []byte { return rc.upstreamRequestBody }
+
+// ResponseBody is what the caller received.
+func (rc *Exchange) ResponseBody() []byte { return rc.responseBody }
+
+// UpstreamResponseBody is what the upstream returned, unaltered.
+func (rc *Exchange) UpstreamResponseBody() []byte { return rc.upstreamResponseBody }
+
+// StreamBodyPath is where a streamed response was captured, empty when the
+// response was not streamed or nothing was captured.
+func (rc *Exchange) StreamBodyPath() string {
+	if !rc.streamBodyCaptured {
+		return ""
+	}
+	return rc.requestID + ".stream"
+}
+
+// StreamBodyTruncated reports whether the stream capture hit its cap.
+func (rc *Exchange) StreamBodyTruncated() bool { return rc.streamBodyTruncated }
+
+// UpstreamBodyTruncated reports whether the captured upstream body hit its cap.
+func (rc *Exchange) UpstreamBodyTruncated() bool { return rc.upstreamBodyTruncated }
+
+// ClientBodyTruncated reports whether the captured client-facing body hit its cap.
+func (rc *Exchange) ClientBodyTruncated() bool { return rc.clientBodyTruncated }
 
 // AttemptRecord is one candidate try (the log keeps every attempt,
 // not just the final one). Outcome is one of the AttemptOutcome* constants.
@@ -226,6 +334,13 @@ const (
 	AttemptAuthFailed  = "auth_failed"  // 401 from upstream -> rotate Key
 	AttemptRateLimited = "rate_limited" // 429 -> rotate Key
 	AttemptConnError   = "conn_error"   // network/timeout -> failover candidate
+	// AttemptServerError/AttemptBadStatus were coined for the two status classes
+	// named below and have both outgrown those names: they are now also written
+	// for stream cuts, decode failures, disabled providers and undecryptable
+	// keys. What separates them depends on where the record comes from — see
+	// attemptOutcomeFor for the delivery paths, classifyUpstreamStatus for the
+	// status ones. Kept as they are because the attempts table has always shown
+	// these two words.
 	AttemptServerError = "server_error" // 5xx -> failover candidate
 	AttemptClientError = "client_error" // 4xx (non-auth) -> do NOT switch
 	AttemptBadStatus   = "bad_status"   // unmapped non-2xx -> do NOT switch
@@ -276,4 +391,35 @@ type Usage struct {
 	// used to drop the field and the billing gate could not re-derive the
 	// verdict. Not serialized — internal accounting only.
 	ReasoningTokens int `json:"-"`
+}
+
+// beginUpstreamAttempt drops whatever the previous send left on the exchange,
+// so nothing this attempt did not produce is read as belonging to it.
+//
+// The boundary is the send, not the candidate: a single candidate rotates
+// through its provider's keys, and each rotation is a real request with its own
+// response. Tying invalidation to the candidate would leave one key's leftovers
+// standing while the next key runs.
+//
+// The captured bodies move on this boundary. The
+// audit row has one field for them and a request may make several attempts, so
+// whatever ends up stored is read as belonging to the attempt the row describes.
+// Keeping the last body that happened to exist meant a chain whose final
+// attempt never reached an upstream still stored an EARLIER provider's error
+// response, with nothing in the row saying it came from somewhere else. The
+// per-attempt records carry each attempt's own status and error text, so
+// storing nothing here loses the raw payload of an already-recorded failure —
+// while storing the wrong one invites a diagnosis of the wrong provider.
+//
+// Keeping every attempt's body would lose nothing at all, and is the better
+// answer. It is not this change: bodies live in their own table precisely
+// because they are large, so attributing them per attempt is a schema change,
+// not a boundary fix.
+func (rc *Exchange) beginUpstreamAttempt() {
+	rc.clearResponseBodies()
+	// The request and the response it produced are one pair. Clearing only the
+	// response left the audit row showing an earlier attempt's request body
+	// with no response beside it — a request that was never the one sent.
+	rc.upstreamRequestBody = nil
+	rc.upstreamURL = ""
 }

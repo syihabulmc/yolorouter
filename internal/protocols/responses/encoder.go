@@ -113,7 +113,7 @@ func decodeResponsesInput(input json.RawMessage) ([]protocols.IRMessage, string,
 		CallID    string          `json:"call_id,omitempty"`
 		Name      string          `json:"name,omitempty"`
 		Arguments string          `json:"arguments,omitempty"`
-		Output    string          `json:"output,omitempty"`
+		Output    json.RawMessage `json:"output,omitempty"`
 	}
 	if err := json.Unmarshal(input, &items); err != nil {
 		return nil, "", fmt.Errorf("parse responses input: %w", err)
@@ -157,18 +157,19 @@ func decodeResponsesInput(input json.RawMessage) ([]protocols.IRMessage, string,
 			}
 
 		case item.Type == "function_call_output":
-			content := item.Output
-			if content == "" {
-				content = "(empty)"
+			content := decodeResponsesToolOutput(item.Output)
+			// A tool that returned nothing still needs a visible result, or the
+			// model is left guessing whether the call ran at all.
+			if isBlankJSON(content) {
+				content = json.RawMessage(`"(empty)"`)
 			}
-			contentJSON, _ := json.Marshal(content)
 			messages = append(messages, protocols.IRMessage{
 				Role:       protocols.RoleTool,
 				ToolCallID: item.CallID,
 				Content: []protocols.IRContentBlock{
 					protocols.BlockToolResult{
 						ToolUseID: item.CallID,
-						Content:   json.RawMessage(contentJSON),
+						Content:   content,
 					},
 				},
 			})
@@ -207,19 +208,91 @@ func decodeResponsesInput(input json.RawMessage) ([]protocols.IRMessage, string,
 	return messages, system, nil
 }
 
+// responsesContentPart is one element of the content-part list form shared by a
+// message's `content` and a function_call_output's `output`.
+type responsesContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// decodeResponsesContentParts decodes the content-part list form. ok is false
+// when the value is not a list of parts at all, leaving each caller to decide
+// what that means.
+func decodeResponsesContentParts(raw json.RawMessage) (parts []responsesContentPart, ok bool) {
+	if json.Unmarshal(raw, &parts) != nil {
+		return nil, false
+	}
+	return parts, true
+}
+
+// jsonValueKind returns the first meaningful byte of a JSON value — '"' for a
+// string, '[' for an array — or 0 when there is nothing to read. Dispatching on
+// it beats unmarshalling speculatively: every failed attempt re-validates the
+// whole value, and a tool output carrying a screenshot is hundreds of kilobytes
+// to rescan.
+func jsonValueKind(raw json.RawMessage) byte {
+	for _, b := range raw {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		default:
+			return b
+		}
+	}
+	return 0
+}
+
+// isBlankJSON reports whether a JSON value carries nothing a model could read.
+func isBlankJSON(raw json.RawMessage) bool {
+	switch string(raw) {
+	case "", `""`, "null":
+		return true
+	}
+	return false
+}
+
+// decodeResponsesToolOutput normalizes a function_call_output's `output` into
+// the JSON value a tool result carries downstream. The field is either a string
+// or a list of output content parts (text, image, file), so reading it as a
+// string alone rejected any request whose tool returned a screenshot — agent
+// clients return them routinely.
+//
+// A string, and any structured value the spec does not describe, keeps its
+// original bytes: re-decoding would copy a payload that reaches hundreds of
+// kilobytes for nothing. Image and file parts collapse into a short marker,
+// since no protocol this converts to can carry one inside a tool result and
+// their data URLs would otherwise be spent as unreadable prompt.
+func decodeResponsesToolOutput(raw json.RawMessage) json.RawMessage {
+	if jsonValueKind(raw) == '[' {
+		if parts, ok := decodeResponsesContentParts(raw); ok {
+			var out []string
+			for _, p := range parts {
+				switch {
+				case p.Text != "":
+					out = append(out, p.Text)
+				case p.Type == "input_image":
+					out = append(out, "[image output omitted]")
+				case p.Type == "input_file":
+					out = append(out, "[file output omitted]")
+				}
+			}
+			if flattened, err := json.Marshal(strings.Join(out, "\n")); err == nil {
+				return flattened
+			}
+		}
+	}
+	return raw
+}
+
 func extractTextFromResponsesContent(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
-	}
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &parts) == nil {
+	switch jsonValueKind(raw) {
+	case '"':
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			return s
+		}
+	case '[':
+		parts, _ := decodeResponsesContentParts(raw)
 		var texts []string
 		for _, p := range parts {
 			if p.Text != "" {

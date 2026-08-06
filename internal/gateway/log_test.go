@@ -92,20 +92,22 @@ func TestComputeCostMissingCandidateIsUnknown(t *testing.T) {
 // request_logs row.
 func TestFinalizeWritesBodyRow(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
-	rc := &RelayContext{
-		RequestID:            "req-body-1",
-		APIKeyID:             apiKey.ID,
-		RequestHeaders:       []byte(`{"User-Agent":["curl/8.0"]}`),
-		RequestBody:          []byte(`{"model":"gpt-4o"}`),
-		UpstreamRequestBody:  []byte(`{"model":"gpt-4o-real"}`),
-		ResponseBody:         []byte(`{"model":"gpt-4o","choices":[]}`),
-		UpstreamResponseBody: []byte(`{"model":"gpt-4o-real","choices":[]}`),
+	rc := &Exchange{
+		requestID:            "req-body-1",
+		apiKeyID:             apiKey.ID,
+		requestHeaders:       []byte(`{"User-Agent":["curl/8.0"]}`),
+		requestBody:          []byte(`{"model":"gpt-4o"}`),
+		upstreamRequestBody:  []byte(`{"model":"gpt-4o-real"}`),
+		responseBody:         []byte(`{"model":"gpt-4o","choices":[]}`),
+		upstreamResponseBody: []byte(`{"model":"gpt-4o-real","choices":[]}`),
 	}
 
-	svc.finalize(rc, 200, "", time.Now())
+	svc.finalize(rc, nil, 200, "", time.Now())
+
+	svc.recordTerminal(rc)
 
 	var logCount int64
 	db.Model(&model.RequestLog{}).Count(&logCount)
@@ -146,7 +148,7 @@ func TestFinalizeWritesBodyRow(t *testing.T) {
 // first and is authoritative.
 func TestFinalizeBodyWriteFailureDoesNotRollbackBilling(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
 	// Force UpsertRequestLogBody to fail without touching request_logs, so
@@ -156,14 +158,15 @@ func TestFinalizeBodyWriteFailureDoesNotRollbackBilling(t *testing.T) {
 		t.Fatalf("drop request_log_bodies: %v", err)
 	}
 
-	rc := &RelayContext{RequestID: "req-body-fail-1", APIKeyID: apiKey.ID}
+	rc := &Exchange{requestID: "req-body-fail-1", apiKeyID: apiKey.ID}
 
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("finalize panicked on request_log_bodies write failure: %v", r)
 		}
 	}()
-	svc.finalize(rc, 200, "", time.Now())
+	svc.finalize(rc, nil, 200, "", time.Now())
+	svc.recordTerminal(rc)
 
 	var logCount int64
 	db.Model(&model.RequestLog{}).Count(&logCount)
@@ -241,33 +244,33 @@ func TestComputeCostCompressSavingsUnknownIsZero(t *testing.T) {
 // in TestComputeCostCompressSavings; here we verify it persisted end-to-end.
 func TestFinalizeWritesCompressColumns(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
 	// Cand InputPrice 2.0/M, tokensSaved 1500 -> 1500 * 2.0 = 3000 micros.
-	// rc.Candidate is only read in-memory by computeCost (InputPrice), never
+	// rc.candidate is only read in-memory by computeCost (InputPrice), never
 	// persisted by finalize — so an unpersisted in-memory candidate is enough.
 	cand := &model.ModelCandidate{
 		InputPrice: 2.0, OutputPrice: 4.0, MaxOutput: 128,
 		SupportsStreaming: boolPtr(true), ManagementStatus: model.ModelCandidateStatusEnabled,
 		VerificationStatus: model.ModelVerificationStatusPassed,
 	}
-	rc := &RelayContext{
-		RequestID:                    "req-compress-1",
-		APIKeyID:                     apiKey.ID,
-		Candidate:                    cand,
-		Usage:                        &Usage{PromptTokens: 100, CompletionTokens: 50},
-		CompressEstimatedTokensSaved: 1500,
-		CompressorsApplied:           []string{"whitespace", "whitespace", "contractions"},
-		RequestBodyCompressed:        []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
+	rc := &Exchange{
+		requestID:                    "req-compress-1",
+		apiKeyID:                     apiKey.ID,
+		candidate:                    cand,
+		compressEstimatedTokensSaved: 1500,
+		compressorsApplied:           []string{"whitespace", "whitespace", "contractions"},
+		requestBodyCompressed:        []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
 		// One successful attempt — the request reached upstream, so the
 		// compress savings are real (not phantom) and must be persisted.
-		Attempts: []AttemptRecord{{
+		attempts: []AttemptRecord{{
 			CandidateID: cand.ID, ProviderID: 1, ProviderName: "test",
 			Outcome: AttemptSuccess, StatusCode: 200,
 		}},
 	}
-	svc.finalize(rc, 200, "", time.Now())
+	svc.finalize(rc, &Usage{PromptTokens: 100, CompletionTokens: 50}, 200, "", time.Now())
+	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-compress-1")
 	if err != nil || row == nil {
@@ -304,15 +307,16 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 // skipped, skip_reason is populated and the savings/body fields are zero/empty.
 func TestFinalizeWritesCompressSkippedColumns(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
-	rc := &RelayContext{
-		RequestID:          "req-compress-skip-1",
-		APIKeyID:           apiKey.ID,
-		CompressSkipReason: "too_small",
+	rc := &Exchange{
+		requestID:          "req-compress-skip-1",
+		apiKeyID:           apiKey.ID,
+		compressSkipReason: "too_small",
 	}
-	svc.finalize(rc, 200, "", time.Now())
+	svc.finalize(rc, nil, 200, "", time.Now())
+	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-compress-skip-1")
 	if err != nil || row == nil {
@@ -345,11 +349,12 @@ func TestFinalizeWritesCompressSkippedColumns(t *testing.T) {
 // and compressed_request_body stay at their zero/empty defaults.
 func TestFinalizeWritesCompressColumnsUncompressed(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
-	rc := &RelayContext{RequestID: "req-nocompress-1", APIKeyID: apiKey.ID}
-	svc.finalize(rc, 200, "", time.Now())
+	rc := &Exchange{requestID: "req-nocompress-1", apiKeyID: apiKey.ID}
+	svc.finalize(rc, nil, 200, "", time.Now())
+	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-nocompress-1")
 	if err != nil || row == nil {
@@ -379,19 +384,20 @@ func TestFinalizeWritesCompressColumnsUncompressed(t *testing.T) {
 // dashboard cares about: never report a saving on a row whose cost is unknown.
 func TestFinalizeCompressCostSavedZeroWhenPricingUnknown(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
-	rc := &RelayContext{
-		RequestID:                    "req-unknown-price-1",
-		APIKeyID:                     apiKey.ID,
-		CompressEstimatedTokensSaved: 5000, // large, but no usage to price it
-		CompressorsApplied:           []string{"whitespace"},
-		RequestBodyCompressed:        []byte(`{"model":"gpt-4o"}`),
+	rc := &Exchange{
+		requestID:                    "req-unknown-price-1",
+		apiKeyID:                     apiKey.ID,
+		compressEstimatedTokensSaved: 5000, // large, but no usage to price it
+		compressorsApplied:           []string{"whitespace"},
+		requestBodyCompressed:        []byte(`{"model":"gpt-4o"}`),
 		// Usage and Candidate are nil — pricing is unknown, and crucially
 		// Attempts is empty (pre-relay rejection).
 	}
-	svc.finalize(rc, http.StatusInternalServerError, "no_candidate", time.Now())
+	svc.finalize(rc, nil, http.StatusInternalServerError, "no_candidate", time.Now())
+	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-unknown-price-1")
 	if err != nil || row == nil {
@@ -425,20 +431,21 @@ func TestFinalizeCompressCostSavedZeroWhenPricingUnknown(t *testing.T) {
 // compressed body on request_log_bodies is still persisted (for debugging).
 func TestFinalizeCompressPhantomSavingsZeroedOnPreRelayRejection(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
-	rc := &RelayContext{
-		RequestID:                    "req-phantom-1",
-		APIKeyID:                     apiKey.ID,
-		CompressEstimatedTokensSaved: 1500,
-		CompressorsApplied:           []string{"whitespace", "log"},
-		RequestBodyCompressed:        []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
+	rc := &Exchange{
+		requestID:                    "req-phantom-1",
+		apiKeyID:                     apiKey.ID,
+		compressEstimatedTokensSaved: 1500,
+		compressorsApplied:           []string{"whitespace", "log"},
+		requestBodyCompressed:        []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
 		// No Attempts — simulates a pre-relay rejection (e.g. no routable
 		// candidate after compression already ran on the caller body).
 	}
 	// 503 = no routable candidate, the most common post-compress pre-relay path.
-	svc.finalize(rc, http.StatusServiceUnavailable, "no_enabled_candidate", time.Now())
+	svc.finalize(rc, nil, http.StatusServiceUnavailable, "no_enabled_candidate", time.Now())
+	svc.recordTerminal(rc)
 
 	row, err := repository.GetRequestLogByRequestID(db, "req-phantom-1")
 	if err != nil || row == nil {
@@ -472,28 +479,6 @@ func TestFinalizeCompressPhantomSavingsZeroedOnPreRelayRejection(t *testing.T) {
 // TestJoinCompressors covers the comma-join helper directly: per-block
 // occurrences are preserved (NOT deduped) so stats can count how many times
 // each compressor fired, order is preserved, and empty input yields "".
-func TestJoinCompressors(t *testing.T) {
-	cases := []struct {
-		name string
-		in   []string
-		want string
-	}{
-		{"nil", nil, ""},
-		{"empty", []string{}, ""},
-		{"single", []string{"whitespace"}, "whitespace"},
-		{"distinct", []string{"whitespace", "contractions"}, "whitespace,contractions"},
-		{"duplicates preserved", []string{"whitespace", "contractions", "whitespace", "whitespace"}, "whitespace,contractions,whitespace,whitespace"},
-		{"blanks filtered", []string{"", "whitespace", "", ""}, "whitespace"},
-		{"repeats counted", []string{"log", "log", "diff"}, "log,log,diff"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := joinCompressors(tc.in); got != tc.want {
-				t.Errorf("joinCompressors(%v) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
 
 func TestNetPromptTokens(t *testing.T) {
 	cases := []struct {
@@ -876,13 +861,14 @@ func TestFinalizeNormalizesCacheExclusivePrompt(t *testing.T) {
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			db := testutil.NewSQLiteDB(t)
-			svc := newRelaySvc(t, db)
+			svc := newSvc(t, db)
 			apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 			cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0, CacheReadPrice: &readPrice}
 
 			reqID := fmt.Sprintf("req-cacheconv-%d", i)
-			rc := &RelayContext{RequestID: reqID, APIKeyID: apiKey.ID, Candidate: cand, Usage: tc.usage}
-			svc.finalize(rc, 200, "", time.Now())
+			rc := &Exchange{requestID: reqID, apiKeyID: apiKey.ID, candidate: cand}
+			svc.finalize(rc, tc.usage, 200, "", time.Now())
+			svc.recordTerminal(rc)
 
 			row, err := repository.GetRequestLogByRequestID(db, reqID)
 			if err != nil || row == nil {

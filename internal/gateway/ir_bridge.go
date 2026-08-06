@@ -2,12 +2,12 @@ package gateway
 
 import "github.com/yolorouter/yolorouter/internal/protocols"
 
-// var _ protocols.UpstreamBuffer = (*RelayContext)(nil) is a compile-time
-// assertion that RelayContext satisfies the IR relay layer's minimal
+// var _ protocols.UpstreamBuffer = (*Exchange)(nil) is a compile-time
+// assertion that Exchange satisfies the IR relay layer's minimal
 // upstream-recording interface, so the IR relay helpers
 // (protocols.IRStreamRelay / IRNonStreamRelay / IRStreamRelayJSONLines) can
-// take a *RelayContext directly as their buf argument.
-var _ protocols.UpstreamBuffer = (*RelayContext)(nil)
+// take a *Exchange directly as their buf argument.
+var _ protocols.UpstreamBuffer = (*Exchange)(nil)
 
 // AppendUpstream implements protocols.UpstreamBuffer for the streaming IR
 // relay path. Intentionally a NO-OP in this version: data here is the raw
@@ -17,11 +17,11 @@ var _ protocols.UpstreamBuffer = (*RelayContext)(nil)
 // (which land in that same file via AppendResponse below), corrupting the
 // "exactly what the client received" contract the capture file is supposed
 // to guarantee. Kept as a method (rather than removed) purely so
-// RelayContext still satisfies protocols.UpstreamBuffer; a future version
+// Exchange still satisfies protocols.UpstreamBuffer; a future version
 // could route this into a separate <request_id>.upstream debug file instead
 // of discarding it, but that is a deliberate scope cut for now, not an
 // oversight.
-func (rc *RelayContext) AppendUpstream(data []byte) {
+func (rc *Exchange) AppendUpstream(data []byte) {
 	_ = data
 }
 
@@ -33,11 +33,11 @@ func (rc *RelayContext) AppendUpstream(data []byte) {
 // IRStreamRelayJSONLines call this at every point an encoded event is
 // actually written to the client, so the capture file ends up byte-for-byte
 // identical to what the client received — mirroring the same-protocol
-// passthrough path's appendStreamBodyLine(rc, sent) calls in
-// passthroughStreamToClient. Delegates to the existing appendStreamBodyLine
+// passthrough pump's own appendStreamBodyLine(rc, sent) calls.
+// Delegates to the existing appendStreamBodyLine
 // helper rather than reimplementing the capture-file bookkeeping (nil-file
 // no-op, 1GiB anti-OOM backstop) here.
-func (rc *RelayContext) AppendResponse(data []byte) {
+func (rc *Exchange) AppendResponse(data []byte) {
 	appendStreamBodyLine(rc, data)
 }
 
@@ -45,16 +45,16 @@ func (rc *RelayContext) AppendResponse(data []byte) {
 // path: it records the raw (pre-IR-decode) upstream response body for the
 // request_log_bodies row, mirroring the non-IR non-stream path's population
 // of UpstreamResponseBody.
-func (rc *RelayContext) SetBody(data []byte) {
-	rc.UpstreamResponseBody = data
+func (rc *Exchange) SetBody(data []byte) {
+	rc.upstreamResponseBody = data
 }
 
 // SetResponseBody implements protocols.UpstreamBuffer for the non-streaming
 // IR relay path: it records the caller-facing (post-IR-encode) response
-// bytes actually written to the client, mirroring dispatchPassthroughNonStream's
-// population of rc.ResponseBody for the same-protocol path.
-func (rc *RelayContext) SetResponseBody(data []byte) {
-	rc.ResponseBody = data
+// bytes actually written to the client, mirroring how the same-protocol path
+// populates rc.responseBody.
+func (rc *Exchange) SetResponseBody(data []byte) {
+	rc.responseBody = data
 }
 
 // clearResponseBodies drops UpstreamResponseBody/ResponseBody before this
@@ -65,9 +65,9 @@ func (rc *RelayContext) SetResponseBody(data []byte) {
 // request's upstream/response body. Only the success path re-populates them
 // afterward (or, for a stream request, leaves them empty — the sent SSE is
 // captured to streamBodyFile instead).
-func (rc *RelayContext) clearResponseBodies() {
-	rc.UpstreamResponseBody = nil
-	rc.ResponseBody = nil
+func (rc *Exchange) clearResponseBodies() {
+	rc.upstreamResponseBody = nil
+	rc.responseBody = nil
 }
 
 // irUsageToUsage converts a protocols.IRUsage into the gateway's own Usage

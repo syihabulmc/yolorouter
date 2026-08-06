@@ -19,9 +19,9 @@ import (
 // a Claude-format client hitting POST /v1/messages, routed through the
 // cross-protocol IR path to an OpenAI-compatible upstream (provider_type
 // "openai"), getting Claude-native responses and errors back. It mirrors
-// dispatch_crossproto_test.go's harness (createProvider/createModelAndCandidate/
+// crossproto_test.go's harness (createProvider/createModelAndCandidate/
 // createAPIKey/newCtxPath/svc.Handle) with ingress and egress swapped:
-// dispatch_crossproto_test.go drives an OpenAI-ingress client against an
+// crossproto_test.go drives an OpenAI-ingress client against an
 // anthropic-type provider; these tests drive a Claude-ingress client (path
 // /v1/messages) against an openai-type provider — the other direction of the
 // same IR round trip, and the one that matches how a real Claude Code / Claude
@@ -67,7 +67,7 @@ func TestMessagesIngressNonStreamSuccess(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "gpt-4o-real", true, true, 1)
@@ -156,14 +156,14 @@ func TestMessagesIngressStreamSuccess(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -236,8 +236,8 @@ func TestMessagesIngressStreamSuccess(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.Usage == nil || captured.Usage.PromptTokens != 10 || captured.Usage.CompletionTokens != 2 {
-		t.Errorf("captured usage = %+v, want prompt=10 completion=2 (mapped from openai prompt_tokens/completion_tokens)", captured.Usage)
+	if billed := requireBilled(t, captured); billed.Prompt != 10 || billed.Completion != 2 {
+		t.Errorf("billed usage = %+v, want prompt=10 completion=2 (mapped from openai prompt_tokens/completion_tokens)", billed)
 	}
 }
 
@@ -318,7 +318,7 @@ func TestMessagesIngressMalformedBodyRejected(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			svc := newRelaySvc(t, db)
+			svc := newSvc(t, db)
 			p := createProvider(t, db, "openai-provider", upstream.URL)
 			createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 			m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "gpt-4o-real", true, true, 1)
@@ -359,8 +359,8 @@ func TestMessagesIngressMalformedBodyRejected(t *testing.T) {
 // of stream_error_ingress_test.go's TestRelayStreamMidFailureClaudeIngress:
 // there, the Claude-ingress caller hits an anthropic-type provider
 // (same-protocol passthrough). Here it hits an openai-type provider (the
-// cross-protocol IR path — protocols.IRStreamRelay via
-// processDispatchResponseStream, not dispatchPassthroughStream). The upstream
+// cross-protocol IR path — protocols.IRStreamRelay, not the byte
+// passthrough pump). The upstream
 // sends one OpenAI SSE frame (enough to reach the first Claude-encoded event,
 // committing the response) then dies via a raw connection hijack/close
 // (hijackAfterFirstFrame, defined in stream_error_ingress_test.go) — a
@@ -373,7 +373,7 @@ func TestMessagesIngressMidStreamFailure(t *testing.T) {
 	))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "gpt-4o-real", true, true, 1)
@@ -399,7 +399,7 @@ func TestMessagesIngressMidStreamFailure(t *testing.T) {
 }
 
 // TestMessagesIngressStreamAuditMatchesClientBytes is the cross-protocol
-// counterpart to dispatch_crossproto_test.go's
+// counterpart to crossproto_test.go's
 // TestCrossProtocolStreamCaptureMatchesClientBytes (which pins the OpenAI
 // ingress -> Claude egress direction): after a successful Claude-ingress ->
 // OpenAI-egress stream, the per-request <request_id>.stream capture file must
@@ -426,15 +426,15 @@ func TestMessagesIngressStreamAuditMatchesClientBytes(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "claude-3-5-sonnet", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
 	dir := t.TempDir()
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"claude-3-5-sonnet","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -448,11 +448,11 @@ func TestMessagesIngressStreamAuditMatchesClientBytes(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.RequestID == "" {
+	if captured.requestID == "" {
 		t.Fatal("expected a non-empty request id")
 	}
 
-	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.RequestID+".stream"))
+	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.requestID+".stream"))
 	if err != nil {
 		t.Fatalf("read captured stream file: %v", err)
 	}

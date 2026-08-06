@@ -52,7 +52,7 @@ func TestIRNonStreamRelay_BoundsResponseBody(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	_, err := IRNonStreamRelay(c, resp, fakeResponseDecoder{}, fakeResponseEncoder{}, nil, nil)
+	_, err := IRNonStreamRelay(NewGinClientWriter(c), resp, fakeResponseDecoder{}, fakeResponseEncoder{}, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error for an upstream body exceeding maxIRResponseBytes, got nil")
 	}
@@ -99,7 +99,7 @@ func TestIRStreamRelayJSONLines_CapsIncompleteLineBuffer(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	_, err := IRStreamRelayJSONLines(c, resp, fakeStreamDecoder{}, fakeStreamEncoder{}, nil, nil, nil)
+	_, err := IRStreamRelayJSONLines(NewGinClientWriter(c), resp, fakeStreamDecoder{}, fakeStreamEncoder{}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected a read error when the upstream never emits a newline past maxJSONLineBytes, got nil")
 	}

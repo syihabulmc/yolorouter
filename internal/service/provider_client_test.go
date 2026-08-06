@@ -32,8 +32,8 @@ func newTestClient(handler http.HandlerFunc) (*HTTPProviderClient, *httptest.Ser
 
 // TestProviderTestURLMatchesRuntimeDispatchBuilder is a regression test: the
 // verification/key-test URL must be built with the exact same
-// protocols.JoinUpstreamURL call runtime dispatch uses
-// (buildUpstreamBody in internal/gateway/dispatch.go), otherwise a
+// protocols.JoinUpstreamURL call a real request is dispatched with,
+// otherwise a
 // bare-host or path-prefixed provider could pass verification against one
 // endpoint and receive production traffic at another (e.g. a bare host
 // silently NOT getting /v1 inserted at verification time while runtime

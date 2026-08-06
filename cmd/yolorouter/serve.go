@@ -165,9 +165,9 @@ func runServe(ctx context.Context, args []string) error {
 		// WriteTimeout is non-zero so non-streaming endpoints are protected
 		// against slow-read clients (a slow client could otherwise hold a
 		// handler and its concurrency slot open indefinitely). Streaming
-		// relay loops call protocols.ApplyStreamWriteDeadline before each
-		// Write/Flush batch to slide the deadline forward, bounding a slow
-		// client without clearing the server WriteTimeout entirely; the
+		// deliveries slide the deadline forward before each Write/Flush,
+		// bounding a slow client without clearing the server WriteTimeout
+		// entirely; the
 		// request-level context timeout (gateway.RequestTimeout) remains as
 		// the streaming backstop.
 		// The value is RequestTimeout + a slack so a non-streaming handler
@@ -176,8 +176,8 @@ func runServe(ctx context.Context, args []string) error {
 		// during the pre-first-write gap (e.g. a long TTFT). The slack is
 		// derived from protocols.StreamWriteWindow() — not a separate
 		// hard-coded literal — because it MUST stay >= that window: once a
-		// stream starts writing, ApplyStreamWriteDeadline slides this
-		// server-level WriteTimeout forward on every chunk, but the very
+		// stream starts writing, every chunk slides this server-level
+		// WriteTimeout forward, but the very
 		// first slide only happens after the pre-first-write gap this slack
 		// covers — a slack shorter than the write window would let the
 		// global WriteTimeout fire before the first slide lands. Deriving

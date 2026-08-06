@@ -273,10 +273,11 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	protected.POST("/models/:id/candidates/:candidateId/test", handler.PostModelCandidateTest(modelSvc))
 	protected.DELETE("/models/:id/candidates/:candidateId", handler.DeleteModelCandidate(modelSvc))
 
-	apiKeySvc := service.NewAPIKeyService(db)
+	apiKeySvc := service.NewAPIKeyService(db, providerMasterKey)
 	protected.GET("/api-keys", handler.GetAPIKeys(apiKeySvc))
 	protected.POST("/api-keys", handler.PostAPIKey(apiKeySvc))
 	protected.GET("/api-keys/:id", handler.GetAPIKey(apiKeySvc))
+	protected.GET("/api-keys/:id/plaintext", handler.GetAPIKeyPlaintext(apiKeySvc))
 	protected.PATCH("/api-keys/:id", handler.PatchAPIKey(apiKeySvc))
 	protected.PATCH("/api-keys/:id/revoke", handler.PatchAPIKeyRevoke(apiKeySvc))
 
@@ -337,17 +338,19 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// rather than bare on r, which would otherwise skip auth, the body-size
 	// cap, and the bodies-dir stash. All four routes share the same
 	// middleware chain (body-size limit, auth, bodies-dir stash);
-	// gateway.PostChatCompletions/RelayService.Handle dispatch by request
+	// gateway.PostChatCompletions/Service.Handle dispatch by request
 	// path (gateway.IngressProtocol) to pick the caller's actual wire
 	// protocol.
-	relaySvc := gateway.NewRelayService(db, providerMasterKey, allowPrivateUpstreams, settingsSvc, gatewayCfg)
+	relaySvc := gateway.NewService(db, providerMasterKey, allowPrivateUpstreams, settingsSvc, gatewayCfg)
+
+	registerCapabilities(relaySvc, db)
 
 	v1 := gatewayGroup(r, "/v1", bodiesDir, db)
 	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))
 	v1.POST("/messages", gateway.PostChatCompletions(relaySvc))
 	v1.POST("/responses", gateway.PostChatCompletions(relaySvc))
 	// Model discovery: GET /v1/models and GET /v1/models/:model are
-	// read-only and bypass RelayService (no provider fan-out, no spend).
+	// read-only and bypass Service (no provider fan-out, no spend).
 	// They reuse the same APIKeyAuth + body-cap chain the relay POSTs above
 	// use, so a caller presents the same key as for a completion request.
 	v1.GET("/models", gateway.ListModels(db))

@@ -64,27 +64,27 @@ func TestWriteClaudeError_Envelope(t *testing.T) {
 }
 
 // TestWriteClaudeError_StashesResponseBody mirrors
-// TestWriteOpenAIErrorStashesResponseBody: when a RelayContext is on the gin
+// TestWriteOpenAIErrorStashesResponseBody: when a Exchange is on the gin
 // context, the Claude error JSON actually sent to the caller must also be
-// stashed into rc.ResponseBody so the audit trail matches.
+// stashed into rc.responseBody so the audit trail matches.
 func TestWriteClaudeError_StashesResponseBody(t *testing.T) {
 	c, w := newIngressTestContext(t, "/v1/messages")
-	rc := &RelayContext{RequestID: "req_x"}
+	rc := &Exchange{requestID: "req_x"}
 	c.Set(relayContextKey, rc)
 
 	WriteClaudeError(c, http.StatusNotFound, "not_found_error", "model does not exist", "req_x")
 
-	if rc.ResponseBody == nil {
-		t.Fatal("rc.ResponseBody was not stashed")
+	if rc.responseBody == nil {
+		t.Fatal("rc.responseBody was not stashed")
 	}
-	if string(rc.ResponseBody) != w.Body.String() {
-		t.Errorf("rc.ResponseBody = %s, want it to equal the sent body %s", rc.ResponseBody, w.Body.String())
+	if string(rc.responseBody) != w.Body.String() {
+		t.Errorf("rc.responseBody = %s, want it to equal the sent body %s", rc.responseBody, w.Body.String())
 	}
 }
 
-// TestWriteClaudeError_NoRelayContextIsNoop confirms the stash is a true
-// no-op (no panic) when no RelayContext is on the context.
-func TestWriteClaudeError_NoRelayContextIsNoop(t *testing.T) {
+// TestWriteClaudeError_NoExchangeIsNoop confirms the stash is a true
+// no-op (no panic) when no Exchange is on the context.
+func TestWriteClaudeError_NoExchangeIsNoop(t *testing.T) {
 	c, w := newIngressTestContext(t, "/v1/messages")
 
 	WriteClaudeError(c, http.StatusUnauthorized, "authentication_error", "missing API key", "req_y")

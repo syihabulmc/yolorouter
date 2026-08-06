@@ -52,7 +52,7 @@ func TestMultiProtocolProvider_BothIngresses_RouteToCorrectPerProtocolUpstream(t
 	}))
 	defer claudeUpstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	now := time.Now().UTC()
 	p := &model.Provider{
 		Name: "multi-protocol-provider", ProviderType: "openai", BaseURL: openaiUpstream.URL,
@@ -161,7 +161,7 @@ func TestDestinationVersionBump_RevokesStaleKeyUntilReVerified(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "claude-3-5-sonnet-20241022", true, true, 1)

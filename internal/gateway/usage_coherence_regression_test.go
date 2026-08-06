@@ -46,13 +46,13 @@ func decodeResponses(t *testing.T, body string) protocols.IRUsage {
 	return resp.Usage
 }
 
-// TestP1_1_WireAndBillingAgreeOnAbsurdCacheCount: an upstream reporting
+// TestWireAndBillingAgreeOnAnAbsurdCacheCount: an upstream reporting
 // prompt=100 alongside cache_write=1000000 under the inclusive convention used
 // to be EMITTED by the encoder (its gate checked only negatives) while billing
 // refused it (cache exceeds the prompt it is supposedly a subset of). The client
 // got an authoritative-looking million-token cache write and a downstream gateway
 // billing from it would have over-charged. After convergence both sides refuse.
-func TestP1_1_WireAndBillingAgreeOnAbsurdCacheCount(t *testing.T) {
+func TestWireAndBillingAgreeOnAnAbsurdCacheCount(t *testing.T) {
 	body := `{
 		"status": "completed",
 		"usage": {
@@ -79,13 +79,13 @@ func TestP1_1_WireAndBillingAgreeOnAbsurdCacheCount(t *testing.T) {
 	}
 }
 
-// TestP2_4_WireAndBillingAgreeOnNegativeReasoning: a record with a positive
+// TestWireAndBillingAgreeOnANegativeReasoningCount: a record with a positive
 // output count but a NEGATIVE reasoning count used to make the encoder emit null
 // (HasNegativeCount sees the negative reasoning count) while billing accepted it
 // (relay.Usage/gateway.Usage had no ReasoningTokens field, so the billing gate
 // could not see the negative and re-derive the verdict). After convergence the
 // reasoning count is carried across the bridge and both sides refuse.
-func TestP2_4_WireAndBillingAgreeOnNegativeReasoning(t *testing.T) {
+func TestWireAndBillingAgreeOnANegativeReasoningCount(t *testing.T) {
 	body := `{
 		"status": "completed",
 		"usage": {

@@ -76,7 +76,7 @@ func TestIRStreamRelay_TreatsCtxCanceledAfterDoneAsSuccess(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	usage, err := protocols.IRStreamRelay(c, resp,
+	usage, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp,
 		chat.NewStreamDecoder(),
 		chat.NewStreamEncoder(),
 		nil, nil, nil)
@@ -111,7 +111,7 @@ func TestIRStreamRelay_PropagatesCtxCanceledBeforeDone(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	_, err := protocols.IRStreamRelay(c, resp,
+	_, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp,
 		chat.NewStreamDecoder(),
 		chat.NewStreamEncoder(),
 		nil, nil, nil)
@@ -151,7 +151,7 @@ func TestIRStreamRelay_FlushesDecoderBufferBeforeReadErrorCheck(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	usage, err := protocols.IRStreamRelay(c, resp,
+	usage, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp,
 		chat.NewStreamDecoder(),
 		chat.NewStreamEncoder(),
 		nil, nil, nil)
@@ -204,7 +204,7 @@ func TestIRStreamRelay_ClaudeMessageStopOnly_CtxCanceledAfterEOF(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	usage, err := protocols.IRStreamRelay(c, resp,
+	usage, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp,
 		claude.NewStreamDecoder(),
 		claude.NewStreamEncoder(),
 		nil, nil, nil)
@@ -257,7 +257,7 @@ func TestIRStreamRelay_TreatsUnexpectedEOFAfterDoneAsSuccess(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	usage, err := protocols.IRStreamRelay(c, resp,
+	usage, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp,
 		chat.NewStreamDecoder(),
 		chat.NewStreamEncoder(),
 		nil, nil, nil)
@@ -299,7 +299,7 @@ func TestIRStreamRelay_FailsWhenCanceledBetweenFinishReasonAndUsageChunk(t *test
 		Header:     http.Header{},
 	}
 
-	_, err := protocols.IRStreamRelay(c, resp,
+	_, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp,
 		chat.NewStreamDecoder(),
 		chat.NewStreamEncoder(),
 		nil, nil, nil)
@@ -339,7 +339,7 @@ func TestIRStreamRelayJSONLines_FailsWhenCanceledWithoutUsage(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	_, err := protocols.IRStreamRelayJSONLines(c, resp,
+	_, err := protocols.IRStreamRelayJSONLines(protocols.NewGinClientWriter(c), resp,
 		gemini.NewStreamDecoder(),
 		gemini.NewStreamEncoder(),
 		nil, nil, nil)
@@ -374,7 +374,7 @@ func TestIRStreamRelayJSONLines_SuccessWhenFinishAndUsageBothArrive(t *testing.T
 		Header:     http.Header{},
 	}
 
-	usage, err := protocols.IRStreamRelayJSONLines(c, resp,
+	usage, err := protocols.IRStreamRelayJSONLines(protocols.NewGinClientWriter(c), resp,
 		gemini.NewStreamDecoder(),
 		gemini.NewStreamEncoder(),
 		nil, nil, nil)
@@ -414,7 +414,7 @@ func TestIRStreamRelay_RequiresSawDoneBeforeSynthesizingSuccess(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	_, err := protocols.IRStreamRelay(c, resp,
+	_, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp,
 		chat.NewStreamDecoder(),
 		chat.NewStreamEncoder(),
 		nil, nil, nil)
@@ -427,7 +427,7 @@ func TestIRStreamRelay_RequiresSawDoneBeforeSynthesizingSuccess(t *testing.T) {
 // [DONE]) must still settle as success and emit [DONE] to the client,
 // confirming the sawDone gate does not regress the normal path — this also
 // pins the shape the existing cross-protocol integration test
-// (dispatch_crossproto_test.go, complete Claude SSE with message_stop)
+// (the gateway's cross-protocol suite, complete Claude SSE with message_stop)
 // depends on.
 func TestIRStreamRelay_CompleteStreamStillSucceeds(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -451,7 +451,7 @@ func TestIRStreamRelay_CompleteStreamStillSucceeds(t *testing.T) {
 		Header:     http.Header{},
 	}
 
-	usage, err := protocols.IRStreamRelay(c, resp,
+	usage, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp,
 		chat.NewStreamDecoder(),
 		chat.NewStreamEncoder(),
 		nil, nil, nil)
@@ -481,7 +481,7 @@ func TestIRStreamRelay_EmptyUpstreamReturnsErrorWithoutCommittingHeaders(t *test
 	}
 
 	var sawFirstChunk bool
-	_, err := protocols.IRStreamRelay(c, resp,
+	_, err := protocols.IRStreamRelay(protocols.NewGinClientWriter(c), resp,
 		chat.NewStreamDecoder(),
 		chat.NewStreamEncoder(),
 		nil, func() { sawFirstChunk = true }, nil)
@@ -508,7 +508,7 @@ func TestIRStreamRelayJSONLines_EmptyUpstreamReturnsErrorWithoutCommittingHeader
 	}
 
 	var sawFirstChunk bool
-	_, err := protocols.IRStreamRelayJSONLines(c, resp,
+	_, err := protocols.IRStreamRelayJSONLines(protocols.NewGinClientWriter(c), resp,
 		gemini.NewStreamDecoder(),
 		gemini.NewStreamEncoder(),
 		nil, func() { sawFirstChunk = true }, nil)
@@ -544,7 +544,7 @@ func TestIRStreamRelayJSONLines_RequiresSawDoneBeforeSynthesizingSuccess(t *test
 		Header:     http.Header{},
 	}
 
-	_, err := protocols.IRStreamRelayJSONLines(c, resp,
+	_, err := protocols.IRStreamRelayJSONLines(protocols.NewGinClientWriter(c), resp,
 		gemini.NewStreamDecoder(),
 		gemini.NewStreamEncoder(),
 		nil, nil, nil)

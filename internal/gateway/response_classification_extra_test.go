@@ -24,9 +24,9 @@ import (
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
 
-// ───────────────────── Fix 1: upstream DeadlineExceeded not misclassified ────
+// ─────────────────── upstream DeadlineExceeded not misclassified ────
 
-// TestProcessDispatchResponseStream_UpstreamDeadlineNotClientWriteTimeout
+// TestAnUpstreamDeadlineIsNotACallerWriteTimeout
 // verifies that when the attempt context deadline fires after the first byte
 // (a genuine upstream read timeout), the error is classified as
 // AttemptServerError + stream_partial and an inline error frame is emitted —
@@ -34,7 +34,7 @@ import (
 // satisfies net.Error.Timeout(); the old broad classifier would have
 // misclassified it as a client write failure, skipping the error frame and
 // recording 499.
-func TestProcessDispatchResponseStream_UpstreamDeadlineNotClientWriteTimeout(t *testing.T) {
+func TestAnUpstreamDeadlineIsNotACallerWriteTimeout(t *testing.T) {
 	// Use a short AttemptTimeout so the upstream deadline fires quickly.
 	gw := testGatewayConfig()
 	gw.AttemptTimeout = 2 * time.Second
@@ -53,9 +53,14 @@ func TestProcessDispatchResponseStream_UpstreamDeadlineNotClientWriteTimeout(t *
 		flusher, _ := w.(http.Flusher)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		// Send message_start so the Claude decoder initializes and the first
-		// byte goes out to the client (FirstByteSent = true).
+		// message_start initializes the decoder but produces no client-facing
+		// chunk on its own; the text delta after it is what makes the encoder
+		// emit, which is what commits the response. Without that second frame
+		// the deadline below is met by a stream that never started, and this
+		// test would exercise the pre-commit failover branch instead of the
+		// mid-stream one it is about.
 		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"))
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -65,17 +70,17 @@ func TestProcessDispatchResponseStream_UpstreamDeadlineNotClientWriteTimeout(t *
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvcWithGateway(t, db, gw)
-	p := createAnthropicProvider(t, db, "claude-p-r6", upstream.URL)
-	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-r6", "k1", 1, true)
-	m := createModelAndCandidate(t, db, p, "gpt-4o-r6", "claude-3-5-sonnet-20241022", true, true, 1)
+	svc := newSvcWithGateway(t, db, gw)
+	p := createAnthropicProvider(t, db, "claude-p-stall", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-stall", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o-stall", "claude-3-5-sonnet-20241022", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	var capturedRC atomic.Pointer[RelayContext]
+	var capturedRC atomic.Pointer[Exchange]
 	prevHook := testHookHandleDone
-	testHookHandleDone = func(rc *RelayContext) {
+	testHookHandleDone = func(rc *Exchange) {
 		capturedRC.Store(rc)
 	}
 	t.Cleanup(func() { testHookHandleDone = prevHook })
@@ -97,7 +102,7 @@ func TestProcessDispatchResponseStream_UpstreamDeadlineNotClientWriteTimeout(t *
 	// reading slowly (the upstream stalls anyway).
 	resp, err := http.Post("http://"+ln.Addr().String()+"/v1/chat/completions",
 		"application/json",
-		strings.NewReader(`{"model":"gpt-4o-r6","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+		strings.NewReader(`{"model":"gpt-4o-stall","messages":[{"role":"user","content":"hi"}],"stream":true}`))
 	if err != nil {
 		t.Fatalf("connect to gateway: %v", err)
 	}
@@ -116,13 +121,24 @@ func TestProcessDispatchResponseStream_UpstreamDeadlineNotClientWriteTimeout(t *
 		t.Fatal("handler did not complete within 10s — attempt deadline should have fired")
 	}
 
-	if len(rc.Attempts) == 0 {
+	if len(rc.attempts) == 0 {
 		t.Fatal("expected at least one attempt record")
 	}
-	last := rc.Attempts[len(rc.Attempts)-1]
+	last := rc.attempts[len(rc.attempts)-1]
 
-	// The upstream timeout must NOT be classified as client_write_timeout.
-	if strings.Contains(last.FailReason, "client write timeout") {
+	// This case is about the mid-stream branch, and the two branches are not
+	// told apart by the outcome: attemptOutcomeFor maps every non-client fault
+	// on a stream to AttemptServerError, so a stream that died BEFORE committing
+	// produces the same label. The reason code is what distinguishes them, and
+	// without this assertion the fixture could stop committing the response and
+	// nothing here would notice.
+	if !strings.HasPrefix(last.FailReason, "stream_partial") {
+		t.Errorf("fail reason = %q, want it to start with stream_partial — "+
+			"anything else means the stream never committed and this test is "+
+			"exercising the pre-commit failover branch instead", last.FailReason)
+	}
+	// The upstream timeout must NOT be blamed on the caller.
+	if strings.Contains(last.FailReason, "client_write_timeout") {
 		t.Errorf("upstream DeadlineExceeded was misclassified as client_write_timeout: fail_reason=%q", last.FailReason)
 	}
 	// It should be AttemptServerError (upstream fault), with stream_partial.
@@ -132,7 +148,7 @@ func TestProcessDispatchResponseStream_UpstreamDeadlineNotClientWriteTimeout(t *
 	}
 }
 
-// ───────────────────── Fix 2: CAS survives attempt ctx expiry ────────────────
+// ─────────────────── CAS survives attempt ctx expiry ────────────────
 
 // TestUnauthorized401_CASSurvivesAttemptContextExpiry verifies that the 401
 // CAS (MarkProviderKeyVerificationFailedIfCurrent) uses a context detached
@@ -163,13 +179,13 @@ func TestUnauthorized401_CASSurvivesAttemptContextExpiry(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvcWithGateway(t, db, gw)
-	p := createProvider(t, db, "p1-r6-cas", upstream.URL)
-	createProviderKey(t, db, svc.masterKey, p.ID, "sk-dead-r6", "k1", 1, true)
-	m := createModelAndCandidate(t, db, p, "gpt-4o-r6-cas", "gpt-4o-real", true, true, 1)
+	svc := newSvcWithGateway(t, db, gw)
+	p := createProvider(t, db, "p-cas-expiry", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-dead-cas", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o-cas-expiry", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	c, _ := newCtx([]byte(`{"model":"gpt-4o-r6-cas","messages":[{"role":"user","content":"hi"}]}`))
+	c, _ := newCtx([]byte(`{"model":"gpt-4o-cas-expiry","messages":[{"role":"user","content":"hi"}]}`))
 	svc.Handle(c, apiKey)
 
 	// The key's verification_status MUST be persisted as Failed despite the
@@ -236,17 +252,17 @@ func TestUnauthorized401_CASSurvivesClientCancel(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvcWithGateway(t, db, gw)
-	p := createProvider(t, db, "p1-r6-cancel", upstream.URL)
-	createProviderKey(t, db, svc.masterKey, p.ID, "sk-dead-r6-cancel", "k1", 1, true)
-	m := createModelAndCandidate(t, db, p, "gpt-4o-r6-cancel", "gpt-4o-real", true, true, 1)
+	svc := newSvcWithGateway(t, db, gw)
+	p := createProvider(t, db, "p-cas-cancel", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-dead-cancel", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "gpt-4o-cas-cancel", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	var capturedRC atomic.Pointer[RelayContext]
+	var capturedRC atomic.Pointer[Exchange]
 	prevHook := testHookHandleDone
-	testHookHandleDone = func(rc *RelayContext) {
+	testHookHandleDone = func(rc *Exchange) {
 		capturedRC.Store(rc)
 	}
 	t.Cleanup(func() { testHookHandleDone = prevHook })
@@ -272,7 +288,7 @@ func TestUnauthorized401_CASSurvivesClientCancel(t *testing.T) {
 	defer reqCancel()
 	req, _ := http.NewRequestWithContext(reqCtx, http.MethodPost,
 		"http://"+ln.Addr().String()+"/v1/chat/completions",
-		strings.NewReader(`{"model":"gpt-4o-r6-cancel","messages":[{"role":"user","content":"hi"}]}`))
+		strings.NewReader(`{"model":"gpt-4o-cas-cancel","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err == nil {
@@ -309,7 +325,7 @@ func TestUnauthorized401_CASSurvivesClientCancel(t *testing.T) {
 	}
 }
 
-// ───────────────────── Fix 3: FlushError timing in writeAndCaptureSSE ────────
+// ─────────────────── FlushError timing in sendSSEFrame ────────
 
 // flushErrorWriter is an http.ResponseWriter whose Write succeeds but whose
 // FlushError returns an error. This simulates the net/http behavior where a
@@ -342,26 +358,26 @@ func (w *flushErrorWriter) FlushError() error {
 	return errors.New("simulated flush failure")
 }
 
-// TestWriteAndCaptureSSE_FlushErrorDoesNotAppend verifies that when Write
+// TestAFrameLostAtTheFlushIsNotRecordedAsSent verifies that when Write
 // succeeds but Flush fails (buffered bytes never reached the client),
-// writeAndCaptureSSE returns the flush error AND does NOT append the
+// sendSSEFrame returns the flush error AND does NOT append the
 // undelivered bytes to the stream capture file.
-func TestWriteAndCaptureSSE_FlushErrorDoesNotAppend(t *testing.T) {
+func TestAFrameLostAtTheFlushIsNotRecordedAsSent(t *testing.T) {
 	dir := t.TempDir()
 	fw := &flushErrorWriter{}
 	c, _ := gin.CreateTestContext(fw)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Set(BodiesDirContextKey, dir)
-	rc := &RelayContext{RequestID: "req-flush-err", Ingress: protocols.ProtocolOpenAI}
+	rc := &Exchange{requestID: "req-flush-err", ingress: protocols.ProtocolOpenAI}
 	openStreamBodyFile(c, rc)
 	defer closeStreamBodyFile(rc)
 
-	err := writeAndCaptureSSE(c, rc, []byte("data: test\n\n"))
+	err := sendSSEFrame(committedStreamClient(t, c, rc), []byte("data: test\n\n"))
 	if err == nil {
-		t.Fatal("expected a Flush error from writeAndCaptureSSE, got nil")
+		t.Fatal("expected a Flush error from sendSSEFrame, got nil")
 	}
 	// The capture file must NOT contain the undelivered bytes.
-	captured, readErr := os.ReadFile(filepath.Join(dir, rc.RequestID+".stream"))
+	captured, readErr := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 	if readErr != nil {
 		t.Fatalf("read capture file: %v", readErr)
 	}
@@ -370,10 +386,10 @@ func TestWriteAndCaptureSSE_FlushErrorDoesNotAppend(t *testing.T) {
 	}
 }
 
-// TestWriteAndCaptureSSE_FlushSuccessAppends verifies the success path is
+// TestAFrameIsRecordedOnlyOnceItsFlushSucceeds verifies the success path is
 // unchanged: when both Write and Flush succeed, the bytes are still appended
 // to the capture file.
-func TestWriteAndCaptureSSE_FlushSuccessAppends(t *testing.T) {
+func TestAFrameIsRecordedOnlyOnceItsFlushSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	// httptest.ResponseRecorder implements http.Flusher; NewResponseController
 	// discovers it and returns nil from Flush().
@@ -381,24 +397,24 @@ func TestWriteAndCaptureSSE_FlushSuccessAppends(t *testing.T) {
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	c.Set(BodiesDirContextKey, dir)
-	rc := &RelayContext{RequestID: "req-flush-ok", Ingress: protocols.ProtocolOpenAI}
+	rc := &Exchange{requestID: "req-flush-ok", ingress: protocols.ProtocolOpenAI}
 	openStreamBodyFile(c, rc)
 	defer closeStreamBodyFile(rc)
 
 	data := []byte("data: hello\n\n")
-	if err := writeAndCaptureSSE(c, rc, data); err != nil {
+	if err := sendSSEFrame(committedStreamClient(t, c, rc), data); err != nil {
 		t.Fatalf("expected nil error on successful write+flush, got %v", err)
 	}
 	if !bytes.Equal(rec.Body.Bytes(), data) {
 		t.Errorf("client body = %q, want %q", rec.Body.Bytes(), data)
 	}
-	captured, _ := os.ReadFile(filepath.Join(dir, rc.RequestID+".stream"))
+	captured, _ := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 	if !bytes.Equal(captured, data) {
 		t.Errorf("capture file = %q, want %q", captured, data)
 	}
 }
 
-// ───────────────────── Fix 1 (supplementary): sentinel unit test ─────────────
+// ─────────────────── sentinel unit test ─────────────
 
 // TestIsClientWriteError_SentinelOnlyForTimeout verifies that the classifier
 // uses the dedicated ErrClientWrite sentinel for timeout classification, and
@@ -430,24 +446,24 @@ func TestIsClientWriteError_SentinelOnlyForTimeout(t *testing.T) {
 	}
 }
 
-// ───────────────────── Fix 4: IR mid-stream client-disconnect precheck ──────
+// ─────────────────── IR mid-stream client-disconnect precheck ──────
 
-// TestFinalizeClientWriteOrPartial_CallerDisconnectPrecheck covers the
-// dormant cross-protocol IR path: unlike the passthrough stream pumps
-// (which detect a caller disconnect via ctx.Done()/errClientDisconnected
-// BEFORE ever reaching finalizeClientWriteOrPartial), protocols.IRStreamRelay's
-// scanner loop returns a caller disconnect as a plain
+// TestACallerDisconnectOnTheIRPathIsNotBlamedOnTheProvider covers the
+// dormant cross-protocol IR path: unlike the passthrough stream pumps (which
+// detect a caller disconnect via ctx.Done()/errClientDisconnected before the
+// failure is ever classified), protocols.IRStreamRelay's scanner loop returns
+// a caller disconnect as a plain
 // "upstream stream read error: context canceled" — neither wrapped in
 // protocols.ErrClientWrite nor the gateway's own errClientDisconnected
 // sentinel. Before this fix that fell through to the generic mid-stream
 // server-failure branch: an inline SSE error frame was written to an
 // already-dead connection and the row was misrecorded as stream_partial,
 // wrongly blaming the provider for the caller's own disconnect.
-func TestFinalizeClientWriteOrPartial_CallerDisconnectPrecheck(t *testing.T) {
+func TestACallerDisconnectOnTheIRPathIsNotBlamedOnTheProvider(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
-	p := createProvider(t, db, "p1-r7-disc", "http://upstream.invalid")
-	m := createModelAndCandidate(t, db, p, "gpt-4o-r7-disc", "gpt-4o-real", true, true, 1)
+	svc := newSvc(t, db)
+	p := createProvider(t, db, "p-mid-disconnect", "http://upstream.invalid")
+	m := createModelAndCandidate(t, db, p, "gpt-4o-mid-disconnect", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
 	var cand model.ModelCandidate
@@ -462,48 +478,56 @@ func TestFinalizeClientWriteOrPartial_CallerDisconnectPrecheck(t *testing.T) {
 	cancel() // the caller's own connection is already gone
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
 
-	rc := &RelayContext{RequestID: "req-ir-mid-stream-disconnect", OriginalModel: "gpt-4o-r7-disc", APIKeyID: apiKey.ID}
+	rc := &Exchange{requestID: "req-ir-mid-stream-disconnect", originalModel: "gpt-4o-mid-disconnect",
+		apiKeyID: apiKey.ID, ingress: protocols.ProtocolOpenAI, isStream: true}
 	rc.MarkFirstByteSent()
 
-	// The exact unwrapped shape IRStreamRelay's scanner loop returns for a
-	// caller disconnect — see IRStreamRelay's
-	// `scanErr = fmt.Errorf("upstream stream read error: %w", err)`.
+	// The exact unwrapped shape the streaming scanner loop returns for a caller
+	// disconnect: `fmt.Errorf("upstream stream read error: %w", err)`, which is
+	// neither wrapped in protocols.ErrClientWrite nor in the gateway's own
+	// disconnect sentinel.
 	err := fmt.Errorf("upstream stream read error: %w", context.Canceled)
 	resp := &http.Response{StatusCode: http.StatusOK}
 
-	result := svc.finalizeClientWriteOrPartial(c, rc, err, cand, p, model.ProviderKey{}, resp, time.Now())
+	// A caller who is already gone, on a response they were served before they
+	// left.
+	client := &stubClient{committed: true, status: http.StatusOK, gone: true}
+	payload := streamingPayload(t, protocols.ProtocolOpenAI, streamCallerBody)
+	d := payload.settleStream(DeliveryTools{Client: client, RequestID: rc.requestID}, resp, nil, err)
+	result := svc.recordAndSettle(c, rc, admitted{payload: payload}, d, cand, p, model.ProviderKey{},
+		resp.StatusCode, time.Now())
 
 	if result != attemptSuccess {
 		t.Errorf("result = %v, want attemptSuccess (already committed, cannot fail over)", result)
 	}
-	if rc.StatusCode != 499 {
-		t.Errorf("rc.StatusCode = %d, want 499 (a caller disconnect must not be billed as an upstream server fault)", rc.StatusCode)
+	if rc.statusCode != 499 {
+		t.Errorf("rc.statusCode = %d, want 499 (a caller disconnect must not be billed as an upstream server fault)", rc.statusCode)
 	}
-	if len(rc.Attempts) != 1 {
-		t.Fatalf("Attempts = %+v, want exactly one entry", rc.Attempts)
+	if len(rc.attempts) != 1 {
+		t.Fatalf("Attempts = %+v, want exactly one entry", rc.attempts)
 	}
-	if rc.Attempts[0].Outcome != AttemptConnError {
-		t.Errorf("attempt outcome = %q, want %q", rc.Attempts[0].Outcome, AttemptConnError)
+	if rc.attempts[0].Outcome != AttemptConnError {
+		t.Errorf("attempt outcome = %q, want %q", rc.attempts[0].Outcome, AttemptConnError)
 	}
-	if rc.Attempts[0].FailReason != "client disconnected" {
-		t.Errorf("fail_reason = %q, want %q", rc.Attempts[0].FailReason, "client disconnected")
+	if !strings.HasPrefix(rc.attempts[0].FailReason, "client_disconnected") {
+		t.Errorf("fail_reason = %q, want it to start with %q", rc.attempts[0].FailReason, "client_disconnected")
 	}
-	// The dead connection must never receive an inline SSE error frame — the
-	// whole point of the precheck is that writeStreamErrorEvent must not run.
-	if rec.Body.Len() != 0 {
-		t.Errorf("expected nothing written to a disconnected client, got: %q", rec.Body.String())
+	// The dead connection must never receive an inline SSE error frame: writing
+	// one is what the precheck exists to prevent.
+	if client.writes != 0 {
+		t.Errorf("expected nothing written to a disconnected client, got %q", client.pending.String())
 	}
 }
 
-// TestFinalizeClientWriteOrPartial_GenericErrorStillPartial is the negative
+// TestALiveCallerStillGetsTheStreamClosedOffOnAProviderFailure is the negative
 // control: a genuine mid-stream upstream failure on a LIVE connection must
 // still take the stream_partial branch (inline error frame + AttemptServerError),
 // not be swept into the new disconnect precheck.
-func TestFinalizeClientWriteOrPartial_GenericErrorStillPartial(t *testing.T) {
+func TestALiveCallerStillGetsTheStreamClosedOffOnAProviderFailure(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
-	p := createProvider(t, db, "p1-r7-live", "http://upstream.invalid")
-	m := createModelAndCandidate(t, db, p, "gpt-4o-r7-live", "gpt-4o-real", true, true, 1)
+	svc := newSvc(t, db)
+	p := createProvider(t, db, "p-mid-live", "http://upstream.invalid")
+	m := createModelAndCandidate(t, db, p, "gpt-4o-mid-live", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
 	var cand model.ModelCandidate
@@ -517,24 +541,30 @@ func TestFinalizeClientWriteOrPartial_GenericErrorStillPartial(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil) // live context, never canceled
 	c.Set(BodiesDirContextKey, t.TempDir())
 
-	rc := &RelayContext{RequestID: "req-ir-mid-stream-live-error", OriginalModel: "gpt-4o-r7-live", APIKeyID: apiKey.ID, Ingress: protocols.ProtocolOpenAI}
+	rc := &Exchange{requestID: "req-ir-mid-stream-live-error", originalModel: "gpt-4o-mid-live",
+		apiKeyID: apiKey.ID, ingress: protocols.ProtocolOpenAI, isStream: true}
 	rc.MarkFirstByteSent()
 
 	err := errors.New("upstream stream read error: connection reset by peer")
 	resp := &http.Response{StatusCode: http.StatusOK}
 
-	result := svc.finalizeClientWriteOrPartial(c, rc, err, cand, p, model.ProviderKey{}, resp, time.Now())
+	// The caller is still there, so the stream can be closed off properly.
+	client := &stubClient{committed: true, status: http.StatusOK}
+	payload := streamingPayload(t, protocols.ProtocolOpenAI, streamCallerBody)
+	d := payload.settleStream(DeliveryTools{Client: client, RequestID: rc.requestID}, resp, nil, err)
+	result := svc.recordAndSettle(c, rc, admitted{payload: payload}, d, cand, p, model.ProviderKey{},
+		resp.StatusCode, time.Now())
 
 	if result != attemptSuccess {
 		t.Errorf("result = %v, want attemptSuccess", result)
 	}
-	if rc.StatusCode != http.StatusOK {
-		t.Errorf("rc.StatusCode = %d, want 200 (stream_partial keeps the already-committed 200)", rc.StatusCode)
+	if rc.statusCode != http.StatusOK {
+		t.Errorf("rc.statusCode = %d, want 200 (stream_partial keeps the already-committed 200)", rc.statusCode)
 	}
-	if len(rc.Attempts) != 1 || rc.Attempts[0].Outcome != AttemptServerError {
-		t.Errorf("Attempts = %+v, want exactly one AttemptServerError entry", rc.Attempts)
+	if len(rc.attempts) != 1 || rc.attempts[0].Outcome != AttemptServerError {
+		t.Errorf("Attempts = %+v, want exactly one AttemptServerError entry", rc.attempts)
 	}
-	if !strings.Contains(rc.Attempts[0].FailReason, "stream mid") {
-		t.Errorf("fail_reason = %q, want it to contain %q", rc.Attempts[0].FailReason, "stream mid")
+	if !strings.HasPrefix(rc.attempts[0].FailReason, "stream_partial") {
+		t.Errorf("fail_reason = %q, want it to start with %q", rc.attempts[0].FailReason, "stream_partial")
 	}
 }

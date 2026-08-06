@@ -37,7 +37,7 @@ func TestGeminiIngressToOpenAIUpstream_NonStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gpt-4o-real", true, true, 1)
@@ -117,7 +117,7 @@ func TestGeminiIngressToOpenAIUpstream_Stream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gpt-4o-real", true, true, 1)
@@ -217,7 +217,7 @@ func TestGeminiIngressToGeminiProvider_Passthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createGeminiProvider(t, db, "gemini-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-gemini-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gemini-2.0-flash-real", true, true, 1)
@@ -306,15 +306,15 @@ func TestGeminiIngressToGeminiProvider_PassthroughStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createGeminiProvider(t, db, "gemini-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-gemini-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gemini-2.0-flash-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
 	dir := t.TempDir()
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
@@ -337,7 +337,7 @@ func TestGeminiIngressToGeminiProvider_PassthroughStream(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.RequestID+".stream"))
+	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.requestID+".stream"))
 	if err != nil {
 		t.Fatalf("read captured stream file: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestGeminiIngressAllCandidatesFailed_NativeError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "openai-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-openai-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gemini-2.0-flash", "gpt-4o-real", true, true, 1)

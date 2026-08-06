@@ -14,6 +14,7 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
+	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
 
@@ -36,11 +37,12 @@ const (
 )
 
 type APIKeyService struct {
-	db *gorm.DB
+	db        *gorm.DB
+	masterKey []byte
 }
 
-func NewAPIKeyService(db *gorm.DB) *APIKeyService {
-	return &APIKeyService{db: db}
+func NewAPIKeyService(db *gorm.DB, masterKey []byte) *APIKeyService {
+	return &APIKeyService{db: db, masterKey: masterKey}
 }
 
 // APIKeyView is the API-facing shape. Status is the stored active/revoked
@@ -98,8 +100,10 @@ type CreateAPIKeyInput struct {
 	CompressEnabled         bool
 }
 
-// CreateAPIKeyResult carries the plaintext key exactly once — PlaintextKey is
-// never persisted and never obtainable again afterwards.
+// CreateAPIKeyResult carries the plaintext key once at create time. The same
+// plaintext is also persisted encrypted (model.APIKey.EncryptedKey), so it can
+// be recovered later via GetAPIKeyPlaintext — PlaintextKey here is just the
+// create-time convenience that keeps the existing modal UX intact.
 type CreateAPIKeyResult struct {
 	PlaintextKey string
 	APIKey       APIKeyView
@@ -214,8 +218,16 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 	if err != nil {
 		return nil, err
 	}
+	// Persist an AES-GCM ciphertext of the plaintext so the full key can be
+	// revealed again from the list page. The auth path never touches this —
+	// it still looks the key up by key_hash. Mirrors the provider-key model.
+	encryptedKey, err := crypto.Encrypt(s.masterKey, rawKey)
+	if err != nil {
+		return nil, err
+	}
 	key := &model.APIKey{
 		KeyHash:                           hashToken(rawKey),
+		EncryptedKey:                      encryptedKey,
 		KeyPrefix:                         truncatePrefix(rawKey),
 		OwnerLabel:                        input.OwnerLabel,
 		Remark:                            input.Remark,
@@ -253,6 +265,29 @@ func (s *APIKeyService) GetAPIKey(id uint) (*APIKeyView, error) {
 	}
 	view := toAPIKeyView(*key, modelIDs, time.Now().UTC())
 	return &view, nil
+}
+
+// GetAPIKeyPlaintext decrypts and returns the full plaintext key for the
+// list-page reveal. Returns ErrAPIKeyPlaintextUnavailable when the row predates
+// the encrypted_key column (its plaintext was never stored), and
+// ErrAPIKeyNotFound when the id does not exist. Auth is unaffected — the
+// gateway never calls this; it authenticates by key_hash.
+func (s *APIKeyService) GetAPIKeyPlaintext(id uint) (string, error) {
+	key, err := repository.FindAPIKeyByID(s.db, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errcode.ErrAPIKeyNotFound
+		}
+		return "", err
+	}
+	if key.EncryptedKey == "" {
+		return "", errcode.ErrAPIKeyPlaintextUnavailable
+	}
+	plaintext, err := crypto.Decrypt(s.masterKey, key.EncryptedKey)
+	if err != nil {
+		return "", err
+	}
+	return plaintext, nil
 }
 
 func (s *APIKeyService) UpdateAPIKey(id uint, input UpdateAPIKeyInput, now time.Time) (*APIKeyView, error) {

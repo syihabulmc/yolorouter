@@ -99,13 +99,13 @@ func LocalIngressErrorBody(ingress protocols.ProtocolID, status int, errType, me
 
 // stashLocalClaudeErrorBody mirrors stashLocalErrorBody (error.go) for the
 // Claude envelope, so request_log_bodies.response_body matches what
-// WriteClaudeError actually sent when a RelayContext is on the context.
+// WriteClaudeError actually sent when a Exchange is on the context.
 func stashLocalClaudeErrorBody(c *gin.Context, anthropicType, message, requestID string) {
 	rc := relayContextFrom(c)
 	if rc == nil {
 		return
 	}
-	rc.ResponseBody = LocalClaudeErrorBody(anthropicType, message, requestID)
+	rc.responseBody = LocalClaudeErrorBody(anthropicType, message, requestID)
 }
 
 // geminiErrorBody is the Google API error envelope: a single nested "error"
@@ -177,13 +177,13 @@ func LocalGeminiErrorBody(status int, message, requestID string) []byte {
 
 // stashLocalGeminiErrorBody mirrors stashLocalClaudeErrorBody for the Gemini
 // envelope, so request_log_bodies.response_body matches what WriteGeminiError
-// actually sent when a RelayContext is on the context.
+// actually sent when a Exchange is on the context.
 func stashLocalGeminiErrorBody(c *gin.Context, status int, message, requestID string) {
 	rc := relayContextFrom(c)
 	if rc == nil {
 		return
 	}
-	rc.ResponseBody = LocalGeminiErrorBody(status, message, requestID)
+	rc.responseBody = LocalGeminiErrorBody(status, message, requestID)
 }
 
 // WriteGeminiError writes one Gemini-native error response and aborts the

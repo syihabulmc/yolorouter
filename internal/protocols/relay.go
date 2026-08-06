@@ -186,24 +186,11 @@ type UpstreamBuffer interface {
 // cmd/yolorouter/serve.go's http.Server.WriteTimeout carries a slack on top
 // of gateway.RequestTimeout, derived directly from StreamWriteWindow() (not a
 // separate hard-coded literal) so it can never drift below this value: that
-// slack is what covers a stream's pre-first-write gap before
-// ApplyStreamWriteDeadline gets a chance to slide the deadline forward for
-// the first time.
+// slack is what covers a stream's pre-first-write gap, before anything has
+// slid the deadline forward for the first time.
 //
 // A package var so tests can shrink it to keep the suite sub-second.
 var streamWriteWindow = 60 * time.Second
-
-// ApplyStreamWriteDeadline sets a sliding write deadline of now +
-// streamWriteWindow on the response writer. Streaming relay loops call this
-// before each Write/Flush batch so a slow-reading client is bounded by
-// streamWriteWindow. On a writer that does not support SetWriteDeadline
-// (e.g. httptest.ResponseRecorder), the error is non-nil but benign in
-// production (*http.response always supports it) — the caller still gets the
-// error back so tests can assert on it.
-func ApplyStreamWriteDeadline(c *gin.Context) error {
-	rc := http.NewResponseController(c.Writer)
-	return rc.SetWriteDeadline(time.Now().Add(streamWriteWindow))
-}
 
 // StreamWriteWindow returns the current streamWriteWindow value. Exported
 // for tests that need to shrink it to keep the suite sub-second.
@@ -325,8 +312,7 @@ func WatchClientClose(c *gin.Context, upstream io.Closer) (stop func()) {
 //
 // The client-facing SSE response headers (200 + text/event-stream) are
 // DEFERRED until the first encoded event is actually about to be written —
-// mirroring the same-protocol passthrough pump's (passthroughStreamToClient)
-// deferred-header behavior. If the upstream ends (clean EOF) or errors
+// mirroring the same-protocol passthrough pump's deferred-header behavior. If the upstream ends (clean EOF) or errors
 // before any event is ever emitted, this function returns an error WITHOUT
 // having written anything to the client, so the caller can still fail over
 // to a healthy candidate instead of being stuck with an already-committed
@@ -339,7 +325,7 @@ func WatchClientClose(c *gin.Context, upstream io.Closer) (stop func()) {
 // reason, whether a tool call was seen, and whether any content was produced
 // (pass nil to skip); used for finish_reason collection.
 func IRStreamRelay(
-	c *gin.Context,
+	w ClientWriter,
 	resp *http.Response,
 	decoder StreamDecoder,
 	encoder StreamEncoder,
@@ -348,10 +334,13 @@ func IRStreamRelay(
 	onFinish func(rawReason string, sawToolCall, produced bool),
 ) (*IRUsage, error) {
 	defer func() { _ = resp.Body.Close() }()
-	defer WatchClientClose(c, resp.Body)()
-	// The relay loop uses ApplyStreamWriteDeadline to slide the write
-	// deadline forward on each Write/Flush batch, bounding a slow-reading
-	// client without clearing the server WriteTimeout entirely.
+	// Watching the caller's connection is the caller's own job: it owns that
+	// connection, and doing it here would need the framework's request object
+	// back. See WatchClientClose.
+	//
+	// A slow-reading client is bounded by the writer, which slides a deadline
+	// forward on every write and flush, rather than by this loop doing it per
+	// batch — so every path through this interface gets the same protection.
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -368,19 +357,19 @@ func IRStreamRelay(
 		if len(events) == 0 {
 			return nil
 		}
-		// Slide the write deadline before each write batch so a slow-reading
-		// client is cut within streamWriteWindow instead of blocking the
-		// handler beyond the request timeout. Ignore SetWriteDeadline errors:
-		// on writers that do not support it (e.g. httptest.ResponseRecorder
-		// in unit tests) writes still work, just without deadline protection.
-		// In production (*http.response) the call always succeeds.
-		_ = ApplyStreamWriteDeadline(c)
 		if !headerWritten {
-			c.Header("Content-Type", "text/event-stream")
-			c.Header("Cache-Control", "no-cache")
-			c.Header("Connection", "keep-alive")
-			c.Header("X-Accel-Buffering", "no")
-			c.Writer.WriteHeader(http.StatusOK)
+			w.Inject(http.Header{
+				"Content-Type":      {"text/event-stream"},
+				"Cache-Control":     {"no-cache"},
+				"Connection":        {"keep-alive"},
+				"X-Accel-Buffering": {"no"},
+			})
+			// A refused commit means the response was already committed by
+			// somebody else. Carrying on would set headerWritten and stream a
+			// body under a status this call did not choose.
+			if cerr := w.Commit(http.StatusOK); cerr != nil {
+				return fmt.Errorf("%w: commit stream to client: %w", ErrClientWrite, cerr)
+			}
 			headerWritten = true
 			if onFirstChunk != nil {
 				onFirstChunk()
@@ -396,14 +385,14 @@ func IRStreamRelay(
 		var written [][]byte
 		for _, event := range events {
 			s := event.String()
-			if _, err := fmt.Fprint(c.Writer, s); err != nil {
+			if _, err := w.Write([]byte(s)); err != nil {
 				return fmt.Errorf("%w: write to client: %w", ErrClientWrite, err)
 			}
 			if buf != nil {
 				written = append(written, []byte(s))
 			}
 		}
-		if err := FlushAndCheckError(c); err != nil {
+		if err := w.Flush(); err != nil {
 			return fmt.Errorf("%w: flush to client: %w", ErrClientWrite, err)
 		}
 		for _, s := range written {
@@ -527,7 +516,7 @@ func IRStreamRelay(
 // raw finish reason, whether a tool call occurred, and whether any content
 // was produced (pass nil to skip).
 func IRNonStreamRelay(
-	c *gin.Context,
+	w ClientWriter,
 	resp *http.Response,
 	decoder ResponseDecoder,
 	encoder ResponseEncoder,
@@ -557,11 +546,13 @@ func IRNonStreamRelay(
 		// This is an explicit single-header copy, not subject to the whitelist policy
 		// which targets success responses where the relay sets its own Content-Type.
 		if ct := resp.Header.Get("Content-Type"); ct != "" {
-			c.Header("Content-Type", ct)
+			w.Inject(http.Header{"Content-Type": {ct}})
 		}
-		CopyUpstreamHeaders(c, resp.Header)
-		c.Writer.WriteHeader(resp.StatusCode)
-		if _, werr := c.Writer.Write(body); werr != nil {
+		w.Inject(UpstreamHeadersToCopy(resp.Header))
+		if cerr := w.Commit(resp.StatusCode); cerr != nil {
+			return nil, fmt.Errorf("%w: commit error body to client: %w", ErrClientWrite, cerr)
+		}
+		if _, werr := w.Write(body); werr != nil {
 			return nil, fmt.Errorf("%w: write error body to client: %w", ErrClientWrite, werr)
 		}
 		// A small error body can land entirely inside net/http's internal
@@ -569,7 +560,7 @@ func IRNonStreamRelay(
 		// socket, and the real delivery error only surfaces on Flush.
 		// Without this check a client that disconnects right after a
 		// buffered Write is still recorded as having received the error body.
-		if ferr := FlushAndCheckError(c); ferr != nil {
+		if ferr := w.Flush(); ferr != nil {
 			return nil, fmt.Errorf("%w: flush error body to client: %w", ErrClientWrite, ferr)
 		}
 		return nil, nil
@@ -600,18 +591,20 @@ func IRNonStreamRelay(
 	}
 	// The relay encodes the success body as JSON; set Content-Type explicitly because
 	// Content-Type is excluded from the upstream header allowlist.
-	c.Header("Content-Type", "application/json")
-	CopyUpstreamHeaders(c, resp.Header)
-	c.Writer.WriteHeader(resp.StatusCode)
 	// The body was already fully decoded against the upstream response
 	// (irResp.Usage reflects real upstream consumption), so partial usage is
-	// still returned for correct billing below even if the write/flush that
-	// follows fails — only the delivery outcome is a failure.
+	// still returned for correct billing below even if the commit/write/flush
+	// that follows fails — only the delivery outcome is a failure.
 	var partialUsage *IRUsage
 	if irResp != nil {
 		partialUsage = &irResp.Usage
 	}
-	if _, werr := c.Writer.Write(encoded); werr != nil {
+	w.Inject(http.Header{"Content-Type": {"application/json"}})
+	w.Inject(UpstreamHeadersToCopy(resp.Header))
+	if cerr := w.Commit(resp.StatusCode); cerr != nil {
+		return partialUsage, fmt.Errorf("%w: commit response to client: %w", ErrClientWrite, cerr)
+	}
+	if _, werr := w.Write(encoded); werr != nil {
 		// The error is wrapped in ErrClientWrite so the caller (which also
 		// reaches this same return slot via decErr above) can tell a
 		// downstream write failure apart from an IR decode failure and
@@ -624,7 +617,7 @@ func IRNonStreamRelay(
 	// surfaces on Flush. Without this check, a client that disconnects
 	// right after a buffered Write is still recorded as a delivered 2xx —
 	// the classification this whole function exists to get right.
-	if ferr := FlushAndCheckError(c); ferr != nil {
+	if ferr := w.Flush(); ferr != nil {
 		return partialUsage, fmt.Errorf("%w: flush response to client: %w", ErrClientWrite, ferr)
 	}
 
@@ -661,7 +654,7 @@ func IRNonStreamRelay(
 // reason, whether a tool call was seen, and whether any content was produced
 // (pass nil to skip); used for finish_reason collection.
 func IRStreamRelayJSONLines(
-	c *gin.Context,
+	w ClientWriter,
 	resp *http.Response,
 	decoder StreamDecoder,
 	encoder StreamEncoder,
@@ -670,10 +663,13 @@ func IRStreamRelayJSONLines(
 	onFinish func(rawReason string, sawToolCall, produced bool),
 ) (*IRUsage, error) {
 	defer func() { _ = resp.Body.Close() }()
-	defer WatchClientClose(c, resp.Body)()
-	// The relay loop uses ApplyStreamWriteDeadline to slide the write
-	// deadline forward on each Write/Flush batch, bounding a slow-reading
-	// client without clearing the server WriteTimeout entirely.
+	// Watching the caller's connection is the caller's own job: it owns that
+	// connection, and doing it here would need the framework's request object
+	// back. See WatchClientClose.
+	//
+	// A slow-reading client is bounded by the writer, which slides a deadline
+	// forward on every write and flush, rather than by this loop doing it per
+	// batch — so every path through this interface gets the same protection.
 
 	buf2 := make([]byte, 4096)
 	var lineBuf []byte
@@ -690,16 +686,19 @@ func IRStreamRelayJSONLines(
 		if len(events) == 0 {
 			return nil
 		}
-		// Slide the write deadline before each write batch — see
-		// IRStreamRelay's emit() for the full rationale. Ignore
-		// SetWriteDeadline errors on unsupported writers (unit tests).
-		_ = ApplyStreamWriteDeadline(c)
 		if !headerWritten {
-			c.Header("Content-Type", "text/event-stream")
-			c.Header("Cache-Control", "no-cache")
-			c.Header("Connection", "keep-alive")
-			c.Header("X-Accel-Buffering", "no")
-			c.Writer.WriteHeader(http.StatusOK)
+			w.Inject(http.Header{
+				"Content-Type":      {"text/event-stream"},
+				"Cache-Control":     {"no-cache"},
+				"Connection":        {"keep-alive"},
+				"X-Accel-Buffering": {"no"},
+			})
+			// A refused commit means the response was already committed by
+			// somebody else. Carrying on would set headerWritten and stream a
+			// body under a status this call did not choose.
+			if cerr := w.Commit(http.StatusOK); cerr != nil {
+				return fmt.Errorf("%w: commit stream to client: %w", ErrClientWrite, cerr)
+			}
 			headerWritten = true
 			if onFirstChunk != nil {
 				onFirstChunk()
@@ -712,14 +711,14 @@ func IRStreamRelayJSONLines(
 		var written [][]byte
 		for _, event := range events {
 			b := []byte(event.String())
-			if _, err := c.Writer.Write(b); err != nil {
+			if _, err := w.Write(b); err != nil {
 				return fmt.Errorf("%w: write to client: %w", ErrClientWrite, err)
 			}
 			if buf != nil {
 				written = append(written, b)
 			}
 		}
-		if err := FlushAndCheckError(c); err != nil {
+		if err := w.Flush(); err != nil {
 			return fmt.Errorf("%w: flush to client: %w", ErrClientWrite, err)
 		}
 		for _, b := range written {
@@ -861,20 +860,74 @@ func IRStreamRelayJSONLines(
 	return &usage, terminalErr
 }
 
+// ClientWriter is everything the relay helpers need in order to answer the
+// caller. It is declared here, by the package that needs it, rather than taken
+// as a *gin.Context: a relay that holds the framework's request object can do
+// anything to it, and what these functions actually do is stage headers, commit
+// a status, write bytes and flush them.
+//
+// Declaring the need rather than importing the provider is also what lets the
+// gateway hand in its own response object — the one that knows when bytes have
+// really left — without this package having to know that type exists.
+type ClientWriter interface {
+	// Inject stages response headers, REPLACING any already staged under the
+	// same name and keeping every value given for it. Replacing is what the
+	// callers mean: a relay setting Content-Type is stating what the body is,
+	// not adding a second opinion, and two Content-Type values on one response
+	// is a malformed response rather than a richer one.
+	//
+	// Headers may or may not reach the caller immediately; what is guaranteed
+	// is that they are in place by the time Commit returns.
+	Inject(h http.Header)
+	// Commit fixes the status. Whether it is on the wire at that moment is the
+	// implementation's business — a buffering writer may hold it until the
+	// first body write — but nothing may be written before it, and no later
+	// call may change it.
+	Commit(status int) error
+	Write(p []byte) (int, error)
+	// Flush pushes buffered bytes onto the socket and reports the failure a
+	// buffered Write can hide.
+	Flush() error
+}
+
+// UpstreamHeadersToCopy is the subset of an upstream's response headers that
+// may be passed on to the caller.
+//
+// A provider's headers can name the provider, the account, or the model behind
+// an alias, so the allowlist is the whole point. It is a plain filter, separate
+// from the writing, so it can be checked on its own — before this split the
+// only way to test the policy was to run a whole relay through it.
+func UpstreamHeadersToCopy(header http.Header) http.Header {
+	var out http.Header
+	for k, vv := range header {
+		if !allowedUpstreamHeaders[k] {
+			continue
+		}
+		if out == nil {
+			out = http.Header{}
+		}
+		for _, v := range vv {
+			out.Add(k, v)
+		}
+	}
+	return out
+}
+
 // CopyUpstreamHeaders copies the headers in the allowlist from the upstream
 // response into the gin response. This uses an allowlist strategy to prevent
 // provider-internal information (organization IDs, server version,
 // diagnostic headers, rate-limit status, Set-Cookie, etc.) from leaking to
 // tenants. Relay-layer compatibility headers (X-Provider, X-Request-Id,
 // x-ratelimit-*, etc.) are injected by each handler itself and are never
-// forwarded from upstream. Uses Add rather than Set to preserve the full
-// semantics of multi-value headers (such as multiple Cache-Control
-// directives).
+// forwarded from upstream.
+//
+// It ADDS rather than replaces, which is not what ClientWriter.Inject does and
+// is deliberate: this is a merge of what the upstream said on top of whatever
+// the relay has already set for itself. A stream sets Cache-Control: no-cache
+// before this runs, and the upstream's own directives are meant to join it, not
+// evict it. Injecting would drop ours.
 func CopyUpstreamHeaders(c *gin.Context, header http.Header) {
-	for k, vv := range header {
-		if !allowedUpstreamHeaders[k] {
-			continue
-		}
+	for k, vv := range UpstreamHeadersToCopy(header) {
 		for _, v := range vv {
 			c.Writer.Header().Add(k, v)
 		}

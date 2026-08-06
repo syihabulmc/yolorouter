@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
@@ -19,7 +20,7 @@ import (
 // contract directly: it must report true only when the CALLER's own request
 // context (c.Request.Context()) is context.Canceled, and false for a
 // deadline-derived context (context.DeadlineExceeded) or a live context —
-// the exact distinction the P2 fix depends on (a client disconnect must
+// the exact distinction this rests on (a client disconnect must
 // settle as 499, while the gateway's own request-budget expiry must not be
 // misclassified as one).
 func TestIsClientDisconnected(t *testing.T) {
@@ -62,7 +63,7 @@ func TestIsClientDisconnected(t *testing.T) {
 // copied — so io.ReadAll (Handle's body read) still returns a nil error (the
 // existing body-read disconnect check only fires on a non-nil ReadAll error,
 // so it is never triggered here), while every context derived from the
-// request afterward (rc.RequestCtx, and any db.WithContext(rc.RequestCtx)
+// request afterward (rc.requestCtx, and any db.WithContext(rc.requestCtx)
 // query issued once Handle proceeds past the body read) observes an
 // already-canceled context — modeling a client that hangs up the instant
 // after its request finished uploading.
@@ -104,17 +105,17 @@ func newCtxDisconnectAfterBodyRead(body []byte) (*gin.Context, *httptest.Respons
 // s.db.WithContext(requestCtx) query in Handle (repository.FindModelByName):
 // when the caller has disconnected, database/sql sees the already-canceled
 // context and returns context.Canceled from the query BEFORE it ever
-// reaches the driver. Before the P2 fix, this landed in the generic
+// reaches the driver. Classified naively, this lands in the generic
 // "internal error" branch and was logged as a 500 db_model fault; it must
 // instead settle as 499 client_disconnected, matching the disconnect
 // handling already used around the body read and the upstream send.
 func TestHandleFindModelDBCanceledContextReturns499(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	c, w := newCtxDisconnectAfterBodyRead([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
@@ -123,14 +124,14 @@ func TestHandleFindModelDBCanceledContextReturns499(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.StatusCode != 499 {
-		t.Errorf("rc.StatusCode = %d, want 499", captured.StatusCode)
+	if captured.statusCode != 499 {
+		t.Errorf("rc.statusCode = %d, want 499", captured.statusCode)
 	}
 	if w.Body.Len() != 0 {
 		t.Errorf("expected nothing written to a disconnected client, got: %s", w.Body.String())
 	}
 
-	row, err := repository.GetRequestLogByRequestID(db, captured.RequestID)
+	row, err := repository.GetRequestLogByRequestID(db, captured.requestID)
 	if err != nil {
 		t.Fatalf("GetRequestLogByRequestID: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestHandleFindModelDBCanceledContextReturns499(t *testing.T) {
 }
 
 // TestHandleFindModelDBRealErrorStays500 is the negative-control pin for the
-// P2 fix above: a genuine DB fault (not a canceled context) at the exact
+// case above: a genuine DB fault (not a canceled context) at the exact
 // same FindModelByName query point must still settle as a 500 db_model
 // failure, not be swept up into the new disconnect branch. Closing the
 // underlying sqlite connection produces a real driver error
@@ -158,7 +159,7 @@ func TestHandleFindModelDBCanceledContextReturns499(t *testing.T) {
 // gorm.ErrRecordNotFound.
 func TestHandleFindModelDBRealErrorStays500(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
 	sqlDB, err := db.DB()
@@ -169,8 +170,8 @@ func TestHandleFindModelDBRealErrorStays500(t *testing.T) {
 		t.Fatalf("close sqlite connection: %v", err)
 	}
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
@@ -179,8 +180,8 @@ func TestHandleFindModelDBRealErrorStays500(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.StatusCode != http.StatusInternalServerError {
-		t.Errorf("rc.StatusCode = %d, want %d (a real DB fault must not be misclassified as a disconnect)", captured.StatusCode, http.StatusInternalServerError)
+	if captured.statusCode != http.StatusInternalServerError {
+		t.Errorf("rc.statusCode = %d, want %d (a real DB fault must not be misclassified as a disconnect)", captured.statusCode, http.StatusInternalServerError)
 	}
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("w.Code = %d, want %d", w.Code, http.StatusInternalServerError)
@@ -189,7 +190,7 @@ func TestHandleFindModelDBRealErrorStays500(t *testing.T) {
 
 // TestRelayCandidatesProviderKeyLoadCanceledContextReturns499 covers the
 // candidate-loop provider-key-load query (repository.ListProviderKeysByProvider,
-// via s.db.WithContext(rc.RequestCtx) in relayCandidates): before the P2 fix,
+// via s.db.WithContext(rc.requestCtx) in relayCandidates): unguarded,
 // a client disconnect here was indistinguishable from a genuine load
 // failure, so the candidate loop kept walking the (now-pointless) remaining
 // candidates and eventually settled as a 502 all_candidates_failed instead
@@ -198,7 +199,7 @@ func TestHandleFindModelDBRealErrorStays500(t *testing.T) {
 // query fails deterministically without needing real timing.
 func TestRelayCandidatesProviderKeyLoadCanceledContextReturns499(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createProvider(t, db, "p1", "http://upstream.invalid")
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
@@ -216,24 +217,36 @@ func TestRelayCandidatesProviderKeyLoadCanceledContextReturns499(t *testing.T) {
 	cancel() // client already gone before relayCandidates ever runs
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
 
-	rc := &RelayContext{
-		RequestID:       "test-req-id",
-		RequestCtx:      ctx,
-		RequestDeadline: time.Now().Add(time.Hour),
-		OriginalModel:   "gpt-4o",
-		APIKeyID:        apiKey.ID,
+	rc := &Exchange{
+		requestID:       "test-req-id",
+		requestCtx:      ctx,
+		requestDeadline: time.Now().Add(time.Hour),
+		originalModel:   "gpt-4o",
+		apiKeyID:        apiKey.ID,
 	}
 
-	svc.relayCandidates(c, rc, []model.ModelCandidate{cand}, time.Now())
-
-	if rc.StatusCode != 499 {
-		t.Errorf("rc.StatusCode = %d, want 499", rc.StatusCode)
+	// The chain now carries the admitted payload; a caller who left before it
+	// starts is the same either way, but the loop cannot run without one.
+	payload, rej := NewTextModality().Admit(context.Background(), Ingress{
+		Protocol: protocols.ProtocolOpenAI, Path: "/v1/chat/completions",
+		Body: []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
+	})
+	if rej != nil {
+		t.Fatalf("Admit refused a valid body: %+v", rej)
 	}
-	if len(rc.Attempts) != 1 || rc.Attempts[0].Outcome != AttemptConnError {
-		t.Errorf("rc.Attempts = %+v, want exactly one AttemptConnError entry", rc.Attempts)
+	svc.relayCandidates(c, rc, admitted{payload: newOrderedPayload(payload, rc.requestID)}, []model.ModelCandidate{cand}, time.Now())
+	// relayCandidates settles the exchange; Handle is what records it, so a
+	// test that calls the inner function has to do the same.
+	svc.recordTerminal(rc)
+
+	if rc.statusCode != 499 {
+		t.Errorf("rc.statusCode = %d, want 499", rc.statusCode)
+	}
+	if len(rc.attempts) != 1 || rc.attempts[0].Outcome != AttemptConnError {
+		t.Errorf("rc.attempts = %+v, want exactly one AttemptConnError entry", rc.attempts)
 	}
 
-	row, err := repository.GetRequestLogByRequestID(db, rc.RequestID)
+	row, err := repository.GetRequestLogByRequestID(db, rc.requestID)
 	if err != nil {
 		t.Fatalf("GetRequestLogByRequestID: %v", err)
 	}

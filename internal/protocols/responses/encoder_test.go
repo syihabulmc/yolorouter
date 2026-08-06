@@ -140,6 +140,13 @@ func TestResponsesRequestDecoder_FunctionCall(t *testing.T) {
 	if irReq.Messages[2].ToolCallID != "call_abc" {
 		t.Errorf("ToolCallID = %q", irReq.Messages[2].ToolCallID)
 	}
+	result, ok := irReq.Messages[2].Content[0].(protocols.BlockToolResult)
+	if !ok {
+		t.Fatalf("Content[0] = %T, want BlockToolResult", irReq.Messages[2].Content[0])
+	}
+	if string(result.Content) != `"Sunny, 25C"` {
+		t.Errorf("string output = %s, want \"Sunny, 25C\"", result.Content)
+	}
 }
 
 func TestResponsesRequestDecoder_SystemItems(t *testing.T) {
@@ -766,5 +773,83 @@ func TestResponsesWireUsage_RequiredDetailMembersAlwaysPresent(t *testing.T) {
 		if _, present := details[k]; !present {
 			t.Errorf("%s is in the schema's required list and must be emitted even when zero", k)
 		}
+	}
+}
+
+// A function_call_output's `output` is either a string or a list of output
+// content parts (text, image, file) — both are valid per the Responses API.
+// Decoding it as a string alone made one image-bearing tool result reject the
+// whole request, which is why the list form is covered here explicitly.
+func TestResponsesRequestDecoder_FunctionCallOutputContentList(t *testing.T) {
+	body := json.RawMessage(`{
+		"model": "gpt-4",
+		"input": [
+			{"type": "function_call", "call_id": "call_abc", "name": "screenshot", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_abc", "output": [
+				{"type": "input_text", "text": "captured the login page"},
+				{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="}
+			]}
+		]
+	}`)
+
+	irReq, err := RequestDecoder{}.DecodeRequest(body, "gpt-4", false)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	if len(irReq.Messages) != 2 {
+		t.Fatalf("Messages count = %d, want 2", len(irReq.Messages))
+	}
+	toolMsg := irReq.Messages[1]
+	if toolMsg.Role != protocols.RoleTool {
+		t.Fatalf("Tool result role = %v", toolMsg.Role)
+	}
+	result, ok := toolMsg.Content[0].(protocols.BlockToolResult)
+	if !ok {
+		t.Fatalf("Content[0] = %T, want BlockToolResult", toolMsg.Content[0])
+	}
+	var got string
+	if err := json.Unmarshal(result.Content, &got); err != nil {
+		t.Fatalf("tool result content is not a JSON string: %v", err)
+	}
+	if !strings.Contains(got, "captured the login page") {
+		t.Errorf("text part lost, got %q", got)
+	}
+	// The image has no representation in a Chat tool message, so it must at
+	// least leave a trace rather than vanish into an empty result — but its
+	// bytes must not be inlined, or the prompt (and the bill) balloons.
+	if !strings.Contains(got, "image") {
+		t.Errorf("image part left no trace, got %q", got)
+	}
+	if strings.Contains(got, "iVBORw0KGgo") {
+		t.Errorf("base64 payload inlined into tool result, got %q", got)
+	}
+}
+
+func TestDecodeResponsesToolOutput(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		// A plain string is already the JSON value a tool result needs, so it
+		// must come back byte-identical rather than decoded and re-encoded.
+		{"string passes through", `"Sunny, 25C"`, `"Sunny, 25C"`},
+		{"text parts join", `[{"type":"input_text","text":"a"},{"type":"input_text","text":"b"}]`, `"a\nb"`},
+		{"image part becomes a marker", `[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]`, `"[image output omitted]"`},
+		{"file part becomes a marker", `[{"type":"input_file","file_id":"file_1"}]`, `"[file output omitted]"`},
+		{"unknown part is dropped", `[{"type":"input_audio"}]`, `""`},
+		// Out of spec, but agent frameworks emit it: keeping the raw JSON lets
+		// the tool's answer still reach the model.
+		{"object passes through", `{"temperature":25}`, `{"temperature":25}`},
+		{"empty stays empty", ``, ``},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := decodeResponsesToolOutput(json.RawMessage(tc.raw))
+			if string(got) != tc.want {
+				t.Errorf("decodeResponsesToolOutput(%s) = %s, want %s", tc.raw, got, tc.want)
+			}
+		})
 	}
 }

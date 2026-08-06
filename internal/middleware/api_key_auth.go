@@ -6,7 +6,7 @@
 // for the gateway handler.
 //
 // Pre-call limit enforcement (state/expiry/budget/RPM/concurrency) runs in
-// gateway.RelayService.Handle, NOT here: those rejections need to land in
+// gateway.Service.Handle, NOT here: those rejections need to land in
 // the request log and map to specific OpenAI error types, which only the
 // handler is positioned to do. This middleware's job is purely credential
 // resolution.

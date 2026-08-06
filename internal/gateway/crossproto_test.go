@@ -21,8 +21,8 @@ import (
 // createAnthropicProvider seeds a provider whose provider_type is
 // "anthropic" — the negotiate.go egress switch maps that to
 // protocols.ProtocolClaude, so a request against this provider takes the
-// cross-protocol IR round trip (buildDispatchRequest / processDispatchResponse*)
-// instead of the same-protocol byte passthrough every other gateway test
+// cross-protocol IR round trip instead of the same-protocol byte passthrough
+// every other gateway test
 // exercises. Mirrors createProvider (relay_test.go) with the type field
 // overridden.
 func createAnthropicProvider(t *testing.T, db *gorm.DB, name, baseURL string) *model.Provider {
@@ -43,9 +43,8 @@ func createAnthropicProvider(t *testing.T, db *gorm.DB, name, baseURL string) *m
 // provider_type="gemini" maps (negotiate.go's primaryProtocol) to
 // protocols.ProtocolGemini, so a request against this provider from a native
 // Gemini ingress caller (/v1beta/...) is same-protocol passthrough — no IR
-// round trip — exercising passthroughStreamToClientDecoded's Gemini branch
-// and, on a mid-stream upstream failure, writeStreamErrorEvent's Gemini
-// branch.
+// round trip — exercising the decoding pump's Gemini branch and, on a
+// mid-stream upstream failure, writeStreamErrorEvent's Gemini branch.
 func createGeminiProvider(t *testing.T, db *gorm.DB, name, baseURL string) *model.Provider {
 	t.Helper()
 	now := time.Now().UTC()
@@ -118,7 +117,7 @@ func TestCrossProtocolOpenAIToAnthropicNonStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "claude-3-5-sonnet-20241022", true, true, 1)
@@ -216,7 +215,7 @@ func TestCrossProtocolOpenAIToAnthropicStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "claude-3-5-sonnet-20241022", true, true, 1)
@@ -303,7 +302,7 @@ func TestCrossProtocolOpenAIToAnthropicStream_IncludeUsage(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "claude-3-5-sonnet-20241022", true, true, 1)
@@ -358,10 +357,10 @@ func TestCrossProtocolOpenAIToAnthropicStream_IncludeUsage(t *testing.T) {
 // regression test for the cross-protocol fix: on a successful
 // cross-protocol non-stream
 // request, IRNonStreamRelay wrote the encoded client response directly and
-// only rc.SetBody (the raw upstream body) ran, leaving rc.ResponseBody (the
+// only rc.SetBody (the raw upstream body) ran, leaving rc.responseBody (the
 // caller-facing audit body persisted to request_log_bodies.response_body)
 // empty — inconsistent with the same-protocol passthrough path, which always
-// populates both. After the fix, rc.ResponseBody must be non-empty and equal
+// populates both. After the fix, rc.responseBody must be non-empty and equal
 // to the OpenAI-encoded bytes actually written to the client.
 func TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -372,14 +371,14 @@ func TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody(t *testing
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "claude-3-5-sonnet-20241022", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"What is 2+2?"}]}`)
@@ -392,14 +391,14 @@ func TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody(t *testing
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if len(captured.ResponseBody) == 0 {
-		t.Fatal("rc.ResponseBody is empty; the cross-protocol non-stream path must capture the caller-facing encoded response")
+	if len(captured.responseBody) == 0 {
+		t.Fatal("rc.responseBody is empty; the cross-protocol non-stream path must capture the caller-facing encoded response")
 	}
-	if !bytes.Equal(captured.ResponseBody, w.Body.Bytes()) {
-		t.Errorf("rc.ResponseBody = %s, want it to equal the bytes actually written to the client: %s", captured.ResponseBody, w.Body.Bytes())
+	if !bytes.Equal(captured.responseBody, w.Body.Bytes()) {
+		t.Errorf("rc.responseBody = %s, want it to equal the bytes actually written to the client: %s", captured.responseBody, w.Body.Bytes())
 	}
-	if !bytes.Contains(captured.ResponseBody, []byte(`"model":"gpt-4o"`)) {
-		t.Errorf("rc.ResponseBody = %s, want the OpenAI-encoded client body carrying the external model name", captured.ResponseBody)
+	if !bytes.Contains(captured.responseBody, []byte(`"model":"gpt-4o"`)) {
+		t.Errorf("rc.responseBody = %s, want the OpenAI-encoded client body carrying the external model name", captured.responseBody)
 	}
 }
 
@@ -408,7 +407,7 @@ func TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody(t *testing
 // the first candidate's upstream never emits a single event. Before the fix,
 // protocols.IRStreamRelay committed the SSE response headers (200 +
 // text/event-stream) unconditionally before reading any upstream bytes, and
-// dispatch.go called rc.MarkFirstByteSent() before invoking the relay at
+// the dispatch layer called rc.MarkFirstByteSent() before invoking the relay at
 // all — so a pre-first-event failure (here, an upstream that returns 200
 // with a completely empty body) was indistinguishable from a genuine
 // mid-stream failure and could never fail over, unlike the same-protocol
@@ -447,7 +446,7 @@ func TestCrossProtocolStreamPreFirstEventFailover(t *testing.T) {
 	}))
 	defer goodUpstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p1 := createAnthropicProvider(t, db, "claude-empty", emptyUpstream.URL)
 	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-claude-empty", "k1", 1, true)
 	p2 := createAnthropicProvider(t, db, "claude-good", goodUpstream.URL)
@@ -475,8 +474,8 @@ func TestCrossProtocolStreamPreFirstEventFailover(t *testing.T) {
 	}
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -490,8 +489,8 @@ func TestCrossProtocolStreamPreFirstEventFailover(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if len(captured.Attempts) != 2 {
-		t.Fatalf("Attempts = %+v, want exactly 2 (the empty first candidate, then the successful second one)", captured.Attempts)
+	if len(captured.attempts) != 2 {
+		t.Fatalf("Attempts = %+v, want exactly 2 (the empty first candidate, then the successful second one)", captured.attempts)
 	}
 
 	body := w.Body.String()
@@ -567,15 +566,15 @@ func TestCrossProtocolStreamCaptureMatchesClientBytes(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	svc := newRelaySvc(t, db)
+	svc := newSvc(t, db)
 	p := createAnthropicProvider(t, db, "claude-provider", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-claude-upstream", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "claude-3-5-sonnet-20241022", true, true, 1)
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
 
 	dir := t.TempDir()
-	var captured *RelayContext
-	testHookHandleDone = func(rc *RelayContext) { captured = rc }
+	var captured *Exchange
+	testHookHandleDone = func(rc *Exchange) { captured = rc }
 	defer func() { testHookHandleDone = nil }()
 
 	reqBody := []byte(`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -589,11 +588,11 @@ func TestCrossProtocolStreamCaptureMatchesClientBytes(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.RequestID == "" {
+	if captured.requestID == "" {
 		t.Fatal("expected a non-empty request id")
 	}
 
-	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.RequestID+".stream"))
+	capturedBytes, err := os.ReadFile(filepath.Join(dir, captured.requestID+".stream"))
 	if err != nil {
 		t.Fatalf("read captured stream file: %v", err)
 	}

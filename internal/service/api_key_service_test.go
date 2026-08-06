@@ -16,7 +16,9 @@ import (
 func newAPIKeyServiceForTest(t *testing.T) (*APIKeyService, *gorm.DB) {
 	t.Helper()
 	db := testutil.NewSQLiteDB(t)
-	return NewAPIKeyService(db), db
+	// testMasterKey is defined in provider_service_test.go (same package); reuse
+	// it rather than carrying a second 32-byte key recipe here.
+	return NewAPIKeyService(db, testMasterKey()), db
 }
 
 func seedModelForAPIKeyTest(t *testing.T, db *gorm.DB, name string) uint {
@@ -52,14 +54,19 @@ func TestCreateAPIKeySucceeds(t *testing.T) {
 		t.Fatalf("expected active display status, got %q", result.APIKey.DisplayStatus)
 	}
 
-	// The stored row keeps a hash, never the plaintext — the plaintext must
-	// be unrecoverable from the database after create.
+	// The stored row keeps a hash (never the plaintext) and an AES-GCM
+	// ciphertext of the plaintext (so it can be revealed again). The hash and
+	// the ciphertext must both differ from the plaintext — only the reveal path
+	// decrypts the ciphertext back to the plaintext.
 	var stored model.APIKey
 	if err := db.First(&stored, result.APIKey.ID).Error; err != nil {
 		t.Fatalf("load stored key: %v", err)
 	}
 	if stored.KeyHash == "" || stored.KeyHash == result.PlaintextKey {
 		t.Fatalf("key_hash must be a hash, not the plaintext")
+	}
+	if stored.EncryptedKey == "" || stored.EncryptedKey == result.PlaintextKey {
+		t.Fatalf("encrypted_key must be a non-empty ciphertext that is not the plaintext")
 	}
 }
 
@@ -266,6 +273,80 @@ func TestGetAPIKeyNotFound(t *testing.T) {
 	_, err := svc.GetAPIKey(999999)
 	if !errors.Is(err, errcode.ErrAPIKeyNotFound) {
 		t.Fatalf("expected ErrAPIKeyNotFound, got %v", err)
+	}
+}
+
+// TestGetAPIKeyPlaintextRoundTripsTheCreatePlaintext verifies the reveal path
+// decrypts back exactly the plaintext handed out at create time — the
+// encrypted_key column must round-trip through AES-GCM with the service's
+// masterKey. This is the core contract the list-page copy button depends on.
+func TestGetAPIKeyPlaintextRoundTripsTheCreatePlaintext(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	revealed, err := svc.GetAPIKeyPlaintext(result.APIKey.ID)
+	if err != nil {
+		t.Fatalf("GetAPIKeyPlaintext: %v", err)
+	}
+	if revealed != result.PlaintextKey {
+		t.Fatalf("revealed plaintext %q does not match the create-time plaintext %q", revealed, result.PlaintextKey)
+	}
+}
+
+// TestGetAPIKeyPlaintextUnavailableForLegacyRow seeds a row the way pre-00021
+// keys look (no encrypted_key) and asserts the reveal path returns the
+// dedicated code rather than an empty string or a decrypt error — so the
+// frontend can show "this key predates the feature, please create a new one".
+func TestGetAPIKeyPlaintextUnavailableForLegacyRow(t *testing.T) {
+	svc, db := newAPIKeyServiceForTest(t)
+	now := time.Now().UTC()
+	legacy := &model.APIKey{
+		KeyHash: hashToken("sk-yr-legacy-key"), KeyPrefix: "sk-yr-legacy000",
+		Status: model.APIKeyStatusActive, CreatedAt: now, UpdatedAt: now,
+		// EncryptedKey intentionally left empty — a pre-00021 row.
+	}
+	if err := db.Create(legacy).Error; err != nil {
+		t.Fatalf("seed legacy key: %v", err)
+	}
+	_, err := svc.GetAPIKeyPlaintext(legacy.ID)
+	if !errors.Is(err, errcode.ErrAPIKeyPlaintextUnavailable) {
+		t.Fatalf("expected ErrAPIKeyPlaintextUnavailable for a legacy row, got %v", err)
+	}
+}
+
+// TestGetAPIKeyPlaintextNotFound mirrors GetAPIKey's not-found path so the
+// reveal endpoint surfaces the same 11001 the rest of the resource does.
+func TestGetAPIKeyPlaintextNotFound(t *testing.T) {
+	svc, _ := newAPIKeyServiceForTest(t)
+	_, err := svc.GetAPIKeyPlaintext(999999)
+	if !errors.Is(err, errcode.ErrAPIKeyNotFound) {
+		t.Fatalf("expected ErrAPIKeyNotFound, got %v", err)
+	}
+}
+
+// TestGetAPIKeyPlaintextFailsWithDifferentMasterKey builds a service with a
+// different masterKey than the one that encrypted the row, and asserts the
+// reveal surfaces a decrypt error (not a silent wrong plaintext) — the AES-GCM
+// auth tag guarantees a tampered/wrong-key ciphertext fails to open.
+func TestGetAPIKeyPlaintextFailsWithDifferentMasterKey(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	mid := seedModelForAPIKeyTest(t, db, "m1")
+	encryptSvc := NewAPIKeyService(db, testMasterKey())
+	result, err := encryptSvc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	// A different 32-byte key (mirrors provider_service_test's wrong-key shape).
+	otherKey := make([]byte, 32)
+	for i := range otherKey {
+		otherKey[i] = byte(i + 99)
+	}
+	decryptSvc := NewAPIKeyService(db, otherKey)
+	if _, err := decryptSvc.GetAPIKeyPlaintext(result.APIKey.ID); err == nil {
+		t.Fatalf("expected a decrypt error when the masterKey differs, got nil")
 	}
 }
 

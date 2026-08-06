@@ -51,8 +51,8 @@ func NewUpstreamClient(allowPrivate bool, headerTimeout, connectTimeout, tlsHand
 }
 
 // SendUpstreamRequest sends a fully-built upstream *http.Request (already
-// carrying its context, URL, body, and codec-specific headers from
-// buildUpstreamBody/attemptOne) and returns the raw response. A non-nil
+// carrying its context, URL, body, and codec-specific headers) and returns the
+// raw response. A non-nil
 // error means a transport-level failure (network/timeout/SSRF-block) — HTTP
 // status codes, including 5xx, come back as a non-nil response with nil
 // error.
