@@ -10,15 +10,14 @@
     <VueJsonPretty
       v-if="parsed !== undefined"
       :data="parsed"
-      :deep="2"
+      :deep="props.deep"
       :show-length="true"
-      :show-line-number="false"
-      :collapsed-on-click-brackets="true"
       theme="light"
-      :virtual="virtual"
-      :height="virtual ? 480 : undefined"
     />
-    <pre v-else class="body-viewer__raw">{{ raw }}</pre>
+    <template v-else>
+      <div v-if="rawHint" class="body-viewer__hint">{{ rawHint }}</div>
+      <pre class="body-viewer__raw">{{ raw }}</pre>
+    </template>
   </div>
 </template>
 
@@ -27,7 +26,17 @@ import { computed } from 'vue'
 import VueJsonPretty from 'vue-json-pretty'
 import 'vue-json-pretty/lib/styles.css'
 
-const props = defineProps<{ raw: string }>()
+const props = withDefaults(
+  defineProps<{
+    raw: string
+    deep?: number
+    rawHint?: string
+  }>(),
+  {
+    deep: 2,
+    rawHint: '',
+  },
+)
 
 // Mirrors vue-json-pretty's exported JSONDataType (its :data prop type),
 // redeclared locally to avoid importing from the library's internal type
@@ -46,11 +55,6 @@ const parsed = computed<JsonData | undefined>(() => {
   }
 })
 
-// Turn on vue-json-pretty's virtual scrolling only for large payloads —
-// below the threshold the fixed-height virtual list adds a scrollbar and
-// clips short bodies awkwardly, so plain (non-virtual) rendering reads better.
-const virtual = computed(() => props.raw.length > 50_000)
-
 // theme is hardcoded 'light': this app is deliberately light-only
 // (src/styles/tokens.less pins color-scheme: light; NConfigProvider is never
 // given a dark theme), so following prefers-color-scheme here would render
@@ -62,6 +66,15 @@ const virtual = computed(() => props.raw.length > 50_000)
 .body-viewer {
   max-height: 480px;
   overflow: auto;
+  font-size: var(--text-xs);
+}
+
+.body-viewer__hint {
+  margin-bottom: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md, 6px);
+  background: var(--color-accent-subtle);
+  color: var(--color-text-secondary);
   font-size: var(--text-xs);
 }
 

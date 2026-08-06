@@ -937,6 +937,12 @@ export default {
     streamBodyPreviewTruncated: 'Showing a 2MB preview only.',
     streamBodyViewFull: 'View full file',
     bodyNotRecorded: 'Not recorded',
+    copyBody: 'Copy',
+    copyBodySuccess: 'Content copied',
+    copyBodyFailed: 'Copy failed, please select and copy manually',
+    bodyRawHint: 'Content is not JSON, shown as raw text.',
+    bodyTooLargeHint: 'Large body shown in raw text mode.',
+    sseTruncatedHint: 'Many SSE chunks; showing the first {shown} of {total}.',
 
     // Compression section (shown when compression was relevant for this request)
     sectionCompress: 'Input Compression',
