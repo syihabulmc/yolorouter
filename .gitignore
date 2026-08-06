@@ -36,3 +36,4 @@ gui-test-screenshots/
 # and README_zh.md embed, so every future screenshot would go missing from the
 # project page with no local signal that it was never committed.
 /docs/articles/
+.zcode/
