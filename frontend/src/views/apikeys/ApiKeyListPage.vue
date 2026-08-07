@@ -318,7 +318,7 @@ function onSaved() {
 }
 
 function firstUsableModel(row: APIKey): string | undefined {
-  if (row.allow_all_models) return models.value[0]?.name
+  if (row.allow_all_models) return models.value.find((m) => m.running_status === 'available')?.name ?? models.value[0]?.name
   const firstAllowedModelId = row.model_ids[0]
   return models.value.find((model) => model.id === firstAllowedModelId)?.name
 }

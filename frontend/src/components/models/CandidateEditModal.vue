@@ -29,6 +29,7 @@
           :placeholder="t('models.provider')"
           :clearable="false"
           width="100%"
+          class="w-full"
           size="medium"
         />
       </n-form-item>
@@ -46,6 +47,7 @@
           clearable
           :placeholder="t('models.providerModelNameHint')"
           width="100%"
+          class="w-full"
           size="medium"
         />
       </n-form-item>
