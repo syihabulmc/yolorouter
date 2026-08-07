@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/testutil"
@@ -900,5 +901,53 @@ func TestFinalizeNormalizesCacheExclusivePrompt(t *testing.T) {
 				t.Errorf("BudgetSpentMicros = %d, want %d", updated.BudgetSpentMicros, tc.wantMicros)
 			}
 		})
+	}
+}
+
+// TestReportUsageCarriesEveryCount pins the settle-side bridge: reportUsage
+// rebuilds the persisted usage record from the Usage struct, and a field left
+// out here is a field that survived the whole relay only to be dropped in the
+// final hop before the timeline. Distinct primes per field so a crossed wire
+// cannot cancel out.
+func TestReportUsageCarriesEveryCount(t *testing.T) {
+	svc := &Service{}
+	rc := &Exchange{requestID: "test"}
+	usage := &Usage{
+		PromptTokens:     101,
+		CompletionTokens: 37,
+		TotalTokens:      211,
+		CacheReadTokens:  17,
+		CacheWriteTokens: 19,
+		ReasoningTokens:  23,
+		WebSearchCount:   29,
+	}
+	svc.reportUsage(rc, usage, newExchangeSink(rc))
+
+	var rep *fact.UsageReported
+	for _, e := range rc.timeline.All() {
+		if u, ok := e.Record.(fact.UsageReported); ok {
+			rep = &u
+			break
+		}
+	}
+	if rep == nil {
+		t.Fatal("no UsageReported on the timeline")
+	}
+	want := fact.UsageReported{
+		Unit:   fact.UnitToken,
+		Source: fact.UsageFromUpstream,
+		// Stated as a literal, not via netPromptTokens: an expectation computed
+		// by the code under test cannot catch that code drifting. The fixture
+		// uses the net (non-inclusive) convention, so net prompt = raw prompt.
+		Prompt:         101,
+		Completion:     37,
+		Total:          211,
+		CacheRead:      17,
+		CacheWrite:     19,
+		Reasoning:      23,
+		WebSearchCount: 29,
+	}
+	if *rep != want {
+		t.Errorf("UsageReported = %+v, want %+v", *rep, want)
 	}
 }

@@ -96,6 +96,47 @@ func TestCombineNeverProducesUndefined(t *testing.T) {
 	}
 }
 
+// TestCombineNeverWeakensAnyEffect pins the fold's direction on every ordered
+// field individually.
+//
+// The algebra tests above prove combine is commutative and associative — which
+// a fold that always took the WEAKER side would also be. Direction is a
+// separate property, and per-field on purpose: reversing one field's fold
+// while the others stay correct is invisible to any test that only inspects
+// the overall strongest-loop behaviour.
+func TestCombineNeverWeakensAnyEffect(t *testing.T) {
+	weak := resolved{Decision: Decision{Defined: true}}
+	strong := resolved{Decision: Decision{
+		Defined: true,
+		Loop:    LoopTerminate,
+		Circuit: CircuitEffect(2),
+		Budget:  BudgetEffect(1),
+		Sticky:  StickyEffect(1),
+		Settle:  SettleEffect(1),
+	}}
+
+	for name, got := range map[string]resolved{
+		"strong on the left":  combine(strong, weak),
+		"strong on the right": combine(weak, strong),
+	} {
+		if got.Loop != strong.Loop {
+			t.Errorf("%s: Loop folded to %v, want the stronger %v", name, got.Loop, strong.Loop)
+		}
+		if got.Circuit != strong.Circuit {
+			t.Errorf("%s: Circuit folded to %v, want the stronger %v", name, got.Circuit, strong.Circuit)
+		}
+		if got.Budget != strong.Budget {
+			t.Errorf("%s: Budget folded to %v, want the stronger %v", name, got.Budget, strong.Budget)
+		}
+		if got.Sticky != strong.Sticky {
+			t.Errorf("%s: Sticky folded to %v, want the stronger %v", name, got.Sticky, strong.Sticky)
+		}
+		if got.Settle != strong.Settle {
+			t.Errorf("%s: Settle folded to %v, want the stronger %v", name, got.Settle, strong.Settle)
+		}
+	}
+}
+
 // TestResolveBatchTakesStrongestLoop confirms a batch resolves to the strongest
 // steer, so a capability reporting a weak verdict alongside a strong one cannot
 // weaken it.

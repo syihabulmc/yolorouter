@@ -11,6 +11,60 @@ linters:
   # This is the baseline the codebase already passes; add more deliberately
   # rather than all at once so CI stays green.
   default: standard
+  enable:
+    - depguard
+  settings:
+    # depguard enforces the dependency directions the gateway kernel's
+    # decoupling depends on. Each rule guards one boundary; the desc on each
+    # deny entry says what breaks when the boundary is crossed.
+    depguard:
+      rules:
+        # Capabilities plug into the kernel through the small view their bind
+        # function grants them and report through a fact.Sink. Importing gin
+        # would hand them the response writer; importing the kernel would hand
+        # them *Exchange. Either one collapses the seam the capability
+        # packages exist behind.
+        # NOTE on the doubled file patterns: `a/**/*.go` does not match files
+        # sitting directly in `a/` (the `**` needs at least one path segment),
+        # so every rule lists both the flat and the nested form. Verified
+        # empirically; dropping either half silently un-guards those files.
+        capability-boundary:
+          files:
+            - "**/internal/capability/*.go"
+            - "**/internal/capability/**/*.go"
+          deny:
+            - pkg: "github.com/gin-gonic/gin"
+              desc: "a capability holding gin.Context can write the response directly; capabilities report facts and the kernel writes responses"
+            - pkg: "github.com/yolorouter/yolorouter/internal/gateway"
+              desc: "a capability importing the kernel can reach *Exchange directly instead of the narrow view its bind function grants"
+        # The kernel dispatches on registered extension points; assembly
+        # (router/cmd) is the only place a concrete capability or modality
+        # package may be named. Test files are exempt: integration tests wire
+        # real capabilities into a Service through the same RegisterXxx
+        # functions assembly uses, which is the seam working as designed and
+        # compiles only under `go test`.
+        kernel-boundary:
+          files:
+            - "**/internal/gateway/*.go"
+            - "**/internal/gateway/**/*.go"
+            - "!$test"
+          deny:
+            - pkg: "github.com/yolorouter/yolorouter/internal/capability"
+              desc: "assembly is the only place a concrete capability may be named; the kernel naming one makes every future capability a kernel change"
+            - pkg: "github.com/yolorouter/yolorouter/internal/modality"
+              desc: "the kernel dispatches on a registered ModalityID, it does not name a modality package"
+        # fact is the leaf every other package here depends on. An import that
+        # is not the standard library puts a cycle one import away from every
+        # package in the module. The package's own import path is allowed so
+        # its external black-box tests (package fact_test) can import it.
+        fact-leaf:
+          files:
+            - "**/internal/fact/*.go"
+            - "**/internal/fact/**/*.go"
+          list-mode: strict
+          allow:
+            - $gostd
+            - "github.com/yolorouter/yolorouter/internal/fact"
   exclusions:
     generated: lax
 

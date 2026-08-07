@@ -180,6 +180,7 @@ type usageNotInColumns struct {
 	Source                string `json:"source"`
 	Total                 int    `json:"total,omitempty"`
 	CacheIncludedInPrompt bool   `json:"cache_included_in_prompt,omitempty"`
+	Reasoning             int    `json:"reasoning,omitempty"`
 	Incoherent            bool   `json:"incoherent,omitempty"`
 	WebSearchCount        int    `json:"web_search_count,omitempty"`
 }
@@ -197,6 +198,7 @@ func usageResidue(rec fact.UsageReported) fact.Record {
 	ordinary := rec.Unit == fact.UnitToken &&
 		rec.Source == fact.UsageFromUpstream &&
 		rec.WebSearchCount == 0 &&
+		rec.Reasoning == 0 &&
 		!rec.Incoherent &&
 		!rec.CacheIncludedInPrompt &&
 		rec.Total == rec.Prompt+rec.Completion+rec.CacheRead+rec.CacheWrite
@@ -208,6 +210,7 @@ func usageResidue(rec fact.UsageReported) fact.Record {
 		Source:                rec.Source.String(),
 		Total:                 rec.Total,
 		CacheIncludedInPrompt: rec.CacheIncludedInPrompt,
+		Reasoning:             rec.Reasoning,
 		Incoherent:            rec.Incoherent,
 		WebSearchCount:        rec.WebSearchCount,
 	}

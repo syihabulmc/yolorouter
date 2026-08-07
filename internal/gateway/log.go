@@ -297,12 +297,18 @@ func (s *Service) finalize(rc *Exchange, usage *Usage, statusCode int, failReaso
 	// after this returns, and one that reports its own final accounting would
 	// otherwise report it into a timeline nobody reads again. Handle arms the
 	// recorder pass before it arms anything else, so it unwinds last.
+	// This is the ONE outcome for the exchange. The recorders read it here and
+	// the admission releases read it from Handle's defer; building a second one
+	// at either site would let the two drift — a different duration, a URL one
+	// of them never saw — and a capability implementing both Release and Record
+	// would reconcile a request against two accounts of the same ending.
 	rc.outcome = fact.Outcome{
-		StatusCode: statusCode,
-		FailReason: failReason,
-		Duration:   duration,
-		Attempts:   len(rc.attempts),
-		Delivered:  rc.firstByteSent,
+		StatusCode:  statusCode,
+		FailReason:  failReason,
+		Duration:    duration,
+		Attempts:    len(rc.attempts),
+		Delivered:   rc.firstByteSent,
+		UpstreamURL: rc.upstreamURL,
 	}
 	rc.outcomeSettled = true
 }
@@ -352,8 +358,10 @@ func (s *Service) reportUsage(rc *Exchange, usage *Usage, sink fact.Sink) {
 		Source:     fact.UsageFromUpstream,
 		Prompt:     netPromptTokens(usage),
 		Completion: usage.CompletionTokens,
+		Total:      usage.TotalTokens,
 		CacheRead:  usage.CacheReadTokens,
 		CacheWrite: usage.CacheWriteTokens,
+		Reasoning:  usage.ReasoningTokens,
 		// Carried even though nothing here prices it. This is the row that gets
 		// persisted, and the searches are stated once, in a response body that
 		// is gone by the time anyone could ask again. A record that omits them

@@ -772,3 +772,70 @@ func TestASettlementAfterItsOwnAttemptIsRecordedAgainstThatAttempt(t *testing.T)
 			noted[0].Attempt, want)
 	}
 }
+
+// clockProbeAdmission samples, at the moment its release runs, the liveness
+// and identity of the context it was handed. Sampling inside the release
+// matters: the kernel cancels each ticket's context right after its release
+// returns, and a cancelled context's Done() collapses to a shared sentinel —
+// judged after the fact, three separate clocks are indistinguishable from one.
+type releaseClockSample struct {
+	err      error
+	deadline bool
+	done     <-chan struct{}
+}
+
+type clockProbeAdmission struct {
+	name string
+	got  *[]releaseClockSample
+}
+
+func (a clockProbeAdmission) Name() string { return a.name }
+
+func (a clockProbeAdmission) Admit(_ context.Context, _ fact.Attempt, _ fact.Sink) (string, bool) {
+	return a.name, true
+}
+
+func (a clockProbeAdmission) Release(ctx context.Context, _ fact.Attempt, _ string, _ fact.Outcome, _ fact.Sink) {
+	_, hasDeadline := ctx.Deadline()
+	*a.got = append(*a.got, releaseClockSample{err: ctx.Err(), deadline: hasDeadline, done: ctx.Done()})
+}
+
+// TestEachReleaseGetsItsOwnClock pins the per-ticket budget: releases run in a
+// chain, and under a SHARED deadline the first release exhausting it would
+// hand every release after it a context that is already dead — a database
+// refund timing out once would strand the reservations every later admission
+// still holds. Each release must therefore arrive with its own live, bounded
+// context, not a sibling's leftovers.
+func TestEachReleaseGetsItsOwnClock(t *testing.T) {
+	var got []releaseClockSample
+	svc := &Service{}
+	for _, name := range []string{"first", "second", "third"} {
+		RegisterAdmission(svc, clockProbeAdmission{name: name, got: &got}, attemptView)
+	}
+
+	rc := &Exchange{}
+	var held []heldTicket
+	if v := svc.admit(context.Background(), rc, &held); v.Loop != LoopNone {
+		t.Fatalf("loop = %v, want LoopNone", v.Loop)
+	}
+	svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{})
+
+	if len(got) != 3 {
+		t.Fatalf("releases observed = %d, want 3", len(got))
+	}
+	for i, sample := range got {
+		if sample.err != nil {
+			t.Errorf("release %d arrived with a context already done (%v): an earlier "+
+				"release's exhaustion leaked into this one", i, sample.err)
+		}
+		if !sample.deadline {
+			t.Errorf("release %d has no deadline: a stuck backend can pin the goroutine", i)
+		}
+		for j := range got[:i] {
+			if got[i].done == got[j].done {
+				t.Errorf("releases %d and %d share one context: whichever exhausts the "+
+					"budget first kills the other's chance to give its resource back", j, i)
+			}
+		}
+	}
+}

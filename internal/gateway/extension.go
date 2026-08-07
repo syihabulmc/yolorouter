@@ -54,9 +54,13 @@ type upstreamErrorObserver interface {
 type upstreamErrorObserverAdapter[V any] struct {
 	inner UpstreamErrorObserverOf[V]
 	bind  func(*Exchange) V
+	// registeredName is captured once at assembly. Name() is capability code
+	// like any other; reading it on a settlement or recovery path would put an
+	// unguarded call into third-party code exactly where a guard matters most.
+	registeredName string
 }
 
-func (a upstreamErrorObserverAdapter[V]) name() string { return a.inner.Name() }
+func (a upstreamErrorObserverAdapter[V]) name() string { return a.registeredName }
 
 func (a upstreamErrorObserverAdapter[V]) observe(ctx context.Context, e *Exchange, up fact.Upstream, sink fact.Sink) {
 	a.inner.ObserveUpstreamError(ctx, a.bind(e), up, sink)
@@ -67,7 +71,7 @@ func (a upstreamErrorObserverAdapter[V]) observe(ctx context.Context, e *Exchang
 // getter the observer needs and the Exchange lacks fails to compile at this
 // call, not at run time.
 func RegisterUpstreamErrorObserver[V any](s *Service, o UpstreamErrorObserverOf[V], bind func(*Exchange) V) {
-	s.upstreamErrorObservers = append(s.upstreamErrorObservers, upstreamErrorObserverAdapter[V]{inner: o, bind: bind})
+	s.upstreamErrorObservers = append(s.upstreamErrorObservers, upstreamErrorObserverAdapter[V]{inner: o, bind: bind, registeredName: o.Name()})
 }
 
 // EgressRewriterOf rewrites the body about to be sent upstream, once per
@@ -133,9 +137,12 @@ type egressRewriterAdapter[V any] struct {
 	inner   EgressRewriterOf[V]
 	bind    func(*Exchange) V
 	atStage EgressStage
+	// Captured at registration; see the field note on
+	// upstreamErrorObserverAdapter.
+	registeredName string
 }
 
-func (a egressRewriterAdapter[V]) name() string       { return a.inner.Name() }
+func (a egressRewriterAdapter[V]) name() string       { return a.registeredName }
 func (a egressRewriterAdapter[V]) stage() EgressStage { return a.atStage }
 
 func (a egressRewriterAdapter[V]) rewrite(ctx context.Context, e *Exchange, egress protocols.ProtocolID, body []byte, sink fact.Sink) ([]byte, error) {
@@ -148,7 +155,7 @@ func (a egressRewriterAdapter[V]) rewrite(ctx context.Context, e *Exchange, egre
 // programming error and panics here, at startup, rather than resolving to
 // whichever was registered first.
 func RegisterEgressRewriter[V any](s *Service, r EgressRewriterOf[V], at EgressStage, bind func(*Exchange) V) {
-	adapter := egressRewriterAdapter[V]{inner: r, bind: bind, atStage: at}
+	adapter := egressRewriterAdapter[V]{inner: r, bind: bind, atStage: at, registeredName: r.Name()}
 	for _, existing := range s.egressRewriters {
 		if existing.stage() == adapter.stage() {
 			panic(fmt.Sprintf("gateway: egress rewriters %q and %q both claim stage %d",
@@ -601,9 +608,12 @@ type admission interface {
 type admissionAdapter[V, T any] struct {
 	inner AdmissionOf[V, T]
 	bind  func(*Exchange) V
+	// Captured at registration; see the field note on
+	// upstreamErrorObserverAdapter.
+	registeredName string
 }
 
-func (a admissionAdapter[V, T]) name() string { return a.inner.Name() }
+func (a admissionAdapter[V, T]) name() string { return a.registeredName }
 
 func (a admissionAdapter[V, T]) admit(ctx context.Context, e *Exchange, sink fact.Sink) (any, bool) {
 	ticket, held := a.inner.Admit(ctx, a.bind(e), sink)
@@ -617,7 +627,7 @@ func (a admissionAdapter[V, T]) release(ctx context.Context, e *Exchange, ticket
 		// this same adapter. Guarded anyway because a wrong ticket would
 		// otherwise release something another admission is holding.
 		logger.Error("gateway: admission ticket type mismatch on release",
-			zap.String("admission", a.inner.Name()))
+			zap.String("admission", a.registeredName))
 		return
 	}
 	a.inner.Release(ctx, a.bind(e), typed, out, sink)
@@ -630,7 +640,7 @@ func (a admissionAdapter[V, T]) release(ctx context.Context, e *Exchange, ticket
 // true by construction rather than by everyone agreeing on a set of ordinal
 // constants nobody can get wrong only if they are all correct.
 func RegisterAdmission[V, T any](s *Service, a AdmissionOf[V, T], bind func(*Exchange) V) {
-	s.admissions = append(s.admissions, admissionAdapter[V, T]{inner: a, bind: bind})
+	s.admissions = append(s.admissions, admissionAdapter[V, T]{inner: a, bind: bind, registeredName: a.Name()})
 }
 
 // RegisteredAdmissions names the admissions in acquisition order, which is the
@@ -688,14 +698,31 @@ func (s *Service) admit(ctx context.Context, rc *Exchange, held *[]heldTicket) r
 }
 
 // releaseAdmissions returns everything that was taken, most recent first.
+//
+// Each release runs under its own detached, bounded context — detached for the
+// same reason the recorders and delivery observers are (a release is money
+// coming back, and it runs from a defer on the way out, exactly when the
+// caller hanging up or the request deadline lapsing has cancelled
+// rc.requestCtx), and per ticket rather than shared because these run in a
+// chain: one release exhausting a shared budget would hand every release after
+// it a context that is already dead, and the reservations THEY hold would stay
+// held. The bound also applies when the request context was still perfectly
+// alive — a release used to run with no clock at all in that case, and a stuck
+// backend could pin the goroutine indefinitely.
 func (s *Service) releaseAdmissions(ctx context.Context, rc *Exchange, held []heldTicket, out fact.Outcome) {
 	if len(held) == 0 {
 		return
 	}
+	if ctx == nil {
+		// Reached only from a caller that never established a request context.
+		ctx = context.Background()
+	}
+	detached := context.WithoutCancel(ctx)
 	sink := newExchangeSink(rc)
 	for i := len(held) - 1; i >= 0; i-- {
 		name := held[i].by.name()
 		sink.reporter = name
+		ticketCtx, cancel := context.WithTimeout(detached, releaseBudget)
 		// Guarded like the other places capability code runs, and for a sharper
 		// reason than most. This is a defer on the way out, after the caller has
 		// been served: a panic here escapes into the HTTP framework's own
@@ -712,8 +739,9 @@ func (s *Service) releaseAdmissions(ctx context.Context, rc *Exchange, held []he
 						zap.Any("panic", v))
 				}
 			}()
-			held[i].by.release(ctx, rc, held[i].ticket, out, sink)
+			held[i].by.release(ticketCtx, rc, held[i].ticket, out, sink)
 		}()
+		cancel()
 	}
 }
 
@@ -721,6 +749,13 @@ func (s *Service) releaseAdmissions(ctx context.Context, rc *Exchange, held []he
 // runs after the caller has been served, so it delays nothing the caller sees;
 // the bound exists so a stuck database cannot pin goroutines indefinitely.
 const recorderWriteBudget = 5 * time.Second
+
+// releaseBudget bounds how long EACH admission may take to give back what it
+// holds — per ticket, not a shared total, so one stuck backend cannot starve
+// the releases queued behind it. Same rationale as the recorder's budget: the
+// work is too important to inherit the caller's cancellation, and too
+// unbounded to run with no clock at all.
+const releaseBudget = 5 * time.Second
 
 // RecorderOf is the terminal fan-in: called exactly once per exchange, on every
 // exit path, after the outcome is settled.
@@ -749,9 +784,12 @@ type recorder interface {
 type recorderAdapter[V any] struct {
 	inner RecorderOf[V]
 	bind  func(*Exchange) V
+	// Captured at registration; see the field note on
+	// upstreamErrorObserverAdapter.
+	registeredName string
 }
 
-func (a recorderAdapter[V]) name() string { return a.inner.Name() }
+func (a recorderAdapter[V]) name() string { return a.registeredName }
 
 func (a recorderAdapter[V]) record(ctx context.Context, e *Exchange, out fact.Outcome, tl fact.Timeline) {
 	a.inner.Record(ctx, a.bind(e), out, tl)
@@ -759,7 +797,7 @@ func (a recorderAdapter[V]) record(ctx context.Context, e *Exchange, out fact.Ou
 
 // RegisterRecorder wires a recorder into the service.
 func RegisterRecorder[V any](s *Service, r RecorderOf[V], bind func(*Exchange) V) {
-	s.recorders = append(s.recorders, recorderAdapter[V]{inner: r, bind: bind})
+	s.recorders = append(s.recorders, recorderAdapter[V]{inner: r, bind: bind, registeredName: r.Name()})
 }
 
 // runRecorders hands the settled exchange to every recorder.

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -227,11 +228,22 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// RequestCtx deadline => attempt ctx deadline too.
 	requestCtx, requestCancel := context.WithDeadline(c.Request.Context(), rc.requestDeadline)
 	defer requestCancel()
-	// Armed before anything else that defers, so it unwinds LAST: recording has
+	// Armed before every other defer except the context cancel, so of the work
+	// that matters it unwinds LAST: recording has
 	// to see a timeline that nothing will append to, and admissions release
 	// after their own defer, which is registered later and therefore runs
 	// first.
-	defer s.recordTerminal(rc)
+	//
+	// The test hook fires here, after recording, because "done" must mean done:
+	// a hook that fired with releases and recording still pending handed tests a
+	// signal to tear down their temp directories while this goroutine was still
+	// writing capture files into them.
+	defer func() {
+		s.recordTerminal(rc)
+		if testHookHandleDone != nil {
+			testHookHandleDone(rc)
+		}
+	}()
 	rc.requestCtx = requestCtx
 	// The ingress protocol is a property of the request path, computed once
 	// up front so every error write in this function (and the pre-candidate
@@ -259,12 +271,40 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if c.Request != nil {
 		rc.requestHeaders = SanitizeHeaders(c.Request.Header)
 	}
+	// Admissions gate the exchange before any work is done on its behalf.
+	// Whatever they take is released on every exit path below, including the
+	// refusal path and a panic, which is why the release is deferred the moment
+	// the tickets exist rather than at each return.
+	//
+	// Two ordering rules are load-bearing here:
+	//   - The release is armed before anything is acquired, not after: an
+	//     admission that panics must still give back whatever its predecessors
+	//     took, and a defer installed after the call would never run at all.
+	//   - The release is armed BEFORE the panic-settlement defer below, so on
+	//     an unwind it runs AFTER settlement. A release is a reconciliation
+	//     against how the request ended; run first, it would read a status of
+	//     zero and a blank reason on exactly the requests that ended worst.
+	//
+	// The outcome is read at release time rather than captured when the defer
+	// was armed, and it is finalize's own record rather than a second literal
+	// built here: a capability deciding whether a reservation became a charge
+	// needs what the request SETTLED as, and two sites each assembling their own
+	// account of that would drift — the recorders would reconcile one ending and
+	// the releases another.
+	var held []heldTicket
+	defer func() {
+		s.releaseAdmissions(rc.requestCtx, rc, held, rc.outcome)
+	}()
+
 	// Panic-recovery safety net: if any sub-call panics (nil
 	// deref, index OOB, type assertion), gin's Recovery middleware catches
 	// it upstream, but finalize would otherwise never run and the request
 	// would leave no audit/cost row. finalize is idempotent (logWritten
 	// guard), so a normal-exit finalize first + this defer on panic writes
 	// exactly one row either way.
+	//
+	// Registered after the release defer above so it runs BEFORE it on an
+	// unwind: settlement first, then release reads the settled outcome.
 	defer func() {
 		if !rc.logWritten.Load() {
 			d := fact.Undelivered(http.StatusInternalServerError, fact.VerdictSettled,
@@ -277,33 +317,11 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 			}
 			s.settle(rc, d, start)
 		}
-		// Test-only hook: Handle doesn't return its internal Exchange, so
-		// tests that need to assert on the captured bodies (RequestBody/
-		// UpstreamRequestBody/ResponseBody/UpstreamResponseBody)
-		// hook in here instead of depending on DB persistence. Never
-		// set outside _test.go.
-		if testHookHandleDone != nil {
-			testHookHandleDone(rc)
-		}
 	}()
 
 	if !s.checkKeyStateAndLimits(c, rc, apiKey, start) {
 		return
 	}
-	// Admissions gate the exchange before any work is done on its behalf.
-	// Whatever they take is released on every exit path below, including the
-	// refusal path and a panic, which is why the release is deferred the moment
-	// the tickets exist rather than at each return.
-	// The release is armed before anything is acquired, not after: an admission
-	// that panics must still give back whatever its predecessors took, and a
-	// defer installed after the call would never run at all.
-	var held []heldTicket
-	defer func() {
-		s.releaseAdmissions(rc.requestCtx, rc, held, fact.Outcome{
-			StatusCode: rc.statusCode,
-			Delivered:  rc.firstByteSent,
-		})
-	}()
 	verdict := s.admit(rc.requestCtx, rc, &held)
 	if verdict.Loop >= LoopNextCandidate {
 		captureRejectedBody(c, rc)
@@ -736,7 +754,16 @@ func attemptNoteFor(d fact.Delivery) string {
 	if d.FailReason == "" {
 		return ""
 	}
-	if d.Err == nil {
+	// Several construction sites already fold the error's text into the reason
+	// they build — "read_body: EOF" carrying the same EOF as its Err. Appending
+	// it again writes "read_body: EOF: EOF" into a persisted column, so the
+	// suffix is only added when it brings something the reason does not already
+	// say. The check matches the folded shape (": " + error, or the error alone)
+	// rather than any suffix, so a reason that merely ENDS with the error's
+	// words — "client_write_timeout" against a bare "timeout" — keeps its
+	// suffix instead of being mistaken for a fold.
+	if d.Err == nil || d.FailReason == d.Err.Error() ||
+		strings.HasSuffix(d.FailReason, ": "+d.Err.Error()) {
 		return d.FailReason
 	}
 	return d.FailReason + ": " + d.Err.Error()
@@ -759,6 +786,7 @@ func usageFromReport(u *fact.UsageReported) *Usage {
 		CacheReadTokens:       u.CacheRead,
 		CacheWriteTokens:      u.CacheWrite,
 		CacheIncludedInPrompt: u.CacheIncludedInPrompt,
+		ReasoningTokens:       u.Reasoning,
 		Invalid:               u.Incoherent,
 		WebSearchCount:        u.WebSearchCount,
 	}
@@ -820,6 +848,13 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *mode
 // "how a response is delivered" and "what the request cost and how it is
 // recorded" from having to be known in one place.
 func (s *Service) deliverAndSettle(c *gin.Context, rc *Exchange, adm admitted, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+	// The payloads close the body themselves, from a defer INSIDE Deliver — but
+	// a panic can fire before that defer is registered: the call-order wrapper
+	// asserts before it forwards, and an assertion tripping there unwinds with
+	// the body still open, pinning the upstream connection until the attempt
+	// context expires. Closing twice is safe; leaking on the one path that
+	// panics before anyone armed a close is not.
+	defer func() { _ = resp.Body.Close() }()
 	tools, release := s.newDeliveryTools(c, rc, adm.limits, rc.isStream)
 	defer release()
 	return s.recordAndSettle(c, rc, adm, adm.payload.Deliver(tools, resp), cand, provider, pk, resp.StatusCode, start)

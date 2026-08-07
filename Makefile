@@ -1,4 +1,4 @@
-.PHONY: build build-embed build-release build-windows build-windows-check build-macos frontend embed-frontend test test-release test-embed vet vet-embed dev migrate
+.PHONY: build build-embed build-release build-windows build-windows-check build-macos frontend embed-frontend test test-release test-embed vet vet-embed gates dev migrate
 
 # Release-build metadata injected via -ldflags into internal/version (the
 # package both the `--version` CLI flag and the system-info API read from).
@@ -90,7 +90,7 @@ build-release: embed-frontend
 	@if ! printf '%s' "$(RELEASE_TAG)" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$$'; then \
 		echo "ERROR: build-release tag '$(RELEASE_TAG)' must be canonical release semver (v1.2.3, no leading zeros, no prerelease)" >&2; \
 		echo "       currentUpdatable rejects non-semver and prerelease versions; a non-canonical" >&2; \
-		echo "       tag would build a binary the update checker can never compare (Codex P2)." >&2; \
+		echo "       tag would build a binary the update checker can never compare." >&2; \
 		exit 1; \
 	fi
 	@if ! git diff-index --quiet HEAD --; then \
@@ -104,7 +104,7 @@ build-release: embed-frontend
 		echo "ERROR: build-release requires a clean worktree (no untracked source files)" >&2; \
 		echo "       untracked .go / frontend sources are built but invisible to git" >&2; \
 		echo "       diff-index, so a tagged HEAD with untracked files still ships as a clean" >&2; \
-		echo "       vX.Y.Z. Commit or remove them first (Codex review P2)." >&2; \
+		echo "       vX.Y.Z. Commit or remove them first." >&2; \
 		exit 1; \
 	fi
 	go build -tags release,embed -ldflags "-X $(VERSION_PKG).Version=$(RELEASE_TAG) -X $(VERSION_PKG).Commit=$(COMMIT) -X $(VERSION_PKG).BuildTime=$(BUILDTIME) -X $(VERSION_PKG).DefaultGitHubRepo=$(DEFAULT_GITHUB_REPO)" -o ./bin/yolorouter ./cmd/yolorouter
@@ -134,6 +134,29 @@ vet:
 # See test-embed above for why this needs its own target.
 vet-embed: embed-frontend
 	go vet -tags embed ./...
+
+# Structural gates that keep the gateway kernel decoupled from the
+# capabilities plugged into it. Three layers, each covering what the others
+# cannot:
+#
+#   - depguard (via golangci-lint) enforces the import directions: capability
+#     packages stay off gin and the kernel, the kernel stays off concrete
+#     capability/modality packages, and the fact package stays stdlib-only.
+#     Rules and rationale live in .golangci.yml.
+#   - internal/gates holds source-level checks no off-the-shelf linter
+#     expresses: the fact vocabulary's routing/accounting split, record
+#     consumers accounting for every field, and the candidate loop's
+#     per-iteration state resets.
+#   - The named -run lines run the behavioural halves that live next to the
+#     code they exercise. `go test -run` exits 0 when a pattern matches
+#     nothing, so these names alone cannot detect their own disappearance —
+#     TestBehaviouralGateTestsStillExist inside internal/gates asserts each
+#     name still exists, and fails loudly when one is renamed away.
+gates:
+	golangci-lint run --enable-only depguard ./...
+	go test ./internal/gates/... -count=1 -v
+	go test ./internal/gateway/ -run '^(TestDecisionTableIsComplete|TestCombineIsCommutative|TestCombineIsAssociative|TestCombineNeverProducesUndefined|TestObserversCannotReachEachOtherOrTheAuditBody)$$' -count=1 -v
+	go test ./internal/fact/ -run '^TestValidateRejectsImpossibleDeliveries$$' -count=1 -v
 
 migrate: build
 	./bin/yolorouter db:migrate

@@ -484,6 +484,34 @@ func (b *bareWriteResponse) CommittedStatus() int { return b.status }
 // version of the check left open, and the one that matters most during the
 // migration: dispatch still writes straight to the response, so a status this
 // type never recorded is the normal case, not the exotic one.
+// TestReconcileCatchesADenialThatQuotesTheServedStatus pins the one shape only
+// the denial branch can catch.
+//
+// The other reconcile tests deny with a blank status, which the status-mismatch
+// branch would also intercept — delete the denial branch and they stay green,
+// because both branches build the same corrected delivery. The delivery below
+// carries the SERVED status while still claiming nothing was committed, so no
+// other branch matches: unhandled, it sails through as an uncommitted delivery
+// and the chain is free to run a second candidate over a response the caller
+// already has.
+func TestReconcileCatchesADenialThatQuotesTheServedStatus(t *testing.T) {
+	client := &bareWriteResponse{written: true, status: 200}
+	// No constructor builds this shape — Validate forbids a status on an
+	// uncommitted delivery — which is exactly why it must be reconciled rather
+	// than trusted: a buggy payload is not obliged to use the constructors.
+	d := fact.Delivery{ClientStatus: 200, Verdict: fact.VerdictNextCandidate}
+
+	got := reconcileWithResponse(client, d, "req-denial")
+
+	if !got.Committed {
+		t.Fatal("a delivery denying a served response was passed through; the chain would " +
+			"run another candidate over a response the caller already received")
+	}
+	if got.ClientStatus != 200 || got.Verdict != fact.VerdictSettled {
+		t.Errorf("delivery = %+v, want the served 200, settled", got)
+	}
+}
+
 func TestReconcileCatchesAResponseWrittenOutsideTheSink(t *testing.T) {
 	client := &bareWriteResponse{written: true, status: 200}
 	d := fact.HandedOn(fact.FaultUpstream, "upstream_server_error", nil)

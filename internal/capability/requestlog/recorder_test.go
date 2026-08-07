@@ -179,6 +179,48 @@ func TestAContradictionSurvivesIntoTheStoredRow(t *testing.T) {
 	}
 }
 
+// TestEveryColumnCarriesItsOwnNumber pins the mapping from record fields to
+// row columns, with every value distinct.
+//
+// The columns are assigned one by one from same-typed fields, so reading the
+// wrong field compiles, passes every test that reuses a value, and is only
+// discovered by whoever reconciles an invoice. Distinct values everywhere is
+// what makes each assignment falsifiable on its own.
+func TestEveryColumnCarriesItsOwnNumber(t *testing.T) {
+	var tl fact.Timeline
+	tl.Append(fact.Entry{Attempt: 1, Record: fact.UsageReported{
+		Unit: fact.UnitToken, Source: fact.UsageFromUpstream,
+		Prompt: 11, Completion: 13, Total: 41, CacheRead: 17, CacheWrite: 19,
+	}})
+	tl.Append(fact.Entry{Attempt: 1, Record: fact.CostComputed{
+		Known: true, Micros: 23, CacheReadSavedMicros: 29, CacheWriteExtraMicros: 31,
+		CompressCostSavedMicros: 37,
+	}})
+
+	s := summarise(tl)
+
+	checks := []struct {
+		name string
+		got  int64
+		want int64
+	}{
+		{"inputTokens", int64(s.inputTokens), 11},
+		{"outputTokens", int64(s.outputTokens), 13},
+		{"cacheReadTokens", int64(s.cacheReadTokens), 17},
+		{"cacheWriteTokens", int64(s.cacheWriteTokens), 19},
+		{"costMicros", s.costMicros, 23},
+		{"cacheReadSavedMicros", s.cacheReadSavedMicros, 29},
+		{"cacheWriteExtraMicros", s.cacheWriteExtraMicros, 31},
+		{"compressCostSavedMicros", s.compressCostSavedMicros, 37},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %d, want %d: this column is being filled from some other field",
+				c.name, c.got, c.want)
+		}
+	}
+}
+
 // TestRoutingFactsAreNotRecords guards the split: a fact that steers the
 // request is not an observation with a column, and must not end up in the
 // overflow pretending to be one.

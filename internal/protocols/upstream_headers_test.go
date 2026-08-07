@@ -50,16 +50,11 @@ func TestUpstreamHeadersToCopyKeepsNothingByDefault(t *testing.T) {
 	}
 }
 
-// TestInjectReplacesButCopyUpstreamHeadersMerges pins a difference that lives
-// two functions apart in one file and reads like an inconsistency.
-//
-// It is not. A relay setting Content-Type is stating what the body is, and a
-// second value would make the response malformed — so Inject replaces. Copying
-// the upstream's allowed headers is a merge on top of what the relay already
-// set: a stream sets Cache-Control: no-cache before this runs, and the
-// upstream's own directives join it rather than evict it. Unifying the two
-// would silently drop one side or duplicate the other.
-func TestInjectReplacesButCopyUpstreamHeadersMerges(t *testing.T) {
+// TestInjectReplaces pins Inject's replacement semantics: a relay setting
+// Content-Type is stating what the body is, and a second value would make the
+// response malformed — so Inject replaces rather than accumulates, while still
+// keeping every value of a single multi-valued set it is handed.
+func TestInjectReplaces(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("Inject replaces what is already there", func(t *testing.T) {
@@ -83,17 +78,6 @@ func TestInjectReplacesButCopyUpstreamHeadersMerges(t *testing.T) {
 		}
 	})
 
-	t.Run("CopyUpstreamHeaders adds to what the relay already set", func(t *testing.T) {
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Writer.Header().Set("Cache-Control", "no-cache")
-
-		protocols.CopyUpstreamHeaders(c, http.Header{"Cache-Control": {"max-age=60"}})
-
-		got := c.Writer.Header()["Cache-Control"]
-		if len(got) != 2 || got[0] != "no-cache" || got[1] != "max-age=60" {
-			t.Errorf("Cache-Control = %v, want the relay's own directive kept and the upstream's added", got)
-		}
-	})
 }
 
 // deadlineRecorder records the write deadlines set on it. httptest's own

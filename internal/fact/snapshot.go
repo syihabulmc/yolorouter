@@ -13,6 +13,14 @@ import (
 // A capability that needs less than a whole snapshot declares its own narrow
 // interface locally and takes that instead; these types are the ready-made
 // option for capabilities that do not care.
+//
+// Several accessors here have no caller in this build. That is deliberate and
+// they stay: these snapshots are the read-only surface capabilities are given
+// instead of the exchange itself, and the capabilities that read the rest of
+// it are the ones not yet built against this kernel. Removing an accessor
+// because this build's capabilities happen not to need it would make the
+// surface a mirror of today's consumers rather than a contract for the next
+// ones.
 
 // Request describes the caller's request for the whole exchange.
 type Request struct {

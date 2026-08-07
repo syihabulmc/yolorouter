@@ -97,9 +97,9 @@ type Exchange struct {
 
 	statusCode int // set by finalize when the log row is written
 
-	// contentInspectionStatus / ContentInspectionErrType describe the MOST
+	// contentInspectionStatus / contentInspectionErrType describe the MOST
 	// RECENT candidate only — relayCandidates clears them at the top of each
-	// iteration, alongside Provider/UpstreamURL and for the same reason, so
+	// iteration, alongside provider/upstreamURL and for the same reason, so
 	// they are set if and only if the candidate that just ran was refused by
 	// the upstream's content inspection. Every other failover reason is an
 	// upstream fault
@@ -401,7 +401,13 @@ type Usage struct {
 	// it a record the wire encoder refused (HasNegativeCount sees the negative
 	// reasoning count and emits null) would still bill here, since the bridge
 	// used to drop the field and the billing gate could not re-derive the
-	// verdict. Not serialized — internal accounting only.
+	// verdict.
+	//
+	// It must ALSO survive the delivery round trip (usageReportOf and back):
+	// settlement re-runs the coherence verdict on the copy that travelled with
+	// the delivery, and a hop that drops this field silently un-condemns a
+	// record on its way to being priced. Not serialized — internal accounting
+	// only.
 	ReasoningTokens int `json:"-"`
 	// WebSearchCount carries protocols.IRUsage.WebSearchCount across the bridge.
 	// It is not a token count and nothing prices it, but it is the only record

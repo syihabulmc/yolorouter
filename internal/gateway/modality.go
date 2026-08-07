@@ -111,6 +111,10 @@ type Payload interface {
 	Deliver(tools DeliveryTools, resp *http.Response) fact.Delivery
 	// NormalizeUpstreamError turns an upstream failure into what the caller is
 	// told about it.
+	//
+	// NOTE: the kernel's error paths do not call this yet — upstream failures
+	// are still shaped by the kernel's own classification. The call site lands
+	// when a modality whose error bodies are not JSON needs it.
 	NormalizeUpstreamError(status int, body []byte, upstreamContentType string) ErrorEnvelope
 	// FinalizeUsage states the billable quantities for the delivery that ended
 	// the request, in whatever unit this modality counts. Returns nil when
@@ -207,10 +211,21 @@ type UpstreamCall struct {
 	// disagree with the bytes. Making it a field the builder must supply
 	// removes the step that could be forgotten; the kernel derives the length
 	// from the body itself for the same reason.
+	//
+	// NOTE: the kernel does not read this field yet. The outgoing header is
+	// still set by the egress codec, which is correct for the JSON protocols
+	// this build carries and wrong for a multipart body — wiring this through
+	// the dispatch path lands with the modality that needs it.
 	ContentType string
-	// Progressive obliges the kernel to forward the response as it arrives
-	// whether or not the caller asked to stream. Some responses cannot be
-	// buffered whole in any sensible amount of memory.
+	// Progressive is the payload's declaration that this response must be
+	// forwarded as it arrives — some responses cannot be buffered whole in any
+	// sensible amount of memory.
+	//
+	// NOTE: the kernel does not read this field yet. Delivery tooling is built
+	// from whether the CALLER asked to stream, which is a different question —
+	// an audio response may need progressive forwarding on a request nobody
+	// marked as streaming. Honouring the declaration lands with the modality
+	// that needs it.
 	Progressive bool
 }
 

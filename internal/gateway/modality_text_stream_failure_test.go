@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -452,5 +453,28 @@ func TestOurOwnDeadlineIsNotACallerWhoLeft(t *testing.T) {
 	}
 	if client.CallerGone() {
 		t.Error("CallerGone is true after OUR deadline expired; the caller never went anywhere")
+	}
+}
+
+// TestACallerWhoLeftOutranksEveryOtherReadingOfTheSameError pins the order of
+// the pump's post-scan triage, which nothing else can reach.
+//
+// A caller hanging up cancels the upstream read too, so the same moment
+// arrives as a scanner error wearing some other error's clothes — including
+// bufio.ErrTooLong when the disconnect lands mid-line. Each branch below the
+// caller-gone check reads that error as somebody else's fault: too-long blames
+// the upstream's framing, the generic branch blames its transport. Only the
+// order of the checks keeps a caller's own departure from being filed as an
+// upstream failure, and before this test, only the order's comment said so.
+func TestACallerWhoLeftOutranksEveryOtherReadingOfTheSameError(t *testing.T) {
+	client := &stubClient{gone: true}
+	pump := &streamPump{tools: DeliveryTools{Client: client}, committed: true}
+
+	err := pump.end(bufio.ErrTooLong, false, false)
+
+	if !errors.Is(err, errClientDisconnected) {
+		t.Errorf("end() = %v, want the caller's own disconnect: read below the caller-gone "+
+			"check, this same error files the caller's departure as an upstream framing failure",
+			err)
 	}
 }

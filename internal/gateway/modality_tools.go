@@ -121,9 +121,13 @@ type ClientResponse interface {
 	// generating for a caller who left.
 	//
 	// Which is why a delivery that spends itself inside one long read has to
-	// arm this. One that comes up for air between frames polls CallerDone
-	// instead and is left with the weaker signal — it still notices, but only
-	// once something else ends the read.
+	// arm this — and why one that never arms it must not lean on CallerDone or
+	// CallerGone at all. Without the watch, the framework never begins
+	// propagating the FIN, the channel never closes, and CallerGone stays
+	// false for a caller who is long gone: the only signal such a delivery
+	// ever gets is its own write failing. The pass-through stream pumps run in
+	// exactly that mode today, which is why their disconnect handling keys off
+	// write errors rather than off these accessors.
 	WatchCaller(upstream io.Closer) (stop func())
 	// Flush pushes buffered bytes onto the socket and reports the failure a
 	// buffered Write can hide. A failed write to the caller wraps
@@ -409,9 +413,16 @@ func (r *ginClientResponse) Flush() error {
 		r.rc.clientBodyTruncated = true
 	}
 	if room > 0 {
-		if int64(len(r.pending)) > room {
+		switch {
+		case int64(len(r.pending)) > room:
 			r.sent = append(r.sent, r.pending[:room]...)
-		} else {
+		case len(r.sent) == 0:
+			// First flush: take ownership instead of copying. pending is set
+			// to nil below, so nothing writes into these bytes afterwards —
+			// and for a non-streaming response this is the flush, of the whole
+			// body, so the copy this avoids is a second full-body allocation.
+			r.sent = r.pending
+		default:
 			r.sent = append(r.sent, r.pending...)
 		}
 		// Assigned, not appended to whatever was there: this is what THIS
@@ -512,6 +523,12 @@ func (e *exchangeCapture) Upstream(p []byte) bool {
 		e.truncated = true
 		e.rc.upstreamBodyTruncated = true
 	}
+	// Copied, not aliased, and that is a contract rather than a habit: the
+	// streaming callers hand this a slice into a read buffer they reuse on the
+	// next chunk, so keeping a reference would let later reads rewrite what
+	// this capture already recorded. For a large non-streaming body the copy
+	// is a real cost — accepted, because an audit that can be silently edited
+	// after the fact is not an audit.
 	e.buf = append(e.buf, p...)
 	// Replaces rather than extends: last attempt wins, matching every other
 	// writer of this field.

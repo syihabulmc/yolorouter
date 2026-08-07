@@ -438,3 +438,60 @@ func TestARefusedBalanceStopsTheSubRequestFromBeingCharged(t *testing.T) {
 		}
 	}
 }
+
+// TestAReleaseOutlivesTheCallerAndHearsTheWholeOutcome pins the two halves of
+// what a release is handed.
+//
+// The context: releases run from a defer on the way out, when the caller may
+// have hung up — and a database-backed refund inheriting that cancellation
+// fails on exactly the requests with the most to give back. The outcome: a
+// capability deciding whether a reservation became a charge reads the status
+// and the reason the request settled with, and a release handed zeroed fields
+// cannot tell a served request from one that never ran.
+func TestAReleaseOutlivesTheCallerAndHearsTheWholeOutcome(t *testing.T) {
+	svc := &Service{}
+	probe := &outcomeProbe{}
+	RegisterAdmission(svc, probe, attemptView)
+
+	rc := &Exchange{requestID: "req-release-outcome"}
+	var held []heldTicket
+	svc.admit(context.Background(), rc, &held)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel() // the caller is gone by the time the deferred release runs
+	svc.releaseAdmissions(cancelled, rc, held, fact.Outcome{
+		StatusCode: 502, FailReason: "all_candidates_failed",
+		Attempts: 3, Delivered: false,
+	})
+
+	if !probe.released {
+		t.Fatal("the admission was never released")
+	}
+	if probe.ctxErr != nil {
+		t.Errorf("the release saw a dead context (%v): a refund must not fail because the "+
+			"caller stopped waiting for it", probe.ctxErr)
+	}
+	if probe.out.StatusCode != 502 || probe.out.FailReason != "all_candidates_failed" || probe.out.Attempts != 3 {
+		t.Errorf("release outcome = %+v, want the settled status, reason and attempt count: "+
+			"zeroed fields cannot tell a served request from one that never ran", probe.out)
+	}
+}
+
+// outcomeProbe records what its release was handed.
+type outcomeProbe struct {
+	released bool
+	ctxErr   error
+	out      fact.Outcome
+}
+
+func (*outcomeProbe) Name() string { return "outcome_probe" }
+
+func (p *outcomeProbe) Admit(_ context.Context, _ fact.Attempt, _ fact.Sink) (struct{}, bool) {
+	return struct{}{}, true
+}
+
+func (p *outcomeProbe) Release(ctx context.Context, _ fact.Attempt, _ struct{}, out fact.Outcome, _ fact.Sink) {
+	p.released = true
+	p.ctxErr = ctx.Err()
+	p.out = out
+}

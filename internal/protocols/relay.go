@@ -307,6 +307,67 @@ func WatchClientClose(c *gin.Context, upstream io.Closer) (stop func()) {
 	return func() { once.Do(func() { close(done) }) }
 }
 
+// newSSEEmitter builds the emit function both streaming relays share: defer
+// the SSE headers and the 200 until there is a first real event to send, and
+// capture caller-facing bytes only after BOTH Write and Flush succeed.
+//
+// One constructor rather than two inline closures, because the two relays'
+// copies had already drifted into being kept in step by comments alone. The
+// rules it encodes are load-bearing:
+//   - Nothing may touch the writer before the first non-empty batch: an early
+//     Flush or Write would implicitly commit a bare 200 with none of the SSE
+//     headers set, and the window for handing this candidate's failure to the
+//     next one would close for nothing.
+//   - A refused commit aborts: the response was already committed by somebody
+//     else, and carrying on would stream a body under a status this call did
+//     not choose.
+//   - Capture happens only after Flush reports success — net/http may buffer
+//     a small Write and return nil without pushing bytes onto the socket, so
+//     capturing at Write time could record bytes the client never received.
+//     This is the only capture point that keeps the stream audit file
+//     byte-for-byte identical to what the client got.
+func newSSEEmitter(w ClientWriter, buf UpstreamBuffer, onFirstChunk func()) func([]SSEEvent) error {
+	headerWritten := false
+	return func(events []SSEEvent) error {
+		if len(events) == 0 {
+			return nil
+		}
+		if !headerWritten {
+			w.Inject(http.Header{
+				"Content-Type":      {"text/event-stream"},
+				"Cache-Control":     {"no-cache"},
+				"Connection":        {"keep-alive"},
+				"X-Accel-Buffering": {"no"},
+			})
+			if cerr := w.Commit(http.StatusOK); cerr != nil {
+				return fmt.Errorf("%w: commit stream to client: %w", ErrClientWrite, cerr)
+			}
+			headerWritten = true
+			if onFirstChunk != nil {
+				onFirstChunk()
+				onFirstChunk = nil
+			}
+		}
+		var written [][]byte
+		for _, event := range events {
+			b := []byte(event.String())
+			if _, err := w.Write(b); err != nil {
+				return fmt.Errorf("%w: write to client: %w", ErrClientWrite, err)
+			}
+			if buf != nil {
+				written = append(written, b)
+			}
+		}
+		if err := w.Flush(); err != nil {
+			return fmt.Errorf("%w: flush to client: %w", ErrClientWrite, err)
+		}
+		for _, b := range written {
+			buf.AppendResponse(b)
+		}
+		return nil
+	}
+}
+
 // IRStreamRelay proxies an upstream SSE stream through IR: decode -> encode.
 // Returns partial usage even on upstream read errors.
 //
@@ -346,64 +407,9 @@ func IRStreamRelay(
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var sig FinishSignals
-	// headerWritten gates both the deferred header write and onFirstChunk:
-	// neither happens until there is at least one encoded event actually
-	// about to be sent to the client. Calling c.Writer.Flush() (or Write)
-	// before this point would implicitly commit a bare 200 with none of the
-	// SSE headers set, so emit() must be the only place that touches the
-	// writer before headerWritten flips true.
-	headerWritten := false
-	emit := func(events []SSEEvent) error {
-		if len(events) == 0 {
-			return nil
-		}
-		if !headerWritten {
-			w.Inject(http.Header{
-				"Content-Type":      {"text/event-stream"},
-				"Cache-Control":     {"no-cache"},
-				"Connection":        {"keep-alive"},
-				"X-Accel-Buffering": {"no"},
-			})
-			// A refused commit means the response was already committed by
-			// somebody else. Carrying on would set headerWritten and stream a
-			// body under a status this call did not choose.
-			if cerr := w.Commit(http.StatusOK); cerr != nil {
-				return fmt.Errorf("%w: commit stream to client: %w", ErrClientWrite, cerr)
-			}
-			headerWritten = true
-			if onFirstChunk != nil {
-				onFirstChunk()
-				onFirstChunk = nil
-			}
-		}
-		// Bytes are captured to buf only after BOTH the Write and the Flush
-		// below succeed — net/http may buffer a small Write and return nil
-		// without having pushed bytes onto the socket, and the real delivery
-		// error only surfaces on Flush (see FlushAndCheckError). Capturing
-		// before that point (the previous behavior) could record bytes the
-		// client never actually received.
-		var written [][]byte
-		for _, event := range events {
-			s := event.String()
-			if _, err := w.Write([]byte(s)); err != nil {
-				return fmt.Errorf("%w: write to client: %w", ErrClientWrite, err)
-			}
-			if buf != nil {
-				written = append(written, []byte(s))
-			}
-		}
-		if err := w.Flush(); err != nil {
-			return fmt.Errorf("%w: flush to client: %w", ErrClientWrite, err)
-		}
-		for _, s := range written {
-			// Caller-facing (post-IR-encode) bytes actually written to the
-			// client — the ONLY capture point that keeps the per-request
-			// stream audit file byte-for-byte identical to what the client
-			// received (see AppendResponse's doc comment).
-			buf.AppendResponse(s)
-		}
-		return nil
-	}
+	// The emitter owns the deferred-header rule; see newSSEEmitter. It must be
+	// the only thing that touches the writer before the first event goes out.
+	emit := newSSEEmitter(w, buf, onFirstChunk)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -676,60 +682,9 @@ func IRStreamRelayJSONLines(
 	var rawReadErr error
 	var sig FinishSignals
 
-	// See IRStreamRelay's emit() for the full rationale: headers (and
-	// onFirstChunk) are deferred until the first non-empty encoded events,
-	// and emit() must be the only place that touches the writer before that
-	// point (an unconditional Flush() before any Write/WriteHeader call
-	// would implicitly commit a bare 200 with none of the SSE headers set).
-	headerWritten := false
-	emit := func(events []SSEEvent) error {
-		if len(events) == 0 {
-			return nil
-		}
-		if !headerWritten {
-			w.Inject(http.Header{
-				"Content-Type":      {"text/event-stream"},
-				"Cache-Control":     {"no-cache"},
-				"Connection":        {"keep-alive"},
-				"X-Accel-Buffering": {"no"},
-			})
-			// A refused commit means the response was already committed by
-			// somebody else. Carrying on would set headerWritten and stream a
-			// body under a status this call did not choose.
-			if cerr := w.Commit(http.StatusOK); cerr != nil {
-				return fmt.Errorf("%w: commit stream to client: %w", ErrClientWrite, cerr)
-			}
-			headerWritten = true
-			if onFirstChunk != nil {
-				onFirstChunk()
-				onFirstChunk = nil
-			}
-		}
-		// See IRStreamRelay's emit() for the full rationale: capture only
-		// after both Write and Flush succeed, since a buffered Write can
-		// return nil before the real delivery error surfaces on Flush.
-		var written [][]byte
-		for _, event := range events {
-			b := []byte(event.String())
-			if _, err := w.Write(b); err != nil {
-				return fmt.Errorf("%w: write to client: %w", ErrClientWrite, err)
-			}
-			if buf != nil {
-				written = append(written, b)
-			}
-		}
-		if err := w.Flush(); err != nil {
-			return fmt.Errorf("%w: flush to client: %w", ErrClientWrite, err)
-		}
-		for _, b := range written {
-			// See IRStreamRelay's emit() for the full rationale: this is
-			// the only capture point that keeps the per-request stream
-			// audit file byte-for-byte identical to what the client
-			// received.
-			buf.AppendResponse(b)
-		}
-		return nil
-	}
+	// The emitter owns the deferred-header rule; see newSSEEmitter. It must be
+	// the only thing that touches the writer before the first event goes out.
+	emit := newSSEEmitter(w, buf, onFirstChunk)
 
 	for {
 		n, err := resp.Body.Read(buf2)
@@ -911,25 +866,4 @@ func UpstreamHeadersToCopy(header http.Header) http.Header {
 		}
 	}
 	return out
-}
-
-// CopyUpstreamHeaders copies the headers in the allowlist from the upstream
-// response into the gin response. This uses an allowlist strategy to prevent
-// provider-internal information (organization IDs, server version,
-// diagnostic headers, rate-limit status, Set-Cookie, etc.) from leaking to
-// tenants. Relay-layer compatibility headers (X-Provider, X-Request-Id,
-// x-ratelimit-*, etc.) are injected by each handler itself and are never
-// forwarded from upstream.
-//
-// It ADDS rather than replaces, which is not what ClientWriter.Inject does and
-// is deliberate: this is a merge of what the upstream said on top of whatever
-// the relay has already set for itself. A stream sets Cache-Control: no-cache
-// before this runs, and the upstream's own directives are meant to join it, not
-// evict it. Injecting would drop ours.
-func CopyUpstreamHeaders(c *gin.Context, header http.Header) {
-	for k, vv := range UpstreamHeadersToCopy(header) {
-		for _, v := range vv {
-			c.Writer.Header().Add(k, v)
-		}
-	}
 }

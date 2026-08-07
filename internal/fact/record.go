@@ -56,6 +56,12 @@ type UsageReported struct {
 	CacheRead             int
 	CacheWrite            int
 	CacheIncludedInPrompt bool
+	// Reasoning is the share of the completion the model spent thinking.
+	// Carried for the same reason Incoherent below is: settlement re-derives
+	// its coherence verdict from this record, and one of the rules — reasoning
+	// cannot exceed the completion — reads this count. A hop that drops it
+	// quietly weakens that verdict on the copy that is actually priced.
+	Reasoning int
 	// Incoherent marks counts that contradict themselves — a negative token
 	// count, a cache read larger than the prompt it was read from.
 	//
@@ -154,6 +160,13 @@ func (s UsageSource) String() string {
 		return "source_" + strconv.Itoa(int(s))
 	}
 }
+
+// Several record types below have no producer in this build. They stay for
+// the same reason the unread snapshot accessors do: this vocabulary is the
+// contract capabilities report through, and the capabilities that produce
+// these records are the ones not yet built against this kernel. A consumer
+// meeting an unknown record already has a defined path (the overflow column),
+// so an unproduced type costs nothing at run time.
 
 // TokensSaved reports a successful input compression pass.
 type TokensSaved struct {
