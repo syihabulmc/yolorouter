@@ -16,11 +16,11 @@ func TestClassifyUpstreamStatus(t *testing.T) {
 		outcome  string
 		errType  string
 	}{
-		{http.StatusUnauthorized, statusRotateKey, AttemptAuthFailed, ""},
-		{http.StatusTooManyRequests, statusRotateKey, AttemptRateLimited, ""},
-		{http.StatusInternalServerError, statusFailover, AttemptServerError, ""},
-		{http.StatusBadGateway, statusFailover, AttemptServerError, ""},
-		{http.StatusServiceUnavailable, statusFailover, AttemptServerError, ""},
+		{http.StatusUnauthorized, statusRotateKey, AttemptAuthFailed, errTypeAuthentication},
+		{http.StatusTooManyRequests, statusRotateKey, AttemptRateLimited, errTypeRateLimit},
+		{http.StatusInternalServerError, statusFailover, AttemptServerError, errTypeUpstream},
+		{http.StatusBadGateway, statusFailover, AttemptServerError, errTypeUpstream},
+		{http.StatusServiceUnavailable, statusFailover, AttemptServerError, errTypeUpstream},
 		{http.StatusBadRequest, statusTerminalClient, AttemptClientError, errTypeInvalidRequest},
 		// 403 is terminal (provider-scoped), NOT a rotate-Key status.
 		{http.StatusForbidden, statusTerminalClient, AttemptClientError, errTypePermission},
@@ -28,6 +28,12 @@ func TestClassifyUpstreamStatus(t *testing.T) {
 		{http.StatusUnprocessableEntity, statusTerminalClient, AttemptClientError, errTypeInvalidRequest},
 	}
 	for _, tt := range tests {
+		if tt.errType == "" {
+			t.Fatalf("status %d expects an empty error type: every classification has to name "+
+				"one, because a verdict carrying this status can reach the caller and an empty "+
+				"type arrives as a field their client will branch on and find nothing",
+				tt.status)
+		}
 		got := classifyUpstreamStatus(tt.status)
 		if got.Category != tt.category {
 			t.Errorf("status %d: category = %v, want %v", tt.status, got.Category, tt.category)

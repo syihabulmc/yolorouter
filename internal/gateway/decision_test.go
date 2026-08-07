@@ -40,13 +40,30 @@ func TestDecisionTableStatusFieldsOnlyWithFixed(t *testing.T) {
 
 // allResolved enumerates one resolved value per Kind, for the algebraic checks.
 func allResolved() []resolved {
-	out := make([]resolved, 0, fact.NumKinds)
+	out := make([]resolved, 0, fact.NumKinds*3)
+	// Three variants per Kind, with distinct words. One per Kind cannot see the
+	// tie-breaks at all: two facts of the SAME Kind is exactly the case the
+	// ordinal cannot separate, and a fixture that never builds that pair leaves
+	// the rule which settles it — and therefore whether the fold depends on
+	// registration order — untested in both directions.
+	//
+	// loopFrom is filled for the same reason: left at the zero Kind for every
+	// element, the loop tie-break compares a value against itself and any rule
+	// at all passes.
 	for k := range fact.NumKinds {
-		out = append(out, resolved{
-			Decision:       decisionTable[k],
-			statusFrom:     fact.Kind(k),
-			upstreamStatus: 502,
-		})
+		for _, w := range []struct{ reason, detail string }{
+			{"", ""},
+			{"reason_a", "detail_x"},
+			{"reason_b", "detail_y"},
+		} {
+			out = append(out, resolved{
+				Decision:     decisionTable[k],
+				statusFrom:   fact.Kind(k),
+				loopFrom:     fact.Kind(k),
+				reason:       w.reason,
+				rejectDetail: w.detail,
+			})
+		}
 	}
 	return out
 }
@@ -104,6 +121,12 @@ func TestCombineNeverProducesUndefined(t *testing.T) {
 // separate property, and per-field on purpose: reversing one field's fold
 // while the others stay correct is invisible to any test that only inspects
 // the overall strongest-loop behaviour.
+// Sticky is deliberately absent from the fields checked here. It is not folded
+// by strength at all: it is part of the caller-facing verdict, adopted whole
+// from whichever fact wins the status, because every part of that verdict —
+// including whether to remember it — has to come from the same reporter.
+// TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt holds that behaviourally
+// and TestTheVerdictIsAdoptedWholeOrNotAtAll holds it structurally.
 func TestCombineNeverWeakensAnyEffect(t *testing.T) {
 	weak := resolved{Decision: Decision{Defined: true}}
 	strong := resolved{Decision: Decision{
@@ -111,7 +134,6 @@ func TestCombineNeverWeakensAnyEffect(t *testing.T) {
 		Loop:    LoopTerminate,
 		Circuit: CircuitEffect(2),
 		Budget:  BudgetEffect(1),
-		Sticky:  StickyEffect(1),
 		Settle:  SettleEffect(1),
 	}}
 
@@ -127,9 +149,6 @@ func TestCombineNeverWeakensAnyEffect(t *testing.T) {
 		}
 		if got.Budget != strong.Budget {
 			t.Errorf("%s: Budget folded to %v, want the stronger %v", name, got.Budget, strong.Budget)
-		}
-		if got.Sticky != strong.Sticky {
-			t.Errorf("%s: Sticky folded to %v, want the stronger %v", name, got.Sticky, strong.Sticky)
 		}
 		if got.Settle != strong.Settle {
 			t.Errorf("%s: Settle folded to %v, want the stronger %v", name, got.Settle, strong.Settle)
@@ -230,5 +249,99 @@ func TestOtherNextCandidateVerdictsAreNotRefusals(t *testing.T) {
 		if got.loopFrom == fact.KindPayloadRefused {
 			t.Errorf("%s is attributed as a refusal", k)
 		}
+	}
+}
+
+// TestAVerdictWithNoStatusOpinionAsksForNothing pins the way a decision says
+// "I have no view on what the caller should be told".
+//
+// Sticky and status are separate columns: a row can ask for its verdict to be
+// remembered without stating what status that verdict deserves. The caller-
+// facing render answers that with a zero status, and the terminal reads the
+// zero as "record nothing" rather than as "tell them zero". Without this the
+// pair reads like defensive filler, and the first person to tidy it would
+// remove the only thing standing between a caller and an HTTP 0.
+func TestAVerdictWithNoStatusOpinionAsksForNothing(t *testing.T) {
+	var v resolved // Status is StatusNone
+	status, errType := v.callerFacing(500, "upstream_error")
+	if status != 0 || errType != "" {
+		t.Errorf("callerFacing = (%d, %q), want (0, \"\"): a decision that states no status "+
+			"must not borrow the response's, or every verdict would look like it had an "+
+			"opinion about what the caller sees", status, errType)
+	}
+}
+
+// TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt is the fold property that
+// a count of scopes cannot express.
+//
+// The terminal stores ONE verdict — status, error type, words, persisted reason
+// — and asks whether to remember it. Every part of that answer has to come from
+// the same fact. Folded independently, stickiness can be supplied by one fact
+// while the status and the words come from another, and the pair is stored as
+// though a single reporter had said both.
+//
+// The case below is the cheapest one that shows it: an exhausted quota carries
+// no stickiness, a payload refusal carries it, and the quota wins the status
+// not by making a stronger claim — a fixed status and a forwarded one are
+// equally strong — but by having the lower Kind, which is how statusWins
+// settles a tie. Fold them apart and the
+// refusal's stickiness files the quota's 429 and the quota's wording — telling
+// a caller their quota ran out when what happened was their payload was
+// refused, and persisting that under the quota's reason code where no dashboard
+// grouping by refusals will ever find it.
+func TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		facts []fact.Fact
+	}{
+		{"refusal first", []fact.Fact{
+			{Kind: fact.KindPayloadRefused, Status: 400, Detail: "refused", Reason: "content_inspection_refused"},
+			{Kind: fact.KindQuotaExhausted, Detail: "quota", Reason: "quota_exhausted"},
+		}},
+		{"quota first", []fact.Fact{
+			{Kind: fact.KindQuotaExhausted, Detail: "quota", Reason: "quota_exhausted"},
+			{Kind: fact.KindPayloadRefused, Status: 400, Detail: "refused", Reason: "content_inspection_refused"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := resolveBatch(tc.facts)
+			// Whoever won the status also decides whether it is remembered.
+			want := decisionFor(v.statusFrom).Sticky
+			if v.Sticky != want {
+				t.Errorf("folded Sticky = %v, but the status came from %v whose row says %v: "+
+					"the verdict would be remembered at a scope its own reporter never asked "+
+					"for, and the caller told a story neither fact tells",
+					v.Sticky, v.statusFrom, want)
+			}
+		})
+	}
+}
+
+// TestTheFallbackReasonNamesTheFactThatSuppliedTheVerdict covers a provenance
+// break that only shows up when two facts split the answer.
+//
+// A fact may carry no reason of its own, and then the Kind's own name is
+// persisted instead. The question is WHICH Kind: a batch can have one fact win
+// the status and the words while another wins the loop effect, and naming the
+// loop's would file the row under something that contributed neither the status
+// the caller saw nor the sentence they read — an audit trail pointing at a fact
+// with nothing to do with the answer.
+//
+// A single-fact batch cannot see this: there, the two winners are the same
+// fact by construction.
+func TestTheFallbackReasonNamesTheFactThatSuppliedTheVerdict(t *testing.T) {
+	// PricingUnavailableSkip states a status and no reason; RequestBudgetExhausted
+	// terminates, so it wins the loop. Neither carries words.
+	v := resolveBatch([]fact.Fact{
+		{Kind: fact.KindPricingUnavailableSkip},
+		{Kind: fact.KindRequestBudgetExhausted},
+	})
+	if v.statusFrom == v.loopFrom {
+		t.Fatalf("fixture no longer splits the winners (both %v); pick two Kinds where one wins "+
+			"the status and another wins the loop, or this test proves nothing", v.statusFrom)
+	}
+	if got, want := v.failReason(), v.statusFrom.String(); got != want {
+		t.Errorf("failReason = %q, want %q: the persisted reason has to name the fact that "+
+			"supplied the verdict, not the one that supplied the loop effect", got, want)
 	}
 }

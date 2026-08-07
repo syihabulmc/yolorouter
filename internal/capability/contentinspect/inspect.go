@@ -63,7 +63,14 @@ func (Inspector) ObserveUpstreamError(_ context.Context, _ View, up fact.Upstrea
 	sink.Report(fact.Fact{
 		Kind:   fact.KindPayloadRefused,
 		Status: up.StatusCode,
-		Detail: "upstream inspected the payload and refused it",
+		// Reason is stated rather than left to the Kind name because it is
+		// persisted and read downstream: a Kind is internal and gets renamed as
+		// the vocabulary sharpens, and a rename must not silently change a
+		// column somebody queries.
+		Reason: "content_inspection_refused",
+		// Detail reaches the caller when this verdict is the one the chain ends
+		// on, so it is written for them rather than for a log reader.
+		Detail: "request was refused by upstream content inspection",
 	})
 }
 

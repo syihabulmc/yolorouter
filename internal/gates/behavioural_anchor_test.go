@@ -42,6 +42,12 @@ func TestBehaviouralGateTestsStillExist(t *testing.T) {
 			tests: []string{"TestObserversCannotReachEachOtherOrTheAuditBody"},
 		},
 		{
+			file: "internal/gateway/decision_test.go",
+			tests: []string{
+				"TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt",
+			},
+		},
+		{
 			file:  "internal/gateway/usage_roundtrip_test.go",
 			tests: []string{"TestEveryCountSurvivesTheDeliveryHop"},
 		},

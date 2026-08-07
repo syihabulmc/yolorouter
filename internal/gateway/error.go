@@ -132,6 +132,14 @@ const (
 	statusTerminalClient                       // other 4xx: caller's problem, no switch
 )
 
+// ErrorType is stated on EVERY classification, including the two that used to
+// leave it empty because their callers never read it. A verdict a capability
+// reports can now carry any of these statuses to the terminal, and an empty
+// error type reaches the caller as `"type": ""` — a field their client library
+// will branch on and find nothing. What used to protect this was a caller that
+// only ever asked on the one path that filled it in; that protection is not
+// something the type can state, so the type states the value instead.
+//
 // upstreamStatusClass is the full classification attemptOne needs from one
 // upstream HTTP status: which branch to take, what outcome label to log,
 // and (for terminal 4xx) which OpenAI error type to surface.
@@ -155,13 +163,13 @@ type upstreamStatusClass struct {
 func classifyUpstreamStatus(status int) upstreamStatusClass {
 	switch {
 	case status == http.StatusUnauthorized, status == http.StatusTooManyRequests:
-		outcome := AttemptAuthFailed
+		outcome, errType := AttemptAuthFailed, errTypeAuthentication
 		if status == http.StatusTooManyRequests {
-			outcome = AttemptRateLimited
+			outcome, errType = AttemptRateLimited, errTypeRateLimit
 		}
-		return upstreamStatusClass{Category: statusRotateKey, Outcome: outcome}
+		return upstreamStatusClass{Category: statusRotateKey, Outcome: outcome, ErrorType: errType}
 	case status >= 500:
-		return upstreamStatusClass{Category: statusFailover, Outcome: AttemptServerError}
+		return upstreamStatusClass{Category: statusFailover, Outcome: AttemptServerError, ErrorType: errTypeUpstream}
 	default:
 		errType := errTypeInvalidRequest
 		switch status {

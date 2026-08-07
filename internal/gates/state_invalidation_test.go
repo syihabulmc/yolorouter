@@ -15,7 +15,8 @@ import (
 // per-iteration state hygiene, and is honest about how far it reaches.
 //
 // The Exchange carries a handful of fields that describe ONE candidate's
-// attempt — which provider was hit, what URL, what a content inspection said.
+// attempt — which provider was hit, what URL, what verdict that attempt ended
+// on.
 // The loop walks candidates and must clear each of those before the moment a
 // stale value from candidate N-1 could be read while judging candidate N. A
 // consolidated attempt-scope with a single reset call would make that a
@@ -52,7 +53,7 @@ func TestPerCandidateStateIsResetBeforeItCanLeak(t *testing.T) {
 
 	// Every per-candidate field must be reset by a statement sitting directly
 	// in the loop body — not inside an if, where some iterations skip it.
-	for _, field := range []string{"contentInspectionStatus", "contentInspectionErrType", "provider", "upstreamURL"} {
+	for _, field := range []string{"stickyAttempt", "provider", "upstreamURL"} {
 		if _, ok := resetAt[field]; !ok {
 			t.Errorf("the candidate loop has no top-level reset of rc.%s: either it was "+
 				"removed, or it moved inside a conditional — both leave a stale value from "+
@@ -66,7 +67,7 @@ func TestPerCandidateStateIsResetBeforeItCanLeak(t *testing.T) {
 	// is reported as.
 	firstBreak := firstIndexWithExit(body, token.BREAK)
 	if firstBreak >= 0 {
-		for _, field := range []string{"contentInspectionStatus", "contentInspectionErrType"} {
+		for _, field := range []string{"stickyAttempt"} {
 			if idx, ok := resetAt[field]; ok && idx > firstBreak {
 				t.Errorf("rc.%s is reset at loop statement %d, after the first early exit at "+
 					"statement %d: an iteration that exits there reports the PREVIOUS "+
@@ -187,13 +188,20 @@ func firstIndexWithExit(body *ast.BlockStmt, kind token.Token) int {
 }
 
 // isZeroLiteral reports whether an expression is one of the zero-value
-// spellings a reset actually uses: nil, 0, or "".
+// spellings a reset actually uses: nil, 0, "", or an empty composite literal.
+//
+// The composite case matters as soon as a per-candidate concern grows past a
+// single scalar: `rc.x = T{}` is the same reset as `rc.x = 0`, and a check that
+// only recognised scalars would go quiet exactly when the state it guards got
+// complicated enough to be worth guarding.
 func isZeroLiteral(e ast.Expr) bool {
 	switch v := e.(type) {
 	case *ast.Ident:
 		return v.Name == "nil"
 	case *ast.BasicLit:
 		return v.Value == "0" || v.Value == `""`
+	case *ast.CompositeLit:
+		return len(v.Elts) == 0
 	}
 	return false
 }

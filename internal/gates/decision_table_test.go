@@ -1,6 +1,7 @@
 package gates
 
 import (
+	"fmt"
 	"go/ast"
 	"go/importer"
 	"go/parser"
@@ -8,6 +9,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -159,4 +161,186 @@ func namedTypeOf(t types.Type) *types.Named {
 	}
 	n, _ := t.(*types.Named)
 	return n
+}
+
+// TestTheVerdictIsAdoptedWholeOrNotAtAll holds the property three rounds of
+// review kept finding broken in a new place.
+//
+// Everything a caller ends up seeing, and everything that gets persisted about
+// why, has to come from ONE reported fact: the status, the error type, the
+// words, the reason, and whether the verdict is worth remembering past the
+// attempt. Assign those from separate folds and a batch can produce an answer
+// no single reporter gave — a caller told their quota ran out when their
+// payload was refused, a row filed under a reason belonging to neither.
+//
+// Earlier versions of this check tried to describe the SHAPE of a correct fold:
+// count the scopes, or walk for the branch the assignment sits in. Both could
+// be satisfied by code that still split the verdict, and the second could be
+// walked around entirely by putting an assignment somewhere the walk did not
+// descend. So the check stopped describing shapes. It reads every assignment in
+// the function, and requires that none of these fields is written directly —
+// the only way to set them is the one helper that sets all of them together.
+func TestTheVerdictIsAdoptedWholeOrNotAtAll(t *testing.T) {
+	root := repoRoot(t)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join(root, "internal", "gateway", "decision.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parsing decision.go: %v", err)
+	}
+
+	var combineFn, adoptFn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		switch fd.Name.Name {
+		case "combine":
+			combineFn = fd
+		case "adoptVerdict":
+			adoptFn = fd
+		}
+	}
+	if combineFn == nil || adoptFn == nil {
+		t.Fatal("combine or adoptVerdict not found in decision.go; the fold was restructured and " +
+			"this check needs re-aiming rather than passing by finding nothing")
+	}
+
+	// The fields that make up one verdict. Assigning any of them outside the
+	// adopting helper is what splits it.
+	verdictFields := map[string]bool{
+		"Status": true, "Code": true, "ErrType": true, "Sticky": true,
+		"statusFrom": true, "rejectDetail": true, "reason": true,
+	}
+	// The effects that legitimately fold on their own strength, and so are the
+	// only fields combine may write directly.
+	foldedEffects := map[string]bool{
+		"Loop": true, "loopFrom": true, "Circuit": true,
+		"Budget": true, "Settle": true, "Defined": true,
+	}
+
+	// The accumulator's name, so a write can be recognised whatever it is
+	// spelled as.
+	acc := accumulatorName(t, combineFn)
+
+	// Every assignment anywhere in combine, however deeply nested. No manual
+	// descent: a walk that has to know which statement kinds to enter is a walk
+	// that can be stepped around by using one it forgot.
+	//
+	// Two things are rejected. A verdict field written by name is the obvious
+	// one. The other is any whole-accumulator write — `*p = ...`, or assigning
+	// a struct that contains these fields — which sets them without ever
+	// naming them, and would let a rename or an extracted struct walk straight
+	// past a check that only knew the seven names.
+	var offenders []string
+	note := func(what string, pos token.Pos) {
+		offenders = append(offenders, fmt.Sprintf("%s at line %d", what, fset.Position(pos).Line))
+	}
+	ast.Inspect(combineFn, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		// The accumulator's own declaration seeds the fold with one operand
+		// whole, which is the one place taking everything at once is right.
+		if as.Tok == token.DEFINE {
+			return true
+		}
+		for _, lhs := range as.Lhs {
+			switch t := lhs.(type) {
+			case *ast.SelectorExpr:
+				if verdictFields[t.Sel.Name] {
+					note(t.Sel.Name, t.Pos())
+					continue
+				}
+				// A field that is itself a struct can carry the verdict inside
+				// it. Only the effects folded by strength are safe to write.
+				if id, ok := t.X.(*ast.Ident); ok && id.Name == acc && !foldedEffects[t.Sel.Name] {
+					note("unrecognised field "+t.Sel.Name, t.Pos())
+				}
+			case *ast.StarExpr, *ast.Ident:
+				if id, ok := lhs.(*ast.Ident); ok && id.Name != acc {
+					continue // an ordinary local, not the accumulator
+				}
+				note("the whole accumulator", lhs.Pos())
+			}
+		}
+		return true
+	})
+	if len(offenders) > 0 {
+		sort.Strings(offenders)
+		t.Errorf("combine assigns verdict fields directly (%s): every part of a verdict must "+
+			"come from the same fact, and a field written on its own can come from another one. "+
+			"Set them through adoptVerdict, which takes them all at once", strings.Join(offenders, ", "))
+	}
+
+	// The helper has to set all of them, and set them unconditionally. A field
+	// assigned inside an `if` is a field that keeps the losing fact's value
+	// whenever the condition is false — the same split, one level down.
+	assigned := map[string]bool{}
+	for _, st := range adoptFn.Body.List {
+		as, ok := st.(*ast.AssignStmt)
+		if !ok {
+			continue
+		}
+		for _, lhs := range as.Lhs {
+			if sel, ok := lhs.(*ast.SelectorExpr); ok {
+				assigned[sel.Sel.Name] = true
+			}
+		}
+	}
+	for field := range verdictFields {
+		if !assigned[field] {
+			t.Errorf("adoptVerdict does not set %s at the top of its body: a field it leaves "+
+				"alone — or sets only under a condition — keeps whatever the losing fact put "+
+				"there, which is the split this check exists to prevent", field)
+		}
+	}
+
+	// And nothing else in the package may write these fields. Restricting the
+	// search to combine would only move the problem: a second helper doing the
+	// assignment is invisible to a check that looks at one function.
+	for _, f := range parseTree(t, filepath.Join("internal", "gateway")) {
+		if strings.HasSuffix(f.rel, "_test.go") {
+			continue
+		}
+		ast.Inspect(f.ast, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, lhs := range as.Lhs {
+				sel, ok := lhs.(*ast.SelectorExpr)
+				if !ok || !verdictFields[sel.Sel.Name] {
+					continue
+				}
+				rel, line := f.pos(sel)
+				if rel == "internal/gateway/decision.go" &&
+					sel.Pos() >= adoptFn.Body.Pos() && sel.Pos() <= adoptFn.Body.End() {
+					continue
+				}
+				t.Errorf("%s:%d writes %s outside adoptVerdict: the verdict has one place it "+
+					"can be set, and a second one is a second fact it can come from",
+					rel, line, sel.Sel.Name)
+			}
+			return true
+		})
+	}
+}
+
+// accumulatorName returns the name combine folds into, read from its first
+// statement rather than assumed, so renaming it does not quietly turn every
+// check above into a no-op.
+func accumulatorName(t *testing.T, fn *ast.FuncDecl) string {
+	t.Helper()
+	if len(fn.Body.List) > 0 {
+		if as, ok := fn.Body.List[0].(*ast.AssignStmt); ok && len(as.Lhs) == 1 {
+			if id, ok := as.Lhs[0].(*ast.Ident); ok {
+				return id.Name
+			}
+		}
+	}
+	t.Fatal("combine does not open by declaring an accumulator; the fold was restructured and " +
+		"the checks above would no longer know what a write to it looks like")
+	return ""
 }

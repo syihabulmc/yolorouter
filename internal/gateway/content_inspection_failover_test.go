@@ -306,3 +306,51 @@ func TestOrdinaryClientErrorStillTerminal(t *testing.T) {
 		t.Fatalf("a schema 400 must not fail over, got %d upstream calls", calls)
 	}
 }
+
+// TestARefusalIsFiledUnderTheNameTheDashboardQueries pins a string that moved
+// out of the kernel and into a capability.
+//
+// The reason a request failed is persisted, and everything downstream — the
+// dashboards that group by it, the strings the frontend translates — reads that
+// column as a contract. It used to be a constant the terminal wrote itself. It
+// is now supplied by whichever capability reported the verdict, through
+// fact.Fact.Reason, which is what lets the kernel quote a refusal without
+// knowing that content inspection exists.
+//
+// Nothing in the type system requires a capability to set it. A capability that
+// leaves it empty still compiles and still refuses the request correctly; the
+// failure is silent and arrives in the column, where the internal Kind name
+// takes the place of the agreed one and a dashboard quietly grows a second
+// bucket for the same event. So the contract is pinned here rather than trusted
+// to whoever writes the next capability.
+func TestARefusalIsFiledUnderTheNameTheDashboardQueries(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":"data_inspection_failed","message":"Input data may contain inappropriate content."}}`))
+	}))
+	defer upstream.Close()
+
+	svc := newSvc(t, db)
+	apiKey := seedTwoCandidateModel(t, svc, db, upstream.URL)
+
+	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want the upstream's own 400; body = %s", w.Code, w.Body.String())
+	}
+	var logRow model.RequestLog
+	if err := db.First(&logRow).Error; err != nil {
+		t.Fatalf("no request_log row: %v", err)
+	}
+	if logRow.FailReason == nil {
+		t.Fatal("fail_reason is null on a refused request: the column downstream groups by is empty")
+	}
+	if got := *logRow.FailReason; got != "content_inspection_refused" {
+		t.Errorf("fail_reason = %q, want %q — a capability that leaves fact.Fact.Reason unset "+
+			"falls back to the internal Kind name, which is renamed as the vocabulary is "+
+			"refined and is not what anything downstream queries", got, "content_inspection_refused")
+	}
+}

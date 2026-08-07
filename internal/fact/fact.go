@@ -181,17 +181,26 @@ func (k Kind) String() string {
 
 // Fact is one routing judgement.
 //
-// Kind is the only field the kernel's decision table is allowed to read. The
-// rest exist for the log row and for the one status policy that forwards an
-// upstream's own status verbatim. Keeping the table keyed on Kind alone is what
-// makes it enumerable: if a decision could also depend on Detail, the table
-// would no longer be the complete description of the kernel's control flow.
+// Kind is the only field the kernel's decision table is allowed to read. Reason
+// is persisted, Detail is shown to the caller, and Reporter is for logs.
+// Keeping the table keyed on Kind alone is what makes it enumerable: if a
+// decision could also depend on Detail, the table would no longer be the
+// complete description of the kernel's control flow.
 type Fact struct {
 	Kind Kind
 	// Reporter names who observed it. Logs and metrics only.
 	Reporter string
 	// Status is the upstream HTTP status that produced this judgement, or 0 when
 	// it did not come from a response.
+	//
+	// Nothing reads it today, and that is deliberate rather than an oversight:
+	// the status a caller is shown comes from the response the kernel is
+	// holding, not from what a reporter says about it. The two agree in
+	// practice and the response is the one that cannot be wrong.
+	//
+	// It is kept as the reporter's own record of what it judged. A timeline
+	// entry that says "this payload was refused" without saying what it saw is
+	// an entry nobody can check against the upstream's own logs.
 	Status int
 	// Reason is the stable, persisted code for why this happened, when the Kind
 	// alone is too coarse. A rate limit refusal is the motivating case: the Kind
@@ -204,7 +213,17 @@ type Fact struct {
 	// downstream. Tying one to the other means a rename silently breaks a
 	// display nobody was looking at.
 	Reason string
-	// Detail is free-form text for the log row. Never parsed.
+	// Detail is the reporter's own words for what happened, in prose. Never
+	// parsed.
+	//
+	// It can reach the CALLER, not just the log: when this verdict is the one a
+	// request ends on — an admission refusal, or a sticky verdict the chain ran
+	// out on — the kernel puts it in the error body as the explanation. Other
+	// endings substitute a generic message and it stays in the timeline only.
+	// So write it for the person who made the request — say what was refused
+	// and why they might fix it — and keep out of it anything they should not
+	// see. An upstream's raw error text, a prompt excerpt, or an internal
+	// identifier pasted in here is pasted into a response.
 	Detail string
 }
 

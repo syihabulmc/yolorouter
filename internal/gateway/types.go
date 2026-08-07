@@ -97,19 +97,21 @@ type Exchange struct {
 
 	statusCode int // set by finalize when the log row is written
 
-	// contentInspectionStatus / contentInspectionErrType describe the MOST
-	// RECENT candidate only — relayCandidates clears them at the top of each
-	// iteration, alongside provider/upstreamURL and for the same reason, so
-	// they are set if and only if the candidate that just ran was refused by
-	// the upstream's content inspection. Every other failover reason is an
-	// upstream fault
-	// whose generic 502 is the honest answer once the chain is exhausted; a
-	// moderation refusal is a verdict on the request, so reporting it as "all
-	// upstream candidates failed" would hide the one thing the caller can act
-	// on. Zero means the last attempt was not such a refusal and the ordinary
-	// terminal applies.
-	contentInspectionStatus  int
-	contentInspectionErrType string
+	// stickyAttempt holds the verdict of the MOST RECENT attempt only. It is
+	// cleared in two places, and both are needed: the key loop clears it before
+	// the checks that can pass a key over without dispatching it, and the
+	// candidate loop clears it for the candidates that are dropped before any
+	// key is reached at all. A chain that ends on a transport failure is a
+	// fault on our side of the wire, whatever an earlier attempt thought of the
+	// payload.
+	//
+	// It is written by the decision table's Sticky effect and read only by the
+	// terminal, which quotes it rather than reporting "all upstream candidates
+	// failed" over the top of a verdict the caller could have acted on. The
+	// field names no capability: which verdicts are worth quoting is a property
+	// of the table, and a second capability wanting this treatment adds a table
+	// row, not a field here.
+	stickyAttempt stickyVerdict
 
 	// usage from the successful attempt, if any — drives cost + the log row.
 

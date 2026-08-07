@@ -588,16 +588,19 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 	// below.
 	ingress := rc.ingress
 	for i := range candidates {
+		// Cleared here as well as on entry to each attempt, because the two
+		// clears cover paths the other cannot reach. A candidate can be dropped
+		// before any attempt is built — no usable key, nothing to send — and
+		// the budget gate below exits the loop mid-iteration; neither reaches
+		// attemptOne, and a verdict left over from the previous candidate would
+		// be reported as what ended the request when what ended it was running
+		// out of candidates or out of time.
+		//
+		// Placed ABOVE the budget gate for that second reason: a reset after it
+		// is skipped exactly when the previous attempt had just left a verdict
+		// behind.
+		rc.stickyAttempt = stickyVerdict{}
 		cand := candidates[i]
-		// Cleared ABOVE the budget gate below, not with the other per-candidate
-		// fields further down: the gate exits the loop mid-iteration, so a reset
-		// placed after it would be skipped exactly when the previous candidate
-		// had just been refused — and the request would be reported as a content
-		// refusal when what actually ended it was running out of time. Normal
-		// exhaustion is unaffected: the last candidate clears these on entry and
-		// sets them again itself if it is refused.
-		rc.contentInspectionStatus = 0
-		rc.contentInspectionErrType = ""
 		// Per-request total-budget gate: RequestDeadline is the hard cap that
 		// spans every candidate and key rotation. Checking it only at the
 		// first attempt left later candidates reachable after the budget had
@@ -617,8 +620,8 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// request. rc.upstreamURL is reset the same way so a candidate that
 		// fails before sending (negotiate / build) never inherits the previous
 		// candidate's URL in its AttemptRecord or the upstream_url column. The
-		// content-inspection fields belong to the same family — see their reset
-		// above the budget gate, which is why they are not repeated here.
+		// sticky slot belongs to the same family — see its reset above the
+		// budget gate, which is why it is not repeated here.
 		rc.provider = nil
 		rc.upstreamURL = ""
 
@@ -810,6 +813,14 @@ const (
 func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *model.ModelCandidate, provider *model.Provider, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
 	for i := range keys {
 		pk := keys[i]
+		// Cleared before the skip checks below, not inside attemptOne, because
+		// a key can be passed over without ever getting there — an unauthorized
+		// destination version, a key that will not decrypt. Left to attemptOne,
+		// the previous key's verdict would survive those paths and, if the
+		// chain then ran out, be reported as what ended the request: a rate
+		// limit one key hit, quoted for a request that actually died with no
+		// usable key at all.
+		rc.stickyAttempt = stickyVerdict{}
 		// Destination-version guard (credential-scope mechanism): a key
 		// is only authorized for the provider destination it was verified
 		// against. When an admin changes BaseURL, DestinationVersion bumps
@@ -1095,23 +1106,39 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 		Body:       errBody,
 		Elapsed:    time.Since(start),
 	})
-	// Only the refusal verdict is executed here. The table describes more than
-	// this call site acts on, so a verdict that is understood but not yet
-	// wired is logged rather than silently dropped: a reported judgement that
+	// Two effects are executed here; everything else the table can express is
+	// logged rather than silently dropped, because a reported judgement that
 	// vanishes without trace is the one failure mode that looks exactly like
-	// everything working.
+	// everything working. Sticky is read from the table, just below. The
+	// failover reclassification is still keyed on a hardcoded Kind rather than
+	// on the table's Loop — see the note at the top of decision.go for what
+	// that does and does not mean.
 	switch {
 	case observed.loopFrom == fact.KindPayloadRefused && class.Category == statusTerminalClient:
 		class.Category = statusFailover
 		class.Outcome = AttemptContentFiltered
 		note = fmt.Sprintf("upstream %d content inspection", statusCode)
-		rc.contentInspectionStatus = statusCode
-		rc.contentInspectionErrType = class.ErrorType
 	case observed.Loop > LoopContinue:
 		logger.Warn("gateway: reported verdict is not executed on this path",
 			zap.String("request_id", rc.requestID),
 			zap.String("verdict", observed.loopFrom.String()),
 			zap.Int("upstream_status", statusCode))
+	}
+
+	// Recorded from the table rather than from the branch above, which is what
+	// makes the slot general: the branch decides where the chain goes next, the
+	// table decides whether this verdict is worth quoting if the chain then
+	// runs out. A verdict with no status to offer records nothing — quoting a
+	// zero would tell the caller the request ended without ever being answered.
+	if observed.Sticky != StickyNone {
+		if status, errType := observed.callerFacing(statusCode, class.ErrorType); status != 0 {
+			rc.stickyAttempt = stickyVerdict{
+				status:  status,
+				errType: errType,
+				detail:  observed.rejectDetail,
+				reason:  observed.failReason(),
+			}
+		}
 	}
 
 	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, statusCode, class.Outcome, note))
@@ -1144,22 +1171,21 @@ func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.T
 			"partial_then_exhausted", nil), start)
 		return
 	}
-	// The chain ended on a content-inspection refusal. That is a verdict on the
-	// request, not an outage, so surface the upstream's own status and say why
-	// — a 502 "all upstream candidates failed" would send the caller looking
-	// for a broken provider instead of at their own prompt. Keyed on the LAST
-	// candidate (the loop clears these on every iteration) rather than "any
-	// candidate was refused": a chain that ends on a 5xx, or on a candidate
-	// that could not even be dispatched to, really is a fault on our side of
-	// the wire, whatever an earlier candidate thought of the payload.
-	if rc.contentInspectionStatus != 0 {
-		errType := rc.contentInspectionErrType
-		if errType == "" {
-			errType = errTypeInvalidRequest
+	// The chain ended on a verdict somebody thought worth quoting — a payload
+	// refusal is the motivating case. That is a judgement on the request, not
+	// an outage, so the caller is shown what was actually said: a 502 "all
+	// upstream candidates failed" would send them looking for a broken provider
+	// instead of at their own prompt.
+	//
+	// One slot, holding the last attempt's verdict: whoever ends the chain
+	// leaves theirs behind, and everyone before them has already had theirs
+	// overwritten or cleared.
+	if v := rc.stickyAttempt; v.held() {
+		detail := v.detail
+		if detail == "" {
+			detail = "upstream refused this request"
 		}
-		s.rejectRequest(c, rc, rc.contentInspectionStatus, errType,
-			"request was refused by upstream content inspection",
-			"content_inspection_refused", fact.FaultUpstream, start)
+		s.rejectRequest(c, rc, v.status, v.errType, detail, v.reason, fact.FaultUpstream, start)
 		return
 	}
 	s.rejectRequest(c, rc, http.StatusBadGateway, errTypeUpstream,

@@ -18,12 +18,27 @@ import (
 // WHAT IS ACTUALLY EXECUTED TODAY
 //
 // The table describes the intended behaviour of every Kind, but the relay does
-// not yet act on all of it. Right now exactly one path consumes a decision —
-// the non-2xx branch of attemptOne — and it acts only on a refusal verdict,
-// mapping it onto the pre-existing failover classification. Everything else the
-// table can express (retry against the same candidate, key rotation, explicit
-// termination, status selection, circuit effects, budget accounting,
-// stickiness, settlement) is described here and NOT executed.
+// not yet act on all of it. Three paths consume a decision:
+//
+//   - The admission refusal path, which reads Status/Code/ErrType to build the
+//     response a rejected caller sees.
+//   - The egress rewrite path, which skips the candidate when the verdict asks
+//     for LoopNextCandidate or stronger.
+//   - The non-2xx branch of attemptOne, which reads Sticky (holding the verdict
+//     for the terminal to quote when the chain runs out) and performs a
+//     failover reclassification.
+//
+// That reclassification is keyed on a hardcoded Kind rather than on the table's
+// Loop effect, and the distinction is worth stating precisely: the branch does
+// not act on WHICH loop effect the row asks for — it does the same thing
+// whatever the row says — but the effect's STRENGTH is what makes that Kind win
+// the fold and become the one the branch recognises. Lowering it below a
+// co-reported verdict's silently disables the branch. So the row's Loop is not
+// free to change, it is just not read for what to do.
+//
+// Everything else the table can express (retry against the same candidate, key
+// rotation, explicit termination, circuit effects, budget accounting,
+// settlement) is described here and NOT executed.
 //
 // This is written down rather than left to be discovered because the gap is
 // invisible from the table itself: a row exists, the completeness test passes,
@@ -112,11 +127,21 @@ type StickyEffect uint8
 
 const (
 	StickyNone StickyEffect = iota
-	// StickyCandidate is cleared at the start of each candidate: it describes
-	// the last candidate only.
-	StickyCandidate
-	// StickyRequest survives the whole exchange.
-	StickyRequest
+	// StickyAttempt is cleared at the start of each attempt: it describes the
+	// one attempt that produced it, and nothing longer.
+	//
+	// A longer-lived scope was tried and removed. Every verdict worth quoting
+	// describes ONE attempt — this candidate has no price, this candidate
+	// cannot serve the request, this key is throttled — and letting one outlive
+	// the attempt it describes gets the terminal wrong in the case that
+	// matters: a key throttled and rotated past, followed by an attempt that
+	// genuinely fell over, would report the throttle and send the caller to
+	// wait out a rate limit while the provider is down.
+	//
+	// An attempt is the unit rather than a candidate because a candidate can
+	// make several: the key loop clears this on every iteration, before the
+	// checks that can pass a key over without ever dispatching it.
+	StickyAttempt
 )
 
 // SettleEffect is what a decision does to outstanding reservations.
@@ -177,23 +202,23 @@ var decisionTable = [fact.NumKinds]Decision{
 	fact.KindPricingUnavailableSkip: {
 		Loop: LoopNextCandidate, Status: StatusFixed,
 		Code: http.StatusServiceUnavailable, ErrType: errTypeUnavailable,
-		Budget: BudgetConsumeProbe, Sticky: StickyRequest, Defined: true,
+		Budget: BudgetConsumeProbe, Sticky: StickyAttempt, Defined: true,
 	},
 	fact.KindCandidateUnsupported: {
 		Loop: LoopNextCandidate, Status: StatusFixed,
 		Code: http.StatusBadRequest, ErrType: errTypeInvalidRequest,
-		Budget: BudgetConsumeProbe, Sticky: StickyRequest, Defined: true,
+		Budget: BudgetConsumeProbe, Sticky: StickyAttempt, Defined: true,
 	},
 
 	// A refusal is a verdict on the payload, not an outage, so the provider is
 	// not penalised for producing it and the caller is told what the upstream
-	// actually said. The sticky slot is candidate-scoped: a chain that ends on
-	// a transport failure is a fault on our side of the wire, whatever an
-	// earlier candidate thought of the payload.
+	// actually said. The sticky slot is attempt-scoped: a chain that ends on a
+	// transport failure is a fault on our side of the wire, whatever an earlier
+	// attempt thought of the payload.
 	fact.KindPayloadRefused: {
 		Loop: LoopNextCandidate, Status: StatusFromUpstream,
 		Circuit: CircuitNone, Budget: BudgetConsumeAttempt,
-		Sticky: StickyCandidate, Defined: true,
+		Sticky: StickyAttempt, Defined: true,
 	},
 	fact.KindPayloadRepairedRetrySame: {
 		Loop: LoopRetrySameCandidate, Budget: BudgetConsumeAttempt, Defined: true,
@@ -206,7 +231,7 @@ var decisionTable = [fact.NumKinds]Decision{
 		Loop: LoopRotateKey, Status: StatusFixed,
 		Code: http.StatusTooManyRequests, ErrType: errTypeRateLimit,
 		Circuit: CircuitPenalizeSoft, Budget: BudgetConsumeAttempt,
-		Sticky: StickyRequest, Defined: true,
+		Sticky: StickyAttempt, Defined: true,
 	},
 	fact.KindUpstreamServerError: {
 		Loop: LoopNextCandidate, Circuit: CircuitPenalize,
@@ -290,8 +315,6 @@ type resolved struct {
 	// resolves to the same effect is indistinguishable, and a log line has to
 	// guess which of them actually happened.
 	loopFrom fact.Kind
-	// upstreamStatus carries the verbatim status for StatusFromUpstream.
-	upstreamStatus int
 	// rejectDetail is the reporter's own words for a refusal, so the caller is
 	// told which limit they hit rather than a status code alone.
 	rejectDetail string
@@ -326,9 +349,6 @@ func combine(a, b resolved) resolved {
 	if b.Budget > out.Budget {
 		out.Budget = b.Budget
 	}
-	if b.Sticky > out.Sticky {
-		out.Sticky = b.Sticky
-	}
 	if b.Settle > out.Settle {
 		out.Settle = b.Settle
 	}
@@ -339,10 +359,25 @@ func combine(a, b resolved) resolved {
 	// orders, which is what keeps the fold commutative — including in the case
 	// where NEITHER side has a real opinion, where an "otherwise keep the left
 	// operand" rule would quietly make the result depend on argument order.
+	// The caller-facing verdict is adopted whole, from one fact, in one
+	// statement. Everything the caller ends up seeing or that gets persisted
+	// travels together: the status, the error type, the words, the reason, and
+	// whether the verdict is worth remembering.
+	//
+	// Folding those apart is a mistake this package has now made twice. Each
+	// time the shape was the same — one fact supplied part of the answer and
+	// another supplied the rest, and the pair was reported as though a single
+	// reporter had said both. A caller was told their quota ran out when their
+	// payload had been refused; a row was filed under a reason belonging to
+	// neither. Splitting the assignment is what made those possible, so the
+	// assignment is not split.
+	//
+	// Which fact wins is decided by statusWins: first by how strong a claim the
+	// row makes about the status, then — and this is what settles the quota
+	// case, since a fixed status and a forwarded one are equally strong — by
+	// Kind, lowest first.
 	if statusWins(b, a) {
-		out.Status, out.Code, out.ErrType = b.Status, b.Code, b.ErrType
-		out.statusFrom, out.upstreamStatus = b.statusFrom, b.upstreamStatus
-		out.rejectDetail, out.reason = b.rejectDetail, b.reason
+		out.adoptVerdict(b)
 	}
 	return out
 }
@@ -370,7 +405,23 @@ func statusWins(challenger, holder resolved) bool {
 	if cs != hs {
 		return cs > hs
 	}
-	return challenger.statusFrom < holder.statusFrom
+	if challenger.statusFrom != holder.statusFrom {
+		return challenger.statusFrom < holder.statusFrom
+	}
+	// Two facts of the SAME Kind, which the Kind ordinal cannot separate. Left
+	// unbroken the comparison answers false both ways, the fold keeps whichever
+	// operand came first, and two capabilities reporting the same Kind with
+	// different words would hand the caller a different message depending on
+	// which was registered first — the exact dependence on registration order
+	// this whole design exists to remove.
+	//
+	// Broken on the words themselves, the answer stops depending on anything
+	// but the facts. Which of two same-Kind reports wins is arbitrary; that it
+	// is the SAME one every time is not.
+	if challenger.reason != holder.reason {
+		return challenger.reason < holder.reason
+	}
+	return challenger.rejectDetail < holder.rejectDetail
 }
 
 // resolveBatch folds one Report call into a single decision.
@@ -378,16 +429,51 @@ func resolveBatch(facts []fact.Fact) resolved {
 	var out resolved
 	for _, f := range facts {
 		r := resolved{
-			Decision:       decisionFor(f.Kind),
-			statusFrom:     f.Kind,
-			loopFrom:       f.Kind,
-			upstreamStatus: f.Status,
-			rejectDetail:   f.Detail,
-			reason:         f.Reason,
+			Decision:     decisionFor(f.Kind),
+			statusFrom:   f.Kind,
+			loopFrom:     f.Kind,
+			rejectDetail: f.Detail,
+			reason:       f.Reason,
 		}
 		out = combine(out, r)
 	}
 	return out
+}
+
+// stickyVerdict is a verdict held for the terminal to quote once the chain is
+// exhausted, so "every candidate refused this payload" reaches the caller as
+// what it is rather than as a generic gateway failure.
+//
+// The kernel holds it without knowing which capability produced it. That is the
+// whole point of the slot: the terminal used to carry a pair of fields named
+// after one capability's concern, which meant a second capability wanting the
+// same treatment had to add its own pair and its own branch here.
+type stickyVerdict struct {
+	status  int
+	errType string
+	detail  string
+	reason  string
+}
+
+// held reports whether anything was recorded.
+func (s stickyVerdict) held() bool { return s.status != 0 }
+
+// callerFacing renders the status and error type this verdict asks the caller
+// to be shown, or a zero status when it has no opinion.
+//
+// The upstream's own status and classification are passed in rather than read
+// off the decision, which does not carry them: StatusFromUpstream means
+// "whatever the peer actually answered with", and the response is held by the
+// call site.
+func (v resolved) callerFacing(upstreamStatus int, upstreamErrType string) (int, string) {
+	switch v.Status {
+	case StatusFixed:
+		return v.Code, v.ErrType
+	case StatusFromUpstream:
+		return upstreamStatus, upstreamErrType
+	default:
+		return 0, ""
+	}
 }
 
 // admissionRejectionResponse turns a refusal verdict into what the caller sees.
@@ -410,9 +496,29 @@ func admissionRejectionResponse(v resolved) (status int, errType string) {
 // internal and get renamed as the vocabulary is refined, while this string is
 // read by dashboards and log viewers that were written against the old value.
 // The Kind name is only the fallback for verdicts nobody gave a code.
+// adoptVerdict takes the whole caller-facing verdict from one fact.
+//
+// It exists so there is exactly one place the verdict can be assigned, which is
+// what makes "every part of it came from the same fact" true by construction
+// rather than by everyone remembering to keep the fields together. A gate holds
+// combine to assigning these fields only through here.
+func (v *resolved) adoptVerdict(from resolved) {
+	v.Status, v.Code, v.ErrType = from.Status, from.Code, from.ErrType
+	v.Sticky = from.Sticky
+	v.statusFrom = from.statusFrom
+	v.rejectDetail, v.reason = from.rejectDetail, from.reason
+}
+
+// failReason is the code persisted for a verdict.
+//
+// The fallback names the fact that supplied the verdict, not the one that
+// supplied the loop effect. Those can be different facts in the same batch, and
+// naming the loop's would file the row under something that contributed neither
+// the status the caller saw nor the words they were given — an audit trail
+// pointing at a fact that had nothing to do with the answer.
 func (v resolved) failReason() string {
 	if v.reason != "" {
 		return v.reason
 	}
-	return v.loopFrom.String()
+	return v.statusFrom.String()
 }
