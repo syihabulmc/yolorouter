@@ -42,6 +42,10 @@ func TestBehaviouralGateTestsStillExist(t *testing.T) {
 			tests: []string{"TestObserversCannotReachEachOtherOrTheAuditBody"},
 		},
 		{
+			file:  "internal/gateway/usage_roundtrip_test.go",
+			tests: []string{"TestEveryCountSurvivesTheDeliveryHop"},
+		},
+		{
 			file:  "internal/fact/delivery_test.go",
 			tests: []string{"TestValidateRejectsImpossibleDeliveries"},
 		},
