@@ -947,6 +947,8 @@ export default {
     bodyRawHint: '内容不是 JSON，已按原文展示。',
     bodyTooLargeHint: '内容较大，已使用原文模式展示。',
     sseTruncatedHint: 'SSE 片段较多，仅展示前 {shown} / {total} 条。',
+    sseAssembledContent: '拼接内容',
+    sseAssembledEmpty: '（流中无文本内容）',
 
     // Compression section (shown when compression was relevant for this request)
     sectionCompress: '输入压缩',

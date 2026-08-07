@@ -944,6 +944,8 @@ export default {
     bodyRawHint: 'Content is not JSON, shown as raw text.',
     bodyTooLargeHint: 'Large body shown in raw text mode.',
     sseTruncatedHint: 'Many SSE chunks; showing the first {shown} of {total}.',
+    sseAssembledContent: 'Assembled content',
+    sseAssembledEmpty: '(no text content in stream)',
 
     // Compression section (shown when compression was relevant for this request)
     sectionCompress: 'Input Compression',

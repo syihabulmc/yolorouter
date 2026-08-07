@@ -235,31 +235,6 @@
             </div>
           </template>
           <EmptyState v-if="!section.body" type="compact" :icon="FileText" :title="t('requestLogs.bodyNotRecorded')" />
-          <template v-else-if="section.key === 'upstreamResponse'">
-            <div v-if="bodyTooLarge(section.body)" class="body-pre-fallback">
-              <div class="body-too-large-hint">{{ t('requestLogs.bodyTooLargeHint') }}</div>
-              <pre class="body-pre"><code>{{ section.body }}</code></pre>
-            </div>
-            <template v-else-if="isUpstreamResponseSSE">
-              <div v-if="upstreamResponseSSETruncated" class="sse-truncated-hint">
-                {{ t('requestLogs.sseTruncatedHint', { shown: SSE_CHUNK_LIMIT, total: upstreamResponseSSEItems.length }) }}
-              </div>
-              <div class="sse-stream">
-                <div v-for="(item, i) in upstreamResponseSSEItems.slice(0, SSE_CHUNK_LIMIT)" :key="i" class="sse-chunk">
-                  <template v-if="item.type === 'data'">
-                    <span v-if="item.isDone" class="sse-done">data: [DONE]</span>
-                    <template v-else-if="item.jsonRaw">
-                      <span class="sse-prefix">data:</span>
-                      <BodyViewer class="sse-json" :raw="item.jsonRaw" :deep="1" :raw-hint="t('requestLogs.bodyRawHint')" />
-                    </template>
-                    <span v-else class="sse-raw">{{ item.raw }}</span>
-                  </template>
-                  <span v-else class="sse-raw sse-raw--other">{{ item.raw }}</span>
-                </div>
-              </div>
-            </template>
-            <BodyViewer v-else :raw="section.body" :deep="1" :raw-hint="t('requestLogs.bodyRawHint')"/>
-          </template>
           <BodyViewer v-else :raw="section.body" :raw-hint="t('requestLogs.bodyRawHint')" />
         </NCard>
 
@@ -275,7 +250,7 @@
           </template>
           <NSpin :show="streamLoading">
             <div class="stream-body-content">
-              <BodyViewer v-if="streamBody" :raw="streamBody" :raw-hint="t('requestLogs.bodyRawHint')" />
+              <StreamBodyViewer v-if="streamBody" :body="streamBody" />
               <EmptyState v-else-if="streamLoaded" type="compact" :icon="FileText" :title="t('requestLogs.bodyNotRecorded')" />
             </div>
           </NSpin>
@@ -325,6 +300,7 @@ import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue
 import StatusClassTag from '../../components/request-logs/StatusClassTag.vue'
 import AttemptOutcomeTag from '../../components/request-logs/AttemptOutcomeTag.vue'
 import BodyViewer from '../../components/request-logs/BodyViewer.vue'
+import StreamBodyViewer from '../../components/request-logs/StreamBodyViewer.vue'
 import { formatFailReason } from '../../utils/failReason'
 import { useIsMobile } from '../../composables/useIsMobile'
 
@@ -431,63 +407,6 @@ const bodySections = computed(() => [
   { key: 'response', title: t('requestLogs.responseBody'), body: detail.value?.response_body ?? '' },
   { key: 'upstreamResponse', title: t('requestLogs.upstreamResponseBody'), body: detail.value?.upstream_response_body ?? '' },
 ])
-
-const JSON_TREE_SIZE_LIMIT = 500_000
-const SSE_CHUNK_LIMIT = 200
-
-interface SSEItem {
-  type: 'data' | 'other'
-  raw: string
-  jsonRaw: string
-  isDone: boolean
-}
-
-function bodyTooLarge(raw: string | undefined | null): boolean {
-  return (raw?.length ?? 0) > JSON_TREE_SIZE_LIMIT
-}
-
-function isSSEFormat(raw: string): boolean {
-  if (!raw) return false
-  const firstLine = raw.trimStart().split('\n')[0].trim()
-  return firstLine.startsWith('data:') || firstLine.startsWith('event:') || firstLine.startsWith('id:') || firstLine.startsWith('retry:')
-}
-
-function parseSSEItems(raw: string): SSEItem[] {
-  const items: SSEItem[] = []
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    if (!trimmed.startsWith('data:')) {
-      items.push({ type: 'other', raw: trimmed, jsonRaw: '', isDone: false })
-      continue
-    }
-
-    const payload = trimmed.startsWith('data: ') ? trimmed.slice(6) : trimmed.slice(5)
-    if (payload === '[DONE]') {
-      items.push({ type: 'data', raw: trimmed, jsonRaw: '', isDone: true })
-      continue
-    }
-
-    try {
-      items.push({ type: 'data', raw: trimmed, jsonRaw: JSON.stringify(JSON.parse(payload), null, 2), isDone: false })
-    } catch {
-      items.push({ type: 'data', raw: trimmed, jsonRaw: '', isDone: false })
-    }
-  }
-  return items
-}
-
-const isUpstreamResponseSSE = computed(() => {
-  const body = detail.value?.upstream_response_body ?? ''
-  return !bodyTooLarge(body) && isSSEFormat(body)
-})
-
-const upstreamResponseSSEItems = computed<SSEItem[]>(() => {
-  if (!isUpstreamResponseSSE.value) return []
-  return parseSSEItems(detail.value?.upstream_response_body ?? '')
-})
-
-const upstreamResponseSSETruncated = computed(() => upstreamResponseSSEItems.value.length > SSE_CHUNK_LIMIT)
 
 // The "final" attempt is the last one in the array — gateway/log.go
 // appends each try in order, so the last entry is whatever the relay loop
@@ -667,81 +586,6 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.body-pre-fallback {
-  max-height: 480px;
-  overflow: auto;
-}
-
-.body-too-large-hint {
-  padding: var(--space-2) var(--space-4);
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-  border-bottom: 1px solid var(--color-border-subtle);
-}
-
-.body-pre {
-  margin: 0;
-  padding: var(--space-3) var(--space-4);
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--font-mono, monospace);
-  font-size: var(--text-xs);
-  line-height: 1.6;
-}
-
-.sse-truncated-hint {
-  padding: var(--space-2) var(--space-4);
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-  border-bottom: 1px solid var(--color-border-subtle);
-}
-
-.sse-stream {
-  max-height: 480px;
-  overflow: auto;
-  padding: var(--space-1) 0;
-  font-family: var(--font-mono, monospace);
-  font-size: var(--text-xs);
-  line-height: 1.6;
-}
-
-.sse-chunk {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  padding: 3px var(--space-4);
-  border-bottom: 1px solid var(--color-border-subtle);
-}
-
-.sse-chunk:last-child {
-  border-bottom: none;
-}
-
-.sse-prefix {
-  flex-shrink: 0;
-  color: var(--color-text-muted);
-  padding-top: 1px;
-}
-
-.sse-json {
-  flex: 1;
-  min-width: 0;
-}
-
-.sse-raw {
-  color: var(--color-text-secondary);
-  word-break: break-all;
-}
-
-.sse-raw--other,
-.sse-done {
-  color: var(--color-text-muted);
-}
-
-.sse-done {
-  font-style: italic;
 }
 
 .stream-body-content {
