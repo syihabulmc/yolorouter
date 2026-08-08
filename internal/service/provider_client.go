@@ -23,10 +23,6 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/middleware"
 	"github.com/yolorouter/yolorouter/internal/protocols"
-	"github.com/yolorouter/yolorouter/internal/protocols/chat"
-	"github.com/yolorouter/yolorouter/internal/protocols/claude"
-	"github.com/yolorouter/yolorouter/internal/protocols/gemini"
-	"github.com/yolorouter/yolorouter/internal/protocols/responses"
 	"github.com/yolorouter/yolorouter/internal/service/safehttp"
 	"github.com/yolorouter/yolorouter/pkg/logger"
 )
@@ -194,16 +190,7 @@ func NewHTTPProviderClient(allowPrivate bool) *HTTPProviderClient {
 // hit the same way in production. Unknown protocols fall back to the
 // OpenAI codec, mirroring protocolForProviderType's own default.
 func requestEncoderFor(proto protocols.ProtocolID) protocols.RequestEncoder {
-	switch proto {
-	case protocols.ProtocolClaude:
-		return claude.RequestEncoder{}
-	case protocols.ProtocolGemini:
-		return gemini.RequestEncoder{}
-	case protocols.ProtocolResponses:
-		return responses.RequestEncoder{}
-	default:
-		return chat.RequestEncoder{}
-	}
+	return probeSpecFor(proto).encoder
 }
 
 // protocolForProviderType maps a provider_type column value to the wire
@@ -211,12 +198,10 @@ func requestEncoderFor(proto protocols.ProtocolID) protocols.RequestEncoder {
 // to OpenAI, matching ValidateProviderType's own default for backward
 // compatibility with providers created before provider_type existed.
 func protocolForProviderType(providerType string) protocols.ProtocolID {
-	switch protocols.ProtocolID(providerType) {
-	case protocols.ProtocolClaude, protocols.ProtocolGemini, protocols.ProtocolResponses:
+	if _, ok := probeSpecs[protocols.ProtocolID(providerType)]; ok {
 		return protocols.ProtocolID(providerType)
-	default:
-		return protocols.ProtocolOpenAI
 	}
+	return protocols.ProtocolOpenAI
 }
 
 // chatCompletionErrorBody and chatCompletionSuccessBody are OpenAI Chat
@@ -411,36 +396,10 @@ func readBoundedBodyN(resp *http.Response, maxBytes int64) ([]byte, bool) {
 }
 
 // chatCompletionPayload builds the minimal request body for a basic-text
-// credential test, shaped for proto. anthropic requires max_tokens on every
-// request. gemini/responses bodies are structurally minimal — a dedicated
-// per-protocol body validator for these two is deferred; only their request
-// shape (enough to avoid a spurious 400) is implemented here.
+// credential test, shaped for proto — see the per-protocol notes on the
+// probeSpecs entries.
 func chatCompletionPayload(proto protocols.ProtocolID, model string) map[string]interface{} {
-	switch proto {
-	case protocols.ProtocolClaude:
-		return map[string]interface{}{
-			"model":      model,
-			"max_tokens": 1,
-			"messages":   []map[string]string{{"role": "user", "content": "ping"}},
-		}
-	case protocols.ProtocolGemini:
-		return map[string]interface{}{
-			"contents": []map[string]interface{}{
-				{"role": "user", "parts": []map[string]string{{"text": "ping"}}},
-			},
-		}
-	case protocols.ProtocolResponses:
-		return map[string]interface{}{
-			"model": model,
-			"input": "ping",
-		}
-	default: // openai
-		return map[string]interface{}{
-			"model":      model,
-			"messages":   []map[string]string{{"role": "user", "content": "ping"}},
-			"max_tokens": 1,
-		}
-	}
+	return probeSpecFor(proto).basicPayload(model)
 }
 
 // providerModelsMaxBodyBytes bounds a model-list response. It is far larger
@@ -575,53 +534,9 @@ func modelsPageURL(baseModelsURL, param, value string) (string, error) {
 
 // parseModelPage extracts one page of model ids from a 200 catalogue body and
 // returns the pagination cursor (param name + value) for the next page, or ""
-// when there is none. openai/anthropic/responses share
-// {"data":[{"id":...}],"has_more","last_id"} (only Anthropic actually
-// paginates; OpenAI omits has_more). gemini returns
-// {"models":[{"name":"models/<id>"}],"nextPageToken"}, whose "models/" prefix
-// is stripped.
+// when there is none — the page shapes live on the probeSpecs entries.
 func parseModelPage(proto protocols.ProtocolID, body []byte) (ids []string, nextParam, nextValue string) {
-	if proto == protocols.ProtocolGemini {
-		var parsed struct {
-			Models []struct {
-				Name string `json:"name"`
-			} `json:"models"`
-			NextPageToken string `json:"nextPageToken"`
-		}
-		if err := json.Unmarshal(body, &parsed); err != nil {
-			return nil, "", ""
-		}
-		out := make([]string, 0, len(parsed.Models))
-		for _, m := range parsed.Models {
-			if id := strings.TrimPrefix(m.Name, "models/"); id != "" {
-				out = append(out, id)
-			}
-		}
-		if parsed.NextPageToken != "" {
-			return out, "pageToken", parsed.NextPageToken
-		}
-		return out, "", ""
-	}
-	var parsed struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-		HasMore bool   `json:"has_more"`
-		LastID  string `json:"last_id"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, "", ""
-	}
-	out := make([]string, 0, len(parsed.Data))
-	for _, m := range parsed.Data {
-		if m.ID != "" {
-			out = append(out, m.ID)
-		}
-	}
-	if parsed.HasMore && parsed.LastID != "" {
-		return out, "after_id", parsed.LastID
-	}
-	return out, "", ""
+	return probeSpecFor(proto).parseModelPage(body)
 }
 
 func (c *HTTPProviderClient) TestChatCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
@@ -710,40 +625,10 @@ func scanSSEStream(r io.Reader) (sawValidDelta, cleanTerminate bool) {
 }
 
 // streamingCompletionPayload mirrors chatCompletionPayload with stream
-// enabled where the protocol's wire format needs an explicit flag (openai/
-// anthropic/responses); gemini's generateContent request body is the same
-// either way, only the endpoint differs, but streaming egress for gemini is
-// not modeled by any codec here yet, so the same non-streaming body is
-// reused.
+// enabled where the protocol's wire format needs an explicit flag — see the
+// per-protocol notes on the probeSpecs entries.
 func streamingCompletionPayload(proto protocols.ProtocolID, model string) map[string]interface{} {
-	switch proto {
-	case protocols.ProtocolClaude:
-		return map[string]interface{}{
-			"model":      model,
-			"max_tokens": 1,
-			"stream":     true,
-			"messages":   []map[string]string{{"role": "user", "content": "ping"}},
-		}
-	case protocols.ProtocolGemini:
-		return map[string]interface{}{
-			"contents": []map[string]interface{}{
-				{"role": "user", "parts": []map[string]string{{"text": "ping"}}},
-			},
-		}
-	case protocols.ProtocolResponses:
-		return map[string]interface{}{
-			"model":  model,
-			"input":  "ping",
-			"stream": true,
-		}
-	default: // openai
-		return map[string]interface{}{
-			"model":      model,
-			"stream":     true,
-			"max_tokens": 1,
-			"messages":   []map[string]string{{"role": "user", "content": "ping"}},
-		}
-	}
+	return probeSpecFor(proto).streamingPayload(model)
 }
 
 func (c *HTTPProviderClient) TestStreamingCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
@@ -851,74 +736,10 @@ func weatherToolParameters() map[string]interface{} {
 }
 
 // functionCallingPayload builds the minimal tool-calling credential test
-// body per protocol. gemini/responses shapes are structurally minimal
-// (enough to avoid a spurious 400); their tool_calls-equivalent response
-// body is not parsed by this test yet — see TestFunctionCalling.
+// body per protocol; the response-side deferrals for gemini/responses are
+// noted on the probeSpecs entries — see TestFunctionCalling.
 func functionCallingPayload(proto protocols.ProtocolID, model string) map[string]interface{} {
-	switch proto {
-	case protocols.ProtocolClaude:
-		return map[string]interface{}{
-			"model":      model,
-			"max_tokens": 64,
-			"messages": []map[string]string{
-				{"role": "user", "content": "What's the weather in Beijing?"},
-			},
-			"tools": []map[string]interface{}{
-				{
-					"name":         weatherToolName,
-					"description":  weatherToolDescription,
-					"input_schema": weatherToolParameters(),
-				},
-			},
-		}
-	case protocols.ProtocolGemini:
-		return map[string]interface{}{
-			"contents": []map[string]interface{}{
-				{"role": "user", "parts": []map[string]string{{"text": "What's the weather in Beijing?"}}},
-			},
-			"tools": []map[string]interface{}{
-				{
-					"functionDeclarations": []map[string]interface{}{
-						{
-							"name":        weatherToolName,
-							"description": weatherToolDescription,
-							"parameters":  weatherToolParameters(),
-						},
-					},
-				},
-			},
-		}
-	case protocols.ProtocolResponses:
-		return map[string]interface{}{
-			"model": model,
-			"input": "What's the weather in Beijing?",
-			"tools": []map[string]interface{}{
-				{
-					"type":        "function",
-					"name":        weatherToolName,
-					"description": weatherToolDescription,
-					"parameters":  weatherToolParameters(),
-				},
-			},
-		}
-	default: // openai
-		return map[string]interface{}{
-			"model": model,
-			"messages": []map[string]string{
-				{"role": "user", "content": "What's the weather in Beijing?"},
-			},
-			"tools": []map[string]interface{}{
-				{
-					"type": "function",
-					"function": map[string]interface{}{
-						"name":        weatherToolName,
-						"description": weatherToolDescription,
-						"parameters":  weatherToolParameters(),
-					},
-				},
-			},
-		}
-	}
+	return probeSpecFor(proto).functionCallingPayload(model)
 }
 
 func (c *HTTPProviderClient) TestFunctionCalling(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
@@ -984,16 +805,8 @@ func upstreamErrorDetail(proto protocols.ProtocolID, statusCode int, body []byte
 // error body, falling back to a trimmed snippet of the raw body for shapes
 // this codebase does not model (gemini errors, plain-text gateways, etc.).
 func extractUpstreamMessage(proto protocols.ProtocolID, body []byte) string {
-	if proto == protocols.ProtocolClaude {
-		if e := parseClaudeErrorBody(body); e != nil && e.Error != nil {
-			if m := strings.TrimSpace(e.Error.Message); m != "" {
-				return m
-			}
-		}
-	} else if e := parseErrorBody(body); e != nil && e.Error != nil {
-		if m := strings.TrimSpace(e.Error.Message); m != "" {
-			return m
-		}
+	if m := probeSpecFor(proto).extractMessage(body); m != "" {
+		return m
 	}
 	// Raw-body fallback: cap the byte slice BEFORE converting so an
 	// unrecognized megabyte-sized error page (the ListModels path reads up to
@@ -1082,17 +895,7 @@ func isValidSuccessBody(proto protocols.ProtocolID, resp *http.Response, body []
 	if !strings.Contains(strings.ToLower(contentType), "application/json") {
 		return false
 	}
-	switch proto {
-	case protocols.ProtocolClaude:
-		return isValidClaudeSuccessBody(body)
-	case protocols.ProtocolGemini, protocols.ProtocolResponses:
-		// Body-shape validation for these two is deferred (see the payload
-		// builders' comments): a parseable JSON object carrying no
-		// top-level "error" field is accepted as success.
-		return isParseableJSONObjectWithoutError(body)
-	default: // openai
-		return isValidOpenAIChatSuccessBody(body)
-	}
+	return probeSpecFor(proto).validSuccessBody(body)
 }
 
 // isValidOpenAIChatSuccessBody is the original OpenAI Chat Completions
@@ -1160,74 +963,13 @@ func parseClaudeErrorBody(body []byte) *claudeErrorBody {
 // reports false for them — IsModelScoped only affects verification_status
 // write rules, never whether the test itself passed or failed.
 func isModelScopedError(proto protocols.ProtocolID, body []byte, model string) bool {
-	switch proto {
-	case protocols.ProtocolClaude:
-		parsed := parseClaudeErrorBody(body)
-		if parsed == nil || parsed.Error == nil {
-			return false
-		}
-		return model != "" && strings.Contains(strings.ToLower(parsed.Error.Message), strings.ToLower(model))
-	case protocols.ProtocolGemini, protocols.ProtocolResponses:
-		return false
-	default: // openai
-		parsed := parseErrorBody(body)
-		if parsed == nil || parsed.Error == nil {
-			return false
-		}
-		if parsed.Error.Param == "model" {
-			return true
-		}
-		return model != "" && strings.Contains(strings.ToLower(parsed.Error.Message), strings.ToLower(model))
-	}
+	return probeSpecFor(proto).modelScopedError(body, model)
 }
 
 func isQuotaError(proto protocols.ProtocolID, body []byte) bool {
-	switch proto {
-	case protocols.ProtocolClaude:
-		parsed := parseClaudeErrorBody(body)
-		if parsed == nil || parsed.Error == nil {
-			return false
-		}
-		lower := strings.ToLower(parsed.Error.Message)
-		return strings.Contains(lower, "quota") || strings.Contains(lower, "billing") || strings.Contains(lower, "credit")
-	case protocols.ProtocolGemini, protocols.ProtocolResponses:
-		// Body parsing deferred: a 429 for these protocols always
-		// classifies as TestRateLimited via classifyResponse's default
-		// fallback rather than TestQuotaUnavailable.
-		return false
-	default: // openai
-		parsed := parseErrorBody(body)
-		if parsed == nil || parsed.Error == nil {
-			return false
-		}
-		if parsed.Error.Code == "insufficient_quota" {
-			return true
-		}
-		lower := strings.ToLower(parsed.Error.Message)
-		return strings.Contains(lower, "quota") || strings.Contains(lower, "billing")
-	}
+	return probeSpecFor(proto).quotaError(body)
 }
 
 func isModelNotFoundError(proto protocols.ProtocolID, body []byte) bool {
-	switch proto {
-	case protocols.ProtocolClaude:
-		parsed := parseClaudeErrorBody(body)
-		if parsed == nil || parsed.Error == nil {
-			return false
-		}
-		lower := strings.ToLower(parsed.Error.Message)
-		return strings.Contains(lower, "model") && (strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist"))
-	case protocols.ProtocolGemini, protocols.ProtocolResponses:
-		return false
-	default: // openai
-		parsed := parseErrorBody(body)
-		if parsed == nil || parsed.Error == nil {
-			return false
-		}
-		if parsed.Error.Code == "model_not_found" {
-			return true
-		}
-		lower := strings.ToLower(parsed.Error.Message)
-		return strings.Contains(lower, "model") && (strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist"))
-	}
+	return probeSpecFor(proto).modelNotFoundError(body)
 }

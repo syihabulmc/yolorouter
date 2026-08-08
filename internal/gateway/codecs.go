@@ -8,11 +8,15 @@ import (
 	"github.com/yolorouter/yolorouter/internal/protocols/responses"
 )
 
-// protocolCodecs groups the six codec constructors for one wire protocol, so
-// adding a new protocol only ever touches codecRegistry. Request/Response
-// codecs are stateless empty structs and are stored by value; the stream
-// codecs are stateful per-request state machines and must be constructed
-// fresh for every call, hence the New... factory function fields.
+// protocolCodecs groups the six codec constructors for one wire protocol.
+// This registry covers the relay's encode/decode dispatch; a new protocol
+// additionally registers its modality (modality_registry.go), its credential
+// probe behaviours (service's probeSpecs), and its compress live-zone
+// locator (compress.ByProtocol) — each a table entry, never a new switch.
+// Request/Response codecs are stateless empty structs and are stored by
+// value; the stream codecs are stateful per-request state machines and must
+// be constructed fresh for every call, hence the New... factory function
+// fields.
 type protocolCodecs struct {
 	RequestDecoder   protocols.RequestDecoder
 	RequestEncoder   protocols.RequestEncoder

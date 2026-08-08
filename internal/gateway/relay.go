@@ -390,7 +390,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if rc.compressEnabled && rc.isChatEndpoint {
 		opts := compress.DefaultOptions()
 		cctx, cancel := context.WithTimeout(c.Request.Context(), opts.Timeout)
-		newBody, cres := compressByIngress(ingress, cctx, body, opts)
+		newBody, cres := compress.ByProtocol(ingress, cctx, body, opts)
 		cancel()
 		if cres.Skipped {
 			rc.compressSkipReason = string(cres.SkipReason)
@@ -1284,22 +1284,4 @@ func (rc *Exchange) recordAttempt(cand model.ModelCandidate, provider *model.Pro
 		rec.KeyLabel = key.Label
 	}
 	rc.attempts = append(rc.attempts, rec)
-}
-
-// compressByIngress dispatches the body to the protocol-specific compress entry
-// point. An unrecognized protocol returns the body unchanged with a no-op
-// result (Skipped=true) so an unknown ingress never breaks the relay.
-func compressByIngress(ingress protocols.ProtocolID, ctx context.Context, body []byte, opts compress.CompressOptions) ([]byte, compress.CompressResult) {
-	switch ingress {
-	case protocols.ProtocolClaude:
-		return compress.CompressClaude(ctx, body, opts)
-	case protocols.ProtocolOpenAI:
-		return compress.CompressChat(ctx, body, opts)
-	case protocols.ProtocolResponses:
-		return compress.CompressResponses(ctx, body, opts)
-	case protocols.ProtocolGemini:
-		return compress.CompressGemini(ctx, body, opts)
-	default:
-		return body, compress.CompressResult{Skipped: true, SkipReason: compress.SkipReasonNoLiveZone}
-	}
 }

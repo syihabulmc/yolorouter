@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/yolorouter/yolorouter/internal/compress/compressors"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
 func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
@@ -52,6 +53,28 @@ func CompressResponses(ctx context.Context, body []byte, opts CompressOptions) (
 // CompressGemini compresses a Gemini native /v1beta generateContent body.
 func CompressGemini(ctx context.Context, body []byte, opts CompressOptions) (out []byte, res CompressResult) {
 	return runCompress(ctx, body, opts, locateGeminiLiveZone)
+}
+
+// ByProtocol dispatches to the protocol-specific compress entry point via
+// the locator table below. An unrecognized protocol returns the body
+// unchanged with a no-op result (Skipped=true) so an unknown ingress never
+// breaks a caller.
+func ByProtocol(proto protocols.ProtocolID, ctx context.Context, body []byte, opts CompressOptions) (out []byte, res CompressResult) {
+	locate, ok := liveZoneLocators[proto]
+	if !ok {
+		return body, CompressResult{Skipped: true, SkipReason: SkipReasonNoLiveZone}
+	}
+	return runCompress(ctx, body, opts, locate)
+}
+
+// liveZoneLocators maps each wire protocol to its live-zone locator — the
+// only thing that differs between the per-protocol entry points above.
+// Adding a protocol here is what makes ByProtocol cover it.
+var liveZoneLocators = map[protocols.ProtocolID]func([]byte) []LiveBlock{
+	protocols.ProtocolOpenAI:    locateChatLiveZone,
+	protocols.ProtocolClaude:    locateClaudeLiveZone,
+	protocols.ProtocolResponses: locateResponsesLiveZone,
+	protocols.ProtocolGemini:    locateGeminiLiveZone,
 }
 
 // runCompress is the shared orchestration for every protocol entrypoint:
