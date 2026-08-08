@@ -18,8 +18,8 @@ func TestUpstreamBufferAppendUpstreamNoCaptureFile(t *testing.T) {
 		}
 	}()
 	rc.AppendUpstream([]byte("data: {}\n"))
-	if rc.streamBodyFile != nil {
-		t.Fatalf("expected streamBodyFile to remain nil, got %v", rc.streamBodyFile)
+	if rc.bodies.StreamCaptured() {
+		t.Fatal("expected no stream capture to have been opened")
 	}
 }
 
@@ -29,8 +29,8 @@ func TestUpstreamBufferSetBody(t *testing.T) {
 	rc := &Exchange{}
 	body := []byte(`{"id":"resp_1"}`)
 	rc.SetBody(body)
-	if string(rc.upstreamResponseBody) != string(body) {
-		t.Fatalf("UpstreamResponseBody = %q, want %q", rc.upstreamResponseBody, body)
+	if string(rc.UpstreamResponseBody()) != string(body) {
+		t.Fatalf("UpstreamResponseBody = %q, want %q", rc.UpstreamResponseBody(), body)
 	}
 }
 
@@ -42,8 +42,8 @@ func TestUpstreamBufferSetResponseBody(t *testing.T) {
 	rc := &Exchange{}
 	body := []byte(`{"id":"chatcmpl-1"}`)
 	rc.SetResponseBody(body)
-	if string(rc.responseBody) != string(body) {
-		t.Fatalf("ResponseBody = %q, want %q", rc.responseBody, body)
+	if string(rc.ResponseBody()) != string(body) {
+		t.Fatalf("ResponseBody = %q, want %q", rc.ResponseBody(), body)
 	}
 }
 

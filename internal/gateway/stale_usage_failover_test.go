@@ -242,9 +242,9 @@ func TestUpstreamBodyDoesNotSurviveAFailedCandidate(t *testing.T) {
 	if len(captured.attempts) != 2 {
 		t.Fatalf("attempts = %d, want 2 (the 500, then the unreachable provider)", len(captured.attempts))
 	}
-	if bytes.Contains(captured.upstreamResponseBody, []byte("first-provider-marker")) {
+	if bytes.Contains(captured.UpstreamResponseBody(), []byte("first-provider-marker")) {
 		t.Errorf("the audit row kept the first provider's error body for a request that ended on a different provider: %s",
-			captured.upstreamResponseBody)
+			captured.UpstreamResponseBody())
 	}
 
 	// What the first provider did is still on record, which is why dropping its
@@ -332,8 +332,8 @@ func TestUpstreamBodyDoesNotSurviveAKeyRotation(t *testing.T) {
 	if len(captured.attempts) < 2 {
 		t.Fatalf("attempts = %d, want at least 2 (the 401, then the rotated key)", len(captured.attempts))
 	}
-	if bytes.Contains(captured.upstreamResponseBody, []byte("first-key-marker")) {
+	if bytes.Contains(captured.UpstreamResponseBody(), []byte("first-key-marker")) {
 		t.Errorf("one key's 401 body survived a rotation and was stored under a later attempt: %s",
-			captured.upstreamResponseBody)
+			captured.UpstreamResponseBody())
 	}
 }

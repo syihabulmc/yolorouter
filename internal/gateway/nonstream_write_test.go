@@ -70,10 +70,10 @@ func TestANonStreamResponseTheCallerNeverReceivedIsNotRecordedAsDelivered(t *tes
 	if rc.statusCode != 499 {
 		t.Errorf("rc.statusCode = %d, want 499 (a discarded write failure must not settle as a delivered 2xx success)", rc.statusCode)
 	}
-	if len(rc.responseBody) != 0 {
-		t.Errorf("ResponseBody must stay empty when the write to the client failed (never delivered), got %d bytes", len(rc.responseBody))
+	if len(rc.ResponseBody()) != 0 {
+		t.Errorf("ResponseBody must stay empty when the write to the client failed (never delivered), got %d bytes", len(rc.ResponseBody()))
 	}
-	if len(rc.upstreamResponseBody) == 0 {
+	if len(rc.UpstreamResponseBody()) == 0 {
 		t.Error("UpstreamResponseBody should still be recorded (what the gateway actually consumed from upstream) even though delivery to the client failed")
 	}
 	if billed := requireBilled(t, rc); billed.Prompt != 5 {
@@ -95,7 +95,7 @@ func TestANonStreamResponseTheCallerNeverReceivedIsNotRecordedAsDelivered(t *tes
 
 // TestANonStreamResponseTheCallerReceivedIsRecordedAsDelivered is the positive
 // control: when the write succeeds, the response IS recorded as delivered
-// (rc.responseBody set) and the request finalizes with the upstream's own
+// (rc.ResponseBody() set) and the request finalizes with the upstream's own
 // status code, not 499.
 func TestANonStreamResponseTheCallerReceivedIsRecordedAsDelivered(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -133,7 +133,7 @@ func TestANonStreamResponseTheCallerReceivedIsRecordedAsDelivered(t *testing.T) 
 	if rc.statusCode != http.StatusOK {
 		t.Errorf("rc.statusCode = %d, want 200", rc.statusCode)
 	}
-	if len(rc.responseBody) == 0 {
+	if len(rc.ResponseBody()) == 0 {
 		t.Error("ResponseBody should be recorded as delivered once the write succeeds")
 	}
 	if len(rc.attempts) != 1 || rc.attempts[0].Outcome != AttemptSuccess {

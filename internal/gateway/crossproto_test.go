@@ -357,10 +357,10 @@ func TestCrossProtocolOpenAIToAnthropicStream_IncludeUsage(t *testing.T) {
 // regression test for the cross-protocol fix: on a successful
 // cross-protocol non-stream
 // request, IRNonStreamRelay wrote the encoded client response directly and
-// only rc.SetBody (the raw upstream body) ran, leaving rc.responseBody (the
+// only rc.SetBody (the raw upstream body) ran, leaving rc.ResponseBody() (the
 // caller-facing audit body persisted to request_log_bodies.response_body)
 // empty — inconsistent with the same-protocol passthrough path, which always
-// populates both. After the fix, rc.responseBody must be non-empty and equal
+// populates both. After the fix, rc.ResponseBody() must be non-empty and equal
 // to the OpenAI-encoded bytes actually written to the client.
 func TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -391,14 +391,14 @@ func TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody(t *testing
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if len(captured.responseBody) == 0 {
-		t.Fatal("rc.responseBody is empty; the cross-protocol non-stream path must capture the caller-facing encoded response")
+	if len(captured.ResponseBody()) == 0 {
+		t.Fatal("rc.ResponseBody() is empty; the cross-protocol non-stream path must capture the caller-facing encoded response")
 	}
-	if !bytes.Equal(captured.responseBody, w.Body.Bytes()) {
-		t.Errorf("rc.responseBody = %s, want it to equal the bytes actually written to the client: %s", captured.responseBody, w.Body.Bytes())
+	if !bytes.Equal(captured.ResponseBody(), w.Body.Bytes()) {
+		t.Errorf("rc.responseBody = %s, want it to equal the bytes actually written to the client: %s", captured.ResponseBody(), w.Body.Bytes())
 	}
-	if !bytes.Contains(captured.responseBody, []byte(`"model":"gpt-4o"`)) {
-		t.Errorf("rc.responseBody = %s, want the OpenAI-encoded client body carrying the external model name", captured.responseBody)
+	if !bytes.Contains(captured.ResponseBody(), []byte(`"model":"gpt-4o"`)) {
+		t.Errorf("rc.responseBody = %s, want the OpenAI-encoded client body carrying the external model name", captured.ResponseBody())
 	}
 }
 

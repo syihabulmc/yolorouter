@@ -55,6 +55,19 @@ linters:
               desc: "assembly is the only place a concrete capability may be named; the kernel naming one makes every future capability a kernel change"
             - pkg: "github.com/yolorouter/yolorouter/internal/modality"
               desc: "the kernel dispatches on a registered ModalityID, it does not name a modality package"
+        # capture owns the audit-record bytes and the stream capture file, and
+        # nothing else: an import beyond the standard library would let the
+        # audit record depend on request state or a web framework, and the
+        # whole point of the package is that the record has exactly one owner
+        # with no opinions about where the bytes come from.
+        capture-leaf:
+          files:
+            - "**/internal/gateway/capture/*.go"
+            - "**/internal/gateway/capture/**/*.go"
+          list-mode: strict
+          allow:
+            - $gostd
+            - "github.com/yolorouter/yolorouter/internal/gateway/capture"
         # decision is the pure fold from reported facts to one verdict. It may
         # see the fact vocabulary and nothing else: an import of request state,
         # storage, or a web framework would hand the table a channel through

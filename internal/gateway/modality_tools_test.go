@@ -159,13 +159,13 @@ func TestUpstreamCaptureStopsAtItsLimit(t *testing.T) {
 	if kept := cap4.Upstream([]byte("cdef")); kept {
 		t.Error("Upstream reported everything kept while over the limit")
 	}
-	if got := string(rc.upstreamResponseBody); got != "abcd" {
+	if got := string(rc.UpstreamResponseBody()); got != "abcd" {
 		t.Errorf("captured %q, want %q: the capture ran past its limit", got, "abcd")
 	}
 	if kept := cap4.Upstream([]byte("gh")); kept {
 		t.Error("Upstream kept bytes after the limit was already reached")
 	}
-	if got := len(rc.upstreamResponseBody); got != 4 {
+	if got := len(rc.UpstreamResponseBody()); got != 4 {
 		t.Errorf("captured %d bytes, want 4", got)
 	}
 }
@@ -363,7 +363,7 @@ func TestEachAttemptCapturesOnItsOwn(t *testing.T) {
 	if kept := second.Capture.Upstream([]byte("BB")); !kept {
 		t.Error("the second attempt was refused room the first attempt had used")
 	}
-	if got := string(rc.upstreamResponseBody); got != "BB" {
+	if got := string(rc.UpstreamResponseBody()); got != "BB" {
 		t.Errorf("upstream body = %q, want %q: this row describes the attempt that ended the request", got, "BB")
 	}
 	if second.Capture.Truncated() {
@@ -380,7 +380,7 @@ func TestCaptureReportsWhatItDropped(t *testing.T) {
 	if !cap.Truncated() {
 		t.Error("Truncated() = false after bytes were dropped: a cut-off body is indistinguishable from a short one")
 	}
-	if got := string(rc.upstreamResponseBody); got != "ab" {
+	if got := string(rc.UpstreamResponseBody()); got != "ab" {
 		t.Errorf("captured %q, want %q", got, "ab")
 	}
 }
@@ -397,13 +397,13 @@ func TestClientBytesAreRecordedOnlyOnceFlushed(t *testing.T) {
 	if _, err := r.Write([]byte("hello")); err != nil {
 		t.Fatalf("Write = %v", err)
 	}
-	if got := string(r.rc.responseBody); got != "" {
+	if got := string(r.rc.ResponseBody()); got != "" {
 		t.Errorf("responseBody = %q before any flush, want empty", got)
 	}
 	if err := r.Flush(); err != nil {
 		t.Fatalf("Flush = %v", err)
 	}
-	if got := string(r.rc.responseBody); got != "hello" {
+	if got := string(r.rc.ResponseBody()); got != "hello" {
 		t.Errorf("responseBody = %q after the flush, want %q", got, "hello")
 	}
 }
@@ -513,7 +513,7 @@ func TestAnAttemptWithNoBodyClearsThePreviousOne(t *testing.T) {
 	_, releaseSecond := svc.newDeliveryTools(c, rc, TransferLimits{}, false)
 	defer releaseSecond()
 
-	if got := string(rc.upstreamResponseBody); got != "" {
+	if got := string(rc.UpstreamResponseBody()); got != "" {
 		t.Errorf("upstream body = %q, want empty: this row describes an attempt that produced nothing", got)
 	}
 }
@@ -530,7 +530,7 @@ func TestCaptureDoesNotResurrectADeliberateClear(t *testing.T) {
 	rc.clearResponseBodies()
 	cap.Upstream([]byte("fresh"))
 
-	if got := string(rc.upstreamResponseBody); got != "fresh" {
+	if got := string(rc.UpstreamResponseBody()); got != "fresh" {
 		t.Errorf("upstream body = %q, want %q: the clear was undone", got, "fresh")
 	}
 }
@@ -654,8 +654,8 @@ func TestAProgressiveDeliveryKeepsNoUpstreamBytes(t *testing.T) {
 	// Nowhere else either. Asserting only on the file let a swap to the
 	// in-memory capture pass: the bytes moved somewhere nothing was looking,
 	// which is the same leak wearing a different hat.
-	if rc.responseBody != nil || rc.upstreamResponseBody != nil {
-		t.Errorf("upstream bytes were kept on the exchange instead (response=%q upstream=%q)", rc.responseBody, rc.upstreamResponseBody)
+	if rc.ResponseBody() != nil || rc.UpstreamResponseBody() != nil {
+		t.Errorf("upstream bytes were kept on the exchange instead (response=%q upstream=%q)", rc.ResponseBody(), rc.UpstreamResponseBody())
 	}
 
 	buffered, releaseBuffered := svc.newDeliveryTools(c, &Exchange{requestID: "whole"}, TransferLimits{}, false)
@@ -729,8 +729,8 @@ func TestAProgressiveDeliveryRecordsWhatWasSentToTheCaptureFile(t *testing.T) {
 	if string(captured) != "data: one\n\n" {
 		t.Errorf("capture file holds %q, want the bytes the caller received", captured)
 	}
-	if rc.responseBody != nil {
-		t.Errorf("in-memory response body holds %q; a stream's bytes belong in the file, and the cap here would truncate them", rc.responseBody)
+	if rc.ResponseBody() != nil {
+		t.Errorf("in-memory response body holds %q; a stream's bytes belong in the file, and the cap here would truncate them", rc.ResponseBody())
 	}
 }
 
@@ -757,8 +757,8 @@ func TestAWholeResponseRecordsWhatWasSentInMemory(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 
-	if string(rc.responseBody) != `{"ok":true}` {
-		t.Errorf("response body holds %q, want the bytes the caller received", rc.responseBody)
+	if string(rc.ResponseBody()) != `{"ok":true}` {
+		t.Errorf("response body holds %q, want the bytes the caller received", rc.ResponseBody())
 	}
 }
 

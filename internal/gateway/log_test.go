@@ -97,14 +97,14 @@ func TestFinalizeWritesBodyRow(t *testing.T) {
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
 	rc := &Exchange{
-		requestID:            "req-body-1",
-		apiKeyID:             apiKey.ID,
-		requestHeaders:       []byte(`{"User-Agent":["curl/8.0"]}`),
-		requestBody:          []byte(`{"model":"gpt-4o"}`),
-		upstreamRequestBody:  []byte(`{"model":"gpt-4o-real"}`),
-		responseBody:         []byte(`{"model":"gpt-4o","choices":[]}`),
-		upstreamResponseBody: []byte(`{"model":"gpt-4o-real","choices":[]}`),
+		requestID:      "req-body-1",
+		apiKeyID:       apiKey.ID,
+		requestHeaders: []byte(`{"User-Agent":["curl/8.0"]}`),
 	}
+	rc.bodies.SetRequest([]byte(`{"model":"gpt-4o"}`))
+	rc.bodies.SetUpstreamRequest([]byte(`{"model":"gpt-4o-real"}`))
+	rc.bodies.SetResponse([]byte(`{"model":"gpt-4o","choices":[]}`))
+	rc.bodies.SetUpstreamResponse([]byte(`{"model":"gpt-4o-real","choices":[]}`))
 
 	svc.finalize(rc, nil, 200, "", time.Now())
 
@@ -262,7 +262,6 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 		candidate:                    cand,
 		compressEstimatedTokensSaved: 1500,
 		compressorsApplied:           []string{"whitespace", "whitespace", "contractions"},
-		requestBodyCompressed:        []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
 		// One successful attempt — the request reached upstream, so the
 		// compress savings are real (not phantom) and must be persisted.
 		attempts: []AttemptRecord{{
@@ -270,6 +269,7 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 			Outcome: AttemptSuccess, StatusCode: 200,
 		}},
 	}
+	rc.bodies.SetCompressedRequest([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
 	svc.finalize(rc, &Usage{PromptTokens: 100, CompletionTokens: 50}, 200, "", time.Now())
 	svc.recordTerminal(rc)
 
@@ -393,10 +393,10 @@ func TestFinalizeCompressCostSavedZeroWhenPricingUnknown(t *testing.T) {
 		apiKeyID:                     apiKey.ID,
 		compressEstimatedTokensSaved: 5000, // large, but no usage to price it
 		compressorsApplied:           []string{"whitespace"},
-		requestBodyCompressed:        []byte(`{"model":"gpt-4o"}`),
 		// Usage and Candidate are nil — pricing is unknown, and crucially
 		// Attempts is empty (pre-relay rejection).
 	}
+	rc.bodies.SetCompressedRequest([]byte(`{"model":"gpt-4o"}`))
 	svc.finalize(rc, nil, http.StatusInternalServerError, "no_candidate", time.Now())
 	svc.recordTerminal(rc)
 
@@ -440,10 +440,10 @@ func TestFinalizeCompressPhantomSavingsZeroedOnPreRelayRejection(t *testing.T) {
 		apiKeyID:                     apiKey.ID,
 		compressEstimatedTokensSaved: 1500,
 		compressorsApplied:           []string{"whitespace", "log"},
-		requestBodyCompressed:        []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`),
 		// No Attempts — simulates a pre-relay rejection (e.g. no routable
 		// candidate after compression already ran on the caller body).
 	}
+	rc.bodies.SetCompressedRequest([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
 	// 503 = no routable candidate, the most common post-compress pre-relay path.
 	svc.finalize(rc, nil, http.StatusServiceUnavailable, "no_enabled_candidate", time.Now())
 	svc.recordTerminal(rc)

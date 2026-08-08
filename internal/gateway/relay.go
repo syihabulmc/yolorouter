@@ -79,14 +79,14 @@ func ReadAuditBodyCapped(r io.Reader, limit int64) []byte {
 // the normal body read (revoked/expired/budget/concurrency/RPM, all before
 // io.ReadAll in Handle).
 func captureRejectedBody(c *gin.Context, rc *Exchange) {
-	if rc.requestBody != nil {
+	if rc.bodies.Request() != nil {
 		return // already captured (e.g. body read succeeded then a later check failed)
 	}
 	if c.Request == nil {
 		return
 	}
 	if body := ReadAuditBody(c.Request.Body); body != nil {
-		rc.requestBody = body
+		rc.bodies.SetRequest(body)
 	}
 }
 
@@ -356,7 +356,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	}
 	// Stash the caller-facing request body for the
 	// request_log_bodies row, verbatim (v0.1 does not scrub body content).
-	rc.requestBody = body
+	rc.bodies.SetRequest(body)
 
 	// Two-level resolve for input compression: a per-key override wins
 	// outright (short-circuit so a stalled settings read can't block an
@@ -395,7 +395,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		if cres.Skipped {
 			rc.compressSkipReason = string(cres.SkipReason)
 		} else {
-			rc.requestBodyCompressed = newBody
+			rc.bodies.SetCompressedRequest(newBody)
 			rc.compressEstimatedTokensSaved = cres.EstimatedTokensSaved
 			rc.compressorsApplied = cres.CompressorsApplied
 			admitBody = newBody
@@ -966,7 +966,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	// actually sent upstream, verbatim. Overwritten on every attempt — the
 	// last write wins, matching the "successful attempt, else the last
 	// attempt" rule.
-	rc.upstreamRequestBody = outBody
+	rc.bodies.SetUpstreamRequest(outBody)
 	// Record the dispatched URL for the log row and each AttemptRecord.
 	// Redacted (userinfo/query/fragment stripped) so a base URL that embeds
 	// credentials never reaches the audit log or UI; the raw url is used
@@ -1089,7 +1089,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	// (errorBodyTotalBudget) so a slow-trickle upstream cannot hold this read
 	// open beyond that window.
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	rc.upstreamResponseBody = errBody
+	rc.bodies.SetUpstreamResponse(errBody)
 	_ = resp.Body.Close()
 
 	// Observers get the response and report what they recognise in it; the

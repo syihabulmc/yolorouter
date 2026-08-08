@@ -46,7 +46,7 @@ func (rc *Exchange) AppendResponse(data []byte) {
 // request_log_bodies row, mirroring the non-IR non-stream path's population
 // of UpstreamResponseBody.
 func (rc *Exchange) SetBody(data []byte) {
-	rc.upstreamResponseBody = data
+	rc.bodies.SetUpstreamResponse(data)
 }
 
 // SetResponseBody implements protocols.UpstreamBuffer for the non-streaming
@@ -54,7 +54,7 @@ func (rc *Exchange) SetBody(data []byte) {
 // bytes actually written to the client, mirroring how the same-protocol path
 // populates rc.responseBody.
 func (rc *Exchange) SetResponseBody(data []byte) {
-	rc.responseBody = data
+	rc.bodies.SetResponse(data)
 }
 
 // clearResponseBodies drops UpstreamResponseBody/ResponseBody before this
@@ -66,8 +66,7 @@ func (rc *Exchange) SetResponseBody(data []byte) {
 // afterward (or, for a stream request, leaves them empty — the sent SSE is
 // captured to streamBodyFile instead).
 func (rc *Exchange) clearResponseBodies() {
-	rc.upstreamResponseBody = nil
-	rc.responseBody = nil
+	rc.bodies.ClearResponses()
 }
 
 // irUsageToUsage converts a protocols.IRUsage into the gateway's own Usage

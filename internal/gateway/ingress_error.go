@@ -105,7 +105,7 @@ func stashLocalClaudeErrorBody(c *gin.Context, anthropicType, message, requestID
 	if rc == nil {
 		return
 	}
-	rc.responseBody = LocalClaudeErrorBody(anthropicType, message, requestID)
+	rc.bodies.SetResponse(LocalClaudeErrorBody(anthropicType, message, requestID))
 }
 
 // geminiErrorBody is the Google API error envelope: a single nested "error"
@@ -183,7 +183,7 @@ func stashLocalGeminiErrorBody(c *gin.Context, status int, message, requestID st
 	if rc == nil {
 		return
 	}
-	rc.responseBody = LocalGeminiErrorBody(status, message, requestID)
+	rc.bodies.SetResponse(LocalGeminiErrorBody(status, message, requestID))
 }
 
 // WriteGeminiError writes one Gemini-native error response and aborts the

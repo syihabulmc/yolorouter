@@ -410,7 +410,7 @@ func (r *ginClientResponse) Flush() error {
 	}
 	room := r.limit - int64(len(r.sent))
 	if int64(len(r.pending)) > room {
-		r.rc.clientBodyTruncated = true
+		r.rc.bodies.MarkClientTruncated()
 	}
 	if room > 0 {
 		switch {
@@ -428,7 +428,7 @@ func (r *ginClientResponse) Flush() error {
 		// Assigned, not appended to whatever was there: this is what THIS
 		// attempt delivered, and an earlier attempt's bytes are a different
 		// response that must not be concatenated onto it.
-		r.rc.responseBody = r.sent
+		r.rc.bodies.SetResponse(r.sent)
 	}
 	r.pending = nil
 	return nil
@@ -494,13 +494,12 @@ func (s *Service) newCapture(c *gin.Context, rc *Exchange, limit int64, progress
 // response was empty — would otherwise leave the previous provider's bytes
 // standing under this attempt's heading.
 func newExchangeCapture(rc *Exchange, limit int64) *exchangeCapture {
-	rc.upstreamResponseBody = nil
-	rc.upstreamBodyTruncated = false
+	rc.bodies.BeginDeliveryCapture()
 	return &exchangeCapture{rc: rc, limit: limit}
 }
 
 func (e *exchangeCapture) Upstream(p []byte) bool {
-	if len(e.rc.upstreamResponseBody) != e.published {
+	if len(e.rc.bodies.UpstreamResponse()) != e.published {
 		// Somebody else wrote or cleared the field since the last publish.
 		// Deliberate clears exist on the dispatch paths, and republishing the
 		// whole accumulated buffer over one would resurrect exactly the bytes
@@ -512,7 +511,7 @@ func (e *exchangeCapture) Upstream(p []byte) bool {
 	if room <= 0 {
 		if len(p) > 0 {
 			e.truncated = true
-			e.rc.upstreamBodyTruncated = true
+			e.rc.bodies.MarkUpstreamTruncated()
 		}
 		return false
 	}
@@ -521,7 +520,7 @@ func (e *exchangeCapture) Upstream(p []byte) bool {
 		p = p[:room]
 		kept = false
 		e.truncated = true
-		e.rc.upstreamBodyTruncated = true
+		e.rc.bodies.MarkUpstreamTruncated()
 	}
 	// Copied, not aliased, and that is a contract rather than a habit: the
 	// streaming callers hand this a slice into a read buffer they reuse on the
@@ -532,7 +531,7 @@ func (e *exchangeCapture) Upstream(p []byte) bool {
 	e.buf = append(e.buf, p...)
 	// Replaces rather than extends: last attempt wins, matching every other
 	// writer of this field.
-	e.rc.upstreamResponseBody = e.buf
+	e.rc.bodies.SetUpstreamResponse(e.buf)
 	e.published = len(e.buf)
 	return kept
 }

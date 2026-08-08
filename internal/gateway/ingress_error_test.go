@@ -66,7 +66,7 @@ func TestWriteClaudeError_Envelope(t *testing.T) {
 // TestWriteClaudeError_StashesResponseBody mirrors
 // TestWriteOpenAIErrorStashesResponseBody: when a Exchange is on the gin
 // context, the Claude error JSON actually sent to the caller must also be
-// stashed into rc.responseBody so the audit trail matches.
+// stashed into rc.ResponseBody() so the audit trail matches.
 func TestWriteClaudeError_StashesResponseBody(t *testing.T) {
 	c, w := newIngressTestContext(t, "/v1/messages")
 	rc := &Exchange{requestID: "req_x"}
@@ -74,11 +74,11 @@ func TestWriteClaudeError_StashesResponseBody(t *testing.T) {
 
 	WriteClaudeError(c, http.StatusNotFound, "not_found_error", "model does not exist", "req_x")
 
-	if rc.responseBody == nil {
-		t.Fatal("rc.responseBody was not stashed")
+	if rc.ResponseBody() == nil {
+		t.Fatal("rc.ResponseBody() was not stashed")
 	}
-	if string(rc.responseBody) != w.Body.String() {
-		t.Errorf("rc.responseBody = %s, want it to equal the sent body %s", rc.responseBody, w.Body.String())
+	if string(rc.ResponseBody()) != w.Body.String() {
+		t.Errorf("rc.responseBody = %s, want it to equal the sent body %s", rc.ResponseBody(), w.Body.String())
 	}
 }
 

@@ -68,7 +68,7 @@ func stashLocalErrorBody(c *gin.Context, errType, message string) {
 	if rc == nil {
 		return
 	}
-	rc.responseBody = LocalErrorBody(errType, message)
+	rc.bodies.SetResponse(LocalErrorBody(errType, message))
 }
 
 // Caller-facing error "type" values. The canonical constants live in the

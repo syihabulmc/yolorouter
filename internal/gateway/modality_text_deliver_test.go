@@ -89,7 +89,7 @@ func runDelivery(t *testing.T, ingress protocols.ProtocolID, egress protocols.Pr
 	d := adm.payload.Deliver(tools, resp)
 
 	out := deliveryOutcome{delivery: d, clientStatus: w.Code, clientBody: w.Body.String(),
-		upstreamBody: string(rc.upstreamResponseBody), firstByteSent: rc.firstByteSent}
+		upstreamBody: string(rc.UpstreamResponseBody()), firstByteSent: rc.firstByteSent}
 	if d.Usage != nil {
 		out.promptTokens = d.Usage.Prompt
 	}

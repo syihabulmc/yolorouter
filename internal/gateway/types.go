@@ -12,13 +12,13 @@ package gateway
 
 import (
 	"context"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
+	"github.com/yolorouter/yolorouter/internal/gateway/capture"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
@@ -63,13 +63,12 @@ type Exchange struct {
 	// enabled but the engine returned Skipped=true). Empty when compression
 	// was disabled, applied successfully, or never attempted.
 	compressSkipReason string
-	// compressEstimatedTokensSaved / CompressorsApplied / RequestBodyCompressed
-	// record the outcome of a successful compression pass. RequestBodyCompressed
-	// is what admission is handed and the payload encodes from; RequestBody
-	// stays the verbatim caller body for the audit row.
+	// compressEstimatedTokensSaved / CompressorsApplied record the outcome of
+	// a successful compression pass; the compressed body itself lives in the
+	// bodies capture (what admission is handed and the payload encodes from,
+	// while the verbatim caller body stays for the audit row).
 	compressEstimatedTokensSaved int
 	compressorsApplied           []string
-	requestBodyCompressed        []byte
 	apiKeyID                     uint
 	// concurrencyLimit / rpmLimit are the caller's allowance, resolved once
 	// from the key. Zero means unlimited, which is also what an absent limit
@@ -147,55 +146,22 @@ type Exchange struct {
 
 	mu sync.Mutex // protects FirstByteSent flips from racing the flusher
 
-	// Bodies captured for the request_log_bodies row.
-	// v0.1 stores them VERBATIM — body content is not scrubbed (only request
-	// headers are masked; see RequestHeaders below). requestBody is set as
-	// soon as the caller body is read. UpstreamRequestBody is overwritten on
-	// each attempt (success => successful attempt; total failure => last
-	// attempt). ResponseBody is the caller-FACING response (post-rewrite,
-	// post-usage-strip, including local error JSON); UpstreamResponseBody is
-	// the raw upstream response (non-stream full / non-2xx error body
-	// bounded-read). For stream, the sent SSE is appended to streamBodyFile
-	// instead, and a streaming delivery clears these two so they stay empty.
-	// Nil/empty on early failure or body-read failure.
-	requestBody          []byte
-	upstreamRequestBody  []byte
-	responseBody         []byte
-	upstreamResponseBody []byte
+	// bodies is the audit record for the request_log_bodies row: the caller's
+	// request, its compressed variant, what was sent upstream, what came
+	// back, what the caller received, and the stream capture file. v0.1
+	// stores them VERBATIM — body content is not scrubbed (only request
+	// headers are masked; see RequestHeaders below). The capture package owns
+	// every write; this struct only holds it. finalize derives the persisted
+	// stream_body_path from RequestID (the path is always exactly
+	// "<request_id>.stream", so the capture only answers "was a file
+	// captured?", not carry the string itself).
+	bodies capture.Bodies
 	// requestHeaders is the caller's request headers as a JSON object, with
 	// sensitive headers already masked (SanitizeHeaders). This header-name
-	// masking is the ONLY redaction v0.1 does — body content above is stored
+	// masking is the ONLY redaction v0.1 does — body content is stored
 	// verbatim. Captured once at Handle entry so it survives even an early
 	// rejection.
 	requestHeaders []byte
-
-	// streamBodyFile/streamBodyCaptured/streamBodyTruncated are the
-	// stream-only counterpart of the four body fields above: the sent SSE
-	// lines are appended to streamBodyFile as
-	// they go out instead of being buffered in memory. streamBodyCaptured is
-	// true once a capture file was successfully opened for this request —
-	// finalize derives the persisted stream_body_path from RequestID
-	// (simplification: the path is always exactly "<request_id>.stream", so
-	// this field only ever needs to answer "was a file captured?", not carry
-	// the string itself). streamBodyTruncated flips true only if the 1GiB
-	// anti-OOM backstop was hit (never a silent content cut). Unexported —
-	// accessed only from within this package (stream.go/relay.go).
-	streamBodyFile      *os.File
-	streamBodyCaptured  bool
-	streamBodyTruncated bool
-	// upstreamBodyTruncated/clientBodyTruncated mark a captured non-stream body
-	// that hit its cap. Stored separately from the bytes because a body cut off
-	// at the limit and one that simply was that long are indistinguishable once
-	// only the bytes survive — and only one of them means the row is missing
-	// evidence.
-	upstreamBodyTruncated bool
-	clientBodyTruncated   bool
-	// streamBodyBytesWritten mirrors the capture file's current size so
-	// appendStreamBodyLine can check the 1GiB backstop with a plain integer
-	// comparison instead of an os.File.Stat() syscall per appended line
-	// (a chat stream can append hundreds of lines, each otherwise costing
-	// its own Stat() call).
-	streamBodyBytesWritten int64
 }
 
 // markFirstByteSent flips firstByteSent true under the lock. Returns whether
@@ -292,37 +258,37 @@ func (rc *Exchange) CompressSkipReason() string { return rc.compressSkipReason }
 func (rc *Exchange) RequestHeaders() []byte { return rc.requestHeaders }
 
 // RequestBody is the caller's body, verbatim.
-func (rc *Exchange) RequestBody() []byte { return rc.requestBody }
+func (rc *Exchange) RequestBody() []byte { return rc.bodies.Request() }
 
 // CompressedRequestBody is the post-compression body, empty when none was made.
-func (rc *Exchange) CompressedRequestBody() []byte { return rc.requestBodyCompressed }
+func (rc *Exchange) CompressedRequestBody() []byte { return rc.bodies.CompressedRequest() }
 
 // UpstreamRequestBody is what the last attempt sent.
-func (rc *Exchange) UpstreamRequestBody() []byte { return rc.upstreamRequestBody }
+func (rc *Exchange) UpstreamRequestBody() []byte { return rc.bodies.UpstreamRequest() }
 
 // ResponseBody is what the caller received.
-func (rc *Exchange) ResponseBody() []byte { return rc.responseBody }
+func (rc *Exchange) ResponseBody() []byte { return rc.bodies.Response() }
 
 // UpstreamResponseBody is what the upstream returned, unaltered.
-func (rc *Exchange) UpstreamResponseBody() []byte { return rc.upstreamResponseBody }
+func (rc *Exchange) UpstreamResponseBody() []byte { return rc.bodies.UpstreamResponse() }
 
 // StreamBodyPath is where a streamed response was captured, empty when the
 // response was not streamed or nothing was captured.
 func (rc *Exchange) StreamBodyPath() string {
-	if !rc.streamBodyCaptured {
+	if !rc.bodies.StreamCaptured() {
 		return ""
 	}
 	return rc.requestID + ".stream"
 }
 
 // StreamBodyTruncated reports whether the stream capture hit its cap.
-func (rc *Exchange) StreamBodyTruncated() bool { return rc.streamBodyTruncated }
+func (rc *Exchange) StreamBodyTruncated() bool { return rc.bodies.StreamTruncated() }
 
 // UpstreamBodyTruncated reports whether the captured upstream body hit its cap.
-func (rc *Exchange) UpstreamBodyTruncated() bool { return rc.upstreamBodyTruncated }
+func (rc *Exchange) UpstreamBodyTruncated() bool { return rc.bodies.UpstreamTruncated() }
 
 // ClientBodyTruncated reports whether the captured client-facing body hit its cap.
-func (rc *Exchange) ClientBodyTruncated() bool { return rc.clientBodyTruncated }
+func (rc *Exchange) ClientBodyTruncated() bool { return rc.bodies.ClientTruncated() }
 
 // AttemptRecord is one candidate try (the log keeps every attempt,
 // not just the final one). Outcome is one of the AttemptOutcome* constants.
@@ -443,10 +409,6 @@ type Usage struct {
 // because they are large, so attributing them per attempt is a schema change,
 // not a boundary fix.
 func (rc *Exchange) beginUpstreamAttempt() {
-	rc.clearResponseBodies()
-	// The request and the response it produced are one pair. Clearing only the
-	// response left the audit row showing an earlier attempt's request body
-	// with no response beside it — a request that was never the one sent.
-	rc.upstreamRequestBody = nil
+	rc.bodies.BeginUpstreamAttempt()
 	rc.upstreamURL = ""
 }

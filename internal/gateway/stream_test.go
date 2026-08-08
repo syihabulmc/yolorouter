@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/yolorouter/yolorouter/internal/fact"
+	"github.com/yolorouter/yolorouter/internal/gateway/capture"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/pkg/logger"
 )
@@ -401,7 +402,7 @@ func TestStreamCaptureNoTruncation(t *testing.T) {
 	if !bytes.Contains(rec.Body.Bytes(), []byte("data: [DONE]")) {
 		t.Fatalf("caller stream did not complete: %s", rec.Body.String()[:200])
 	}
-	if rc.streamBodyTruncated {
+	if rc.bodies.StreamTruncated() {
 		t.Error("expected streamBodyTruncated=false (well under the 1GiB backstop)")
 	}
 	captured, err := os.ReadFile(filepath.Join(dir, "req-no-trunc.stream"))
@@ -422,14 +423,14 @@ func TestStreamCaptureNoTruncation(t *testing.T) {
 }
 
 // TestStreamCaptureBackstopMarked: once the (test-shrunk)
-// maxStreamBodyFileBytes cap is hit, streamBodyTruncated flips true, the
+// capture.MaxStreamFileBytes cap is hit, streamBodyTruncated flips true, the
 // file stops growing past the cap, and the caller's own stream still
 // completes normally — the backstop only stops the disk audit copy, never
 // the client-facing stream.
 func TestStreamCaptureBackstopMarked(t *testing.T) {
-	orig := maxStreamBodyFileBytes
-	maxStreamBodyFileBytes = 500 // test-only small cap; avoids writing a real 1GiB
-	defer func() { maxStreamBodyFileBytes = orig }()
+	orig := capture.MaxStreamFileBytes
+	capture.MaxStreamFileBytes = 500 // test-only small cap; avoids writing a real 1GiB
+	defer func() { capture.MaxStreamFileBytes = orig }()
 
 	dir := t.TempDir()
 	body := sseDataFrames(50, 200) // far larger than the 500-byte test cap
@@ -440,15 +441,15 @@ func TestStreamCaptureBackstopMarked(t *testing.T) {
 	if !bytes.Contains(rec.Body.Bytes(), []byte("data: [DONE]")) {
 		t.Fatalf("caller stream did not complete despite the backstop: %s", rec.Body.String()[:200])
 	}
-	if !rc.streamBodyTruncated {
+	if !rc.bodies.StreamTruncated() {
 		t.Error("expected streamBodyTruncated=true once the test cap was exceeded")
 	}
 	info, err := os.Stat(filepath.Join(dir, "req-backstop.stream"))
 	if err != nil {
 		t.Fatalf("stat captured stream file: %v", err)
 	}
-	if info.Size() > maxStreamBodyFileBytes {
-		t.Errorf("captured file grew past the backstop cap: %d bytes, cap %d", info.Size(), maxStreamBodyFileBytes)
+	if info.Size() > capture.MaxStreamFileBytes {
+		t.Errorf("captured file grew past the backstop cap: %d bytes, cap %d", info.Size(), capture.MaxStreamFileBytes)
 	}
 }
 
@@ -474,7 +475,7 @@ func TestStreamCaptureVerbatim(t *testing.T) {
 	if bytes.Contains(captured, []byte("[REDACTED]")) {
 		t.Errorf("v0.1 must not redact stream body content: %s", captured)
 	}
-	if !rc.streamBodyCaptured {
+	if !rc.bodies.StreamCaptured() {
 		t.Error("expected streamBodyCaptured to be true")
 	}
 }
@@ -614,16 +615,12 @@ func TestAWriterThatCannotTakeADeadlineIsReportedOnce(t *testing.T) {
 	}
 }
 
-// TestOpeningTheCaptureFileTwiceKeepsOneDescriptor pins what happens while two
-// callers both believe they open this file.
-//
-// The kernel decides where an attempt's bytes are kept and opens the file when
-// the answer is "on disk"; the streaming pumps still open it themselves too,
-// and will until they take their tools from the kernel. Overwriting the handle
-// on the second call would drop the only reference to the first descriptor, and
-// nothing would ever close it — one leaked descriptor per stream, invisible
-// until a busy process runs out.
-func TestOpeningTheCaptureFileTwiceKeepsOneDescriptor(t *testing.T) {
+// The descriptor-identity half of the double-open guarantee (two callers both
+// believe they open this file; the second open must keep the first
+// descriptor, or it leaks) lives with the capture package now — the handle is
+// its private state. What stays here is the gateway wiring: a second
+// openStreamBodyFile call is harmless and the capture keeps working.
+func TestOpeningTheCaptureFileTwiceKeepsCapturing(t *testing.T) {
 	dir := t.TempDir()
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Set(BodiesDirContextKey, dir)
@@ -631,14 +628,19 @@ func TestOpeningTheCaptureFileTwiceKeepsOneDescriptor(t *testing.T) {
 
 	openStreamBodyFile(c, rc)
 	defer closeStreamBodyFile(rc)
-	first := rc.streamBodyFile
-	if first == nil {
+	if !rc.bodies.StreamCaptured() {
 		t.Fatal("first open produced no capture file")
 	}
 
 	openStreamBodyFile(c, rc)
-	if rc.streamBodyFile != first {
-		t.Fatalf("second open replaced the capture file (%v -> %v); the first descriptor is now unreachable and will never be closed", first, rc.streamBodyFile)
+	appendStreamBodyLine(rc, []byte("data: once\n\n"))
+	closeStreamBodyFile(rc)
+	captured, err := os.ReadFile(filepath.Join(dir, "twice-opened.stream"))
+	if err != nil {
+		t.Fatalf("read capture file: %v", err)
+	}
+	if strings.Count(string(captured), "data: once") != 1 {
+		t.Fatalf("capture after a double open holds %q, want the line exactly once", captured)
 	}
 }
 
@@ -660,9 +662,6 @@ func TestANewAttemptReopensTheCaptureFileAndAppends(t *testing.T) {
 	closeStreamBodyFile(rc)
 
 	openStreamBodyFile(c, rc)
-	if rc.streamBodyFile == nil {
-		t.Fatal("a closed capture file was not reopened for the next attempt")
-	}
 	appendStreamBodyLine(rc, []byte("data: second\n\n"))
 	closeStreamBodyFile(rc)
 

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 
 	"github.com/gin-gonic/gin"
@@ -91,16 +90,6 @@ const maxPreambleBytes = 64 * 1024
 // a very long line without a newline could grow the in-memory buffer without
 // limit (the response body has no bodylimit guard the way the request does).
 const maxStreamLineBytes = 1 * 1024 * 1024 // 1 MiB
-
-// maxStreamBodyFileBytes is a HARD anti-OOM disk backstop, NOT a content
-// truncation (the stream capture must record every SENT
-// SSE fragment, never cut short for length). A normal chat stream never
-// approaches this; only a hostile/buggy upstream maxing bandwidth within the
-// 120s upstream timeout could. Hitting it sets stream_body_truncated=true
-// (marked, never silent) and stops appending — the caller's own stream is
-// unaffected either way. A package var (not const) so tests can inject a
-// small value instead of actually writing 1GiB.
-var maxStreamBodyFileBytes int64 = 1 << 30 // 1 GiB
 
 func writeSSEHeader(w protocols.ClientWriter) error {
 	w.Inject(http.Header{
@@ -415,69 +404,30 @@ func openStreamBodyFile(c *gin.Context, rc *Exchange) {
 	if rc.requestID == "" {
 		return
 	}
-	if rc.streamBodyFile != nil {
-		return
-	}
 	dir := streamBodiesDir(c)
 	if dir == "" {
 		return
 	}
 	path := filepath.Join(dir, rc.requestID+".stream")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
+	if err := rc.bodies.OpenStream(path); err != nil {
 		logger.Warn("gateway: open stream body file failed", zap.String("request_id", rc.requestID), zap.Error(err))
-		return
-	}
-	rc.streamBodyFile = f
-	rc.streamBodyCaptured = true
-	// A pre-first-byte failover can re-enter this function for the SAME
-	// RequestID (same file, O_APPEND) after an earlier attempt already wrote
-	// some preamble bytes to it — one Stat() here (not per appended line,
-	// see appendStreamBodyLine) seeds the in-memory backstop counter with
-	// the file's real starting size so it never drifts out of sync with what
-	// prior attempts already wrote.
-	if info, statErr := f.Stat(); statErr == nil {
-		rc.streamBodyBytesWritten = info.Size()
 	}
 }
 
 // closeStreamBodyFile closes the stream capture file opened by
 // openStreamBodyFile, if any. Safe to call even when open never succeeded.
 func closeStreamBodyFile(rc *Exchange) {
-	if rc.streamBodyFile != nil {
-		_ = rc.streamBodyFile.Close()
-		rc.streamBodyFile = nil
-	}
+	rc.bodies.CloseStream()
 }
 
 // appendStreamBodyLine appends one already-caller-facing SSE line to the
 // request's stream capture file, verbatim (v0.1 does not scrub body content).
 // A no-op once the file was never opened (bodies dir unresolved / open failed)
-// or the 1GiB backstop already fired for this request.
-//
-// maxStreamBodyFileBytes is a HARD anti-OOM disk backstop, NOT a content
-// truncation (the capture must record every sent SSE
-// fragment, never cut short for length) — a normal chat stream never comes
-// close to it; only a hostile/buggy upstream maxing bandwidth within the
-// 120s upstream timeout could. Hitting it sets rc.streamBodyTruncated=true
-// (marked, never silent) and stops appending; the caller's own stream is
-// entirely unaffected.
+// or the anti-OOM backstop already fired for this request — the backstop
+// itself, and why it marks rather than silently cuts, is documented on
+// capture.MaxStreamFileBytes.
 func appendStreamBodyLine(rc *Exchange, line []byte) {
-	if rc.streamBodyFile == nil || rc.streamBodyTruncated || len(line) == 0 {
-		return
-	}
-	// rc.streamBodyBytesWritten tracks the file's size purely in memory
-	// (initialized once from a real Stat() in openStreamBodyFile) — checking
-	// the backstop this way, instead of Stat()-ing the file on every single
-	// appended line, turns what could be hundreds of syscalls per stream
-	// into zero.
-	if rc.streamBodyBytesWritten+int64(len(line)) > maxStreamBodyFileBytes {
-		rc.streamBodyTruncated = true
-		return
-	}
-	n, err := rc.streamBodyFile.Write(line)
-	rc.streamBodyBytesWritten += int64(n)
-	if err != nil {
+	if err := rc.bodies.AppendStream(line); err != nil {
 		logger.Warn("gateway: write stream body failed", zap.String("request_id", rc.requestID), zap.Error(err))
 	}
 }
@@ -488,33 +438,13 @@ func appendStreamBodyLine(rc *Exchange, line []byte) {
 // disconnect before the first byte forwarded). Left in place, an empty
 // stream_body_path would show as an empty, useless "stream body" link on
 // the request-log detail page. A no-op when nothing was ever captured
-// (streamBodyCaptured == false, e.g. bodies_dir was never resolved) or the
-// file legitimately has content — streamBodyTruncated in particular guards
-// against ever discarding a backstop-marked file, even though in practice
-// that flag never fires on an empty file (it only fires after content was
-// already appended).
+// (e.g. bodies_dir was never resolved) or the file legitimately has content.
 func removeEmptyStreamBodyFile(c *gin.Context, rc *Exchange) {
-	if !rc.streamBodyCaptured || rc.streamBodyTruncated {
-		return
-	}
 	dir := streamBodiesDir(c)
 	if dir == "" {
 		return
 	}
-	path := filepath.Join(dir, rc.requestID+".stream")
-	info, err := os.Stat(path)
-	if err != nil || info.Size() != 0 {
-		return
-	}
-	// Close the fd BEFORE unlinking: leaving it open
-	// past os.Remove would let any later appendStreamBodyLine write to an
-	// unlinked inode (bytes silently lost), and on Windows os.Remove of an
-	// open file fails outright, leaving a stale empty stream_body_path. This
-	// also nils rc.streamBodyFile so the caller's deferred closeStreamBodyFile
-	// is a no-op.
-	closeStreamBodyFile(rc)
-	_ = os.Remove(path)
-	rc.streamBodyCaptured = false
+	rc.bodies.DiscardEmptyStream(filepath.Join(dir, rc.requestID+".stream"))
 }
 
 // BodiesDirContextKey is the gin.Context key under which a router-level

@@ -50,7 +50,7 @@ func TestClassifyUpstreamStatus(t *testing.T) {
 // TestWriteOpenAIErrorStashesResponseBody: when a
 // Exchange is on the gin context (as Handle installs it), the local
 // error JSON WriteOpenAIErrorWithRequestID returns to the caller is also
-// stashed into rc.responseBody, so request_log_bodies.response_body reflects
+// stashed into rc.ResponseBody(), so request_log_bodies.response_body reflects
 // what the caller actually received for a locally-rejected request.
 func TestWriteOpenAIErrorStashesResponseBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -63,10 +63,10 @@ func TestWriteOpenAIErrorStashesResponseBody(t *testing.T) {
 
 	WriteOpenAIErrorWithRequestID(c, http.StatusNotFound, errTypeNotFound, "model does not exist", "req_x")
 
-	if rc.responseBody == nil {
-		t.Fatal("rc.responseBody was not stashed")
+	if rc.ResponseBody() == nil {
+		t.Fatal("rc.ResponseBody() was not stashed")
 	}
-	got := string(rc.responseBody)
+	got := string(rc.ResponseBody())
 	for _, want := range []string{`"message"`, `"type"`, "model does not exist", errTypeNotFound, "req_x"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("ResponseBody = %s, want it to contain %q", got, want)

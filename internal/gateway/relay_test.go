@@ -386,19 +386,19 @@ func TestFinalizeNonStreamCapturesBodies(t *testing.T) {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
 
-	if !bytes.Contains(captured.requestBody, []byte(`"model":"gpt-4o"`)) {
-		t.Errorf("RequestBody = %s, want it to contain the caller's original request", captured.requestBody)
+	if !bytes.Contains(captured.RequestBody(), []byte(`"model":"gpt-4o"`)) {
+		t.Errorf("RequestBody = %s, want it to contain the caller's original request", captured.RequestBody())
 	}
-	if !bytes.Contains(captured.upstreamRequestBody, []byte(`"model":"gpt-4o-real"`)) {
-		t.Errorf("UpstreamRequestBody = %s, want the rewritten (provider model name) request", captured.upstreamRequestBody)
+	if !bytes.Contains(captured.UpstreamRequestBody(), []byte(`"model":"gpt-4o-real"`)) {
+		t.Errorf("UpstreamRequestBody = %s, want the rewritten (provider model name) request", captured.UpstreamRequestBody())
 	}
-	if !bytes.Contains(captured.upstreamResponseBody, []byte(`"model":"gpt-4o-real"`)) {
-		t.Errorf("UpstreamResponseBody = %s, want the raw upstream response (provider model name)", captured.upstreamResponseBody)
+	if !bytes.Contains(captured.UpstreamResponseBody(), []byte(`"model":"gpt-4o-real"`)) {
+		t.Errorf("UpstreamResponseBody = %s, want the raw upstream response (provider model name)", captured.UpstreamResponseBody())
 	}
-	if !bytes.Contains(captured.responseBody, []byte(`"model":"gpt-4o"`)) {
-		t.Errorf("ResponseBody = %s, want the caller-facing rewritten response (external model name)", captured.responseBody)
+	if !bytes.Contains(captured.ResponseBody(), []byte(`"model":"gpt-4o"`)) {
+		t.Errorf("ResponseBody = %s, want the caller-facing rewritten response (external model name)", captured.ResponseBody())
 	}
-	if bytes.Equal(captured.responseBody, captured.upstreamResponseBody) {
+	if bytes.Equal(captured.ResponseBody(), captured.UpstreamResponseBody()) {
 		t.Error("ResponseBody and UpstreamResponseBody must differ (post- vs pre-rewrite model field)")
 	}
 
@@ -411,17 +411,17 @@ func TestFinalizeNonStreamCapturesBodies(t *testing.T) {
 	if dbBody == nil {
 		t.Fatal("expected a request_log_bodies row to be persisted by finalize")
 	}
-	if dbBody.RequestBody != string(captured.requestBody) {
-		t.Errorf("persisted RequestBody = %q, want %q", dbBody.RequestBody, captured.requestBody)
+	if dbBody.RequestBody != string(captured.RequestBody()) {
+		t.Errorf("persisted RequestBody = %q, want %q", dbBody.RequestBody, captured.RequestBody())
 	}
-	if dbBody.UpstreamRequestBody != string(captured.upstreamRequestBody) {
-		t.Errorf("persisted UpstreamRequestBody = %q, want %q", dbBody.UpstreamRequestBody, captured.upstreamRequestBody)
+	if dbBody.UpstreamRequestBody != string(captured.UpstreamRequestBody()) {
+		t.Errorf("persisted UpstreamRequestBody = %q, want %q", dbBody.UpstreamRequestBody, captured.UpstreamRequestBody())
 	}
-	if dbBody.ResponseBody != string(captured.responseBody) {
-		t.Errorf("persisted ResponseBody = %q, want %q", dbBody.ResponseBody, captured.responseBody)
+	if dbBody.ResponseBody != string(captured.ResponseBody()) {
+		t.Errorf("persisted ResponseBody = %q, want %q", dbBody.ResponseBody, captured.ResponseBody())
 	}
-	if dbBody.UpstreamResponseBody != string(captured.upstreamResponseBody) {
-		t.Errorf("persisted UpstreamResponseBody = %q, want %q", dbBody.UpstreamResponseBody, captured.upstreamResponseBody)
+	if dbBody.UpstreamResponseBody != string(captured.UpstreamResponseBody()) {
+		t.Errorf("persisted UpstreamResponseBody = %q, want %q", dbBody.UpstreamResponseBody, captured.UpstreamResponseBody())
 	}
 }
 
@@ -803,12 +803,12 @@ func TestHandleEarlyRejectionCapturesRequestBody(t *testing.T) {
 			if captured == nil {
 				t.Fatal("testHookHandleDone was never invoked")
 			}
-			if !bytes.Contains(captured.requestBody, []byte(`"model":"gpt-4o"`)) {
-				t.Errorf("RequestBody = %s, want it to contain the caller's request", captured.requestBody)
+			if !bytes.Contains(captured.RequestBody(), []byte(`"model":"gpt-4o"`)) {
+				t.Errorf("RequestBody = %s, want it to contain the caller's request", captured.RequestBody())
 			}
-			if len(captured.upstreamRequestBody) != 0 || len(captured.upstreamResponseBody) != 0 {
+			if len(captured.UpstreamRequestBody()) != 0 || len(captured.UpstreamResponseBody()) != 0 {
 				t.Errorf("expected empty upstream_* for a pre-dispatch rejection, got request=%q response=%q",
-					captured.upstreamRequestBody, captured.upstreamResponseBody)
+					captured.UpstreamRequestBody(), captured.UpstreamResponseBody())
 			}
 
 			dbBody, err := repository.GetRequestLogBodyByRequestID(db, captured.requestID)
@@ -1039,12 +1039,12 @@ func TestRelayClaudeMalformedBodyRejectedBeforeCandidateLoop(t *testing.T) {
 	}
 	// The audit trail must record the Claude envelope actually sent, not the
 	// OpenAI-shaped one.
-	if !bytes.Contains(captured.responseBody, []byte(`"type":"error"`)) {
-		t.Errorf("rc.responseBody = %s, want the Claude error envelope stashed for audit", captured.responseBody)
+	if !bytes.Contains(captured.ResponseBody(), []byte(`"type":"error"`)) {
+		t.Errorf("rc.responseBody = %s, want the Claude error envelope stashed for audit", captured.ResponseBody())
 	}
-	if len(captured.upstreamRequestBody) != 0 || len(captured.upstreamResponseBody) != 0 {
+	if len(captured.UpstreamRequestBody()) != 0 || len(captured.UpstreamResponseBody()) != 0 {
 		t.Errorf("expected empty upstream_* (candidate loop never entered), got request=%q response=%q",
-			captured.upstreamRequestBody, captured.upstreamResponseBody)
+			captured.UpstreamRequestBody(), captured.UpstreamResponseBody())
 	}
 }
 
@@ -1342,12 +1342,12 @@ func TestCompressTriggersAcrossProtocols(t *testing.T) {
 			if !captured.compressEnabled {
 				t.Error("rc.compressEnabled = false, want true")
 			}
-			if captured.requestBodyCompressed == nil {
+			if captured.CompressedRequestBody() == nil {
 				t.Fatal("rc.requestBodyCompressed is nil, compression did not produce a body")
 			}
-			if len(captured.requestBodyCompressed) >= len(origBody) {
+			if len(captured.CompressedRequestBody()) >= len(origBody) {
 				t.Errorf("compressed body (%d bytes) is not shorter than original (%d bytes)",
-					len(captured.requestBodyCompressed), len(origBody))
+					len(captured.CompressedRequestBody()), len(origBody))
 			}
 			if captured.compressEstimatedTokensSaved <= 0 {
 				t.Error("CompressEstimatedTokensSaved should be positive")
@@ -1397,7 +1397,7 @@ func TestCompressSkipsNoLiveZone(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.requestBodyCompressed != nil {
+	if captured.CompressedRequestBody() != nil {
 		t.Error("RequestBodyCompressed should be nil when the engine skips")
 	}
 	if captured.compressSkipReason != "no_live_zone" {
@@ -1440,7 +1440,7 @@ func TestCompressDisabledBySwitch(t *testing.T) {
 	if captured.compressEnabled {
 		t.Error("rc.compressEnabled should be false")
 	}
-	if captured.requestBodyCompressed != nil {
+	if captured.CompressedRequestBody() != nil {
 		t.Error("RequestBodyCompressed should be nil when compression is off")
 	}
 	if captured.compressSkipReason != "" {
@@ -1487,7 +1487,7 @@ func TestCompressNonChatEndpointNotCompressed(t *testing.T) {
 	if !captured.compressEnabled {
 		t.Error("rc.compressEnabled should be true (global switch on)")
 	}
-	if captured.requestBodyCompressed != nil {
+	if captured.CompressedRequestBody() != nil {
 		t.Error("RequestBodyCompressed should be nil — non-chat endpoints are not compressed")
 	}
 	if captured.compressSkipReason != "" {
@@ -1533,7 +1533,7 @@ func TestCompressFailOpenProceeds(t *testing.T) {
 	if captured == nil {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
-	if captured.requestBodyCompressed != nil {
+	if captured.CompressedRequestBody() != nil {
 		t.Error("RequestBodyCompressed should be nil when the engine skips")
 	}
 	if captured.compressSkipReason == "" {
@@ -1583,7 +1583,7 @@ func TestCompressOverrideShortCircuitsGlobal(t *testing.T) {
 	if captured.compressEnabled {
 		t.Error("rc.compressEnabled should be false (per-key override wins)")
 	}
-	if captured.requestBodyCompressed != nil {
+	if captured.CompressedRequestBody() != nil {
 		t.Error("RequestBodyCompressed should be nil when override disables compression")
 	}
 }
@@ -1625,7 +1625,7 @@ func TestCompressOverrideEnablesWhenGlobalOff(t *testing.T) {
 	if !captured.compressEnabled {
 		t.Error("rc.compressEnabled should be true (per-key override enables)")
 	}
-	if captured.requestBodyCompressed == nil {
+	if captured.CompressedRequestBody() == nil {
 		t.Error("RequestBodyCompressed should be non-nil (override enabled compression)")
 	}
 }
@@ -1665,7 +1665,7 @@ func TestCompressGlobalFailOpenOnError(t *testing.T) {
 	if captured.compressEnabled {
 		t.Error("rc.compressEnabled should be false (fail-open on settings error)")
 	}
-	if captured.requestBodyCompressed != nil {
+	if captured.CompressedRequestBody() != nil {
 		t.Error("RequestBodyCompressed should be nil when settings read fails")
 	}
 }
@@ -1713,12 +1713,12 @@ func TestCompressAndCSPCoexist(t *testing.T) {
 		t.Fatal("testHookHandleDone was never invoked")
 	}
 	// Compression applied.
-	if captured.requestBodyCompressed == nil {
+	if captured.CompressedRequestBody() == nil {
 		t.Fatal("RequestBodyCompressed should be non-nil (compression enabled and ran)")
 	}
-	if len(captured.requestBodyCompressed) >= len(origBody) {
+	if len(captured.CompressedRequestBody()) >= len(origBody) {
 		t.Errorf("compressed body (%d) should be shorter than original (%d)",
-			len(captured.requestBodyCompressed), len(origBody))
+			len(captured.CompressedRequestBody()), len(origBody))
 	}
 	// CSP resolved.
 	if !captured.customSystemPromptEnabled {
