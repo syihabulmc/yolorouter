@@ -18,7 +18,7 @@ import (
 // same as always. A native Gemini request has no such field at all — the
 // model only ever appears in the URL path (EgressPath builds
 // /v1beta/models/{providerModelName}:generateContent, applied by the caller
-// right after this function returns) — so rc.requestBody is forwarded
+// right after this function returns) — so the captured request body is forwarded
 // completely unchanged: injecting a top-level "model" key would add a field
 // the real Gemini API's protojson-based request parser rejects as unknown,
 // turning a passthrough request into a hard failure.

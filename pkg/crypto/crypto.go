@@ -76,7 +76,7 @@ func KeyFromBase64(encoded string) ([]byte, error) {
 // tokens use this for at-rest lookup: the token is already a high-entropy
 // random value, so a fast indexable hash suffices (not bcrypt). This is the
 // single source of truth for that recipe — service.hashToken,
-// repository.hashSessionToken, middleware.hashBearerKey, and the gateway
+// repository.hashSessionToken, the bearer-key auth middleware, and the gateway
 // test helper all delegate here rather than carrying their own copies.
 func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))

@@ -395,10 +395,10 @@ func TestCrossProtocolOpenAIToAnthropicNonStream_CapturesResponseBody(t *testing
 		t.Fatal("rc.ResponseBody() is empty; the cross-protocol non-stream path must capture the caller-facing encoded response")
 	}
 	if !bytes.Equal(captured.ResponseBody(), w.Body.Bytes()) {
-		t.Errorf("rc.responseBody = %s, want it to equal the bytes actually written to the client: %s", captured.ResponseBody(), w.Body.Bytes())
+		t.Errorf("ResponseBody() = %s, want it to equal the bytes actually written to the client: %s", captured.ResponseBody(), w.Body.Bytes())
 	}
 	if !bytes.Contains(captured.ResponseBody(), []byte(`"model":"gpt-4o"`)) {
-		t.Errorf("rc.responseBody = %s, want the OpenAI-encoded client body carrying the external model name", captured.ResponseBody())
+		t.Errorf("ResponseBody() = %s, want the OpenAI-encoded client body carrying the external model name", captured.ResponseBody())
 	}
 }
 

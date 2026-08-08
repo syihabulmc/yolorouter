@@ -249,7 +249,7 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
 	// Cand InputPrice 2.0/M, tokensSaved 1500 -> 1500 * 2.0 = 3000 micros.
-	// rc.candidate is only read in-memory by computeCost (InputPrice), never
+	// the attempt state candidate is only read in-memory by computeCost (InputPrice), never
 	// persisted by finalize — so an unpersisted in-memory candidate is enough.
 	cand := &model.ModelCandidate{
 		InputPrice: 2.0, OutputPrice: 4.0, MaxOutput: 128,

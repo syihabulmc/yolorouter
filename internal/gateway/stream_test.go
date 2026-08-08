@@ -360,8 +360,8 @@ func TestStreamUpstreamStripsInjectedUsage(t *testing.T) {
 // and a RequestID (stream body capture: internal/router/router.go
 // stashes the absolute bodies dir on every request's gin.Context; here the
 // test wires it directly instead of going through the real middleware). It
-// returns the Exchange so callers can inspect streamBodyCaptured/
-// streamBodyTruncated and the recorder so callers can check the bytes the
+// returns the Exchange so callers can inspect StreamCaptured()/
+// StreamTruncated() and the recorder so callers can check the bytes the
 // caller actually received.
 func runStreamPumpCapture(t *testing.T, upstreamBody, requestID, bodiesDir string) (*Exchange, *httptest.ResponseRecorder, *Usage, error) {
 	t.Helper()
@@ -423,7 +423,7 @@ func TestStreamCaptureNoTruncation(t *testing.T) {
 }
 
 // TestStreamCaptureBackstopMarked: once the (test-shrunk)
-// capture.MaxStreamFileBytes cap is hit, streamBodyTruncated flips true, the
+// capture.MaxStreamFileBytes cap is hit, the capture is marked truncated, the
 // file stops growing past the cap, and the caller's own stream still
 // completes normally — the backstop only stops the disk audit copy, never
 // the client-facing stream.
@@ -674,7 +674,7 @@ func TestANewAttemptReopensTheCaptureFileAndAppends(t *testing.T) {
 	}
 }
 
-// refusingCommitWriter stands in for the response object this pump will be
+// A commit-refusing writer stands in for the response object this pump will be
 // handed once the kernel owns delivery: one that knows whether the response has
 // already been committed, and says no when it has.
 // TestARefusedCommitEndsTheRequestInsteadOfTryingAnotherProvider pins the one

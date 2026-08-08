@@ -822,7 +822,7 @@ func writeInstallLayout(t *testing.T, configBody string) (appHome, exe string) {
 	return appHome, exe
 }
 
-// evalSymlinks resolves path for comparison against a resolvePath result, which
+// evalSymlinks resolves path for comparison against the config path resolution, which
 // follows the executable symlink and so returns a fully resolved path.
 func evalSymlinks(t *testing.T, path string) string {
 	t.Helper()

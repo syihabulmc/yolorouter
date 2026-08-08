@@ -52,7 +52,7 @@ func (rc *Exchange) SetBody(data []byte) {
 // SetResponseBody implements protocols.UpstreamBuffer for the non-streaming
 // IR relay path: it records the caller-facing (post-IR-encode) response
 // bytes actually written to the client, mirroring how the same-protocol path
-// populates rc.responseBody.
+// populates the response-body capture.
 func (rc *Exchange) SetResponseBody(data []byte) {
 	rc.bodies.SetResponse(data)
 }
@@ -64,7 +64,7 @@ func (rc *Exchange) SetResponseBody(data []byte) {
 // stale earlier-candidate error body would be persisted as this (successful)
 // request's upstream/response body. Only the success path re-populates them
 // afterward (or, for a stream request, leaves them empty — the sent SSE is
-// captured to streamBodyFile instead).
+// captured to the stream capture file instead).
 func (rc *Exchange) clearResponseBodies() {
 	rc.bodies.ClearResponses()
 }

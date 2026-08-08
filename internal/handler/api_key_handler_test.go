@@ -60,7 +60,7 @@ func postAPIKey(t *testing.T, r *gin.Engine, body map[string]any) *httptest.Resp
 // (allow_all_models=false) must name at least one model, while an all-models
 // key legitimately carries no allowlist. gin's required_without only checks the
 // slice is non-nil, so an explicit empty [] must be caught by
-// validateCustomAllowlist instead.
+// the service layer's model-scope validation instead.
 func TestPostAPIKeyModelScopeContract(t *testing.T) {
 	cases := []struct {
 		name string

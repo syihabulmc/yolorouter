@@ -78,7 +78,7 @@ func TestWriteClaudeError_StashesResponseBody(t *testing.T) {
 		t.Fatal("rc.ResponseBody() was not stashed")
 	}
 	if string(rc.ResponseBody()) != w.Body.String() {
-		t.Errorf("rc.responseBody = %s, want it to equal the sent body %s", rc.ResponseBody(), w.Body.String())
+		t.Errorf("ResponseBody() = %s, want it to equal the sent body %s", rc.ResponseBody(), w.Body.String())
 	}
 }
 

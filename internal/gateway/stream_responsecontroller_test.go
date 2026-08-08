@@ -9,7 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// sentinelFlushError is returned by the innermost test writer's FlushError,
+// errSentinelFlush is returned by the innermost test writer's FlushError,
 // proving whether a caller can discover FlushError through gin's
 // responseWriter wrapper.
 var errSentinelFlush = errors.New("sentinel flush error from inner writer")

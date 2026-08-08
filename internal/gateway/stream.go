@@ -395,7 +395,7 @@ func isClientWriteError(err error) bool {
 //
 // Calling it twice for one attempt keeps the first file rather than opening a
 // second one. Two callers is the state of a half-finished move of this
-// decision, and the alternative — overwriting rc.streamBodyFile — drops the
+// decision, and the alternative — overwriting the capture handle — drops the
 // only reference to a descriptor nothing will ever close. Re-entry BETWEEN
 // attempts is different and still opens: the previous attempt's file was
 // closed on its way out, and O_APPEND is what lets a failover keep writing

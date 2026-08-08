@@ -1040,7 +1040,7 @@ func TestRelayClaudeMalformedBodyRejectedBeforeCandidateLoop(t *testing.T) {
 	// The audit trail must record the Claude envelope actually sent, not the
 	// OpenAI-shaped one.
 	if !bytes.Contains(captured.ResponseBody(), []byte(`"type":"error"`)) {
-		t.Errorf("rc.responseBody = %s, want the Claude error envelope stashed for audit", captured.ResponseBody())
+		t.Errorf("ResponseBody() = %s, want the Claude error envelope stashed for audit", captured.ResponseBody())
 	}
 	if len(captured.UpstreamRequestBody()) != 0 || len(captured.UpstreamResponseBody()) != 0 {
 		t.Errorf("expected empty upstream_* (candidate loop never entered), got request=%q response=%q",
@@ -1343,7 +1343,7 @@ func TestCompressTriggersAcrossProtocols(t *testing.T) {
 				t.Error("rc.compressEnabled = false, want true")
 			}
 			if captured.CompressedRequestBody() == nil {
-				t.Fatal("rc.requestBodyCompressed is nil, compression did not produce a body")
+				t.Fatal("CompressedRequestBody() is nil, compression did not produce a body")
 			}
 			if len(captured.CompressedRequestBody()) >= len(origBody) {
 				t.Errorf("compressed body (%d bytes) is not shorter than original (%d bytes)",
@@ -1364,7 +1364,7 @@ func TestCompressTriggersAcrossProtocols(t *testing.T) {
 
 // TestCompressSkipsNoLiveZone: compression is enabled but the body has no
 // live-zone blocks (last message is assistant — no user/tool text after it).
-// The engine returns Skipped=NoLiveZone, rc.requestBodyCompressed stays nil,
+// The engine returns Skipped=NoLiveZone, the compressed request body stays unset,
 // and the request proceeds with the original body.
 func TestCompressSkipsNoLiveZone(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -1450,7 +1450,7 @@ func TestCompressDisabledBySwitch(t *testing.T) {
 
 // TestCompressNonChatEndpointNotCompressed: a path whose IsChatEndpoint is
 // false (Gemini countTokens) is not compressed even when CompressEnabled is
-// true. rc.requestBodyCompressed stays nil and no skip reason is recorded
+// true. the compressed request body stays unset and no skip reason is recorded
 // (the gate was never entered).
 func TestCompressNonChatEndpointNotCompressed(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)

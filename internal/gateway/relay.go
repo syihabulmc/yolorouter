@@ -262,7 +262,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	rc.isChatEndpoint = IsChatEndpoint(rc.ingressPath)
 	// Put rc on the gin context so WriteOpenAIError*
 	// (called from many exit paths below, and potentially from further down
-	// the chain) can stash the local error JSON into rc.responseBody without
+	// the chain) can stash the local error JSON into the response-body capture without
 	// every call site threading an *Exchange parameter through.
 	c.Set(relayContextKey, rc)
 	// Capture the caller's request headers once at entry (masked
@@ -385,7 +385,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// compressed ones. Safe in this order: the engine leaves a body it cannot
 	// parse untouched, so an invalid request is still rejected by the
 	// validation below rather than slipping past a compressor that skipped it.
-	// rc.requestBody keeps what the caller actually sent.
+	// the captured request body keeps what the caller actually sent.
 	admitBody := body
 	if rc.compressEnabled && rc.isChatEndpoint {
 		opts := compress.DefaultOptions()
@@ -1077,7 +1077,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	// Error bodies are small; cap at 1MiB — beyond that is
 	// truncation of an error diagnostic, not a response body, and 1MiB is
 	// ample for debugging. Unconditionally overwritten (even when empty) so
-	// this matches rc.upstreamRequestBody's "last attempt wins" rule above —
+	// this matches the upstream request capture's "last attempt wins" rule above —
 	// an empty errBody from THIS attempt must clear out a stale non-empty body
 	// left by an earlier failed candidate, not leave it looking current.
 	// A subsequent SUCCESSFUL stream candidate clears it entirely.

@@ -12,7 +12,7 @@ import (
 // relayContextKey is the gin.Context key Handle stores the in-flight
 // Exchange under (relay.go: c.Set(relayContextKey, rc)), so
 // WriteOpenAIError* can stash the local error JSON it is about to return
-// into rc.responseBody without threading an
+// into the response-body capture without threading an
 // *Exchange parameter through every call site. Absent on paths that
 // never call Handle (e.g. unit tests, or middleware.APIKeyAuth's own 401s
 // before Handle ever runs) — stashLocalErrorBody is then a no-op.

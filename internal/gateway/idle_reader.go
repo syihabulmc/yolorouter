@@ -112,7 +112,7 @@ const errorBodyBudget = 10 * time.Second
 //
 // A retryable 503/429 response that flushes the status header but then holds
 // the chunked body open without emitting a single byte would otherwise block
-// readErrorBody / readUpstreamErrorBody for the full firstByteTimeout (600s
+// the bounded error-body reads for the full firstByteTimeout (600s
 // default) before the IdleReadCloser surfaces ErrFirstByteTimeout — burning
 // 10 minutes per failed candidate and neutralizing the retry/failover loop's
 // responsiveness. Error bodies are small by definition (a JSON error envelope
@@ -165,7 +165,7 @@ func firstByteBudgetFor(statusCode int, firstByteTimeout time.Duration) time.Dur
 // NewIdleReadCloser wraps body with two-phase idle enforcement.
 //
 // Both firstByteTimeout and idle must be > 0 (the config layer enforces this
-// via validateConfig). ctx carries cancellation / deadline that will surface
+// via validate). ctx carries cancellation / deadline that will surface
 // as ctx.Err() from Read.
 //
 // The timer starts immediately so the firstByte budget measures wall-clock

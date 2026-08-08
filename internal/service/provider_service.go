@@ -377,8 +377,8 @@ func (s *ProviderService) CreateProvider(ctx context.Context, input CreateProvid
 // HTTP-originated request before it reaches here, so this only fires for
 // a non-HTTP caller of these exported service methods; kept as
 // defense-in-depth for that reason.
-// This used to wrap errcode.ErrProviderTestFailed purely so
-// writeProviderServiceError's switch would have a matching case — but "key
+// This used to wrap errcode.ErrProviderTestFailed purely so the handler's
+// error mapping would have a matching case — but "key
 // too short" is not "the connection test failed", a misleading
 // classification if this ever actually fires. Uses its own sentinel now.
 func validatePlaintextLength(plaintext string) error {
@@ -716,7 +716,7 @@ func (s *ProviderService) runNewPlaintextTestAndCommit(ctx context.Context, prov
 	// must lose to it rather than silently overwrite it.
 	// Only fire the write when it can actually change something: every
 	// caller already forces Disabled before running the test, so a
-	// finalStatus of Disabled would just be a no-op UPDATE (WHERE
+	// final status of Disabled would just be a no-op UPDATE (WHERE
 	// management_status = Disabled SET management_status = Disabled) —
 	// wasted regardless of whether it applies, since a mismatched row
 	// (concurrent status change already flipped it) leaves the same
