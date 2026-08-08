@@ -403,4 +403,8 @@ func PostProviderKeysTestAll(svc *service.ProviderService) gin.HandlerFunc {
 	}
 }
 
-func timeNow() time.Time { return time.Now().UTC() }
+// timeNow is the handler layer's single clock. It is a package variable so
+// tests can pin it: every service call that involves a time window or a
+// stamped mutation receives this value explicitly, and nothing below the
+// handler reads the wall clock for query windowing.
+var timeNow = func() time.Time { return time.Now().UTC() }

@@ -193,19 +193,14 @@ func GetStreamBodyPathByRequestID(db *gorm.DB, requestID string) (string, error)
 	return paths[0], nil
 }
 
-// TodayBounds returns the [start, end) UTC timestamps covering the current
-// calendar day in the given location ("today" is by the system's
-// current timezone). created_at is stored UTC, so callers compare
-// created_at >= start AND created_at < end. end is exclusive.
-func TodayBounds(loc *time.Location) (start, end time.Time) {
-	now := time.Now().In(loc)
-	startLocal := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
-	return startLocal.UTC(), startLocal.AddDate(0, 0, 1).UTC()
-}
-
 // DayBoundsAt returns the [start, end) UTC timestamps for the calendar day
-// containing t in the given location. Used by the trend / time-bucket queries
-// that walk back N days from today.
+// containing t in the given location. created_at is stored UTC, so callers
+// compare created_at >= start AND created_at < end; end is exclusive.
+//
+// This is the single home for day-window arithmetic. Callers that mean
+// "today" pass their own clock reading — the repository layer never reads
+// the wall clock for a query window, so day-boundary behaviour stays
+// deterministic under test with a pinned time.
 func DayBoundsAt(loc *time.Location, t time.Time) (start, end time.Time) {
 	local := t.In(loc)
 	startLocal := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)

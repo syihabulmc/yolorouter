@@ -57,7 +57,10 @@ func TestAggregateCompressDailySeriesGapFillNoDroppedBucket(t *testing.T) {
 	end := time.Date(2026, 7, 22, 10, 0, 0, 0, loc)
 	f := &RequestLogFilter{StartTime: &start, EndTime: &end}
 
-	rows, err := AggregateCompressDailySeries(context.Background(), db, f, loc)
+	// now is deliberately far from the filter window: an explicit
+	// [start, end) must win over the clock, so if the implementation ever
+	// let now leak into the windowing, every bucket assertion below fails.
+	rows, err := AggregateCompressDailySeries(context.Background(), db, f, loc, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("AggregateCompressDailySeries: %v", err)
 	}
@@ -95,7 +98,10 @@ func TestAggregateCompressDailySeriesSumEqualsTotals(t *testing.T) {
 	end := time.Date(2026, 7, 23, 0, 0, 0, 0, loc)
 	f := &RequestLogFilter{StartTime: &start, EndTime: &end}
 
-	rows, err := AggregateCompressDailySeries(context.Background(), db, f, loc)
+	// now is deliberately far from the filter window: an explicit
+	// [start, end) must win over the clock, so if the implementation ever
+	// let now leak into the windowing, every bucket assertion below fails.
+	rows, err := AggregateCompressDailySeries(context.Background(), db, f, loc, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("AggregateCompressDailySeries: %v", err)
 	}
@@ -130,7 +136,10 @@ func TestAggregateCompressDailySeriesNonUTCOffset(t *testing.T) {
 	end := time.Date(2026, 7, 23, 0, 0, 0, 0, loc)
 	f := &RequestLogFilter{StartTime: &start, EndTime: &end}
 
-	rows, err := AggregateCompressDailySeries(context.Background(), db, f, loc)
+	// now is deliberately far from the filter window: an explicit
+	// [start, end) must win over the clock, so if the implementation ever
+	// let now leak into the windowing, every bucket assertion below fails.
+	rows, err := AggregateCompressDailySeries(context.Background(), db, f, loc, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("AggregateCompressDailySeries: %v", err)
 	}
@@ -169,7 +178,10 @@ func TestAggregateCompressDailySeriesDSTBoundary(t *testing.T) {
 
 	// No data — just verify gap-fill produces 4 buckets (7, 8, 9, 10)
 	// without dropping any.
-	rows, err := AggregateCompressDailySeries(context.Background(), db, f, loc)
+	// now is deliberately far from the filter window: an explicit
+	// [start, end) must win over the clock, so if the implementation ever
+	// let now leak into the windowing, every bucket assertion below fails.
+	rows, err := AggregateCompressDailySeries(context.Background(), db, f, loc, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("AggregateCompressDailySeries: %v", err)
 	}

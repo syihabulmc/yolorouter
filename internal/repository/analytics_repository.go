@@ -312,12 +312,12 @@ func resolveOwnerLabels(db *gorm.DB, rows []CallerReportRow) error {
 //
 // Range defaults to [today end, today end - 7 days) when the filter doesn't
 // carry start/end. day bucket caps at 90 days, hour at 30 days.
-func AggregateByTime(db *gorm.DB, f *RequestLogFilter, loc *time.Location, bucket string) ([]TimeReportRow, error) {
+func AggregateByTime(db *gorm.DB, f *RequestLogFilter, loc *time.Location, bucket string, now time.Time) ([]TimeReportRow, error) {
 	layout, advance, err := timeBucketConfig(bucket)
 	if err != nil {
 		return nil, err
 	}
-	end, start := ResolveTimeRange(f, loc, bucket)
+	end, start := ResolveTimeRange(f, loc, bucket, now)
 
 	cursor := start.In(loc)
 	endLocal := end.In(loc)
@@ -729,9 +729,9 @@ func dayBucketExpr(db *gorm.DB, loc *time.Location, offsetSec int) string {
 // against a Go-side walk of [start, end) — missing days surface as zero rows,
 // keeping the chart x-axis continuous. Output is sorted ascending (oldest
 // first) for a left-to-right trend.
-func AggregateCompressDailySeries(ctx context.Context, db *gorm.DB, f *RequestLogFilter, loc *time.Location) ([]CompressDailySeriesRow, error) {
+func AggregateCompressDailySeries(ctx context.Context, db *gorm.DB, f *RequestLogFilter, loc *time.Location, now time.Time) ([]CompressDailySeriesRow, error) {
 	layout := "2006-01-02"
-	end, start := ResolveTimeRange(f, loc, TimeBucketDay)
+	end, start := ResolveTimeRange(f, loc, TimeBucketDay, now)
 
 	byDay := make(map[string]CompressDailySeriesRow)
 
@@ -908,11 +908,11 @@ type CompressorHitRow struct {
 // overview cards and the time-dimension report on the exact same window
 // (otherwise the time report silently truncates an oversized custom range
 // while the overview aggregates the full range).
-func ResolveTimeRange(f *RequestLogFilter, loc *time.Location, bucket string) (end, start time.Time) {
+func ResolveTimeRange(f *RequestLogFilter, loc *time.Location, bucket string, now time.Time) (end, start time.Time) {
 	if f.EndTime != nil {
 		end = *f.EndTime
 	} else {
-		_, e := TodayBounds(loc)
+		_, e := DayBoundsAt(loc, now)
 		end = e
 	}
 	if f.StartTime != nil {

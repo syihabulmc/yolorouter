@@ -579,7 +579,9 @@ func TestAggregateByTimeWalksDayBucketsInUTC(t *testing.T) {
 	endUTC := end
 	f := &repository.RequestLogFilter{StartTime: &startUTC, EndTime: &endUTC}
 
-	rows, err := repository.AggregateByTime(db, f, loc, repository.TimeBucketDay)
+	// now is deliberately far from the explicit filter window — if it ever
+	// leaked into the windowing, the bucket assertions below would fail.
+	rows, err := repository.AggregateByTime(db, f, loc, repository.TimeBucketDay, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("AggregateByTime: %v", err)
 	}
@@ -605,7 +607,7 @@ func TestAggregateByTimeWalksDayBucketsInUTC(t *testing.T) {
 
 func TestAggregateByTimeRejectsInvalidBucket(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	_, err := repository.AggregateByTime(db, &repository.RequestLogFilter{}, time.UTC, "century")
+	_, err := repository.AggregateByTime(db, &repository.RequestLogFilter{}, time.UTC, "century", time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	if !errors.Is(err, repository.ErrInvalidBucket) {
 		t.Fatalf("expected ErrInvalidBucket, got %v", err)
 	}

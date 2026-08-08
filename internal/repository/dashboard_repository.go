@@ -68,20 +68,6 @@ type TrendPoint struct {
 	CostMicros int64  `json:"cost_micros"`
 }
 
-// GetTrend returns per-day totals for the `days` calendar days ending today
-// (today inclusive, oldest first). Delegates to GetTrendRange after computing
-// the [start, end) window from the day count.
-func GetTrend(db *gorm.DB, days int, loc *time.Location) ([]TrendPoint, error) {
-	if days < 1 {
-		days = 1
-	}
-	now := time.Now().In(loc)
-	startDay := now.AddDate(0, 0, -(days - 1))
-	rangeStart := time.Date(startDay.Year(), startDay.Month(), startDay.Day(), 0, 0, 0, 0, loc).UTC()
-	rangeEnd := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, 1).UTC()
-	return GetTrendRange(db, rangeStart, rangeEnd, loc)
-}
-
 // GetTrendRange returns per-day totals for an arbitrary [rangeStart, rangeEnd)
 // window in a single GROUP BY query, then gap-fills missing days with zeros
 // so the frontend chart x-axis is continuous. Uses dayBucketExpr for

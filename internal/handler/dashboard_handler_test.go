@@ -122,8 +122,26 @@ func insertRequestLog(t *testing.T, db *gorm.DB, ts time.Time, mut func(*model.R
 	}
 }
 
+// pinDashboardClock pins the handler clock to a fixed instant for the
+// duration of one test. The dashboard tests seed rows a few minutes before
+// "now" and assert they land in today's window; with the real clock those
+// rows fall into yesterday when the test runs just after local midnight,
+// so every day-window assertion here runs against a pinned instant instead.
+func pinDashboardClock(t *testing.T, fixed time.Time) {
+	t.Helper()
+	prev := timeNow
+	timeNow = func() time.Time { return fixed.UTC() }
+	t.Cleanup(func() { timeNow = prev })
+}
+
+// dashboardTestNow is a mid-day local instant: far from both midnights, so
+// the relative seed offsets the tests use (minutes) can never cross a day
+// boundary. The date itself is arbitrary — each test gets a fresh DB.
+var dashboardTestNow = time.Date(2026, 5, 15, 12, 30, 0, 0, time.Local)
+
 func TestGetDashboardReturnsZeroEnvelopeOnFreshDB(t *testing.T) {
 	r, _ := newDashboardTestRouter(t)
+	pinDashboardClock(t, dashboardTestNow)
 
 	w, env := doJSON(t, r, http.MethodGet, "/api/admin/dashboard", nil, nil)
 	if w.Code != http.StatusOK {
@@ -145,7 +163,7 @@ func TestGetDashboardReturnsZeroEnvelopeOnFreshDB(t *testing.T) {
 		t.Fatalf("expected %d trend points, got %d", service.DashboardTrendDays, len(body.Trend))
 	}
 	// Trend must be oldest-first, ending today, contiguous days.
-	wantToday := time.Now().In(time.Local).Format("2006-01-02")
+	wantToday := dashboardTestNow.Format("2006-01-02")
 	last := body.Trend[len(body.Trend)-1]
 	if last.Date != wantToday {
 		t.Fatalf("expected last trend point to be today %q, got %q", wantToday, last.Date)
@@ -177,8 +195,9 @@ func TestGetDashboardReturnsZeroEnvelopeOnFreshDB(t *testing.T) {
 func TestGetDashboardTodayMetricsCountRowsInLocalDay(t *testing.T) {
 	r, db := newDashboardTestRouter(t)
 	loc := time.Local
-	start, end := repository.TodayBounds(loc)
-	now := time.Now().In(loc)
+	pinDashboardClock(t, dashboardTestNow)
+	start, end := repository.DayBoundsAt(loc, dashboardTestNow)
+	now := dashboardTestNow
 
 	// Two clean successes (200, cost_known=true), one failure (500, 0 cost),
 	// one unknown-cost success (200, cost_known=false, cost_micros=0), one
@@ -277,7 +296,8 @@ func TestGetDashboardTodayMetricsCountRowsInLocalDay(t *testing.T) {
 func TestGetDashboardTrendIncludesTodayRowOnly(t *testing.T) {
 	r, db := newDashboardTestRouter(t)
 	loc := time.Local
-	now := time.Now().In(loc)
+	pinDashboardClock(t, dashboardTestNow)
+	now := dashboardTestNow
 
 	// Two rows today, nothing on prior days.
 	insertRequestLog(t, db, now.Add(-10*time.Minute), func(r *model.RequestLog) {
@@ -353,8 +373,8 @@ func TestGetDashboardTrendIncludesTodayRowOnly(t *testing.T) {
 
 func TestGetDashboardTopCallersRankedByCost(t *testing.T) {
 	r, db := newDashboardTestRouter(t)
-	loc := time.Local
-	now := time.Now().In(loc)
+	pinDashboardClock(t, dashboardTestNow)
+	now := dashboardTestNow
 
 	// Create three api_keys. The dashboard's top-callers list should rank
 	// them by cost_micros DESC regardless of how many requests each made —
@@ -428,7 +448,8 @@ func TestGetDashboardTopCallersRankedByCost(t *testing.T) {
 
 func TestGetDashboardTopCallersExcludesRowsWithoutAPIKey(t *testing.T) {
 	r, db := newDashboardTestRouter(t)
-	now := time.Now().In(time.Local)
+	pinDashboardClock(t, dashboardTestNow)
+	now := dashboardTestNow
 
 	// A high-cost row with NULL api_key_id (e.g. failed auth) must NOT
 	// surface in the top-callers list — there's no caller identity to show.
@@ -673,5 +694,48 @@ func TestGetDashboardReturns500WhenDBFails(t *testing.T) {
 	}
 	if env.Code != errcode.InternalError {
 		t.Fatalf("expected code %d, got %d", errcode.InternalError, env.Code)
+	}
+}
+
+// TestGetDashboardTodayWindowJustAfterLocalMidnight pins the clock 38 seconds
+// past local midnight: a row from five minutes ago belongs to YESTERDAY and
+// must not count, while a row from ten seconds ago is today's only call. This
+// is the exact configuration under which a window derived from a wall-clock
+// read inside the query layer went wrong — the handler's pinned clock must be
+// the single time source for the day boundary.
+func TestGetDashboardTodayWindowJustAfterLocalMidnight(t *testing.T) {
+	r, db := newDashboardTestRouter(t)
+	justPastMidnight := time.Date(2026, 5, 15, 0, 0, 38, 0, time.Local)
+	pinDashboardClock(t, justPastMidnight)
+
+	// 23:55:38 yesterday — outside today's window.
+	insertRequestLog(t, db, justPastMidnight.Add(-5*time.Minute), func(r *model.RequestLog) {
+		r.CostMicros = 9999
+		r.CostKnown = true
+	})
+	// 00:00:28 today — the only row inside the window.
+	insertRequestLog(t, db, justPastMidnight.Add(-10*time.Second), func(r *model.RequestLog) {
+		r.CostMicros = 55
+		r.CostKnown = true
+	})
+
+	w, env := doJSON(t, r, http.MethodGet, "/api/admin/dashboard", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var body dashboardBody
+	if err := json.Unmarshal(env.Data, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.Today.Calls != 1 {
+		t.Fatalf("Calls: want 1 (yesterday's row must not leak in), got %d", body.Today.Calls)
+	}
+	if body.Today.TotalCostMicros != 55 {
+		t.Fatalf("TotalCostMicros: want 55, got %d", body.Today.TotalCostMicros)
+	}
+	// The trend's last point is today as seen by the pinned clock, holding
+	// the trend window to the same time source as the KPI window.
+	if got := body.Trend[len(body.Trend)-1].Date; got != justPastMidnight.Format("2006-01-02") {
+		t.Fatalf("trend last date: want %q, got %q", justPastMidnight.Format("2006-01-02"), got)
 	}
 }

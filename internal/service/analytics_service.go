@@ -155,10 +155,10 @@ func NewAnalyticsService(db *gorm.DB) *AnalyticsService {
 // GetOverview returns the aggregate MetricTotals for the filter.
 // Reuses AggregateRequestLogMetrics so the overview's success-rate
 // definition stays identical to the dashboard's today-card.
-func (s *AnalyticsService) GetOverview(filter AnalyticsFilter, bucket string) (*OverviewRow, error) {
+func (s *AnalyticsService) GetOverview(filter AnalyticsFilter, bucket string, now time.Time) (*OverviewRow, error) {
 	// Clamp the window on the same bucket cap the report uses, so the overview
 	// cards and the time-dimension report aggregate the exact same range.
-	filter = resolveEffectiveRange(filter, bucket)
+	filter = resolveEffectiveRange(filter, bucket, now)
 	m, err := repository.AggregateRequestLogMetrics(s.db, toRepoFilter(filter))
 	if err != nil {
 		return nil, err
@@ -182,8 +182,8 @@ func (s *AnalyticsService) GetOverview(filter AnalyticsFilter, bucket string) (*
 // (empty bucket defaults to "day"). Returns ErrInvalidDimension for an
 // unrecognized dimension and repository.ErrInvalidBucket for an unrecognized
 // bucket; the handler maps both to 400.
-func (s *AnalyticsService) GetReport(dimension, bucket string, filter AnalyticsFilter) (*ReportResult, error) {
-	rows, err := s.runReport(dimension, bucket, filter)
+func (s *AnalyticsService) GetReport(dimension, bucket string, filter AnalyticsFilter, now time.Time) (*ReportResult, error) {
+	rows, err := s.runReport(dimension, bucket, filter, now)
 	if err != nil {
 		return nil, err
 	}
@@ -202,8 +202,8 @@ func (s *AnalyticsService) GetReport(dimension, bucket string, filter AnalyticsF
 // (same pattern as request_log's BuildExportRows + WriteCSVRows): a build
 // failure here returns a JSON envelope, not a truncated CSV reported as
 // success.
-func (s *AnalyticsService) BuildCSVRecords(dimension, bucket string, filter AnalyticsFilter) ([]string, [][]string, error) {
-	rows, err := s.runReport(dimension, bucket, filter)
+func (s *AnalyticsService) BuildCSVRecords(dimension, bucket string, filter AnalyticsFilter, now time.Time) ([]string, [][]string, error) {
+	rows, err := s.runReport(dimension, bucket, filter, now)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -213,8 +213,8 @@ func (s *AnalyticsService) BuildCSVRecords(dimension, bucket string, filter Anal
 // ExportCSV is a thin wrapper retained for tests / direct callers; production
 // handlers use BuildCSVRecords + csvutil.WriteCSV so a build failure never
 // reaches the wire.
-func (s *AnalyticsService) ExportCSV(dimension, bucket string, filter AnalyticsFilter, w io.Writer) error {
-	headers, records, err := s.BuildCSVRecords(dimension, bucket, filter)
+func (s *AnalyticsService) ExportCSV(dimension, bucket string, filter AnalyticsFilter, w io.Writer, now time.Time) error {
+	headers, records, err := s.BuildCSVRecords(dimension, bucket, filter, now)
 	if err != nil {
 		return err
 	}
@@ -224,11 +224,11 @@ func (s *AnalyticsService) ExportCSV(dimension, bucket string, filter AnalyticsF
 // runReport dispatches to the right repository function and returns the
 // typed row slice (caller-facing type chosen by dimension). The switch is
 // the single point that maps dimension → row type.
-func (s *AnalyticsService) runReport(dimension, bucket string, filter AnalyticsFilter) (interface{}, error) {
+func (s *AnalyticsService) runReport(dimension, bucket string, filter AnalyticsFilter, now time.Time) (interface{}, error) {
 	// Resolve the window once for every dimension (day cap by default; the
 	// time dimension uses the caller's bucket cap) so overview, model/
 	// provider/caller, and time reports all see the same [start, end).
-	filter = resolveEffectiveRange(filter, bucketForDimension(dimension, bucket))
+	filter = resolveEffectiveRange(filter, bucketForDimension(dimension, bucket), now)
 	rf := toRepoFilter(filter)
 	switch dimension {
 	case DimensionModel:
@@ -238,7 +238,7 @@ func (s *AnalyticsService) runReport(dimension, bucket string, filter AnalyticsF
 	case DimensionCaller:
 		return repository.AggregateByCaller(s.db, rf)
 	case DimensionTime:
-		return repository.AggregateByTime(s.db, rf, filter.location(), bucket)
+		return repository.AggregateByTime(s.db, rf, filter.location(), bucket, now)
 	}
 	return nil, ErrInvalidDimension
 }
@@ -264,9 +264,9 @@ func toRepoFilter(f AnalyticsFilter) *repository.RequestLogFilter {
 // otherwise the time report would silently truncate an oversized custom range
 // while the overview / model / provider / caller dimensions kept the full
 // range. bucket="" uses the day-bucket cap.
-func resolveEffectiveRange(filter AnalyticsFilter, bucket string) AnalyticsFilter {
+func resolveEffectiveRange(filter AnalyticsFilter, bucket string, now time.Time) AnalyticsFilter {
 	rf := toRepoFilter(filter)
-	end, start := repository.ResolveTimeRange(rf, filter.location(), bucket)
+	end, start := repository.ResolveTimeRange(rf, filter.location(), bucket, now)
 	filter.StartTime = &start
 	filter.EndTime = &end
 	return filter
@@ -427,7 +427,7 @@ const MaxCompressTopN = 20
 // cancels in-flight SQL. Every slice in the result is non-nil (empty [] on
 // the wire, never JSON null) so the frontend can call .map / .length without
 // null-checking.
-func (s *AnalyticsService) GetCompressStats(ctx context.Context, filter AnalyticsFilter, topN int) (*CompressStatsResult, error) {
+func (s *AnalyticsService) GetCompressStats(ctx context.Context, filter AnalyticsFilter, topN int, now time.Time) (*CompressStatsResult, error) {
 	if topN <= 0 {
 		topN = DefaultCompressTopN
 	}
@@ -436,7 +436,7 @@ func (s *AnalyticsService) GetCompressStats(ctx context.Context, filter Analytic
 	}
 	// Clamp on the day-bucket cap so the daily series walk and the totals
 	// share the exact same [start, end) window.
-	filter = resolveEffectiveRange(filter, BucketDay)
+	filter = resolveEffectiveRange(filter, BucketDay, now)
 	rf := toRepoFilter(filter)
 
 	totals, err := repository.AggregateCompressTotals(ctx, s.db, rf)
@@ -463,7 +463,7 @@ func (s *AnalyticsService) GetCompressStats(ctx context.Context, filter Analytic
 	if err != nil {
 		return nil, err
 	}
-	daily, err := repository.AggregateCompressDailySeries(ctx, s.db, rf, filter.location())
+	daily, err := repository.AggregateCompressDailySeries(ctx, s.db, rf, filter.location(), now)
 	if err != nil {
 		return nil, err
 	}

@@ -49,7 +49,7 @@ func GetDashboard(svc *service.DashboardService) gin.HandlerFunc {
 			response.ParamError(c, "start must be before end")
 			return
 		}
-		data, err := svc.GetDashboard(loc, rangeStart, rangeEnd)
+		data, err := svc.GetDashboard(loc, rangeStart, rangeEnd, timeNow())
 		if err != nil {
 			response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
 			return

@@ -63,7 +63,7 @@ func GetAnalyticsOverview(svc *service.AnalyticsService) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		data, err := svc.GetOverview(filter, bucket)
+		data, err := svc.GetOverview(filter, bucket, timeNow())
 		if err != nil {
 			response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
 			return
@@ -90,7 +90,7 @@ func GetAnalyticsReport(svc *service.AnalyticsService) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		result, err := svc.GetReport(dimension, bucket, filter)
+		result, err := svc.GetReport(dimension, bucket, filter, timeNow())
 		if err != nil {
 			writeServiceError(c, err)
 			return
@@ -125,7 +125,7 @@ func ExportAnalyticsCSV(svc *service.AnalyticsService) gin.HandlerFunc {
 		// Build BEFORE committing HTTP 200 / BOM so a build failure (bad
 		// dimension/bucket, DB error) returns a JSON envelope, not a truncated
 		// CSV reported as success (same pattern as request-log export).
-		headers, records, err := svc.BuildCSVRecords(dimension, bucket, filter)
+		headers, records, err := svc.BuildCSVRecords(dimension, bucket, filter, timeNow())
 		if err != nil {
 			writeServiceError(c, err)
 			return
@@ -156,7 +156,7 @@ func GetCompressStats(svc *service.AnalyticsService) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		result, err := svc.GetCompressStats(c.Request.Context(), filter, topN)
+		result, err := svc.GetCompressStats(c.Request.Context(), filter, topN, timeNow())
 		if err != nil {
 			writeServiceError(c, err)
 			return

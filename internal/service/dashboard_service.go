@@ -81,7 +81,11 @@ type RecentFailureView struct {
 // of the time range (they reflect current state, not a historical window).
 // If any one section fails the whole call fails — the dashboard can't
 // meaningfully render with a missing section.
-func (s *DashboardService) GetDashboard(loc *time.Location, rangeStart, rangeEnd *time.Time) (*DashboardData, error) {
+//
+// now is the caller's clock reading; "today" and the trend window are both
+// derived from it, so a request that straddles local midnight still sees one
+// consistent day, and tests can pin the boundary exactly.
+func (s *DashboardService) GetDashboard(loc *time.Location, rangeStart, rangeEnd *time.Time, now time.Time) (*DashboardData, error) {
 	if loc == nil {
 		loc = time.Local
 	}
@@ -101,8 +105,12 @@ func (s *DashboardService) GetDashboard(loc *time.Location, rangeStart, rangeEnd
 		}
 		trend, err = repository.GetTrendRange(s.db, kpiStart, kpiEnd, loc)
 	} else {
-		kpiStart, kpiEnd = repository.TodayBounds(loc)
-		trend, err = repository.GetTrend(s.db, DashboardTrendDays, loc)
+		kpiStart, kpiEnd = repository.DayBoundsAt(loc, now)
+		// Trend window: DashboardTrendDays calendar days ending today,
+		// today inclusive. Day arithmetic happens in loc so the window
+		// lands on local midnights across DST transitions.
+		trendStart, _ := repository.DayBoundsAt(loc, now.In(loc).AddDate(0, 0, -(DashboardTrendDays-1)))
+		trend, err = repository.GetTrendRange(s.db, trendStart, kpiEnd, loc)
 	}
 	if err != nil {
 		return nil, err
