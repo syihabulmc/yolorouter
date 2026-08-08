@@ -150,10 +150,6 @@ type UpstreamCapture interface {
 	// the delivery's response limit rather than growing without bound, and
 	// reports whether everything it was given was kept.
 	Upstream(p []byte) (kept bool)
-	// Truncated reports whether anything was dropped. The audit row needs this
-	// separately from the bytes: a body cut off at the limit and a body that
-	// was simply that long look identical once stored.
-	Truncated() bool
 }
 
 // FactSink is where a modality reports what it observed. It is the same sink
@@ -409,9 +405,6 @@ func (r *ginClientResponse) Flush() error {
 		return nil
 	}
 	room := r.limit - int64(len(r.sent))
-	if int64(len(r.pending)) > room {
-		r.rc.bodies.MarkClientTruncated()
-	}
 	if room > 0 {
 		switch {
 		case int64(len(r.pending)) > room:
@@ -461,7 +454,6 @@ type exchangeCapture struct {
 	// somebody outside wrote or cleared the field, and this capture has to
 	// defer rather than republish over them.
 	published int
-	truncated bool
 }
 
 // newCapture picks where this attempt's upstream bytes are kept, and opens the
@@ -509,18 +501,12 @@ func (e *exchangeCapture) Upstream(p []byte) bool {
 	}
 	room := e.limit - int64(len(e.buf))
 	if room <= 0 {
-		if len(p) > 0 {
-			e.truncated = true
-			e.rc.bodies.MarkUpstreamTruncated()
-		}
 		return false
 	}
 	kept := true
 	if int64(len(p)) > room {
 		p = p[:room]
 		kept = false
-		e.truncated = true
-		e.rc.bodies.MarkUpstreamTruncated()
 	}
 	// Copied, not aliased, and that is a contract rather than a habit: the
 	// streaming callers hand this a slice into a read buffer they reuse on the
@@ -535,8 +521,6 @@ func (e *exchangeCapture) Upstream(p []byte) bool {
 	e.published = len(e.buf)
 	return kept
 }
-
-func (e *exchangeCapture) Truncated() bool { return e.truncated }
 
 // droppedCapture is the upstream capture a progressive delivery gets: one that
 // keeps nothing.
@@ -554,8 +538,6 @@ func (e *exchangeCapture) Truncated() bool { return e.truncated }
 type droppedCapture struct{}
 
 func (droppedCapture) Upstream([]byte) bool { return true }
-
-func (droppedCapture) Truncated() bool { return false }
 
 // safeFetcher is the kernel's SecondaryFetcher.
 type safeFetcher struct {

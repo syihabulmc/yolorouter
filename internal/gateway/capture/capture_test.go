@@ -156,16 +156,14 @@ func TestBeginUpstreamAttemptClearsThePair(t *testing.T) {
 	}
 }
 
-// TestBeginDeliveryCaptureResetsTruncation: a fresh delivery capture starts
-// with a clean upstream slate — bytes and the truncation mark — or an attempt
-// that never produced a body would stand under the previous provider's
-// heading.
-func TestBeginDeliveryCaptureResetsTruncation(t *testing.T) {
+// TestBeginDeliveryCaptureStartsClean: a fresh delivery capture starts with a
+// clean upstream slate, or an attempt that never produced a body would stand
+// under the previous provider's heading.
+func TestBeginDeliveryCaptureStartsClean(t *testing.T) {
 	var b Bodies
 	b.SetUpstreamResponse([]byte("stale"))
-	b.MarkUpstreamTruncated()
 	b.BeginDeliveryCapture()
-	if b.UpstreamResponse() != nil || b.UpstreamTruncated() {
-		t.Fatalf("delivery capture started dirty: body=%q truncated=%v", b.UpstreamResponse(), b.UpstreamTruncated())
+	if b.UpstreamResponse() != nil {
+		t.Fatalf("delivery capture started dirty: body=%q", b.UpstreamResponse())
 	}
 }

@@ -64,30 +64,3 @@ func (t Timeline) All() []Entry {
 	}
 	return out
 }
-
-// OfAttempt returns the entries reported during one attempt.
-func (t Timeline) OfAttempt(n int) []Entry {
-	var out []Entry
-	for _, e := range t.All() {
-		if e.Attempt == n {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
-// Last returns the entries from the highest-numbered attempt that reported
-// anything.
-//
-// Terminal decisions read this rather than scanning the whole timeline for "did
-// any attempt ever see X". A chain that ends on a transport failure really is a
-// fault on our side of the wire, whatever an earlier candidate thought of the
-// payload — so only the final attempt's verdict may shape what the caller is
-// told.
-func (t Timeline) Last() []Entry {
-	if len(t.entries) == 0 {
-		return nil
-	}
-	last := t.entries[len(t.entries)-1].Attempt
-	return t.OfAttempt(last)
-}

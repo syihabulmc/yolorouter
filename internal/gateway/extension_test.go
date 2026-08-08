@@ -25,7 +25,7 @@ type stubObserver struct{}
 
 func (stubObserver) Name() string { return "stub" }
 
-func (stubObserver) ObserveUpstreamError(_ context.Context, _ fact.Attempt, up fact.Upstream, sink fact.Sink) {
+func (stubObserver) ObserveUpstreamError(_ context.Context, _ struct{}, up fact.Upstream, sink fact.Sink) {
 	sink.Report(fact.Fact{Kind: fact.KindPayloadRefused, Status: up.StatusCode})
 }
 
@@ -121,7 +121,7 @@ type refusingRewriter struct{}
 
 func (refusingRewriter) Name() string { return "refuser" }
 
-func (refusingRewriter) RewriteEgress(_ context.Context, _ fact.Attempt, _ protocols.ProtocolID, _ []byte, _ fact.Sink) ([]byte, error) {
+func (refusingRewriter) RewriteEgress(_ context.Context, _ struct{}, _ protocols.ProtocolID, _ []byte, _ fact.Sink) ([]byte, error) {
 	return nil, errors.New("cannot produce a usable body")
 }
 
@@ -131,7 +131,7 @@ type mutatingRewriter struct{ ran *bool }
 
 func (mutatingRewriter) Name() string { return "mutator" }
 
-func (m mutatingRewriter) RewriteEgress(_ context.Context, _ fact.Attempt, _ protocols.ProtocolID, body []byte, _ fact.Sink) ([]byte, error) {
+func (m mutatingRewriter) RewriteEgress(_ context.Context, _ struct{}, _ protocols.ProtocolID, body []byte, _ fact.Sink) ([]byte, error) {
 	*m.ran = true
 	return append(body, '!'), nil
 }
@@ -171,7 +171,7 @@ func TestRewriteEgressRefusalStopsAndReportsAVerdict(t *testing.T) {
 // at registration, not from the order the calls happened to be made in.
 func TestRewriteEgressRunsInStageOrder(t *testing.T) {
 	var order []string
-	rec := func(name string) EgressRewriterOf[fact.Attempt] { return orderingRewriter{name: name, log: &order} }
+	rec := func(name string) EgressRewriterOf[struct{}] { return orderingRewriter{name: name, log: &order} }
 
 	svc := &Service{}
 	// Registered late-stage first, on purpose.
@@ -192,7 +192,7 @@ type orderingRewriter struct {
 
 func (o orderingRewriter) Name() string { return o.name }
 
-func (o orderingRewriter) RewriteEgress(_ context.Context, _ fact.Attempt, _ protocols.ProtocolID, body []byte, _ fact.Sink) ([]byte, error) {
+func (o orderingRewriter) RewriteEgress(_ context.Context, _ struct{}, _ protocols.ProtocolID, body []byte, _ fact.Sink) ([]byte, error) {
 	*o.log = append(*o.log, o.name)
 	return body, nil
 }
@@ -218,7 +218,7 @@ type vandalObserver struct{}
 
 func (vandalObserver) Name() string { return "vandal" }
 
-func (vandalObserver) ObserveUpstreamError(_ context.Context, _ fact.Attempt, up fact.Upstream, _ fact.Sink) {
+func (vandalObserver) ObserveUpstreamError(_ context.Context, _ struct{}, up fact.Upstream, _ fact.Sink) {
 	if len(up.Body) > 0 {
 		up.Body[0] = 'X'
 	}
@@ -233,7 +233,7 @@ type witnessObserver struct {
 
 func (w *witnessObserver) Name() string { return "witness" }
 
-func (w *witnessObserver) ObserveUpstreamError(_ context.Context, _ fact.Attempt, up fact.Upstream, _ fact.Sink) {
+func (w *witnessObserver) ObserveUpstreamError(_ context.Context, _ struct{}, up fact.Upstream, _ fact.Sink) {
 	w.body = bytes.Clone(up.Body)
 	w.header = up.Header.Get("X-Tampered")
 }
@@ -279,7 +279,7 @@ type candidateRefusingRewriter struct{}
 
 func (candidateRefusingRewriter) Name() string { return "candidate_refuser" }
 
-func (candidateRefusingRewriter) RewriteEgress(_ context.Context, _ fact.Attempt, _ protocols.ProtocolID, body []byte, _ fact.Sink) ([]byte, error) {
+func (candidateRefusingRewriter) RewriteEgress(_ context.Context, _ struct{}, _ protocols.ProtocolID, body []byte, _ fact.Sink) ([]byte, error) {
 	if bytes.Contains(body, []byte(`"model":"c1-model"`)) {
 		return nil, errors.New("refusing the body bound for c1")
 	}
@@ -337,7 +337,7 @@ type trackingAdmission struct {
 
 func (a trackingAdmission) Name() string { return a.name }
 
-func (a trackingAdmission) Admit(_ context.Context, _ fact.Attempt, sink fact.Sink) (string, bool) {
+func (a trackingAdmission) Admit(_ context.Context, _ struct{}, sink fact.Sink) (string, bool) {
 	*a.log = append(*a.log, "admit:"+a.name)
 	if a.refuse {
 		sink.Report(fact.Fact{Kind: fact.KindCallerRateLimited, Detail: a.name + " refused"})
@@ -346,7 +346,7 @@ func (a trackingAdmission) Admit(_ context.Context, _ fact.Attempt, sink fact.Si
 	return a.name, a.takeHold
 }
 
-func (a trackingAdmission) Release(_ context.Context, _ fact.Attempt, ticket string, _ fact.Outcome, _ fact.Sink) {
+func (a trackingAdmission) Release(_ context.Context, _ struct{}, ticket string, _ fact.Outcome, _ fact.Sink) {
 	*a.log = append(*a.log, "release:"+ticket)
 }
 
@@ -438,12 +438,12 @@ type panickingAdmission struct{ log *[]string }
 
 func (panickingAdmission) Name() string { return "panicker" }
 
-func (a panickingAdmission) Admit(context.Context, fact.Attempt, fact.Sink) (string, bool) {
+func (a panickingAdmission) Admit(context.Context, struct{}, fact.Sink) (string, bool) {
 	*a.log = append(*a.log, "admit:panicker")
 	panic("admission blew up")
 }
 
-func (a panickingAdmission) Release(context.Context, fact.Attempt, string, fact.Outcome, fact.Sink) {
+func (a panickingAdmission) Release(context.Context, struct{}, string, fact.Outcome, fact.Sink) {
 	*a.log = append(*a.log, "release:panicker")
 }
 
@@ -792,11 +792,11 @@ type clockProbeAdmission struct {
 
 func (a clockProbeAdmission) Name() string { return a.name }
 
-func (a clockProbeAdmission) Admit(_ context.Context, _ fact.Attempt, _ fact.Sink) (string, bool) {
+func (a clockProbeAdmission) Admit(_ context.Context, _ struct{}, _ fact.Sink) (string, bool) {
 	return a.name, true
 }
 
-func (a clockProbeAdmission) Release(ctx context.Context, _ fact.Attempt, _ string, _ fact.Outcome, _ fact.Sink) {
+func (a clockProbeAdmission) Release(ctx context.Context, _ struct{}, _ string, _ fact.Outcome, _ fact.Sink) {
 	_, hasDeadline := ctx.Deadline()
 	*a.got = append(*a.got, releaseClockSample{err: ctx.Err(), deadline: hasDeadline, done: ctx.Done()})
 }

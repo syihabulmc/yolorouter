@@ -52,11 +52,6 @@ type Bodies struct {
 	streamCaptured  bool
 	streamTruncated bool
 	streamBytes     int64
-	// upstreamTruncated / clientTruncated mark a captured non-stream body
-	// that hit its in-memory cap: the stored bytes are a prefix, not the
-	// whole exchange.
-	upstreamTruncated bool
-	clientTruncated   bool
 }
 
 // SetRequest records the caller's body, verbatim.
@@ -122,21 +117,7 @@ func (b *Bodies) ClearResponses() {
 // leave the previous provider's bytes standing under this attempt's heading.
 func (b *Bodies) BeginDeliveryCapture() {
 	b.upstreamResponse = nil
-	b.upstreamTruncated = false
 }
-
-// MarkUpstreamTruncated records that the captured upstream body is a prefix.
-func (b *Bodies) MarkUpstreamTruncated() { b.upstreamTruncated = true }
-
-// UpstreamTruncated reports whether the captured upstream body hit its cap.
-func (b *Bodies) UpstreamTruncated() bool { return b.upstreamTruncated }
-
-// MarkClientTruncated records that the captured client-facing body is a
-// prefix.
-func (b *Bodies) MarkClientTruncated() { b.clientTruncated = true }
-
-// ClientTruncated reports whether the captured client-facing body hit its cap.
-func (b *Bodies) ClientTruncated() bool { return b.clientTruncated }
 
 // OpenStream opens (or re-opens) the stream capture file at path.
 //

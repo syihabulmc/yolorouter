@@ -110,11 +110,6 @@ type Exchange struct {
 	outcome        fact.Outcome
 	outcomeSettled bool
 
-	// rewriteSteps records, in order, every egress rewrite that actually
-	// changed the body for the current candidate. Reset alongside the body
-	// it describes.
-	rewriteSteps []rewriteStep
-
 	// firstByteSent flips true once any byte has been written to the client
 	// (after this, no more Key/candidate switching is allowed).
 	firstByteSent bool
@@ -265,12 +260,6 @@ func (rc *Exchange) StreamBodyPath() string {
 
 // StreamBodyTruncated reports whether the stream capture hit its cap.
 func (rc *Exchange) StreamBodyTruncated() bool { return rc.bodies.StreamTruncated() }
-
-// UpstreamBodyTruncated reports whether the captured upstream body hit its cap.
-func (rc *Exchange) UpstreamBodyTruncated() bool { return rc.bodies.UpstreamTruncated() }
-
-// ClientBodyTruncated reports whether the captured client-facing body hit its cap.
-func (rc *Exchange) ClientBodyTruncated() bool { return rc.bodies.ClientTruncated() }
 
 // AttemptRecord is one candidate try (the log keeps every attempt,
 // not just the final one). Outcome is one of the AttemptOutcome* constants.

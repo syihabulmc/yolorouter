@@ -35,28 +35,8 @@ func compressorsFor(ct ContentType) []compressors.Compressor {
 	}
 }
 
-// CompressClaude compresses an Anthropic /v1/messages request body.
-func CompressClaude(ctx context.Context, body []byte, opts CompressOptions) (out []byte, res CompressResult) {
-	return runCompress(ctx, body, opts, locateClaudeLiveZone)
-}
-
-// CompressChat compresses an OpenAI chat completions request body.
-func CompressChat(ctx context.Context, body []byte, opts CompressOptions) (out []byte, res CompressResult) {
-	return runCompress(ctx, body, opts, locateChatLiveZone)
-}
-
-// CompressResponses compresses an OpenAI Responses API /v1/responses body.
-func CompressResponses(ctx context.Context, body []byte, opts CompressOptions) (out []byte, res CompressResult) {
-	return runCompress(ctx, body, opts, locateResponsesLiveZone)
-}
-
-// CompressGemini compresses a Gemini native /v1beta generateContent body.
-func CompressGemini(ctx context.Context, body []byte, opts CompressOptions) (out []byte, res CompressResult) {
-	return runCompress(ctx, body, opts, locateGeminiLiveZone)
-}
-
-// ByProtocol dispatches to the protocol-specific compress entry point via
-// the locator table below. An unrecognized protocol returns the body
+// ByProtocol compresses a request body using the protocol's live-zone
+// locator from the table below. An unrecognized protocol returns the body
 // unchanged with a no-op result (Skipped=true) so an unknown ingress never
 // breaks a caller.
 func ByProtocol(proto protocols.ProtocolID, ctx context.Context, body []byte, opts CompressOptions) (out []byte, res CompressResult) {
@@ -68,8 +48,8 @@ func ByProtocol(proto protocols.ProtocolID, ctx context.Context, body []byte, op
 }
 
 // liveZoneLocators maps each wire protocol to its live-zone locator — the
-// only thing that differs between the per-protocol entry points above.
-// Adding a protocol here is what makes ByProtocol cover it.
+// only per-protocol fact in this package. Adding a protocol here is what
+// makes ByProtocol cover it.
 var liveZoneLocators = map[protocols.ProtocolID]func([]byte) []LiveBlock{
 	protocols.ProtocolOpenAI:    locateChatLiveZone,
 	protocols.ProtocolClaude:    locateClaudeLiveZone,

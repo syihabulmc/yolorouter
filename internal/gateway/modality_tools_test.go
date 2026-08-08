@@ -366,9 +366,6 @@ func TestEachAttemptCapturesOnItsOwn(t *testing.T) {
 	if got := string(rc.UpstreamResponseBody()); got != "BB" {
 		t.Errorf("upstream body = %q, want %q: this row describes the attempt that ended the request", got, "BB")
 	}
-	if second.Capture.Truncated() {
-		t.Error("the second attempt reports truncation, but nothing of its own was dropped")
-	}
 }
 
 func TestCaptureReportsWhatItDropped(t *testing.T) {
@@ -376,9 +373,6 @@ func TestCaptureReportsWhatItDropped(t *testing.T) {
 	cap := &exchangeCapture{rc: rc, limit: 2}
 	if kept := cap.Upstream([]byte("abcd")); kept {
 		t.Error("Upstream reported everything kept while over the limit")
-	}
-	if !cap.Truncated() {
-		t.Error("Truncated() = false after bytes were dropped: a cut-off body is indistinguishable from a short one")
 	}
 	if got := string(rc.UpstreamResponseBody()); got != "ab" {
 		t.Errorf("captured %q, want %q", got, "ab")
@@ -535,12 +529,15 @@ func TestCaptureDoesNotResurrectADeliberateClear(t *testing.T) {
 	}
 }
 
-func TestTruncationIsRecordedOnTheExchange(t *testing.T) {
+// TestCapturesStopAtTheirCap pins the cap behaviour on both captures: bytes
+// past the limit are dropped, and what is stored is exactly the prefix that
+// fit — never a resized buffer, never the overflow.
+func TestCapturesStopAtTheirCap(t *testing.T) {
 	rc := &Exchange{}
 	cap := newExchangeCapture(rc, 2)
 	cap.Upstream([]byte("abcd"))
-	if !rc.UpstreamBodyTruncated() {
-		t.Error("UpstreamBodyTruncated() = false after the cap was hit")
+	if got := string(rc.UpstreamResponseBody()); got != "ab" {
+		t.Errorf("upstream body = %q, want %q: the capture must stop at its cap", got, "ab")
 	}
 
 	r, _ := newClientResponse(t)
@@ -554,8 +551,8 @@ func TestTruncationIsRecordedOnTheExchange(t *testing.T) {
 	if err := r.Flush(); err != nil {
 		t.Fatalf("Flush = %v", err)
 	}
-	if !r.rc.ClientBodyTruncated() {
-		t.Error("ClientBodyTruncated() = false after the client capture was cut off")
+	if got := string(r.rc.ResponseBody()); got != "ab" {
+		t.Errorf("client body = %q, want %q: the client capture must stop at its cap", got, "ab")
 	}
 }
 

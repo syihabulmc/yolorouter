@@ -27,9 +27,8 @@ import (
 // view it actually needs, and the binding function supplied at assembly is the
 // compile-time proof that an Exchange satisfies it.
 //
-// An implementation that needs nothing beyond the snapshot uses fact.Attempt or
-// fact.Request as its V; the generic degenerates and no second calling
-// convention is needed.
+// An implementation that needs nothing from the exchange uses struct{} as its
+// V; the generic degenerates and no second calling convention is needed.
 
 // UpstreamErrorObserverOf sees one complete NON-2xx upstream response and
 // reports what it recognises in it. It cannot alter the response, write to the
@@ -189,9 +188,6 @@ func (s *Service) rewriteEgress(ctx context.Context, rc *Exchange, egress protoc
 		// nil that panics on first use.
 		ctx = context.Background()
 	}
-	// The chain describes the body being built now; steps from an earlier
-	// candidate describe a body that no longer exists.
-	rc.rewriteSteps = nil
 	sink := newExchangeSink(rc)
 	for _, r := range s.egressRewriters {
 		sink.reporter = r.name()
@@ -207,39 +203,11 @@ func (s *Service) rewriteEgress(ctx context.Context, rc *Exchange, egress protoc
 			})
 			return body, sink.resolve()
 		}
-		if out != nil && changedBytes(body, out) {
-			// The chain is the answer to "who shaped this body": every applied
-			// step, in order, with its size effect. One current body plus this
-			// list replaces any scheme where rewriters write to separate fields
-			// and a later reader has to arbitrate which one is in effect.
-			rc.rewriteSteps = append(rc.rewriteSteps, rewriteStep{
-				Name:      r.name(),
-				ByteDelta: len(out) - len(body),
-			})
+		if out != nil {
 			body = out
 		}
 	}
 	return body, sink.resolve()
-}
-
-// rewriteStep records one applied rewrite for the audit trail.
-type rewriteStep struct {
-	Name      string
-	ByteDelta int
-}
-
-// changedBytes reports whether a rewriter actually produced a different body.
-// Identity of the backing array is the test: rewriters return their input
-// (possibly re-sliced) when they decline. Lengths are compared first so the
-// address check never indexes an empty slice.
-func changedBytes(before, after []byte) bool {
-	if len(after) != len(before) {
-		return true
-	}
-	if len(after) == 0 {
-		return false
-	}
-	return &after[0] != &before[0]
 }
 
 // exchangeSink collects what capabilities report during one exchange.

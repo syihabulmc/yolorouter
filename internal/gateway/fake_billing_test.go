@@ -49,7 +49,7 @@ type fakePrepaidBalance struct {
 
 func (*fakePrepaidBalance) Name() string { return "fake_prepaid_balance" }
 
-func (f *fakePrepaidBalance) Admit(_ context.Context, _ fact.Attempt, sink fact.Sink) (prepaidTicket, bool) {
+func (f *fakePrepaidBalance) Admit(_ context.Context, _ struct{}, sink fact.Sink) (prepaidTicket, bool) {
 	switch f.state {
 	case quotaExhausted:
 		sink.Report(fact.Fact{Kind: fact.KindBalanceInsufficient, Detail: "no funds"})
@@ -67,7 +67,7 @@ func (f *fakePrepaidBalance) Admit(_ context.Context, _ fact.Attempt, sink fact.
 	}
 }
 
-func (f *fakePrepaidBalance) Release(_ context.Context, _ fact.Attempt, t prepaidTicket, out fact.Outcome, _ fact.Sink) {
+func (f *fakePrepaidBalance) Release(_ context.Context, _ struct{}, t prepaidTicket, out fact.Outcome, _ fact.Sink) {
 	f.released++
 	*f.log = append(*f.log, "release:balance")
 	if out.Delivered {
@@ -130,7 +130,7 @@ type fakeSubRequestCharge struct {
 
 func (*fakeSubRequestCharge) Name() string { return "fake_sub_request_charge" }
 
-func (f *fakeSubRequestCharge) Admit(_ context.Context, _ fact.Attempt, _ fact.Sink) (subRequestTicket, bool) {
+func (f *fakeSubRequestCharge) Admit(_ context.Context, _ struct{}, _ fact.Sink) (subRequestTicket, bool) {
 	switch f.state {
 	case visionNoImage:
 		// No second upstream ran, so there is nothing to reverse. Returning
@@ -148,7 +148,7 @@ func (f *fakeSubRequestCharge) Admit(_ context.Context, _ fact.Attempt, _ fact.S
 	}
 }
 
-func (f *fakeSubRequestCharge) Release(_ context.Context, _ fact.Attempt, t subRequestTicket, _ fact.Outcome, _ fact.Sink) {
+func (f *fakeSubRequestCharge) Release(_ context.Context, _ struct{}, t subRequestTicket, _ fact.Outcome, _ fact.Sink) {
 	// The whole ticket is kept, state included. The state is read from the
 	// TICKET rather than from the capability because the capability is shared
 	// across concurrent exchanges — its own field says what the most recent
@@ -162,7 +162,7 @@ func (f *fakeSubRequestCharge) Release(_ context.Context, _ fact.Attempt, t subR
 	f.reversed = append(f.reversed, t)
 }
 
-func attemptView(*Exchange) fact.Attempt { return fact.Attempt{} }
+func attemptView(*Exchange) struct{} { return struct{}{} }
 
 // TestAQuotaWithNoLimitReservesNothingAndIsNotReleased is the three-state test.
 //
@@ -401,12 +401,12 @@ type explodingAdmission struct{ log *[]string }
 
 func (*explodingAdmission) Name() string { return "exploding_admission" }
 
-func (f *explodingAdmission) Admit(_ context.Context, _ fact.Attempt, _ fact.Sink) (struct{}, bool) {
+func (f *explodingAdmission) Admit(_ context.Context, _ struct{}, _ fact.Sink) (struct{}, bool) {
 	*f.log = append(*f.log, "admit:exploding")
 	return struct{}{}, true
 }
 
-func (*explodingAdmission) Release(_ context.Context, _ fact.Attempt, _ struct{}, _ fact.Outcome, _ fact.Sink) {
+func (*explodingAdmission) Release(_ context.Context, _ struct{}, _ struct{}, _ fact.Outcome, _ fact.Sink) {
 	// A nil pointer whose field is read — the shape a capability reaches for
 	// state it assumed some earlier step had populated.
 	var reservation *prepaidTicket
@@ -487,11 +487,11 @@ type outcomeProbe struct {
 
 func (*outcomeProbe) Name() string { return "outcome_probe" }
 
-func (p *outcomeProbe) Admit(_ context.Context, _ fact.Attempt, _ fact.Sink) (struct{}, bool) {
+func (p *outcomeProbe) Admit(_ context.Context, _ struct{}, _ fact.Sink) (struct{}, bool) {
 	return struct{}{}, true
 }
 
-func (p *outcomeProbe) Release(ctx context.Context, _ fact.Attempt, _ struct{}, out fact.Outcome, _ fact.Sink) {
+func (p *outcomeProbe) Release(ctx context.Context, _ struct{}, _ struct{}, out fact.Outcome, _ fact.Sink) {
 	p.released = true
 	p.ctxErr = ctx.Err()
 	p.out = out

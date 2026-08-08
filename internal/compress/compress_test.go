@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yolorouter/yolorouter/internal/compress/compressors"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
 // panicCompressor is a test double that always panics inside Compress. It is
@@ -24,7 +25,7 @@ func (*panicCompressor) Compress(context.Context, string) (string, error) {
 func TestCompressClaudeShrinksToolResultKeepsRest(t *testing.T) {
 	big := "=== RUN   TestA\n--- PASS: TestA (0.00s)\n" + strings.Repeat("=== RUN   TestX\n--- PASS: TestX (0.00s)\n", 200) + "PASS\nok  \tpkg\t0.1s\n"
 	body := []byte(`{"model":"claude","system":"SYS","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":` + mustJSONStr(big) + `}]}]}`)
-	out, res := CompressClaude(context.Background(), body, DefaultOptions())
+	out, res := ByProtocol(protocols.ProtocolClaude, context.Background(), body, DefaultOptions())
 	if res.Skipped {
 		t.Fatalf("expected compression, got skip=%v", res.SkipReason)
 	}
@@ -43,7 +44,7 @@ func TestCompressClaudeShrinksToolResultKeepsRest(t *testing.T) {
 
 func TestCompressClaudeNoLiveZoneIsIdentity(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`) // no tool_result
-	out, res := CompressClaude(context.Background(), body, DefaultOptions())
+	out, res := ByProtocol(protocols.ProtocolClaude, context.Background(), body, DefaultOptions())
 	if !bytes.Equal(out, body) {
 		t.Fatal("no-op must return bytes.Equal output")
 	}
@@ -54,7 +55,7 @@ func TestCompressClaudeNoLiveZoneIsIdentity(t *testing.T) {
 
 func TestCompressClaudeParseErrorIsIdentity(t *testing.T) {
 	body := []byte(`{not json`)
-	out, res := CompressClaude(context.Background(), body, DefaultOptions())
+	out, res := ByProtocol(protocols.ProtocolClaude, context.Background(), body, DefaultOptions())
 	if !bytes.Equal(out, body) || res.SkipReason != SkipReasonParseError {
 		t.Fatal("invalid JSON must be returned verbatim with ParseError")
 	}
@@ -65,7 +66,7 @@ func TestCompressSkipReasonNoLiveZone(t *testing.T) {
 	// bare-string content has none, so locate returns an empty slice and the
 	// true skip reason is NoLiveZone.
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
-	_, res := CompressClaude(context.Background(), body, DefaultOptions())
+	_, res := ByProtocol(protocols.ProtocolClaude, context.Background(), body, DefaultOptions())
 	if !res.Skipped || res.SkipReason != SkipReasonNoLiveZone {
 		t.Fatalf("expected NoLiveZone, got skip=%v reason=%v", res.Skipped, res.SkipReason)
 	}
@@ -77,7 +78,7 @@ func TestCompressSkipReasonNoMatchingCompressor(t *testing.T) {
 	// a real coverage gap as NoMatchingCompressor.
 	prose := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 100)
 	body := []byte(`{"model":"claude","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":` + mustJSONStr(prose) + `}]}]}`)
-	_, res := CompressClaude(context.Background(), body, DefaultOptions())
+	_, res := ByProtocol(protocols.ProtocolClaude, context.Background(), body, DefaultOptions())
 	if !res.Skipped || res.SkipReason != SkipReasonNoMatchingCompressor {
 		t.Fatalf("expected NoMatchingCompressor, got skip=%v reason=%v", res.Skipped, res.SkipReason)
 	}
@@ -90,7 +91,7 @@ func TestCompressSkipReasonNoEffectiveReplacement(t *testing.T) {
 	// NoMatchingCompressor.
 	tiny := "=== RUN   TestA\n--- PASS: TestA (0.00s)\nPASS\n"
 	body := []byte(`{"model":"claude","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":` + mustJSONStr(tiny) + `}]}]}`)
-	_, res := CompressClaude(context.Background(), body, DefaultOptions())
+	_, res := ByProtocol(protocols.ProtocolClaude, context.Background(), body, DefaultOptions())
 	if !res.Skipped || res.SkipReason != SkipReasonNoEffectiveReplacement {
 		t.Fatalf("expected NoEffectiveReplacement, got skip=%v reason=%v", res.Skipped, res.SkipReason)
 	}
@@ -113,7 +114,7 @@ func TestCompressSkipReasonFailOpenOnPanic(t *testing.T) {
 		"PASS\nok  \tpkg\t0.1s\n"
 	body := []byte(`{"messages":[{"role":"user","content":` + mustJSONStr(big) + `}]}`)
 
-	out, res := CompressChat(context.Background(), body, DefaultOptions())
+	out, res := ByProtocol(protocols.ProtocolOpenAI, context.Background(), body, DefaultOptions())
 	if !bytes.Equal(out, body) {
 		t.Fatal("panic must fail open: returned body must be bytes.Equal to original")
 	}
@@ -170,7 +171,7 @@ func TestCompressOptionsTimeoutStopsTheWork(t *testing.T) {
 	opts := DefaultOptions()
 	opts.Timeout = 20 * time.Millisecond
 
-	out, res := CompressChat(context.Background(), body, opts)
+	out, res := ByProtocol(protocols.ProtocolOpenAI, context.Background(), body, opts)
 	if !bytes.Equal(out, body) {
 		t.Fatal("timeout must return original body untouched")
 	}
@@ -189,7 +190,7 @@ func TestCompressSkipReasonTimeout(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 
-	out, res := CompressChat(ctx, body, DefaultOptions())
+	out, res := ByProtocol(protocols.ProtocolOpenAI, ctx, body, DefaultOptions())
 	if !bytes.Equal(out, body) {
 		t.Fatal("timeout must return original body untouched")
 	}
