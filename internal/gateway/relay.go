@@ -625,11 +625,11 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 
 		provider := cand.Provider
 		if provider == nil {
-			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, nil, nil, 0, AttemptBadStatus, "provider missing (preload)"))
+			rc.recordAttempt(cand, nil, nil, 0, AttemptBadStatus, "provider missing (preload)")
 			continue
 		}
 		if provider.ManagementStatus != model.ProviderStatusEnabled {
-			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "provider disabled"))
+			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, "provider disabled")
 			continue
 		}
 		rc.attempt.BindProvider(provider)
@@ -641,12 +641,12 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 				// entirely rather than burning the remaining candidates
 				// only to land on allCandidatesFailed's 502; record 499
 				// instead, mirroring attemptOne's disconnect handling.
-				rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptConnError, "client disconnected"))
+				rc.recordAttempt(cand, provider, nil, 0, AttemptConnError, "client disconnected")
 				s.abandonRequestAfterAttempt(rc, "client_disconnected", start)
 				return
 			}
 			logger.Error("gateway: list provider keys", zap.String("request_id", rc.requestID), zap.Error(err))
-			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "load keys failed"))
+			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, "load keys failed")
 			continue
 		}
 		enabled, anyEnabledKey := filterEnabledKeys(keys)
@@ -655,7 +655,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 			if anyEnabledKey {
 				reason = "no verified key"
 			}
-			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, reason))
+			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, reason)
 			continue
 		}
 
@@ -666,7 +666,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// encodes back from.
 		egress, err := Negotiate(ingress, provider)
 		if err != nil {
-			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "negotiate egress: "+err.Error()))
+			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, "negotiate egress: "+err.Error())
 			continue // mapping failure -> skip candidate
 		}
 
@@ -685,7 +685,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 			MaxOutput:               cand.MaxOutput,
 		}
 		if v := adm.payload.Supports(offer); !v.OK {
-			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, v.Reason))
+			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, v.Reason)
 			continue
 		}
 		// Built once per candidate: it depends on the candidate and the
@@ -693,7 +693,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// key attempt below reuses the same bytes.
 		call, err := adm.payload.PrepareUpstream(offer)
 		if err != nil {
-			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "build request: "+err.Error()))
+			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, "build request: "+err.Error())
 			continue // build failure -> skip candidate, nothing sent yet
 		}
 		// The origin and the credentials stay on this side of the interface:
@@ -713,8 +713,8 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// anyway would mean a reported judgement was overridden by omission.
 		// Under-executing a verdict is recoverable; ignoring it is not.
 		if verdict.Loop >= decision.LoopNextCandidate {
-			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus,
-				"egress rewrite verdict "+verdict.LoopFrom().String()))
+			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus,
+				"egress rewrite verdict "+verdict.LoopFrom().String())
 			continue
 		}
 		// Retry-same and rotate-key have no meaning before anything was sent;
@@ -827,14 +827,14 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *mode
 		// to an unapproved destination. Skip and rotate to the next key,
 		// matching the destination-matched select in provider_repository.go.
 		if pk.AuthorizedDestinationVersion != provider.DestinationVersion {
-			rc.attempts = append(rc.attempts, rc.makeAttempt(*cand, provider, &pk, 0, AttemptAuthFailed, "destination version mismatch"))
+			rc.recordAttempt(*cand, provider, &pk, 0, AttemptAuthFailed, "destination version mismatch")
 			continue
 		}
 		plaintext, derr := crypto.Decrypt(s.masterKey, pk.EncryptedKey)
 		if derr != nil {
 			logger.Warn("gateway: decrypt provider key failed",
 				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID), zap.Error(derr))
-			rc.attempts = append(rc.attempts, rc.makeAttempt(*cand, provider, &pk, 0, AttemptBadStatus, "decrypt failed"))
+			rc.recordAttempt(*cand, provider, &pk, 0, AttemptBadStatus, "decrypt failed")
 			continue
 		}
 		result := s.attemptOne(c, rc, adm, *cand, provider, pk, plaintext, egress, outBody, url, start)
@@ -886,8 +886,8 @@ func (s *Service) recordAndSettle(c *gin.Context, rc *Exchange, adm admitted, d 
 	// worse than being told the wrong thing.
 	sink := newExchangeSink(rc)
 	s.checkAndNote(rc, &d, sink)
-	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk,
-		upstreamStatus, attemptOutcomeFor(d, rc.isStream), attemptNoteFor(d)))
+	rc.recordAttempt(cand, provider, &pk,
+		upstreamStatus, attemptOutcomeFor(d, rc.isStream), attemptNoteFor(d))
 	if d.Verdict == fact.VerdictSettled {
 		// The one delivery that ended the request, which is the only one this
 		// question is asked about. Asking per attempt would tell the payload the
@@ -948,7 +948,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	// cannot overrun the request cap.
 	remaining := time.Until(rc.requestDeadline)
 	if remaining <= 0 {
-		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, "request budget exhausted"))
+		rc.recordAttempt(cand, provider, &pk, 0, AttemptConnError, "request budget exhausted")
 		return attemptNextCandidate
 	}
 	attemptBudget := min(s.gateway.AttemptTimeout, remaining)
@@ -977,8 +977,8 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 		// over. Every key on this candidate would fail identically (url is
 		// candidate-invariant), so the first key attempt already exhausts
 		// this candidate via tryKeys' immediate return on attemptNextCandidate.
-		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptBadStatus,
-			"build request: "+redactedFailure(err, rc.attempt.UpstreamURL())))
+		rc.recordAttempt(cand, provider, &pk, 0, AttemptBadStatus,
+			"build request: "+redactedFailure(err, rc.attempt.UpstreamURL()))
 		return attemptNextCandidate
 	}
 	codecsFor(egress.Protocol).RequestEncoder.SetupRequest(req, plaintext)
@@ -991,12 +991,12 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 		// is candidate-level, not a disconnect) so the log labels the right
 		// failure class. Any other transport failure is candidate-level.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError, "client disconnected"))
+			rc.recordAttempt(cand, provider, &pk, 0, AttemptConnError, "client disconnected")
 			s.abandonRequestAfterAttempt(rc, "client_disconnected", start) // nginx-style 499
 			return attemptTerminal
 		}
-		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError,
-			redactedFailure(err, rc.attempt.UpstreamURL())))
+		rc.recordAttempt(cand, provider, &pk, 0, AttemptConnError,
+			redactedFailure(err, rc.attempt.UpstreamURL()))
 		return attemptNextCandidate
 	}
 
@@ -1139,7 +1139,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 		}
 	}
 
-	rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, statusCode, class.Outcome, note))
+	rc.recordAttempt(cand, provider, &pk, statusCode, class.Outcome, note)
 	switch class.Category {
 	case statusRotateKey:
 		// 401 CAS was already performed above, before the error body read.
@@ -1251,17 +1251,20 @@ func filterEnabledKeys(keys []model.ProviderKey) (out []model.ProviderKey, anyEn
 	return out, anyEnabled
 }
 
-// makeAttempt builds one AttemptRecord. provider and key are nil-able: nil
-// provider marks a candidate whose provider was missing/disabled; nil key
-// marks a candidate-level failure before any key was tried (load failed, no
-// enabled key, rewrite failed).
+// recordAttempt builds one AttemptRecord and appends it to the exchange's
+// attempt log — the one place that log grows, so every recorded try passes
+// through the same construction. provider and key are nil-able: nil provider
+// marks a candidate whose provider was missing/disabled; nil key marks a
+// candidate-level failure before any key was tried (load failed, no enabled
+// key, rewrite failed).
 //
-// It is a Exchange method so it can stamp the attempt with rc.attempt.UpstreamURL()
-// — the URL the gateway dispatched to for this attempt — without every caller
-// threading the URL through. rc.attempt.UpstreamURL() is reset per candidate in
-// relayCandidates and set in attemptOne, so it reflects the current attempt:
-// empty for attempts that failed before any request was sent.
-func (rc *Exchange) makeAttempt(cand model.ModelCandidate, provider *model.Provider, key *model.ProviderKey, status int, outcome, failReason string) AttemptRecord {
+// It is an Exchange method so it can stamp the attempt with
+// rc.attempt.UpstreamURL() — the URL the gateway dispatched to for this
+// attempt — without every caller threading the URL through. That URL is reset
+// per candidate in relayCandidates and set in attemptOne, so it reflects the
+// current attempt: empty for attempts that failed before any request was
+// sent.
+func (rc *Exchange) recordAttempt(cand model.ModelCandidate, provider *model.Provider, key *model.ProviderKey, status int, outcome, failReason string) {
 	rec := AttemptRecord{
 		CandidateID:       cand.ID,
 		ProviderModelName: cand.ProviderModelName,
@@ -1280,7 +1283,7 @@ func (rc *Exchange) makeAttempt(cand model.ModelCandidate, provider *model.Provi
 		rec.KeyID = key.ID
 		rec.KeyLabel = key.Label
 	}
-	return rec
+	rc.attempts = append(rc.attempts, rec)
 }
 
 // compressByIngress dispatches the body to the protocol-specific compress entry

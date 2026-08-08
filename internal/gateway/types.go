@@ -94,9 +94,9 @@ type Exchange struct {
 
 	statusCode int // set by finalize when the log row is written
 
-	// usage from the successful attempt, if any — drives cost + the log row.
-
-	// attempts records every candidate try in order.
+	// attempts records every candidate try in order; recordAttempt is the one
+	// place it grows. Usage itself is not held here — the successful
+	// delivery's usage travels as a finalize parameter.
 	attempts []AttemptRecord
 
 	// timeline is the append-only log of everything capabilities reported
