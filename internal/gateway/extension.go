@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/pkg/logger"
@@ -178,9 +179,9 @@ func RegisterEgressRewriter[V any](s *Service, r EgressRewriterOf[V], at EgressS
 // rewriter's call: it reports a fact and the table decides, which is why the
 // failure comes back as a verdict rather than as an error the caller must
 // interpret.
-func (s *Service) rewriteEgress(ctx context.Context, rc *Exchange, egress protocols.ProtocolID, body []byte) ([]byte, resolved) {
+func (s *Service) rewriteEgress(ctx context.Context, rc *Exchange, egress protocols.ProtocolID, body []byte) ([]byte, decision.Resolved) {
 	if len(s.egressRewriters) == 0 {
-		return body, resolved{}
+		return body, decision.Resolved{}
 	}
 	if ctx == nil {
 		// Reached only from a caller that never established a request context.
@@ -363,10 +364,10 @@ func (s *exchangeSink) Note(records ...fact.Record) {
 // capability reporting twice is indistinguishable from two capabilities
 // reporting once — which is the point: the outcome depends on what was said,
 // not on who said it or when.
-func (s *exchangeSink) resolve() resolved {
-	var out resolved
+func (s *exchangeSink) resolve() decision.Resolved {
+	var out decision.Resolved
 	for _, b := range s.batches {
-		out = combine(out, resolveBatch(b))
+		out = decision.Combine(out, decision.ResolveBatch(b))
 	}
 	return out
 }
@@ -385,9 +386,9 @@ func (s *exchangeSink) resolve() resolved {
 // reintroducing order dependence through a second door. The Body is also the
 // bytes already captured for the audit row, so a stray write would rewrite the
 // record of what the upstream actually said.
-func (s *Service) observeUpstreamError(ctx context.Context, rc *Exchange, up fact.Upstream) resolved {
+func (s *Service) observeUpstreamError(ctx context.Context, rc *Exchange, up fact.Upstream) decision.Resolved {
 	if len(s.upstreamErrorObservers) == 0 {
-		return resolved{}
+		return decision.Resolved{}
 	}
 	sink := newExchangeSink(rc)
 	for _, o := range s.upstreamErrorObservers {
@@ -524,8 +525,8 @@ func (s *Service) observeDelivery(rc *Exchange, d fact.Delivery, sink *exchangeS
 				zap.String("request_id", rc.requestID),
 				zap.String("observer", o.registeredName),
 			}
-			if v.Loop != LoopNone {
-				fields = append(fields, zap.String("reported_kind", v.loopFrom.String()))
+			if v.Loop != decision.LoopNone {
+				fields = append(fields, zap.String("reported_kind", v.LoopFrom().String()))
 			}
 			logger.Error("gateway: a delivery observer reported an effect on a settled request", fields...)
 		}
@@ -679,9 +680,9 @@ type heldTicket struct {
 // caller's deferred release can see it; had the tickets only appeared in a
 // return value, that release would never have been installed and the resources
 // would be held until the process restarts.
-func (s *Service) admit(ctx context.Context, rc *Exchange, held *[]heldTicket) resolved {
+func (s *Service) admit(ctx context.Context, rc *Exchange, held *[]heldTicket) decision.Resolved {
 	if len(s.admissions) == 0 {
-		return resolved{}
+		return decision.Resolved{}
 	}
 	sink := newExchangeSink(rc)
 	for _, a := range s.admissions {
@@ -690,7 +691,7 @@ func (s *Service) admit(ctx context.Context, rc *Exchange, held *[]heldTicket) r
 		if ok {
 			*held = append(*held, heldTicket{by: a, ticket: ticket})
 		}
-		if verdict := sink.resolve(); verdict.Loop >= LoopNextCandidate {
+		if verdict := sink.resolve(); verdict.Loop >= decision.LoopNextCandidate {
 			return verdict
 		}
 	}

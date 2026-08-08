@@ -61,10 +61,12 @@ func TestNoRecordCarriesALoopEffect(t *testing.T) {
 // decision table keys on, Reporter is logging-only and legitimately stamped
 // throughout the kernel, Detail and Status feed the status-passthrough fold,
 // and Reason is the persisted refusal code. The fold and the code both belong
-// to decision.go (resolveBatch and the helpers around it); business logic
-// anywhere else that branches on Status, Detail, or Reason is a second,
-// unaudited place a routing decision gets made — invisible to anything that
-// audits the table for completeness.
+// to the decision package (ResolveBatch and the helpers around it), which the
+// compiler already fences off; business logic in the kernel that branches on
+// Status, Detail, or Reason is a second, unaudited place a routing decision
+// gets made — invisible to anything that audits the table for completeness.
+// Since the fold moved into its own package, no gateway file is trusted: the
+// kernel consumes a Resolved verdict, never the raw fields.
 //
 // This is the one check that needs real type information rather than syntax:
 // Status, Detail, and Reason are common field names, and only a type checker
@@ -115,8 +117,6 @@ func TestOnlyDecisionTableReadsRoutingFactFields(t *testing.T) {
 	resolvedFactSelectors := 0
 
 	for _, f := range files {
-		pos := fset.Position(f.Pos())
-		isDecisionFile := filepath.Base(pos.Filename) == "decision.go"
 		ast.Inspect(f, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
@@ -131,16 +131,13 @@ func TestOnlyDecisionTableReadsRoutingFactFields(t *testing.T) {
 				return true
 			}
 			resolvedFactSelectors++
-			if isDecisionFile {
-				return true // the trusted fold
-			}
 			switch sel.Sel.Name {
 			case "Status", "Detail", "Reason":
 				p := fset.Position(sel.Pos())
 				rel, _ := filepath.Rel(root, p.Filename)
-				t.Errorf("%s:%d: reads fact.Fact.%s outside decision.go — routing decisions "+
-					"must go through the decision table; branching on this field here is a "+
-					"second, unaudited place the relay loop can be steered from",
+				t.Errorf("%s:%d: reads fact.Fact.%s outside the decision package — routing "+
+					"decisions must go through the decision table; branching on this field here "+
+					"is a second, unaudited place the relay loop can be steered from",
 					filepath.ToSlash(rel), p.Line, sel.Sel.Name)
 			}
 			return true
@@ -183,7 +180,7 @@ func namedTypeOf(t types.Type) *types.Named {
 func TestTheVerdictIsAdoptedWholeOrNotAtAll(t *testing.T) {
 	root := repoRoot(t)
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join(root, "internal", "gateway", "decision.go"), nil, 0)
+	file, err := parser.ParseFile(fset, filepath.Join(root, "internal", "decision", "decision.go"), nil, 0)
 	if err != nil {
 		t.Fatalf("parsing decision.go: %v", err)
 	}
@@ -195,14 +192,14 @@ func TestTheVerdictIsAdoptedWholeOrNotAtAll(t *testing.T) {
 			continue
 		}
 		switch fd.Name.Name {
-		case "combine":
+		case "Combine":
 			combineFn = fd
 		case "adoptVerdict":
 			adoptFn = fd
 		}
 	}
 	if combineFn == nil || adoptFn == nil {
-		t.Fatal("combine or adoptVerdict not found in decision.go; the fold was restructured and " +
+		t.Fatal("Combine or adoptVerdict not found in decision.go; the fold was restructured and " +
 			"this check needs re-aiming rather than passing by finding nothing")
 	}
 
@@ -297,34 +294,42 @@ func TestTheVerdictIsAdoptedWholeOrNotAtAll(t *testing.T) {
 		}
 	}
 
-	// And nothing else in the package may write these fields. Restricting the
-	// search to combine would only move the problem: a second helper doing the
-	// assignment is invisible to a check that looks at one function.
-	for _, f := range parseTree(t, filepath.Join("internal", "gateway")) {
-		if strings.HasSuffix(f.rel, "_test.go") {
-			continue
-		}
-		ast.Inspect(f.ast, func(n ast.Node) bool {
-			as, ok := n.(*ast.AssignStmt)
-			if !ok {
+	// And nothing else may write these fields. Restricting the search to
+	// Combine would only move the problem: a second helper doing the
+	// assignment is invisible to a check that looks at one function. The
+	// unexported half is fenced by the compiler at the package boundary, but
+	// the exported half (Status, Code, ErrType, Sticky) is assignable from the
+	// kernel, so the kernel's tree is scanned alongside the package's own.
+	for _, dir := range []string{
+		filepath.Join("internal", "decision"),
+		filepath.Join("internal", "gateway"),
+	} {
+		for _, f := range parseTree(t, dir) {
+			if strings.HasSuffix(f.rel, "_test.go") {
+				continue
+			}
+			ast.Inspect(f.ast, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for _, lhs := range as.Lhs {
+					sel, ok := lhs.(*ast.SelectorExpr)
+					if !ok || !verdictFields[sel.Sel.Name] {
+						continue
+					}
+					rel, line := f.pos(sel)
+					if rel == "internal/decision/decision.go" &&
+						sel.Pos() >= adoptFn.Body.Pos() && sel.Pos() <= adoptFn.Body.End() {
+						continue
+					}
+					t.Errorf("%s:%d writes %s outside adoptVerdict: the verdict has one place it "+
+						"can be set, and a second one is a second fact it can come from",
+						rel, line, sel.Sel.Name)
+				}
 				return true
-			}
-			for _, lhs := range as.Lhs {
-				sel, ok := lhs.(*ast.SelectorExpr)
-				if !ok || !verdictFields[sel.Sel.Name] {
-					continue
-				}
-				rel, line := f.pos(sel)
-				if rel == "internal/gateway/decision.go" &&
-					sel.Pos() >= adoptFn.Body.Pos() && sel.Pos() <= adoptFn.Body.End() {
-					continue
-				}
-				t.Errorf("%s:%d writes %s outside adoptVerdict: the verdict has one place it "+
-					"can be set, and a second one is a second fact it can come from",
-					rel, line, sel.Sel.Name)
-			}
-			return true
-		})
+			})
+		}
 	}
 }
 

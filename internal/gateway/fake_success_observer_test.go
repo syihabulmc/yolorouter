@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/protocols/claude"
@@ -224,7 +225,7 @@ func TestAnObserverCannotSteerASettledRequest(t *testing.T) {
 	}}
 	RegisterDeliveryObserver(svc, steerer, bindBilledView)
 
-	if !decisionFor(fact.KindPayloadRefused).Defined {
+	if !decision.For(fact.KindPayloadRefused).Defined {
 		t.Fatal("the fixture no longer reports a fact with any effect; pick a Kind the table defines")
 	}
 
@@ -299,7 +300,7 @@ func TestCountsJudgedImpossibleAreNotPricedAfterTheDeliveryHop(t *testing.T) {
 // set is the plainest case: the table defines it, it steers nothing, and
 // reporting it here is still a capability asking for something impossible.
 func TestAnEffectThatSteersNothingIsStillRefused(t *testing.T) {
-	if d := decisionFor(fact.KindNone); !d.Defined || d.Loop != LoopNone {
+	if d := decision.For(fact.KindNone); !d.Defined || d.Loop != decision.LoopNone {
 		t.Fatalf("the fixture no longer describes a defined, non-steering decision: %+v", d)
 	}
 

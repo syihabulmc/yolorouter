@@ -1,4 +1,4 @@
-package gateway
+package decision
 
 import (
 	"testing"
@@ -38,9 +38,9 @@ func TestDecisionTableStatusFieldsOnlyWithFixed(t *testing.T) {
 	}
 }
 
-// allResolved enumerates one resolved value per Kind, for the algebraic checks.
-func allResolved() []resolved {
-	out := make([]resolved, 0, fact.NumKinds*3)
+// allResolved enumerates one Resolved value per Kind, for the algebraic checks.
+func allResolved() []Resolved {
+	out := make([]Resolved, 0, fact.NumKinds*3)
 	// Three variants per Kind, with distinct words. One per Kind cannot see the
 	// tie-breaks at all: two facts of the SAME Kind is exactly the case the
 	// ordinal cannot separate, and a fixture that never builds that pair leaves
@@ -56,7 +56,7 @@ func allResolved() []resolved {
 			{"reason_a", "detail_x"},
 			{"reason_b", "detail_y"},
 		} {
-			out = append(out, resolved{
+			out = append(out, Resolved{
 				Decision:     decisionTable[k],
 				statusFrom:   fact.Kind(k),
 				loopFrom:     fact.Kind(k),
@@ -77,8 +77,8 @@ func TestCombineIsCommutative(t *testing.T) {
 	rs := allResolved()
 	for _, a := range rs {
 		for _, b := range rs {
-			if combine(a, b) != combine(b, a) {
-				t.Fatalf("combine not commutative for %s and %s", a.statusFrom, b.statusFrom)
+			if Combine(a, b) != Combine(b, a) {
+				t.Fatalf("Combine not commutative for %s and %s", a.statusFrom, b.statusFrom)
 			}
 		}
 	}
@@ -93,8 +93,8 @@ func TestCombineIsAssociative(t *testing.T) {
 	for i, a := range rs {
 		for j, b := range rs {
 			c := rs[(i+j)%len(rs)]
-			if combine(combine(a, b), c) != combine(a, combine(b, c)) {
-				t.Fatalf("combine not associative for %s, %s, %s", a.statusFrom, b.statusFrom, c.statusFrom)
+			if Combine(Combine(a, b), c) != Combine(a, Combine(b, c)) {
+				t.Fatalf("Combine not associative for %s, %s, %s", a.statusFrom, b.statusFrom, c.statusFrom)
 			}
 		}
 	}
@@ -106,8 +106,8 @@ func TestCombineNeverProducesUndefined(t *testing.T) {
 	rs := allResolved()
 	for _, a := range rs {
 		for _, b := range rs {
-			if got := combine(a, b); !got.Defined {
-				t.Fatalf("combine produced an undefined decision from %s and %s", a.statusFrom, b.statusFrom)
+			if got := Combine(a, b); !got.Defined {
+				t.Fatalf("Combine produced an undefined decision from %s and %s", a.statusFrom, b.statusFrom)
 			}
 		}
 	}
@@ -116,7 +116,7 @@ func TestCombineNeverProducesUndefined(t *testing.T) {
 // TestCombineNeverWeakensAnyEffect pins the fold's direction on every ordered
 // field individually.
 //
-// The algebra tests above prove combine is commutative and associative — which
+// The algebra tests above prove Combine is commutative and associative — which
 // a fold that always took the WEAKER side would also be. Direction is a
 // separate property, and per-field on purpose: reversing one field's fold
 // while the others stay correct is invisible to any test that only inspects
@@ -128,8 +128,8 @@ func TestCombineNeverProducesUndefined(t *testing.T) {
 // TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt holds that behaviourally
 // and TestTheVerdictIsAdoptedWholeOrNotAtAll holds it structurally.
 func TestCombineNeverWeakensAnyEffect(t *testing.T) {
-	weak := resolved{Decision: Decision{Defined: true}}
-	strong := resolved{Decision: Decision{
+	weak := Resolved{Decision: Decision{Defined: true}}
+	strong := Resolved{Decision: Decision{
 		Defined: true,
 		Loop:    LoopTerminate,
 		Circuit: CircuitEffect(2),
@@ -137,9 +137,9 @@ func TestCombineNeverWeakensAnyEffect(t *testing.T) {
 		Settle:  SettleEffect(1),
 	}}
 
-	for name, got := range map[string]resolved{
-		"strong on the left":  combine(strong, weak),
-		"strong on the right": combine(weak, strong),
+	for name, got := range map[string]Resolved{
+		"strong on the left":  Combine(strong, weak),
+		"strong on the right": Combine(weak, strong),
 	} {
 		if got.Loop != strong.Loop {
 			t.Errorf("%s: Loop folded to %v, want the stronger %v", name, got.Loop, strong.Loop)
@@ -160,7 +160,7 @@ func TestCombineNeverWeakensAnyEffect(t *testing.T) {
 // steer, so a capability reporting a weak verdict alongside a strong one cannot
 // weaken it.
 func TestResolveBatchTakesStrongestLoop(t *testing.T) {
-	got := resolveBatch([]fact.Fact{
+	got := ResolveBatch([]fact.Fact{
 		{Kind: fact.KindUpstreamServerError},
 		{Kind: fact.KindRequestBudgetExhausted},
 	})
@@ -176,7 +176,7 @@ func TestResolveBatchTakesStrongestLoop(t *testing.T) {
 // decides the chain ends, another decides what the caller is told, and neither
 // has to know about the other.
 func TestResolveBatchStatusFromPeer(t *testing.T) {
-	got := resolveBatch([]fact.Fact{
+	got := ResolveBatch([]fact.Fact{
 		{Kind: fact.KindPricingUnavailableTerminal},
 		{Kind: fact.KindPricingUnavailableSkip},
 	})
@@ -195,18 +195,18 @@ func TestResolveBatchStatusFromPeer(t *testing.T) {
 // indistinguishable, and the relay has to guess — which is how a repair offer
 // and a content refusal both ended up logged as content inspection.
 func TestCombineAttributesTheWinningLoop(t *testing.T) {
-	refused := resolved{
+	refused := Resolved{
 		Decision:   decisionTable[fact.KindPayloadRefused],
 		loopFrom:   fact.KindPayloadRefused,
 		statusFrom: fact.KindPayloadRefused,
 	}
-	terminal := resolved{
+	terminal := Resolved{
 		Decision:   decisionTable[fact.KindRequestBudgetExhausted],
 		loopFrom:   fact.KindRequestBudgetExhausted,
 		statusFrom: fact.KindRequestBudgetExhausted,
 	}
 
-	got := combine(refused, terminal)
+	got := Combine(refused, terminal)
 	if got.Loop != LoopTerminate {
 		t.Fatalf("loop = %v, want LoopTerminate", got.Loop)
 	}
@@ -215,7 +215,7 @@ func TestCombineAttributesTheWinningLoop(t *testing.T) {
 	}
 	// The weaker verdict must not claim the effect just because it was folded
 	// in first.
-	if rev := combine(terminal, refused); rev.loopFrom != got.loopFrom {
+	if rev := Combine(terminal, refused); rev.loopFrom != got.loopFrom {
 		t.Errorf("attribution depends on fold order: %s vs %s", rev.loopFrom, got.loopFrom)
 	}
 }
@@ -224,7 +224,7 @@ func TestCombineAttributesTheWinningLoop(t *testing.T) {
 // must be identifiable as a refusal, not merely as "something wants the next
 // candidate".
 func TestResolveBatchAttributesRefusal(t *testing.T) {
-	got := resolveBatch([]fact.Fact{{Kind: fact.KindPayloadRefused, Status: 400}})
+	got := ResolveBatch([]fact.Fact{{Kind: fact.KindPayloadRefused, Status: 400}})
 	if got.Loop != LoopNextCandidate {
 		t.Fatalf("loop = %v, want LoopNextCandidate", got.Loop)
 	}
@@ -242,7 +242,7 @@ func TestOtherNextCandidateVerdictsAreNotRefusals(t *testing.T) {
 		fact.KindUpstreamTransportFailure,
 		fact.KindCandidateUnsupported,
 	} {
-		got := resolveBatch([]fact.Fact{{Kind: k}})
+		got := ResolveBatch([]fact.Fact{{Kind: k}})
 		if got.Loop != LoopNextCandidate {
 			t.Fatalf("%s: loop = %v, want LoopNextCandidate", k, got.Loop)
 		}
@@ -262,10 +262,10 @@ func TestOtherNextCandidateVerdictsAreNotRefusals(t *testing.T) {
 // pair reads like defensive filler, and the first person to tidy it would
 // remove the only thing standing between a caller and an HTTP 0.
 func TestAVerdictWithNoStatusOpinionAsksForNothing(t *testing.T) {
-	var v resolved // Status is StatusNone
-	status, errType := v.callerFacing(500, "upstream_error")
+	var v Resolved // Status is StatusNone
+	status, errType := v.CallerFacing(500, "upstream_error")
 	if status != 0 || errType != "" {
-		t.Errorf("callerFacing = (%d, %q), want (0, \"\"): a decision that states no status "+
+		t.Errorf("CallerFacing = (%d, %q), want (0, \"\"): a decision that states no status "+
 			"must not borrow the response's, or every verdict would look like it had an "+
 			"opinion about what the caller sees", status, errType)
 	}
@@ -304,9 +304,9 @@ func TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			v := resolveBatch(tc.facts)
+			v := ResolveBatch(tc.facts)
 			// Whoever won the status also decides whether it is remembered.
-			want := decisionFor(v.statusFrom).Sticky
+			want := For(v.statusFrom).Sticky
 			if v.Sticky != want {
 				t.Errorf("folded Sticky = %v, but the status came from %v whose row says %v: "+
 					"the verdict would be remembered at a scope its own reporter never asked "+
@@ -332,7 +332,7 @@ func TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt(t *testing.T) {
 func TestTheFallbackReasonNamesTheFactThatSuppliedTheVerdict(t *testing.T) {
 	// PricingUnavailableSkip states a status and no reason; RequestBudgetExhausted
 	// terminates, so it wins the loop. Neither carries words.
-	v := resolveBatch([]fact.Fact{
+	v := ResolveBatch([]fact.Fact{
 		{Kind: fact.KindPricingUnavailableSkip},
 		{Kind: fact.KindRequestBudgetExhausted},
 	})
@@ -340,8 +340,8 @@ func TestTheFallbackReasonNamesTheFactThatSuppliedTheVerdict(t *testing.T) {
 		t.Fatalf("fixture no longer splits the winners (both %v); pick two Kinds where one wins "+
 			"the status and another wins the loop, or this test proves nothing", v.statusFrom)
 	}
-	if got, want := v.failReason(), v.statusFrom.String(); got != want {
-		t.Errorf("failReason = %q, want %q: the persisted reason has to name the fact that "+
+	if got, want := v.FailReason(), v.statusFrom.String(); got != want {
+		t.Errorf("FailReason = %q, want %q: the persisted reason has to name the fact that "+
 			"supplied the verdict, not the one that supplied the loop effect", got, want)
 	}
 }

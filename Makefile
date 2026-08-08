@@ -155,7 +155,8 @@ vet-embed: embed-frontend
 gates:
 	golangci-lint run --enable-only depguard ./...
 	go test ./internal/gates/... -count=1 -v
-	go test ./internal/gateway/ -run '^(TestDecisionTableIsComplete|TestCombineIsCommutative|TestCombineIsAssociative|TestCombineNeverProducesUndefined|TestObserversCannotReachEachOtherOrTheAuditBody|TestEveryCountSurvivesTheDeliveryHop|TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt|TestAVerdictDoesNotOutliveTheKeyThatEarnedIt)$$' -count=1 -v
+	go test ./internal/decision/ -run '^(TestDecisionTableIsComplete|TestCombineIsCommutative|TestCombineIsAssociative|TestCombineNeverProducesUndefined|TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt)$$' -count=1 -v
+	go test ./internal/gateway/ -run '^(TestObserversCannotReachEachOtherOrTheAuditBody|TestEveryCountSurvivesTheDeliveryHop|TestAVerdictDoesNotOutliveTheKeyThatEarnedIt)$$' -count=1 -v
 	go test ./internal/fact/ -run '^TestValidateRejectsImpossibleDeliveries$$' -count=1 -v
 
 migrate: build

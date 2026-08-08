@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
@@ -48,7 +49,7 @@ func TestObserveUpstreamStampsProvenance(t *testing.T) {
 	}
 
 	got := svc.observeUpstreamError(context.Background(), rc, fact.Upstream{StatusCode: 400})
-	if got.Loop != LoopNextCandidate {
+	if got.Loop != decision.LoopNextCandidate {
 		t.Fatalf("want the refusal to resolve to a failover, got loop %v", got.Loop)
 	}
 
@@ -104,7 +105,7 @@ func TestObserveUpstreamWithNoObserversIsInert(t *testing.T) {
 	rc := &Exchange{}
 
 	got := svc.observeUpstreamError(context.Background(), rc, fact.Upstream{StatusCode: 400})
-	if got.Loop != LoopNone {
+	if got.Loop != decision.LoopNone {
 		t.Errorf("loop = %v, want LoopNone", got.Loop)
 	}
 	if len(rc.timeline.All()) != 0 {
@@ -149,11 +150,11 @@ func TestRewriteEgressRefusalStopsAndReportsAVerdict(t *testing.T) {
 	body := []byte(`{"a":1}`)
 	out, verdict := svc.rewriteEgress(context.Background(), rc, protocols.ProtocolOpenAI, body)
 
-	if verdict.Loop != LoopNextCandidate {
-		t.Fatalf("loop = %v, want LoopNextCandidate so the candidate is skipped", verdict.Loop)
+	if verdict.Loop != decision.LoopNextCandidate {
+		t.Fatalf("loop = %v, want decision.LoopNextCandidate so the candidate is skipped", verdict.Loop)
 	}
-	if verdict.loopFrom != fact.KindEgressRewriteFailed {
-		t.Errorf("loopFrom = %s, want egress_rewrite_failed", verdict.loopFrom)
+	if verdict.LoopFrom() != fact.KindEgressRewriteFailed {
+		t.Errorf("loopFrom = %s, want egress_rewrite_failed", verdict.LoopFrom())
 	}
 	if string(out) != string(body) {
 		t.Errorf("body = %q, want it left as it was; a refused body must not be handed on", out)
@@ -363,7 +364,7 @@ func TestAdmissionsReleaseInReverseOrder(t *testing.T) {
 	rc := &Exchange{}
 	var held []heldTicket
 	verdict := svc.admit(context.Background(), rc, &held)
-	if verdict.Loop != LoopNone {
+	if verdict.Loop != decision.LoopNone {
 		t.Fatalf("loop = %v, want LoopNone when nothing refused", verdict.Loop)
 	}
 	svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{})
@@ -395,11 +396,11 @@ func TestAdmissionRefusalStopsLaterAdmissions(t *testing.T) {
 	var held []heldTicket
 	verdict := svc.admit(context.Background(), rc, &held)
 
-	if verdict.Loop != LoopTerminate {
-		t.Fatalf("loop = %v, want LoopTerminate", verdict.Loop)
+	if verdict.Loop != decision.LoopTerminate {
+		t.Fatalf("loop = %v, want decision.LoopTerminate", verdict.Loop)
 	}
-	if verdict.rejectDetail != "refuser refused" {
-		t.Errorf("rejectDetail = %q, want the reporter's own words", verdict.rejectDetail)
+	if verdict.RejectDetail() != "refuser refused" {
+		t.Errorf("rejectDetail = %q, want the reporter's own words", verdict.RejectDetail())
 	}
 	if len(held) != 0 {
 		t.Errorf("held = %v, want nothing held when the first admission refused", held)
@@ -501,15 +502,15 @@ func TestAdmissionPanicStillReleasesEarlierTickets(t *testing.T) {
 // strings, so deriving one from the other means a rename silently breaks a
 // display nobody is watching.
 func TestFailReasonPrefersTheReporterCode(t *testing.T) {
-	withCode := resolveBatch([]fact.Fact{
+	withCode := decision.ResolveBatch([]fact.Fact{
 		{Kind: fact.KindCallerRateLimited, Reason: "concurrency_limit"},
 	})
-	if got := withCode.failReason(); got != "concurrency_limit" {
+	if got := withCode.FailReason(); got != "concurrency_limit" {
 		t.Errorf("failReason = %q, want the reporter's stable code", got)
 	}
 
-	withoutCode := resolveBatch([]fact.Fact{{Kind: fact.KindCallerRateLimited}})
-	if got := withoutCode.failReason(); got != "caller_rate_limited" {
+	withoutCode := decision.ResolveBatch([]fact.Fact{{Kind: fact.KindCallerRateLimited}})
+	if got := withoutCode.FailReason(); got != "caller_rate_limited" {
 		t.Errorf("failReason = %q, want the kind name as fallback", got)
 	}
 }
@@ -815,7 +816,7 @@ func TestEachReleaseGetsItsOwnClock(t *testing.T) {
 
 	rc := &Exchange{}
 	var held []heldTicket
-	if v := svc.admit(context.Background(), rc, &held); v.Loop != LoopNone {
+	if v := svc.admit(context.Background(), rc, &held); v.Loop != decision.LoopNone {
 		t.Fatalf("loop = %v, want LoopNone", v.Loop)
 	}
 	svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{})

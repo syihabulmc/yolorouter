@@ -18,6 +18,7 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/compress"
 	"github.com/yolorouter/yolorouter/internal/config"
+	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
@@ -323,10 +324,10 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		return
 	}
 	verdict := s.admit(rc.requestCtx, rc, &held)
-	if verdict.Loop >= LoopNextCandidate {
+	if verdict.Loop >= decision.LoopNextCandidate {
 		captureRejectedBody(c, rc)
-		status, errType := admissionRejectionResponse(verdict)
-		s.rejectRequest(c, rc, status, errType, verdict.rejectDetail, verdict.failReason(), fact.FaultClient, start)
+		status, errType := decision.AdmissionRejectionResponse(verdict)
+		s.rejectRequest(c, rc, status, errType, verdict.RejectDetail(), verdict.FailReason(), fact.FaultClient, start)
 		return
 	}
 
@@ -599,7 +600,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// Placed ABOVE the budget gate for that second reason: a reset after it
 		// is skipped exactly when the previous attempt had just left a verdict
 		// behind.
-		rc.stickyAttempt = stickyVerdict{}
+		rc.stickyAttempt = decision.StickyVerdict{}
 		cand := candidates[i]
 		// Per-request total-budget gate: RequestDeadline is the hard cap that
 		// spans every candidate and key rotation. Checking it only at the
@@ -714,18 +715,18 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// once a fact resolved to a verdict this strong, dispatching the body
 		// anyway would mean a reported judgement was overridden by omission.
 		// Under-executing a verdict is recoverable; ignoring it is not.
-		if verdict.Loop >= LoopNextCandidate {
+		if verdict.Loop >= decision.LoopNextCandidate {
 			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus,
-				"egress rewrite verdict "+verdict.loopFrom.String()))
+				"egress rewrite verdict "+verdict.LoopFrom().String()))
 			continue
 		}
 		// Retry-same and rotate-key have no meaning before anything was sent;
 		// they are logged so the reporting capability's misunderstanding is
 		// visible rather than silently absorbed.
-		if verdict.Loop > LoopContinue {
+		if verdict.Loop > decision.LoopContinue {
 			logger.Warn("gateway: reported verdict is not executable before dispatch",
 				zap.String("request_id", rc.requestID),
-				zap.String("verdict", verdict.loopFrom.String()))
+				zap.String("verdict", verdict.LoopFrom().String()))
 		}
 
 		if s.tryKeys(c, rc, adm, &cand, provider, enabled, egress, outBody, url, start) == outcomeDone {
@@ -820,7 +821,7 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *mode
 		// chain then ran out, be reported as what ended the request: a rate
 		// limit one key hit, quoted for a request that actually died with no
 		// usable key at all.
-		rc.stickyAttempt = stickyVerdict{}
+		rc.stickyAttempt = decision.StickyVerdict{}
 		// Destination-version guard (credential-scope mechanism): a key
 		// is only authorized for the provider destination it was verified
 		// against. When an admin changes BaseURL, DestinationVersion bumps
@@ -1111,17 +1112,17 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	// vanishes without trace is the one failure mode that looks exactly like
 	// everything working. Sticky is read from the table, just below. The
 	// failover reclassification is still keyed on a hardcoded Kind rather than
-	// on the table's Loop — see the note at the top of decision.go for what
-	// that does and does not mean.
+	// on the table's Loop — see the note at the top of the decision package
+	// for what that does and does not mean.
 	switch {
-	case observed.loopFrom == fact.KindPayloadRefused && class.Category == statusTerminalClient:
+	case observed.LoopFrom() == fact.KindPayloadRefused && class.Category == statusTerminalClient:
 		class.Category = statusFailover
 		class.Outcome = AttemptContentFiltered
 		note = fmt.Sprintf("upstream %d content inspection", statusCode)
-	case observed.Loop > LoopContinue:
+	case observed.Loop > decision.LoopContinue:
 		logger.Warn("gateway: reported verdict is not executed on this path",
 			zap.String("request_id", rc.requestID),
-			zap.String("verdict", observed.loopFrom.String()),
+			zap.String("verdict", observed.LoopFrom().String()),
 			zap.Int("upstream_status", statusCode))
 	}
 
@@ -1130,13 +1131,13 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	// table decides whether this verdict is worth quoting if the chain then
 	// runs out. A verdict with no status to offer records nothing — quoting a
 	// zero would tell the caller the request ended without ever being answered.
-	if observed.Sticky != StickyNone {
-		if status, errType := observed.callerFacing(statusCode, class.ErrorType); status != 0 {
-			rc.stickyAttempt = stickyVerdict{
-				status:  status,
-				errType: errType,
-				detail:  observed.rejectDetail,
-				reason:  observed.failReason(),
+	if observed.Sticky != decision.StickyNone {
+		if status, errType := observed.CallerFacing(statusCode, class.ErrorType); status != 0 {
+			rc.stickyAttempt = decision.StickyVerdict{
+				Status:  status,
+				ErrType: errType,
+				Detail:  observed.RejectDetail(),
+				Reason:  observed.FailReason(),
 			}
 		}
 	}
@@ -1180,12 +1181,12 @@ func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.T
 	// One slot, holding the last attempt's verdict: whoever ends the chain
 	// leaves theirs behind, and everyone before them has already had theirs
 	// overwritten or cleared.
-	if v := rc.stickyAttempt; v.held() {
-		detail := v.detail
+	if v := rc.stickyAttempt; v.Held() {
+		detail := v.Detail
 		if detail == "" {
 			detail = "upstream refused this request"
 		}
-		s.rejectRequest(c, rc, v.status, v.errType, detail, v.reason, fact.FaultUpstream, start)
+		s.rejectRequest(c, rc, v.Status, v.ErrType, detail, v.Reason, fact.FaultUpstream, start)
 		return
 	}
 	s.rejectRequest(c, rc, http.StatusBadGateway, errTypeUpstream,

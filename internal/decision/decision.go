@@ -1,4 +1,12 @@
-package gateway
+// Package decision is the whole of the kernel's control-flow authority over
+// reported facts. A fact turns into a decision here and nowhere else: no other
+// package may branch on a fact, and a structural gate holds the kernel to
+// that.
+//
+// The package imports only the standard library and the fact vocabulary. It
+// holds no request state and touches no I/O: everything here is a pure fold
+// from reported facts to one resolved verdict the kernel then acts on.
+package decision
 
 import (
 	"net/http"
@@ -6,10 +14,6 @@ import (
 	"github.com/yolorouter/yolorouter/internal/fact"
 )
 
-// This file is the whole of the kernel's control-flow authority over reported
-// facts. A fact turns into a decision here and nowhere else: no other code in
-// this package may branch on a fact.
-//
 // The table is a fixed-size array rather than a map so that a Kind added
 // without a row is a detectable state (Defined stays false) instead of an
 // all-zero Decision that silently reads as "continue, no status, no
@@ -24,9 +28,9 @@ import (
 //     response a rejected caller sees.
 //   - The egress rewrite path, which skips the candidate when the verdict asks
 //     for LoopNextCandidate or stronger.
-//   - The non-2xx branch of attemptOne, which reads Sticky (holding the verdict
-//     for the terminal to quote when the chain runs out) and performs a
-//     failover reclassification.
+//   - The non-2xx branch of the attempt loop, which reads Sticky (holding the
+//     verdict for the terminal to quote when the chain runs out) and performs
+//     a failover reclassification.
 //
 // That reclassification is keyed on a hardcoded Kind rather than on the table's
 // Loop effect, and the distinction is worth stating precisely: the branch does
@@ -47,6 +51,29 @@ import (
 // dropped, so the gap is at least noisy. Do not add a capability that depends
 // on an unexecuted effect before the executor exists — it will compile, pass
 // its own tests, and do nothing.
+
+// Caller-facing error "type" values (each failure class maps to one of
+// these). They are the vocabulary the table's StatusFixed rows speak and the
+// kernel's error envelopes render; kept as untyped string constants so both
+// sides can use them wherever a plain string is expected.
+const (
+	ErrTypeAuthentication    = "authentication_error"
+	ErrTypePermission        = "permission_error"
+	ErrTypeRateLimit         = "rate_limit_error"
+	ErrTypeInvalidRequest    = "invalid_request_error"
+	ErrTypeNotFound          = "not_found_error"
+	ErrTypeUpstream          = "upstream_error"
+	ErrTypeServer            = "server_error"
+	ErrTypeUnavailable       = "service_unavailable"
+	ErrTypeInsufficientQuota = "insufficient_quota" // OpenAI's type for budget/quota exhaustion (distinct from rate_limit_error)
+)
+
+// StatusClientClosedRequest is the non-standard status used to record that the
+// caller went away before the response was delivered. It is never written to
+// the wire — there is no caller left to receive it — but it must be
+// distinguishable in the audit row from a gateway fault, because the two demand
+// opposite responses from whoever reads it.
+const StatusClientClosedRequest = 499
 
 // LoopEffect is what a decision does to the candidate loop.
 //
@@ -179,12 +206,12 @@ type Decision struct {
 var decisionTable = [fact.NumKinds]Decision{
 	fact.KindQuotaExhausted: {
 		Loop: LoopTerminate, Status: StatusFixed,
-		Code: http.StatusTooManyRequests, ErrType: errTypeInsufficientQuota,
+		Code: http.StatusTooManyRequests, ErrType: ErrTypeInsufficientQuota,
 		Settle: SettleReverseAll, Defined: true,
 	},
 	fact.KindBalanceInsufficient: {
 		Loop: LoopTerminate, Status: StatusFixed,
-		Code: http.StatusPaymentRequired, ErrType: errTypeInsufficientQuota,
+		Code: http.StatusPaymentRequired, ErrType: ErrTypeInsufficientQuota,
 		Settle: SettleReverseAll, Defined: true,
 	},
 	// Nothing was reserved downstream and no upstream was touched, so there is
@@ -192,7 +219,7 @@ var decisionTable = [fact.NumKinds]Decision{
 	// releases on every exit path regardless of verdict.
 	fact.KindCallerRateLimited: {
 		Loop: LoopTerminate, Status: StatusFixed,
-		Code: http.StatusTooManyRequests, ErrType: errTypeRateLimit,
+		Code: http.StatusTooManyRequests, ErrType: ErrTypeRateLimit,
 		Defined: true,
 	},
 	fact.KindPricingUnavailableTerminal: {
@@ -201,12 +228,12 @@ var decisionTable = [fact.NumKinds]Decision{
 	},
 	fact.KindPricingUnavailableSkip: {
 		Loop: LoopNextCandidate, Status: StatusFixed,
-		Code: http.StatusServiceUnavailable, ErrType: errTypeUnavailable,
+		Code: http.StatusServiceUnavailable, ErrType: ErrTypeUnavailable,
 		Budget: BudgetConsumeProbe, Sticky: StickyAttempt, Defined: true,
 	},
 	fact.KindCandidateUnsupported: {
 		Loop: LoopNextCandidate, Status: StatusFixed,
-		Code: http.StatusBadRequest, ErrType: errTypeInvalidRequest,
+		Code: http.StatusBadRequest, ErrType: ErrTypeInvalidRequest,
 		Budget: BudgetConsumeProbe, Sticky: StickyAttempt, Defined: true,
 	},
 
@@ -229,7 +256,7 @@ var decisionTable = [fact.NumKinds]Decision{
 	},
 	fact.KindUpstreamRateLimited: {
 		Loop: LoopRotateKey, Status: StatusFixed,
-		Code: http.StatusTooManyRequests, ErrType: errTypeRateLimit,
+		Code: http.StatusTooManyRequests, ErrType: ErrTypeRateLimit,
 		Circuit: CircuitPenalizeSoft, Budget: BudgetConsumeAttempt,
 		Sticky: StickyAttempt, Defined: true,
 	},
@@ -278,12 +305,12 @@ var decisionTable = [fact.NumKinds]Decision{
 	},
 	fact.KindRequestBudgetExhausted: {
 		Loop: LoopTerminate, Status: StatusFixed,
-		Code: http.StatusGatewayTimeout, ErrType: errTypeUpstream,
+		Code: http.StatusGatewayTimeout, ErrType: ErrTypeUpstream,
 		Settle: SettleReverseAll, Defined: true,
 	},
 	fact.KindIngressRewriteFailed: {
 		Loop: LoopTerminate, Status: StatusFixed,
-		Code: http.StatusInternalServerError, ErrType: errTypeServer,
+		Code: http.StatusInternalServerError, ErrType: ErrTypeServer,
 		Settle: SettleReverseAll, Defined: true,
 	},
 	fact.KindEgressRewriteFailed: {
@@ -295,17 +322,17 @@ var decisionTable = [fact.NumKinds]Decision{
 	fact.KindNone: {Defined: true},
 }
 
-// decisionFor is the only lookup into the table.
-func decisionFor(k fact.Kind) Decision {
+// For is the only lookup into the table.
+func For(k fact.Kind) Decision {
 	if int(k) >= len(decisionTable) {
 		return Decision{}
 	}
 	return decisionTable[k]
 }
 
-// resolved is a folded batch: the decision the kernel will act on, plus the
+// Resolved is a folded batch: the decision the kernel will act on, plus the
 // status it resolved to.
-type resolved struct {
+type Resolved struct {
 	Decision
 	// statusFrom is the Kind that supplied the status, used to break ties
 	// deterministically when two facts in a batch both have an opinion.
@@ -323,7 +350,14 @@ type resolved struct {
 	reason string
 }
 
-// combine folds two decisions from the same batch.
+// LoopFrom names the fact that supplied the winning Loop effect.
+func (v Resolved) LoopFrom() fact.Kind { return v.loopFrom }
+
+// RejectDetail is the winning reporter's own words for a refusal, empty when
+// it gave none.
+func (v Resolved) RejectDetail() string { return v.rejectDetail }
+
+// Combine folds two decisions from the same batch.
 //
 // It must be commutative and associative. If it were not, the outcome would
 // depend on the order capabilities happen to be registered in — which is the
@@ -332,7 +366,7 @@ type resolved struct {
 // strength ordering; Status carries a payload and so cannot, and breaks ties by
 // Kind ordinal instead, which is a total order and therefore keeps the fold
 // commutative.
-func combine(a, b resolved) resolved {
+func Combine(a, b Resolved) Resolved {
 	out := a
 	switch {
 	case b.Loop > out.Loop:
@@ -400,7 +434,7 @@ func statusStrength(p StatusPolicy) int {
 // statusWins reports whether challenger's status opinion should replace
 // holder's. Ties break on the lower Kind ordinal: arbitrary, but total, and
 // total is the only property that matters here.
-func statusWins(challenger, holder resolved) bool {
+func statusWins(challenger, holder Resolved) bool {
 	cs, hs := statusStrength(challenger.Status), statusStrength(holder.Status)
 	if cs != hs {
 		return cs > hs
@@ -424,48 +458,48 @@ func statusWins(challenger, holder resolved) bool {
 	return challenger.rejectDetail < holder.rejectDetail
 }
 
-// resolveBatch folds one Report call into a single decision.
-func resolveBatch(facts []fact.Fact) resolved {
-	var out resolved
+// ResolveBatch folds one Report call into a single decision.
+func ResolveBatch(facts []fact.Fact) Resolved {
+	var out Resolved
 	for _, f := range facts {
-		r := resolved{
-			Decision:     decisionFor(f.Kind),
+		r := Resolved{
+			Decision:     For(f.Kind),
 			statusFrom:   f.Kind,
 			loopFrom:     f.Kind,
 			rejectDetail: f.Detail,
 			reason:       f.Reason,
 		}
-		out = combine(out, r)
+		out = Combine(out, r)
 	}
 	return out
 }
 
-// stickyVerdict is a verdict held for the terminal to quote once the chain is
+// StickyVerdict is a verdict held for the terminal to quote once the chain is
 // exhausted, so "every candidate refused this payload" reaches the caller as
 // what it is rather than as a generic gateway failure.
 //
 // The kernel holds it without knowing which capability produced it. That is the
 // whole point of the slot: the terminal used to carry a pair of fields named
 // after one capability's concern, which meant a second capability wanting the
-// same treatment had to add its own pair and its own branch here.
-type stickyVerdict struct {
-	status  int
-	errType string
-	detail  string
-	reason  string
+// same treatment had to add its own pair and its own branch there.
+type StickyVerdict struct {
+	Status  int
+	ErrType string
+	Detail  string
+	Reason  string
 }
 
-// held reports whether anything was recorded.
-func (s stickyVerdict) held() bool { return s.status != 0 }
+// Held reports whether anything was recorded.
+func (s StickyVerdict) Held() bool { return s.Status != 0 }
 
-// callerFacing renders the status and error type this verdict asks the caller
+// CallerFacing renders the status and error type this verdict asks the caller
 // to be shown, or a zero status when it has no opinion.
 //
 // The upstream's own status and classification are passed in rather than read
 // off the decision, which does not carry them: StatusFromUpstream means
 // "whatever the peer actually answered with", and the response is held by the
 // call site.
-func (v resolved) callerFacing(upstreamStatus int, upstreamErrType string) (int, string) {
+func (v Resolved) CallerFacing(upstreamStatus int, upstreamErrType string) (int, string) {
 	switch v.Status {
 	case StatusFixed:
 		return v.Code, v.ErrType
@@ -476,47 +510,45 @@ func (v resolved) callerFacing(upstreamStatus int, upstreamErrType string) (int,
 	}
 }
 
-// admissionRejectionResponse turns a refusal verdict into what the caller sees.
+// AdmissionRejectionResponse turns a refusal verdict into what the caller sees.
 //
 // Only StatusFixed is honoured here: an admission runs before any upstream
 // exists, so there is no upstream status to forward and no peer fact to defer
 // to. A verdict that expressed neither falls back to the generic refusal rather
 // than inventing a specific one, because guessing a status is how a rate limit
 // ends up reported as a server fault.
-func admissionRejectionResponse(v resolved) (status int, errType string) {
+func AdmissionRejectionResponse(v Resolved) (status int, errType string) {
 	if v.Status == StatusFixed && v.Code != 0 {
 		return v.Code, v.ErrType
 	}
-	return http.StatusTooManyRequests, errTypeRateLimit
+	return http.StatusTooManyRequests, ErrTypeRateLimit
 }
 
-// failReason is the code persisted for a verdict.
-//
-// A reporter-supplied Reason wins because it is the stable one: Kind names are
-// internal and get renamed as the vocabulary is refined, while this string is
-// read by dashboards and log viewers that were written against the old value.
-// The Kind name is only the fallback for verdicts nobody gave a code.
 // adoptVerdict takes the whole caller-facing verdict from one fact.
 //
 // It exists so there is exactly one place the verdict can be assigned, which is
 // what makes "every part of it came from the same fact" true by construction
 // rather than by everyone remembering to keep the fields together. A gate holds
-// combine to assigning these fields only through here.
-func (v *resolved) adoptVerdict(from resolved) {
+// Combine to assigning these fields only through here.
+func (v *Resolved) adoptVerdict(from Resolved) {
 	v.Status, v.Code, v.ErrType = from.Status, from.Code, from.ErrType
 	v.Sticky = from.Sticky
 	v.statusFrom = from.statusFrom
 	v.rejectDetail, v.reason = from.rejectDetail, from.reason
 }
 
-// failReason is the code persisted for a verdict.
+// FailReason is the code persisted for a verdict.
+//
+// A reporter-supplied Reason wins because it is the stable one: Kind names are
+// internal and get renamed as the vocabulary is refined, while this string is
+// read by dashboards and log viewers that were written against the old value.
 //
 // The fallback names the fact that supplied the verdict, not the one that
 // supplied the loop effect. Those can be different facts in the same batch, and
 // naming the loop's would file the row under something that contributed neither
 // the status the caller saw nor the words they were given — an audit trail
 // pointing at a fact that had nothing to do with the answer.
-func (v resolved) failReason() string {
+func (v Resolved) FailReason() string {
 	if v.reason != "" {
 		return v.reason
 	}

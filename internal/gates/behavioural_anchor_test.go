@@ -29,12 +29,13 @@ func TestBehaviouralGateTestsStillExist(t *testing.T) {
 		tests []string
 	}{
 		{
-			file: "internal/gateway/decision_test.go",
+			file: "internal/decision/decision_test.go",
 			tests: []string{
 				"TestDecisionTableIsComplete",
 				"TestCombineIsCommutative",
 				"TestCombineIsAssociative",
 				"TestCombineNeverProducesUndefined",
+				"TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt",
 			},
 		},
 		{
@@ -42,10 +43,8 @@ func TestBehaviouralGateTestsStillExist(t *testing.T) {
 			tests: []string{"TestObserversCannotReachEachOtherOrTheAuditBody"},
 		},
 		{
-			file: "internal/gateway/decision_test.go",
-			tests: []string{
-				"TestAVerdictIsRememberedOnlyByTheFactThatSuppliedIt",
-			},
+			file:  "internal/gateway/sticky_scope_test.go",
+			tests: []string{"TestAVerdictDoesNotOutliveTheKeyThatEarnedIt"},
 		},
 		{
 			file:  "internal/gateway/usage_roundtrip_test.go",

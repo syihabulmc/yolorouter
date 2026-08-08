@@ -37,6 +37,8 @@ linters:
               desc: "a capability holding gin.Context can write the response directly; capabilities report facts and the kernel writes responses"
             - pkg: "github.com/yolorouter/yolorouter/internal/gateway"
               desc: "a capability importing the kernel can reach *Exchange directly instead of the narrow view its bind function grants"
+            - pkg: "github.com/yolorouter/yolorouter/internal/decision"
+              desc: "a capability reports facts; turning a fact into a decision belongs to the kernel's table, and a capability consulting it can pre-empt the fold"
         # The kernel dispatches on registered extension points; assembly
         # (router/cmd) is the only place a concrete capability or modality
         # package may be named. Test files are exempt: integration tests wire
@@ -53,6 +55,19 @@ linters:
               desc: "assembly is the only place a concrete capability may be named; the kernel naming one makes every future capability a kernel change"
             - pkg: "github.com/yolorouter/yolorouter/internal/modality"
               desc: "the kernel dispatches on a registered ModalityID, it does not name a modality package"
+        # decision is the pure fold from reported facts to one verdict. It may
+        # see the fact vocabulary and nothing else: an import of request state,
+        # storage, or a web framework would hand the table a channel through
+        # which a decision could depend on something other than the facts.
+        decision-leaf:
+          files:
+            - "**/internal/decision/*.go"
+            - "**/internal/decision/**/*.go"
+          list-mode: strict
+          allow:
+            - $gostd
+            - "github.com/yolorouter/yolorouter/internal/fact"
+            - "github.com/yolorouter/yolorouter/internal/decision"
         # fact is the leaf every other package here depends on. An import that
         # is not the standard library puts a cycle one import away from every
         # package in the module. The package's own import path is allowed so

@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
@@ -111,7 +112,7 @@ type Exchange struct {
 	// field names no capability: which verdicts are worth quoting is a property
 	// of the table, and a second capability wanting this treatment adds a table
 	// row, not a field here.
-	stickyAttempt stickyVerdict
+	stickyAttempt decision.StickyVerdict
 
 	// usage from the successful attempt, if any — drives cost + the log row.
 

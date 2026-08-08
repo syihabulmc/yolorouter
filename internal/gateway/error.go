@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/yolorouter/yolorouter/internal/decision"
 )
 
 // relayContextKey is the gin.Context key Handle stores the in-flight
@@ -69,19 +71,19 @@ func stashLocalErrorBody(c *gin.Context, errType, message string) {
 	rc.responseBody = LocalErrorBody(errType, message)
 }
 
-// OpenAI error "type" values (each failure class maps to one of
-// these). Kept as untyped string constants — they only appear at the
-// WriteOpenAIError call sites and in tests.
+// Caller-facing error "type" values. The canonical constants live in the
+// decision package — its table speaks them — and are aliased here so the many
+// envelope call sites in this package stay short.
 const (
-	errTypeAuthentication    = "authentication_error"
-	errTypePermission        = "permission_error"
-	errTypeRateLimit         = "rate_limit_error"
-	errTypeInvalidRequest    = "invalid_request_error"
-	errTypeNotFound          = "not_found_error"
-	errTypeUpstream          = "upstream_error"
-	errTypeServer            = "server_error"
-	errTypeUnavailable       = "service_unavailable"
-	errTypeInsufficientQuota = "insufficient_quota" // OpenAI's type for budget/quota exhaustion (distinct from rate_limit_error)
+	errTypeAuthentication    = decision.ErrTypeAuthentication
+	errTypePermission        = decision.ErrTypePermission
+	errTypeRateLimit         = decision.ErrTypeRateLimit
+	errTypeInvalidRequest    = decision.ErrTypeInvalidRequest
+	errTypeNotFound          = decision.ErrTypeNotFound
+	errTypeUpstream          = decision.ErrTypeUpstream
+	errTypeServer            = decision.ErrTypeServer
+	errTypeUnavailable       = decision.ErrTypeUnavailable
+	errTypeInsufficientQuota = decision.ErrTypeInsufficientQuota
 )
 
 // StatusClientClosedRequest is the non-standard status used to record that the
@@ -89,7 +91,7 @@ const (
 // the wire — there is no caller left to receive it — but it must be
 // distinguishable in the audit row from a gateway fault, because the two demand
 // opposite responses from whoever reads it.
-const StatusClientClosedRequest = 499
+const StatusClientClosedRequest = decision.StatusClientClosedRequest
 
 // WriteOpenAIError writes one OpenAI-compatible error response and aborts
 // the chain. status is the HTTP status; errType is the error.type string;

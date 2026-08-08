@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
 )
 
@@ -203,7 +204,7 @@ func TestAQuotaWithNoLimitReservesNothingAndIsNotReleased(t *testing.T) {
 			var held []heldTicket
 			verdict := svc.admit(context.Background(), rc, &held)
 
-			admitted := verdict.Loop == LoopNone
+			admitted := verdict.Loop == decision.LoopNone
 			if admitted != tc.wantAdmit {
 				t.Fatalf("admitted = %v (loop %v), want %v", admitted, verdict.Loop, tc.wantAdmit)
 			}
@@ -429,7 +430,7 @@ func TestARefusedBalanceStopsTheSubRequestFromBeingCharged(t *testing.T) {
 	var held []heldTicket
 	verdict := svc.admit(context.Background(), rc, &held)
 
-	if verdict.Loop == LoopNone {
+	if verdict.Loop == decision.LoopNone {
 		t.Fatal("an exhausted balance admitted the request")
 	}
 	for _, e := range log {
