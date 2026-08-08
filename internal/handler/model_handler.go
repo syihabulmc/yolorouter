@@ -1,13 +1,11 @@
 package handler
 
 import (
-	"errors"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/yolorouter/yolorouter/internal/service"
-	"github.com/yolorouter/yolorouter/pkg/errcode"
 	"github.com/yolorouter/yolorouter/pkg/response"
 )
 
@@ -70,35 +68,11 @@ func parseModelAndCandidateIDs(c *gin.Context) (modelID, candidateID uint, ok bo
 	return modelID, candidateID, true
 }
 
-// writeModelServiceError maps a service-layer sentinel error to the
-// project's unified error envelope — mirrors provider_handler.go's
-// writeProviderServiceError.
-func writeModelServiceError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, errcode.ErrModelNotFound):
-		response.Error(c, errcode.ModelNotFound, errcode.GetMessage(errcode.ModelNotFound))
-	case errors.Is(err, errcode.ErrModelNameTaken):
-		response.Error(c, errcode.ModelNameTaken, errcode.GetMessage(errcode.ModelNameTaken))
-	case errors.Is(err, errcode.ErrModelCandidateNotFound):
-		response.Error(c, errcode.ModelCandidateNotFound, errcode.GetMessage(errcode.ModelCandidateNotFound))
-	case errors.Is(err, errcode.ErrModelCandidateProviderTaken):
-		response.Error(c, errcode.ModelCandidateProviderTaken, errcode.GetMessage(errcode.ModelCandidateProviderTaken))
-	case errors.Is(err, errcode.ErrModelCandidateNotVerified):
-		response.Error(c, errcode.ModelCandidateNotVerified, errcode.GetMessage(errcode.ModelCandidateNotVerified))
-	case errors.Is(err, errcode.ErrProviderNotFound):
-		response.Error(c, errcode.ProviderNotFound, errcode.GetMessage(errcode.ProviderNotFound))
-	case errors.Is(err, errcode.ErrProviderNoTestableModel):
-		response.Error(c, errcode.ProviderNoTestableModel, errcode.GetMessage(errcode.ProviderNoTestableModel))
-	default:
-		response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
-	}
-}
-
 func GetModels(svc *service.ModelService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		list, err := svc.ListModels()
 		if err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, gin.H{"list": list})
@@ -113,7 +87,7 @@ func PostModel(svc *service.ModelService) gin.HandlerFunc {
 		}
 		view, err := svc.CreateModel(service.CreateModelInput{Name: req.Name}, timeNow())
 		if err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -131,7 +105,7 @@ func PostModelsBatch(svc *service.ModelService) gin.HandlerFunc {
 		}
 		result, err := svc.CreateModelsBatch(req.Names, timeNow())
 		if err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, result)
@@ -146,7 +120,7 @@ func GetModel(svc *service.ModelService) gin.HandlerFunc {
 		}
 		detail, err := svc.GetModelDetail(id)
 		if err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, detail)
@@ -165,7 +139,7 @@ func PatchModel(svc *service.ModelService) gin.HandlerFunc {
 		}
 		view, err := svc.UpdateModelNameStatus(id, req.Name, timeNow())
 		if err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -183,7 +157,7 @@ func PatchModelStatus(svc *service.ModelService) gin.HandlerFunc {
 			return
 		}
 		if err := svc.SetModelStatus(id, req.Enabled, timeNow()); err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, nil)
@@ -209,7 +183,7 @@ func GetCandidateSuggestPrice(svc *service.ModelService) gin.HandlerFunc {
 		}
 		view, err := svc.SuggestCandidatePrice(providerID, modelName)
 		if err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -233,7 +207,7 @@ func PostModelCandidate(svc *service.ModelService) gin.HandlerFunc {
 			MaxOutput: req.MaxOutput, ManagementStatus: req.ManagementStatus,
 		}, timeNow())
 		if err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -256,7 +230,7 @@ func PatchModelCandidate(svc *service.ModelService) gin.HandlerFunc {
 			ManagementStatus: req.ManagementStatus,
 		}, timeNow())
 		if err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, result)
@@ -274,7 +248,7 @@ func PatchModelCandidateOrder(svc *service.ModelService) gin.HandlerFunc {
 			return
 		}
 		if err := svc.ReorderModelCandidate(modelID, candidateID, req.Direction); err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, nil)
@@ -292,7 +266,7 @@ func PatchModelCandidateStatus(svc *service.ModelService) gin.HandlerFunc {
 			return
 		}
 		if err := svc.SetCandidateStatus(candidateID, req.Enabled, timeNow()); err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, nil)
@@ -310,7 +284,7 @@ func PostModelCandidateTest(svc *service.ModelService) gin.HandlerFunc {
 		}
 		view, err := svc.RetestModelCandidate(c.Request.Context(), candidateID, timeNow())
 		if err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -338,7 +312,7 @@ func PostModelCandidateTestAndCreate(svc *service.ModelService) gin.HandlerFunc 
 			MaxOutput: req.MaxOutput, ManagementStatus: req.ManagementStatus,
 		}, timeNow())
 		if err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, result)
@@ -352,7 +326,7 @@ func DeleteModelCandidate(svc *service.ModelService) gin.HandlerFunc {
 			return
 		}
 		if err := svc.DeleteModelCandidate(candidateID); err != nil {
-			writeModelServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, nil)

@@ -2,15 +2,12 @@
 package handler
 
 import (
-	"errors"
-	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/yolorouter/yolorouter/internal/service"
-	"github.com/yolorouter/yolorouter/pkg/errcode"
 	"github.com/yolorouter/yolorouter/pkg/response"
 )
 
@@ -108,31 +105,6 @@ func validateExpiryFuture(c *gin.Context, expiry *time.Time) bool {
 	return true
 }
 
-func writeAPIKeyServiceError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, errcode.ErrAPIKeyNotFound):
-		response.Error(c, errcode.APIKeyNotFound, errcode.GetMessage(errcode.APIKeyNotFound))
-	case errors.Is(err, errcode.ErrModelNotFound):
-		response.Error(c, errcode.ModelNotFound, errcode.GetMessage(errcode.ModelNotFound))
-	case errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist):
-		response.Error(c, errcode.APIKeyEmptyAllowlist, errcode.GetMessage(errcode.APIKeyEmptyAllowlist))
-	case errors.Is(err, errcode.ErrCustomSystemPromptTooLong):
-		response.Error(c, errcode.CustomSystemPromptTooLong, errcode.GetMessage(errcode.CustomSystemPromptTooLong))
-	case errors.Is(err, errcode.ErrCustomSystemPromptEmpty):
-		response.Error(c, errcode.CustomSystemPromptEmpty, errcode.GetMessage(errcode.CustomSystemPromptEmpty))
-	case errors.Is(err, errcode.ErrCompressEnabledRequired):
-		response.Error(c, errcode.CompressEnabledRequired, errcode.GetMessage(errcode.CompressEnabledRequired))
-	case errors.Is(err, errcode.ErrAPIKeyPlaintextUnavailable):
-		response.Error(c, errcode.APIKeyPlaintextUnavailable, errcode.GetMessage(errcode.APIKeyPlaintextUnavailable))
-	case errors.Is(err, errcode.ErrAPIKeyConflict):
-		// 409 is not produced by httpStatusForCode's range mapping; set it
-		// explicitly, mirroring the system_settings CAS-conflict path.
-		response.ErrorStatus(c, http.StatusConflict, errcode.APIKeyConflict, errcode.GetMessage(errcode.APIKeyConflict))
-	default:
-		response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
-	}
-}
-
 // validAPIKeyStatusFilters is the allowlist for the ?status= filter: empty
 // (no filter) plus the four display statuses computeAPIKeyDisplayStatus can
 // return. An unknown value is rejected with a 400 rather than silently
@@ -156,7 +128,7 @@ func GetAPIKeys(svc *service.APIKeyService) gin.HandlerFunc {
 		}
 		list, total, err := svc.ListAPIKeys(c.Query("q"), c.Query("owner"), status, page, pageSize)
 		if err != nil {
-			writeAPIKeyServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.PageSuccess(c, total, page, pageSize, list)
@@ -187,7 +159,7 @@ func PostAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			CompressEnabled:                   req.CompressEnabled,
 		}, timeNow())
 		if err != nil {
-			writeAPIKeyServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		denyStorage(c)
@@ -223,7 +195,7 @@ func GetAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 		}
 		view, err := svc.GetAPIKey(id)
 		if err != nil {
-			writeAPIKeyServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -242,7 +214,7 @@ func GetAPIKeyPlaintext(svc *service.APIKeyService) gin.HandlerFunc {
 		}
 		plaintext, err := svc.GetAPIKeyPlaintext(id)
 		if err != nil {
-			writeAPIKeyServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		denyStorage(c)
@@ -276,7 +248,7 @@ func PatchAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			ExpectedUpdatedAt:                 req.ExpectedUpdatedAt,
 		}, timeNow())
 		if err != nil {
-			writeAPIKeyServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -290,7 +262,7 @@ func PatchAPIKeyRevoke(svc *service.APIKeyService) gin.HandlerFunc {
 			return
 		}
 		if err := svc.RevokeAPIKey(id, timeNow()); err != nil {
-			writeAPIKeyServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, nil)

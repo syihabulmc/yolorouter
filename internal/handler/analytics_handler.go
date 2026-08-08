@@ -15,7 +15,6 @@
 package handler
 
 import (
-	"errors"
 	"strconv"
 	"time"
 
@@ -93,7 +92,7 @@ func GetAnalyticsReport(svc *service.AnalyticsService) gin.HandlerFunc {
 		}
 		result, err := svc.GetReport(dimension, bucket, filter)
 		if err != nil {
-			writeAnalyticsServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, result)
@@ -128,7 +127,7 @@ func ExportAnalyticsCSV(svc *service.AnalyticsService) gin.HandlerFunc {
 		// CSV reported as success (same pattern as request-log export).
 		headers, records, err := svc.BuildCSVRecords(dimension, bucket, filter)
 		if err != nil {
-			writeAnalyticsServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		filename := "analytics-" + dimension + "-" + time.Now().UTC().Format("20060102-150405") + ".csv"
@@ -159,7 +158,7 @@ func GetCompressStats(svc *service.AnalyticsService) gin.HandlerFunc {
 		}
 		result, err := svc.GetCompressStats(c.Request.Context(), filter, topN)
 		if err != nil {
-			writeAnalyticsServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, result)
@@ -243,22 +242,4 @@ func parseBucketParam(c *gin.Context) (string, bool) {
 		return "", false
 	}
 	return bucket, true
-}
-
-// writeAnalyticsServiceError maps the service-layer sentinel errors onto
-// the project's unified envelope. ErrInvalidBucket / ErrInvalidDimension
-// are 400s (bad request shape); anything else is a 500.
-//
-// dimension/bucket validation mostly happens at the handler (via
-// parseDimensionParam / parseBucketParam) so the service sentinels here are
-// a defensive second line — easier to keep the mapping than to prove the
-// handler is the only entry point.
-func writeAnalyticsServiceError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, repository.ErrInvalidBucket),
-		errors.Is(err, service.ErrInvalidDimension):
-		response.Error(c, errcode.InvalidParam, err.Error())
-	default:
-		response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
-	}
 }

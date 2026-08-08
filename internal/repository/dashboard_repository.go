@@ -20,6 +20,13 @@ import (
 // percentage. TotalCostMicros sums cost_micros, which finalize leaves at 0
 // whenever cost_known=false, so this sum equals the known-cost total without
 // a dialect-specific CASE on the boolean column.
+//
+// NOTE: this DTO — like TrendPoint, TopCaller, UpstreamStatusDTO, and
+// SetupStatusDTO below — is embedded verbatim in the GET /api/admin/dashboard
+// response body (service.DashboardData). Its json tags ARE the public wire
+// contract: renaming a field here renames a field the frontend reads. If a
+// dashboard section ever needs to diverge from its SQL row shape, give it a
+// handler-side view type at that point instead of editing these tags.
 // The four token sums are mutually exclusive buckets: input_tokens is the net
 // prompt (cache reads/writes excluded), so input + output + cache_write +
 // cache_read is the true total without double counting.

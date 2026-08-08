@@ -26,7 +26,7 @@ type createProviderRequest struct {
 	// ProviderType and ProtocolEndpoints are deliberately unconstrained by
 	// gin binding tags: they are validated in the service layer via
 	// service.ValidateProviderType/ValidateProtocolEndpoints so a bad value
-	// surfaces as a clean 400 through writeProviderServiceError rather than
+	// surfaces as a clean 400 through writeServiceError rather than
 	// a gin binding error. Both are optional — omitting ProviderType
 	// normalizes to "openai" for backward compatibility.
 	ProviderType      string `json:"provider_type"`
@@ -130,53 +130,11 @@ func parseProviderAndKeyIDs(c *gin.Context) (providerID, keyID uint, ok bool) {
 	return providerID, keyID, true
 }
 
-// writeProviderServiceError maps a service-layer sentinel error to the
-// project's unified error envelope — mirrors auth_handler.go's convention
-// of a single dispatch table rather than repeating this switch at every
-// call site.
-func writeProviderServiceError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, errcode.ErrProviderNotFound):
-		response.Error(c, errcode.ProviderNotFound, errcode.GetMessage(errcode.ProviderNotFound))
-	case errors.Is(err, errcode.ErrProviderNameTaken):
-		response.Error(c, errcode.ProviderNameTaken, errcode.GetMessage(errcode.ProviderNameTaken))
-	case errors.Is(err, errcode.ErrProviderKeyNotFound):
-		response.Error(c, errcode.ProviderKeyNotFound, errcode.GetMessage(errcode.ProviderKeyNotFound))
-	case errors.Is(err, errcode.ErrProviderKeyLabelTaken):
-		response.Error(c, errcode.ProviderKeyLabelTaken, errcode.GetMessage(errcode.ProviderKeyLabelTaken))
-	case errors.Is(err, errcode.ErrProviderKeyNotVerified):
-		response.Error(c, errcode.ProviderKeyNotVerified, errcode.GetMessage(errcode.ProviderKeyNotVerified))
-	case errors.Is(err, errcode.ErrProviderKeyNeedsReentry):
-		response.Error(c, errcode.ProviderKeyNeedsReentry, errcode.GetMessage(errcode.ProviderKeyNeedsReentry))
-	case errors.Is(err, errcode.ErrProviderKeyTestNotSaved):
-		response.Error(c, errcode.ProviderKeyTestNotSaved, errcode.GetMessage(errcode.ProviderKeyTestNotSaved))
-	case errors.Is(err, errcode.ErrProviderProtocolInvalid):
-		// Unlike the default branch below, this message is safe to return
-		// verbatim: it names exactly which client-supplied provider_type/
-		// protocol_endpoints value failed validation (e.g. "invalid
-		// provider_type: claude"), not internal crypto/gorm error detail.
-		response.Error(c, errcode.ProviderProtocolInvalid, err.Error())
-	case errors.Is(err, errcode.ErrProviderKeyTooShort):
-		// validatePlaintextLength (provider_service.go) wraps this sentinel —
-		// Gin's own binding tags currently make that check unreachable via
-		// HTTP, but without this case a future change (a looser binding tag,
-		// a new non-HTTP caller) would silently fall to the default 500
-		// branch instead of the intended 400.
-		response.Error(c, errcode.ProviderKeyTooShort, errcode.GetMessage(errcode.ProviderKeyTooShort))
-	default:
-		// The previous err.Error()
-		// here was leaking internal details (wrapped crypto/gorm error text)
-		// to the client — every other handler (see auth_handler.go) always
-		// substitutes a fixed generic message for unmatched errors instead.
-		response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
-	}
-}
-
 func GetProviders(svc *service.ProviderService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		list, err := svc.ListProviders()
 		if err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, gin.H{"list": list})
@@ -191,7 +149,7 @@ func GetProvider(svc *service.ProviderService) gin.HandlerFunc {
 		}
 		detail, err := svc.GetProviderDetail(id)
 		if err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, detail)
@@ -212,7 +170,7 @@ func PostProvider(svc *service.ProviderService) gin.HandlerFunc {
 			ProtocolEndpoints: req.ProtocolEndpoints,
 		}, timeNow())
 		if err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -235,7 +193,7 @@ func PatchProvider(svc *service.ProviderService) gin.HandlerFunc {
 			ProtocolEndpoints: req.ProtocolEndpoints,
 		}, timeNow())
 		if err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -253,7 +211,7 @@ func PatchProviderStatus(svc *service.ProviderService) gin.HandlerFunc {
 			return
 		}
 		if err := svc.SetProviderStatus(id, req.Enabled, timeNow()); err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, nil)
@@ -268,7 +226,7 @@ func PostProviderTestKey(svc *service.ProviderService) gin.HandlerFunc {
 		}
 		result, err := svc.TestKeyPreview(c.Request.Context(), req.BaseURL, req.APIKey, req.Model, req.ProviderType)
 		if err != nil {
-			// Same fix as writeProviderServiceError's default branch:
+			// Same fix as writeServiceError's default branch:
 			// this call site was
 			// missed, still leaking the raw client-call error (e.g. "too
 			// many concurrent provider test calls in flight") verbatim.
@@ -351,7 +309,7 @@ func PostProviderKey(svc *service.ProviderService) gin.HandlerFunc {
 			Label: req.Label, Plaintext: req.Plaintext, TestModel: req.TestModel, ManagementStatus: req.ManagementStatus,
 		}, timeNow())
 		if err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -372,7 +330,7 @@ func PatchProviderKey(svc *service.ProviderService) gin.HandlerFunc {
 			Label: req.Label, Plaintext: req.Plaintext, TestModel: req.TestModel, ManagementStatus: req.ManagementStatus,
 		}, timeNow())
 		if err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -390,7 +348,7 @@ func PatchProviderKeyOrder(svc *service.ProviderService) gin.HandlerFunc {
 			return
 		}
 		if err := svc.ReorderProviderKey(providerID, keyID, req.Direction, timeNow()); err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, nil)
@@ -408,7 +366,7 @@ func PatchProviderKeyStatus(svc *service.ProviderService) gin.HandlerFunc {
 			return
 		}
 		if err := svc.SetProviderKeyStatus(providerID, keyID, req.Enabled, timeNow()); err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, nil)
@@ -423,7 +381,7 @@ func PostProviderKeyTest(svc *service.ProviderService) gin.HandlerFunc {
 		}
 		view, err := svc.TestProviderKey(c.Request.Context(), providerID, keyID, timeNow())
 		if err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, view)
@@ -438,7 +396,7 @@ func PostProviderKeysTestAll(svc *service.ProviderService) gin.HandlerFunc {
 		}
 		results, err := svc.TestAllProviderKeys(c.Request.Context(), providerID, timeNow())
 		if err != nil {
-			writeProviderServiceError(c, err)
+			writeServiceError(c, err)
 			return
 		}
 		response.Success(c, gin.H{"results": results})
