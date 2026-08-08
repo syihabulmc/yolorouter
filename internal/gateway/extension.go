@@ -300,11 +300,11 @@ func newExchangeSink(rc *Exchange) *exchangeSink {
 		// several hosts stays in one frame of reference.
 		now: func() time.Time { return time.Now().UTC() },
 	}
-	if rc.candidate != nil {
-		s.candidate = rc.candidate.ID
+	if rc.attempt.Candidate() != nil {
+		s.candidate = rc.attempt.Candidate().ID
 	}
-	if rc.provider != nil {
-		s.provider = rc.provider.ID
+	if rc.attempt.Provider() != nil {
+		s.provider = rc.attempt.Provider().ID
 	}
 	return s
 }

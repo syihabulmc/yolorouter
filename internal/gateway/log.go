@@ -228,7 +228,7 @@ func safeUpstreamMessage(status int) string {
 // finalize writes the request_logs row and, when cost is known and positive,
 // accumulates the spend onto the API key's budget_spent_micros. Called on
 // every exit path (success, every failure class) so each gateway request
-// produces exactly one row. rc.candidate/Provider/Usage may be nil
+// produces exactly one row. rc.attempt.Candidate()/Provider/Usage may be nil
 // on early failures (before any candidate was tried); finalize is nil-safe
 // for all of them.
 //
@@ -264,7 +264,7 @@ func (s *Service) finalize(rc *Exchange, usage *Usage, statusCode int, failReaso
 	// net reading simply stays inclusive and is rejected as incoherent, exactly
 	// as it was before.
 	normalizeCacheConvention(usage)
-	cost := computeCost(rc.candidate, usage, rc.compressEstimatedTokensSaved)
+	cost := computeCost(rc.attempt.Candidate(), usage, rc.compressEstimatedTokensSaved)
 
 	s.reportUsage(rc, usage, sink)
 	sink.Note(fact.CostComputed{
@@ -308,7 +308,7 @@ func (s *Service) finalize(rc *Exchange, usage *Usage, statusCode int, failReaso
 		Duration:    duration,
 		Attempts:    len(rc.attempts),
 		Delivered:   rc.firstByteSent,
-		UpstreamURL: rc.upstreamURL,
+		UpstreamURL: rc.attempt.UpstreamURL(),
 	}
 	rc.outcomeSettled = true
 }

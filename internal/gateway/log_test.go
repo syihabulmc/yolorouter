@@ -259,7 +259,6 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 	rc := &Exchange{
 		requestID:                    "req-compress-1",
 		apiKeyID:                     apiKey.ID,
-		candidate:                    cand,
 		compressEstimatedTokensSaved: 1500,
 		compressorsApplied:           []string{"whitespace", "whitespace", "contractions"},
 		// One successful attempt — the request reached upstream, so the
@@ -269,6 +268,7 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 			Outcome: AttemptSuccess, StatusCode: 200,
 		}},
 	}
+	rc.attempt.BeginCandidate(cand)
 	rc.bodies.SetCompressedRequest([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
 	svc.finalize(rc, &Usage{PromptTokens: 100, CompletionTokens: 50}, 200, "", time.Now())
 	svc.recordTerminal(rc)
@@ -867,7 +867,8 @@ func TestFinalizeNormalizesCacheExclusivePrompt(t *testing.T) {
 			cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0, CacheReadPrice: &readPrice}
 
 			reqID := fmt.Sprintf("req-cacheconv-%d", i)
-			rc := &Exchange{requestID: reqID, apiKeyID: apiKey.ID, candidate: cand}
+			rc := &Exchange{requestID: reqID, apiKeyID: apiKey.ID}
+			rc.attempt.BeginCandidate(cand)
 			svc.finalize(rc, tc.usage, 200, "", time.Now())
 			svc.recordTerminal(rc)
 

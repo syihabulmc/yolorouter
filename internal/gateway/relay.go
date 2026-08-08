@@ -600,7 +600,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// Placed ABOVE the budget gate for that second reason: a reset after it
 		// is skipped exactly when the previous attempt had just left a verdict
 		// behind.
-		rc.stickyAttempt = decision.StickyVerdict{}
+		rc.attempt.ClearVerdict()
 		cand := candidates[i]
 		// Per-request total-budget gate: RequestDeadline is the hard cap that
 		// spans every candidate and key rotation. Checking it only at the
@@ -612,19 +612,16 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		if !rc.requestDeadline.IsZero() && time.Until(rc.requestDeadline) <= 0 {
 			break
 		}
-		rc.candidate = &cand
-		// Reset per iteration: rc.provider is set only when this candidate's
-		// provider is usable, so a `continue` path (provider missing/disabled,
-		// load-keys failed, no enabled key, rewrite failed) doesn't leave a
-		// stale provider from a previous iteration on rc — which finalize
-		// would otherwise record as the "final hit provider" of an all-failed
-		// request. rc.upstreamURL is reset the same way so a candidate that
-		// fails before sending (negotiate / build) never inherits the previous
-		// candidate's URL in its AttemptRecord or the upstream_url column. The
-		// sticky slot belongs to the same family — see its reset above the
-		// budget gate, which is why it is not repeated here.
-		rc.provider = nil
-		rc.upstreamURL = ""
+		// Entering the candidate replaces the whole attempt state: provider is
+		// re-bound only when this candidate's provider proves usable, so a
+		// `continue` path (provider missing/disabled, load-keys failed, no
+		// enabled key, rewrite failed) doesn't leave a stale provider from a
+		// previous iteration on rc — which finalize would otherwise record as
+		// the "final hit provider" of an all-failed request — and the same for
+		// the dispatch URL. Deliberately AFTER the budget gate above: an
+		// iteration that exits there keeps the previous attempt's identity,
+		// which is what the audit row is supposed to show.
+		rc.attempt.BeginCandidate(&cand)
 
 		provider := cand.Provider
 		if provider == nil {
@@ -635,7 +632,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 			rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, nil, 0, AttemptBadStatus, "provider disabled"))
 			continue
 		}
-		rc.provider = provider
+		rc.attempt.BindProvider(provider)
 
 		keys, err := repository.ListProviderKeysByProvider(s.db.WithContext(rc.requestCtx), provider.ID)
 		if err != nil {
@@ -821,7 +818,7 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *mode
 		// chain then ran out, be reported as what ended the request: a rate
 		// limit one key hit, quoted for a request that actually died with no
 		// usable key at all.
-		rc.stickyAttempt = decision.StickyVerdict{}
+		rc.attempt.ClearVerdict()
 		// Destination-version guard (credential-scope mechanism): a key
 		// is only authorized for the provider destination it was verified
 		// against. When an admin changes BaseURL, DestinationVersion bumps
@@ -971,7 +968,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	// Redacted (userinfo/query/fragment stripped) so a base URL that embeds
 	// credentials never reaches the audit log or UI; the raw url is used
 	// only for the actual HTTP request below.
-	rc.upstreamURL = protocols.RedactURL(url)
+	rc.attempt.SetUpstreamURL(protocols.RedactURL(url))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(outBody))
 	if err != nil {
@@ -981,7 +978,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 		// candidate-invariant), so the first key attempt already exhausts
 		// this candidate via tryKeys' immediate return on attemptNextCandidate.
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptBadStatus,
-			"build request: "+redactedFailure(err, rc.upstreamURL)))
+			"build request: "+redactedFailure(err, rc.attempt.UpstreamURL())))
 		return attemptNextCandidate
 	}
 	codecsFor(egress.Protocol).RequestEncoder.SetupRequest(req, plaintext)
@@ -999,7 +996,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 			return attemptTerminal
 		}
 		rc.attempts = append(rc.attempts, rc.makeAttempt(cand, provider, &pk, 0, AttemptConnError,
-			redactedFailure(err, rc.upstreamURL)))
+			redactedFailure(err, rc.attempt.UpstreamURL())))
 		return attemptNextCandidate
 	}
 
@@ -1133,12 +1130,12 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	// zero would tell the caller the request ended without ever being answered.
 	if observed.Sticky != decision.StickyNone {
 		if status, errType := observed.CallerFacing(statusCode, class.ErrorType); status != 0 {
-			rc.stickyAttempt = decision.StickyVerdict{
+			rc.attempt.HoldVerdict(decision.StickyVerdict{
 				Status:  status,
 				ErrType: errType,
 				Detail:  observed.RejectDetail(),
 				Reason:  observed.FailReason(),
-			}
+			})
 		}
 	}
 
@@ -1181,7 +1178,7 @@ func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.T
 	// One slot, holding the last attempt's verdict: whoever ends the chain
 	// leaves theirs behind, and everyone before them has already had theirs
 	// overwritten or cleared.
-	if v := rc.stickyAttempt; v.Held() {
+	if v := rc.attempt.Verdict(); v.Held() {
 		detail := v.Detail
 		if detail == "" {
 			detail = "upstream refused this request"
@@ -1259,9 +1256,9 @@ func filterEnabledKeys(keys []model.ProviderKey) (out []model.ProviderKey, anyEn
 // marks a candidate-level failure before any key was tried (load failed, no
 // enabled key, rewrite failed).
 //
-// It is a Exchange method so it can stamp the attempt with rc.upstreamURL
+// It is a Exchange method so it can stamp the attempt with rc.attempt.UpstreamURL()
 // — the URL the gateway dispatched to for this attempt — without every caller
-// threading the URL through. rc.upstreamURL is reset per candidate in
+// threading the URL through. rc.attempt.UpstreamURL() is reset per candidate in
 // relayCandidates and set in attemptOne, so it reflects the current attempt:
 // empty for attempts that failed before any request was sent.
 func (rc *Exchange) makeAttempt(cand model.ModelCandidate, provider *model.Provider, key *model.ProviderKey, status int, outcome, failReason string) AttemptRecord {
@@ -1271,7 +1268,7 @@ func (rc *Exchange) makeAttempt(cand model.ModelCandidate, provider *model.Provi
 		StatusCode:        status,
 		Outcome:           outcome,
 		FailReason:        failReason,
-		UpstreamURL:       rc.upstreamURL,
+		UpstreamURL:       rc.attempt.UpstreamURL(),
 	}
 	if provider != nil {
 		rec.ProviderID = provider.ID

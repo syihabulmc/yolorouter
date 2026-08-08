@@ -16,10 +16,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
+	"github.com/yolorouter/yolorouter/internal/gateway/attempt"
 	"github.com/yolorouter/yolorouter/internal/gateway/capture"
-	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
@@ -39,14 +38,6 @@ type Exchange struct {
 	// ProtocolOpenAI for non-generateContent actions, so the path alone
 	// distinguishes countTokens / embedContent from real chat.
 	ingressPath string
-	// upstreamURL is the full URL the gateway dispatched to for the current
-	// candidate's attempt. Reset to "" at the start of each candidate in
-	// relayCandidates so a build-failed candidate never inherits the previous
-	// candidate's URL; set in attemptOne right before the request is sent.
-	// makeAttempt stamps each AttemptRecord with it, and finalize copies it to
-	// the request_logs.upstream_url column under the same "last attempt wins"
-	// rule as UpstreamRequestBody.
-	upstreamURL string
 	// isChatEndpoint is computed once in Handle from IngressPath. Both the
 	// compression gate and the CSP injection gate read this bool instead of
 	// recomputing isChatEndpoint(path) independently.
@@ -91,27 +82,17 @@ type Exchange struct {
 	// no deadline and a stuck query could block past RequestDeadline.
 	requestCtx context.Context
 
-	// Current-attempt target (overwritten on each candidate switch).
-	candidate *model.ModelCandidate
-	provider  *model.Provider
+	// attempt is the current attempt's identity and outcome: candidate,
+	// provider, dispatch URL, and the verdict held for the terminal to quote.
+	// The attempt package owns every write and the two lifetimes inside the
+	// family (the verdict clears before a loop's early exits; the rest resets
+	// only when a candidate is actually entered) — see its package comment.
+	// The verdict slot names no capability: which verdicts are worth quoting
+	// is a property of the decision table, and a second capability wanting
+	// that treatment adds a table row, not a field here.
+	attempt attempt.State
 
 	statusCode int // set by finalize when the log row is written
-
-	// stickyAttempt holds the verdict of the MOST RECENT attempt only. It is
-	// cleared in two places, and both are needed: the key loop clears it before
-	// the checks that can pass a key over without dispatching it, and the
-	// candidate loop clears it for the candidates that are dropped before any
-	// key is reached at all. A chain that ends on a transport failure is a
-	// fault on our side of the wire, whatever an earlier attempt thought of the
-	// payload.
-	//
-	// It is written by the decision table's Sticky effect and read only by the
-	// terminal, which quotes it rather than reporting "all upstream candidates
-	// failed" over the top of a verdict the caller could have acted on. The
-	// field names no capability: which verdicts are worth quoting is a property
-	// of the table, and a second capability wanting this treatment adds a table
-	// row, not a field here.
-	stickyAttempt decision.StickyVerdict
 
 	// usage from the successful attempt, if any — drives cost + the log row.
 
@@ -239,15 +220,16 @@ func (rc *Exchange) IsStream() bool { return rc.isStream }
 func (rc *Exchange) IngressPath() string { return rc.ingressPath }
 
 // UpstreamURL is where the last attempt was dispatched, empty if none was.
-func (rc *Exchange) UpstreamURL() string { return rc.upstreamURL }
+func (rc *Exchange) UpstreamURL() string { return rc.attempt.UpstreamURL() }
 
 // ProviderID identifies the provider of the last attempt, nil when no candidate
 // was reached.
 func (rc *Exchange) ProviderID() *uint {
-	if rc.provider == nil {
+	p := rc.attempt.Provider()
+	if p == nil {
 		return nil
 	}
-	id := rc.provider.ID
+	id := p.ID
 	return &id
 }
 
@@ -410,5 +392,5 @@ type Usage struct {
 // not a boundary fix.
 func (rc *Exchange) beginUpstreamAttempt() {
 	rc.bodies.BeginUpstreamAttempt()
-	rc.upstreamURL = ""
+	rc.attempt.BeginUpstreamAttempt()
 }

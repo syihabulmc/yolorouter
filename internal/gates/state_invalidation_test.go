@@ -12,33 +12,26 @@ import (
 )
 
 // TestPerCandidateStateIsResetBeforeItCanLeak checks the candidate loop's
-// per-iteration state hygiene, and is honest about how far it reaches.
+// per-iteration state hygiene.
 //
-// The Exchange carries a handful of fields that describe ONE candidate's
-// attempt — which provider was hit, what URL, what verdict that attempt ended
-// on.
-// The loop walks candidates and must clear each of those before the moment a
-// stale value from candidate N-1 could be read while judging candidate N. A
-// consolidated attempt-scope with a single reset call would make that a
-// one-line property; that abstraction does not exist yet, so what exists is a
-// set of hand-placed reset statements whose positions each carry a comment
-// explaining why they sit where they sit. Comments do not fail builds. This
-// does, on the two ways those positions rot:
+// The attempt package owns the state that describes one candidate's attempt —
+// which provider was hit, what URL, what verdict that attempt ended on — and
+// its BeginCandidate replaces the WHOLE state, so a per-candidate field added
+// later is reset by construction rather than by someone extending a list of
+// clears. What the type cannot hold is position: the two entry calls have to
+// sit directly in the loop body, on the right side of its early exits, and
+// that is control flow only this check can see. Two ways the positions rot:
 //
-//   - A reset nested into a conditional stops being a per-iteration
+//   - A call nested into a conditional stops being a per-iteration
 //     guarantee: some iteration skips it, and a stale value survives.
-//   - A reset that drifts to the wrong SIDE of an early exit stops covering
-//     it: the loop's budget gate `break`s mid-iteration, and a reset placed
-//     after it is skipped exactly when the previous candidate had just been
-//     refused — the request is then reported as a content refusal when what
-//     ended it was running out of time. The loop's own comments call this
-//     out; this check makes the comment enforceable.
-//
-// Known limit: the field list below is a hand-kept inventory. A brand-new
-// per-candidate field forgotten by both the loop and this list is invisible
-// here — nothing ties Exchange fields to this table. What the check holds is
-// the fields we know about staying reset, unconditionally, on the right side
-// of the exits.
+//   - A call that drifts to the wrong SIDE of an early exit stops covering
+//     it. ClearVerdict must precede the budget gate's `break`, or an
+//     iteration that exits there reports the previous candidate's verdict as
+//     this request's ending. BeginCandidate must precede the first
+//     `continue`, or a dropped candidate carries the previous iteration's
+//     provider and URL into the audit row — and it must stay AFTER the
+//     break, because an exhausted chain is supposed to keep the last
+//     attempt's identity, not wipe it.
 func TestPerCandidateStateIsResetBeforeItCanLeak(t *testing.T) {
 	root := repoRoot(t)
 	path := filepath.Join(root, "internal", "gateway", "relay.go")
@@ -49,45 +42,38 @@ func TestPerCandidateStateIsResetBeforeItCanLeak(t *testing.T) {
 	}
 
 	body := findCandidateLoopBody(t, file)
-	resetAt := topLevelResetIndices(body)
+	callAt := topLevelAttemptCalls(body)
 
-	// Every per-candidate field must be reset by a statement sitting directly
-	// in the loop body — not inside an if, where some iterations skip it.
-	for _, field := range []string{"stickyAttempt", "provider", "upstreamURL"} {
-		if _, ok := resetAt[field]; !ok {
-			t.Errorf("the candidate loop has no top-level reset of rc.%s: either it was "+
-				"removed, or it moved inside a conditional — both leave a stale value from "+
-				"the previous candidate readable while this one is judged", field)
-		}
-	}
-
-	// The content-inspection pair must additionally sit before the first
-	// top-level early exit (the budget gate's break): that exit ends the
-	// request mid-iteration, and values it leaves behind are what the request
-	// is reported as.
 	firstBreak := firstIndexWithExit(body, token.BREAK)
-	if firstBreak >= 0 {
-		for _, field := range []string{"stickyAttempt"} {
-			if idx, ok := resetAt[field]; ok && idx > firstBreak {
-				t.Errorf("rc.%s is reset at loop statement %d, after the first early exit at "+
-					"statement %d: an iteration that exits there reports the PREVIOUS "+
-					"candidate's value as this request's ending", field, idx, firstBreak)
-			}
-		}
+	firstContinue := firstIndexWithExit(body, token.CONTINUE)
+
+	clearIdx, ok := callAt["ClearVerdict"]
+	if !ok {
+		t.Error("the candidate loop has no top-level rc.attempt.ClearVerdict() call: either it " +
+			"was removed, or it moved inside a conditional — both let a verdict from the " +
+			"previous candidate survive into an iteration that never makes an attempt")
+	} else if firstBreak >= 0 && clearIdx > firstBreak {
+		t.Errorf("rc.attempt.ClearVerdict() sits at loop statement %d, after the first early "+
+			"exit at statement %d: an iteration that exits there reports the PREVIOUS "+
+			"candidate's verdict as this request's ending", clearIdx, firstBreak)
 	}
 
-	// provider and upstreamURL must sit before the first path that skips to
-	// the next candidate: every `continue` after them relies on their having
-	// been cleared, or an all-failed request records the previous iteration's
-	// provider as the one that served it.
-	firstContinue := firstIndexWithExit(body, token.CONTINUE)
-	if firstContinue >= 0 {
-		for _, field := range []string{"provider", "upstreamURL"} {
-			if idx, ok := resetAt[field]; ok && idx > firstContinue {
-				t.Errorf("rc.%s is reset at loop statement %d, after the first continue at "+
-					"statement %d: iterations taking that path carry the previous "+
-					"candidate's value", field, idx, firstContinue)
-			}
+	beginIdx, ok := callAt["BeginCandidate"]
+	if !ok {
+		t.Error("the candidate loop has no top-level rc.attempt.BeginCandidate() call: either " +
+			"it was removed, or it moved inside a conditional — both leave a stale provider " +
+			"and URL from the previous candidate readable while this one is judged")
+	} else {
+		if firstContinue >= 0 && beginIdx > firstContinue {
+			t.Errorf("rc.attempt.BeginCandidate() sits at loop statement %d, after the first "+
+				"continue at statement %d: iterations taking that path carry the previous "+
+				"candidate's identity", beginIdx, firstContinue)
+		}
+		if firstBreak >= 0 && beginIdx < firstBreak {
+			t.Errorf("rc.attempt.BeginCandidate() sits at loop statement %d, before the budget "+
+				"gate's break at statement %d: an iteration that exits there now wipes the "+
+				"last attempt's identity, and the audit row files an exhausted chain under "+
+				"no provider at all", beginIdx, firstBreak)
 		}
 	}
 }
@@ -123,25 +109,29 @@ func findCandidateLoopBody(t *testing.T, file *ast.File) *ast.BlockStmt {
 	return nil
 }
 
-// topLevelResetIndices returns, for each rc.<field> assigned its type's zero
-// value by a statement sitting directly in the loop body, the index of that
-// statement in the body's list.
-func topLevelResetIndices(body *ast.BlockStmt) map[string]int {
+// topLevelAttemptCalls returns, for each method called on rc.attempt by a
+// statement sitting directly in the loop body, the index of that statement in
+// the body's list.
+func topLevelAttemptCalls(body *ast.BlockStmt) map[string]int {
 	out := map[string]int{}
 	for i, stmt := range body.List {
-		as, ok := stmt.(*ast.AssignStmt)
-		if !ok || as.Tok != token.ASSIGN || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
-			continue
-		}
-		sel, ok := as.Lhs[0].(*ast.SelectorExpr)
+		es, ok := stmt.(*ast.ExprStmt)
 		if !ok {
 			continue
 		}
-		recv, ok := sel.X.(*ast.Ident)
-		if !ok || recv.Name != "rc" {
+		call, ok := es.X.(*ast.CallExpr)
+		if !ok {
 			continue
 		}
-		if !isZeroLiteral(as.Rhs[0]) {
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		inner, ok := sel.X.(*ast.SelectorExpr)
+		if !ok || inner.Sel.Name != "attempt" {
+			continue
+		}
+		if recv, ok := inner.X.(*ast.Ident); !ok || recv.Name != "rc" {
 			continue
 		}
 		if _, seen := out[sel.Sel.Name]; !seen {
@@ -185,25 +175,6 @@ func firstIndexWithExit(body *ast.BlockStmt, kind token.Token) int {
 		}
 	}
 	return -1
-}
-
-// isZeroLiteral reports whether an expression is one of the zero-value
-// spellings a reset actually uses: nil, 0, "", or an empty composite literal.
-//
-// The composite case matters as soon as a per-candidate concern grows past a
-// single scalar: `rc.x = T{}` is the same reset as `rc.x = 0`, and a check that
-// only recognised scalars would go quiet exactly when the state it guards got
-// complicated enough to be worth guarding.
-func isZeroLiteral(e ast.Expr) bool {
-	switch v := e.(type) {
-	case *ast.Ident:
-		return v.Name == "nil"
-	case *ast.BasicLit:
-		return v.Value == "0" || v.Value == `""`
-	case *ast.CompositeLit:
-		return len(v.Elts) == 0
-	}
-	return false
 }
 
 // TestReleaseIsArmedBeforeTheSettlementSafetyNet pins a defer registration

@@ -55,6 +55,21 @@ linters:
               desc: "assembly is the only place a concrete capability may be named; the kernel naming one makes every future capability a kernel change"
             - pkg: "github.com/yolorouter/yolorouter/internal/modality"
               desc: "the kernel dispatches on a registered ModalityID, it does not name a modality package"
+        # attempt owns the current attempt's identity and held verdict. It may
+        # see the model types it identifies and the decision vocabulary its
+        # verdict speaks, and nothing else — request state, storage, or a web
+        # framework would let the attempt's identity depend on something other
+        # than what the relay loop told it.
+        attempt-boundary:
+          files:
+            - "**/internal/gateway/attempt/*.go"
+            - "**/internal/gateway/attempt/**/*.go"
+          list-mode: strict
+          allow:
+            - $gostd
+            - "github.com/yolorouter/yolorouter/internal/decision"
+            - "github.com/yolorouter/yolorouter/internal/model"
+            - "github.com/yolorouter/yolorouter/internal/gateway/attempt"
         # capture owns the audit-record bytes and the stream capture file, and
         # nothing else: an import beyond the standard library would let the
         # audit record depend on request state or a web framework, and the

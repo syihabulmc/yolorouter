@@ -43,10 +43,10 @@ func TestObserveUpstreamStampsProvenance(t *testing.T) {
 	RegisterUpstreamErrorObserver(svc, stubObserver{}, attemptView)
 
 	rc := &Exchange{
-		candidate: &model.ModelCandidate{ID: 77},
-		provider:  &model.Provider{ID: 42},
-		attempts:  make([]AttemptRecord, 2), // two attempts already recorded
+		attempts: make([]AttemptRecord, 2), // two attempts already recorded
 	}
+	rc.attempt.BeginCandidate(&model.ModelCandidate{ID: 77})
+	rc.attempt.BindProvider(&model.Provider{ID: 42})
 
 	got := svc.observeUpstreamError(context.Background(), rc, fact.Upstream{StatusCode: 400})
 	if got.Loop != decision.LoopNextCandidate {
