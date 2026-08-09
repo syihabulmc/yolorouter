@@ -139,6 +139,12 @@ type Service struct {
 	// registration so no per-request sort is needed.
 	egressRewriters []egressRewriter
 
+	// failureRewriters see a non-2xx upstream response together with the body
+	// that provoked it, and may offer a repaired body. They never decide what
+	// happens next: whether the repair is worth an attempt is the decision
+	// table's call, made from the facts they report.
+	failureRewriters []failureRewriter
+
 	// admissions gate the exchange before any upstream work. Registration
 	// order is acquisition order; release runs in reverse.
 	admissions []admission
@@ -861,7 +867,18 @@ const (
 // to the next candidate (same-provider no usable key, THEN failover).
 func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
 	provider := rc.attempt.Provider()
-	for i := range keys {
+	// Indexed by hand because one iteration can legitimately not advance: a
+	// repaired-body retry re-enters the same key with the new body. One
+	// repair per candidate: a capability that kept producing
+	// fresh-but-ineffective repairs would otherwise burn the whole attempt
+	// budget on one candidate — the kernel does not rely on rewriters being
+	// well-behaved. The allowance is passed INTO attemptOne so that an offer
+	// it cannot honour is judged unexecutable there, where the failure still
+	// gets its full baseline handling — surfacing the upstream's own status —
+	// rather than being discarded after the attempt already closed as a
+	// retry.
+	repairsUsed := 0
+	for i := 0; i < len(keys); {
 		// The attempt budget spans key rotations too: a rotation that spent
 		// the last attempt must not dispatch the next key. Surfacing as a
 		// candidate switch lands on the loop gate above, which recognises the
@@ -891,6 +908,7 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, keys []mod
 		// matching the destination-matched select in provider_repository.go.
 		if pk.AuthorizedDestinationVersion != provider.DestinationVersion {
 			rc.recordCurrentAttempt(0, AttemptAuthFailed, "destination version mismatch")
+			i++
 			continue
 		}
 		plaintext, derr := crypto.Decrypt(s.masterKey, pk.EncryptedKey)
@@ -898,14 +916,25 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, keys []mod
 			logger.Warn("gateway: decrypt provider key failed",
 				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID), zap.Error(derr))
 			rc.recordCurrentAttempt(0, AttemptBadStatus, "decrypt failed")
+			i++
 			continue
 		}
-		result := s.attemptOne(c, rc, adm, plaintext, egress, outBody, url, start)
+		result, repaired := s.attemptOne(c, rc, adm, plaintext, egress, outBody, url, start, repairsUsed == 0)
 		if result == attemptSuccess || result == attemptTerminal {
 			return outcomeDone
 		}
 		if result == attemptRotateKey {
-			continue // next key on the same provider
+			i++ // next key on the same provider
+			continue
+		}
+		if result == attemptRetrySame {
+			// The table judged the repaired body worth another attempt against
+			// THIS candidate. The body is candidate-level, exactly like the
+			// egress-rewritten one it replaces: the same key retries first,
+			// and a later rotation reuses it too.
+			repairsUsed++
+			outBody = repaired
+			continue
 		}
 		return outcomeNextCandidate
 	}
@@ -990,6 +1019,10 @@ const (
 	attemptTerminal                    // 4xx client error — surfaced to caller, no switch
 	attemptRotateKey                   // 401/429 — try next key
 	attemptNextCandidate               // 5xx / conn / timeout — try next candidate
+	// attemptRetrySame re-sends a repaired body to the same candidate. Only
+	// attemptOne's failure-rewrite path produces it, and only together with
+	// the body to re-send; the attempt budget bounds how often it can recur.
+	attemptRetrySame
 )
 
 // attemptOne sends one upstream request with one decrypted key and routes
@@ -999,7 +1032,7 @@ const (
 // and pre-first-byte stream failures are candidate-level (failover); 401/429
 // are key-level (rotate); 2xx is success; other 4xx is terminal (caller's
 // problem).
-func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time) attemptResult {
+func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time, repairAllowed bool) (attemptResult, []byte) {
 	// The attempt's identity — candidate, provider, key — lives on rc.attempt,
 	// staged by the loops above; plaintext alone stays a parameter, because a
 	// credential parked on the exchange would outlive the one call that needs
@@ -1017,7 +1050,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	remaining := time.Until(rc.requestDeadline)
 	if remaining <= 0 {
 		rc.recordCurrentAttempt(0, AttemptConnError, "request budget exhausted")
-		return attemptNextCandidate
+		return attemptNextCandidate, nil
 	}
 	attemptBudget := min(s.gateway.AttemptTimeout, remaining)
 	// Derive from rc.requestCtx (carries RequestDeadline) rather than
@@ -1047,7 +1080,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 		// this candidate via tryKeys' immediate return on attemptNextCandidate.
 		rc.recordCurrentAttempt(0, AttemptBadStatus,
 			"build request: "+redactedFailure(err, rc.attempt.UpstreamURL()))
-		return attemptNextCandidate
+		return attemptNextCandidate, nil
 	}
 	codecsFor(egress.Protocol).RequestEncoder.SetupRequest(req, plaintext)
 
@@ -1068,7 +1101,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
 			rc.recordCurrentAttempt(0, AttemptConnError, "client disconnected")
 			s.abandonRequestAfterAttempt(rc, "client_disconnected", start) // nginx-style 499
-			return attemptTerminal
+			return attemptTerminal, nil
 		}
 		// Reported as the kernel's own fact so the timeline shows the
 		// judgement; the attempt was already charged at the dispatch above,
@@ -1079,7 +1112,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 		sink.Report(fact.Fact{Kind: fact.KindUpstreamTransportFailure})
 		rc.recordCurrentAttempt(0, AttemptConnError,
 			redactedFailure(err, rc.attempt.UpstreamURL()))
-		return attemptNextCandidate
+		return attemptNextCandidate, nil
 	}
 
 	// Wrap the body with two-phase idle enforcement:
@@ -1125,7 +1158,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return s.deliverAndSettle(c, rc, adm, resp, start)
+		return s.deliverAndSettle(c, rc, adm, resp, start), nil
 	}
 
 	statusCode := resp.StatusCode
@@ -1180,21 +1213,44 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	// The verdict is remembered for allCandidatesFailed: if every candidate
 	// moderates the payload, the caller must still get that verdict rather than
 	// a generic 502 that reads like an outage.
-	observed := s.observeUpstreamError(ctx, rc, fact.Upstream{
+	up := fact.Upstream{
 		StatusCode: statusCode,
 		Header:     resp.Header,
 		Body:       errBody,
 		Elapsed:    time.Since(start),
-	})
-	// A retry-same verdict cannot be executed on this path yet: a repaired
-	// body has no receiver until the failure-rewrite seam exists. It is
-	// logged loudly, and the fold below then treats it as no routing opinion,
-	// so the kernel's baseline decides — routing, sticky and status all
-	// together, exactly as if the repair had never been offered. Substituting
-	// the routing alone was tried and is not enough: it left the baseline's
-	// sticky behind, and a chain exhausted on rate limits then answered with
-	// a generic 502 instead of the 429 the caller should back off on.
-	if observed.Loop == decision.LoopRetrySameCandidate {
+	}
+	observed := s.observeUpstreamError(ctx, rc, up)
+	// Failure rewriters see the same failed response and may offer a
+	// repaired body. What they report folds with what the observers
+	// reported: one verdict, however many mouths spoke.
+	repaired, offered := s.rewriteAfterFailure(ctx, rc, egress.Protocol, outBody, up)
+	observed = decision.Combine(observed, offered)
+	// A repair addresses the payload, so it executes only when the status
+	// says the payload is what failed AND the candidate's repair allowance
+	// remains. A rejected credential or a throttled key is not a payload
+	// problem — no body change can address it, and re-sending on the same
+	// key would burn the budget against a cause the repair cannot touch (a
+	// 401 has also just marked the key failed, so retrying it would dispatch
+	// on a credential already known bad). A provider fault is not one
+	// either, and neither are the 4xx that judge the caller, the account, or
+	// the route rather than the bytes. And a repair already spent is an
+	// answer already given. In all those cases the verdict is logged as
+	// unexecuted and the baseline joins the fold, so the failure keeps its
+	// full normal handling — rotation, failover, or surfacing the upstream's
+	// own status — instead of being discarded after a half-executed retry.
+	retryExecutable := observed.Loop == decision.LoopRetrySameCandidate &&
+		repaired != nil &&
+		repairAllowed &&
+		payloadRepairableUpstreamStatus(statusCode)
+	// A retry-same verdict that cannot be executed — no repaired body behind
+	// it, or a failure no payload repair can address — is logged loudly, and
+	// the fold below then treats it as no routing opinion, so the kernel's
+	// baseline decides: routing, sticky and status all together, exactly as
+	// if the repair had never been offered. Substituting the routing alone
+	// was tried and is not enough: it left the baseline's sticky behind, and
+	// a chain exhausted on rate limits then answered with a generic 502
+	// instead of the 429 the caller should back off on.
+	if observed.Loop == decision.LoopRetrySameCandidate && !retryExecutable {
 		logger.Warn("gateway: reported verdict is not executed on this path",
 			zap.String("request_id", rc.requestID),
 			zap.String("verdict", observed.LoopFrom().String()),
@@ -1213,11 +1269,21 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	// the baseline's "terminate" (any unrecognised 4xx) out-rank a moderation
 	// refusal's "try the next candidate" — the exact upgrade the observation
 	// point exists to make possible.
-	if observed.Loop <= decision.LoopContinue || observed.Loop == decision.LoopRetrySameCandidate {
+	if observed.Loop <= decision.LoopContinue ||
+		(observed.Loop == decision.LoopRetrySameCandidate && !retryExecutable) {
 		sink := newExchangeSink(rc)
 		sink.reporter = kernelReporter
 		sink.Report(kernelUpstreamFact(statusCode))
 		observed = decision.Combine(observed, sink.resolve())
+	}
+	// The retry-same executor. The table judged a repaired body worth
+	// another attempt against this candidate, the failure was one a repair
+	// can address, and the body to re-send exists: the attempt is recorded
+	// and the pair goes back to the key loop, whose budget gate bounds how
+	// often a repair can recur.
+	if retryExecutable {
+		rc.recordCurrentAttempt(statusCode, class.Outcome, note)
+		return attemptRetrySame, repaired
 	}
 	// A body-informed refusal relabels the attempt record: the payload was
 	// judged, not the provider, and the row should say which happened.
@@ -1262,18 +1328,18 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 		}
 		s.settleAfterAttempt(rc, fact.Rejected(status, fact.FaultUpstream,
 			observed.FailReason(), nil), start)
-		return attemptTerminal
+		return attemptTerminal, nil
 	case observed.Loop == decision.LoopNextCandidate:
-		return attemptNextCandidate
+		return attemptNextCandidate, nil
 	case observed.Loop == decision.LoopRotateKey:
 		// 401 CAS was already performed above, before the error body read.
-		return attemptRotateKey
+		return attemptRotateKey, nil
 	default:
 		// Unreachable while the baseline fold above holds: every kernel row
 		// steers at least as strongly as a key rotation. Routed rather than
 		// panicking so a future weakening fails toward failover, the least
 		// damaging wrong answer.
-		return attemptNextCandidate
+		return attemptNextCandidate, nil
 	}
 }
 

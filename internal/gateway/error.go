@@ -176,6 +176,26 @@ func kindForUpstreamStatus(status int) fact.Kind {
 	}
 }
 
+// payloadRepairableUpstreamStatus reports whether a non-2xx status describes
+// a failure a body repair could plausibly address. It is deliberately a
+// whitelist: a malformed request, an oversized payload, or an unprocessable
+// entity are statements about the BYTES, and different bytes can change the
+// answer. Everything else a provider says with a 4xx — no permission (403),
+// no funds (402), no such route (404), wrong method (405), and notably an
+// unsupported media type (415, which judges the Content-Type header a
+// rewriter cannot touch, not the body) — is a statement about the caller,
+// the account, the URL, or request metadata, and re-sending edited bytes
+// cannot change it: retrying there would replace an actionable status with a
+// budget-exhaustion 504 while loading the upstream for nothing.
+func payloadRepairableUpstreamStatus(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge,
+		http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
 // kernelUpstreamFact is the kernel's baseline report for a non-2xx response,
 // built whole in one place so the fact and its persisted audit code cannot
 // drift apart.

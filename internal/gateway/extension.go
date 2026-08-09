@@ -168,6 +168,120 @@ func RegisterEgressRewriter[V any](s *Service, r EgressRewriterOf[V], at EgressS
 	})
 }
 
+// FailureRewriterOf is called after a non-2xx upstream response, with that
+// response in hand, so a capability may offer a REPAIRED body. It never says
+// "retry": it returns a body and reports a fact. Whether the repaired body is
+// worth an attempt, and against which candidate, is the decision table's
+// call — a body returned without a fact behind it is never dispatched.
+//
+// body is the egress-encoded body the failed dispatch actually sent; a
+// repaired body must be in the same encoding, because it is re-sent to the
+// same candidate as-is. The egress protocol is a parameter for the same
+// reason it is on the egress rewriter: it belongs to the attempt, not the
+// exchange, and a repairer that cannot tell which schema the bytes are in
+// cannot repair them. Returning nil, or the input unchanged, abstains.
+//
+// An error means "no repair could be produced" and nothing more. The exchange
+// is already on a failure path, so the kernel logs the error and carries on
+// with the failure handling the response would have received anyway — unlike
+// the ingress and egress shapes, there is no usable-body contract here to
+// break.
+type FailureRewriterOf[V any] interface {
+	Name() string
+	RewriteAfterFailure(ctx context.Context, view V, egress protocols.ProtocolID, body []byte, up fact.Upstream, sink fact.Sink) ([]byte, error)
+}
+
+// failureRewriter is the kernel-side, view-erased form.
+type failureRewriter interface {
+	name() string
+	rewrite(ctx context.Context, e *Exchange, egress protocols.ProtocolID, body []byte, up fact.Upstream, sink fact.Sink) ([]byte, error)
+}
+
+type failureRewriterAdapter[V any] struct {
+	inner FailureRewriterOf[V]
+	bind  func(*Exchange) V
+	// Captured at registration; see the field note on
+	// upstreamErrorObserverAdapter.
+	registeredName string
+}
+
+func (a failureRewriterAdapter[V]) name() string { return a.registeredName }
+
+func (a failureRewriterAdapter[V]) rewrite(ctx context.Context, e *Exchange, egress protocols.ProtocolID, body []byte, up fact.Upstream, sink fact.Sink) ([]byte, error) {
+	return a.inner.RewriteAfterFailure(ctx, a.bind(e), egress, body, up, sink)
+}
+
+// RegisterFailureRewriter wires a failure rewriter into the service. They run
+// in registration order, each over the previous one's output; no stage
+// parameter until a second production rewriter demonstrates an ordering
+// constraint worth encoding.
+func RegisterFailureRewriter[V any](s *Service, r FailureRewriterOf[V], bind func(*Exchange) V) {
+	s.failureRewriters = append(s.failureRewriters, failureRewriterAdapter[V]{inner: r, bind: bind, registeredName: r.Name()})
+}
+
+// rewriteAfterFailure runs every registered failure rewriter over one failed
+// dispatch and folds what they reported. It returns the final repaired body —
+// nil when nobody repaired — and the resolved verdict of everything reported
+// through it, which the caller folds with the observers' before routing.
+//
+// The rewriters chain: each sees the previous one's output, so there is one
+// current body at every point rather than competing repairs. Every input is
+// isolated per rewriter — the upstream snapshot for the same reason it is per
+// observer, and the body because it aliases the audit capture of what was
+// actually sent: a rewriter that edits its input in place and then abstains
+// would otherwise corrupt the audit record and hand its dead edit to the next
+// rewriter in the chain.
+//
+// Abstention is real abstention, and it is atomic PER INVOCATION: an
+// invocation is accepted only when it changed the body AND reported the
+// repair verdict for it, and anything less — an error, a nil or unchanged
+// return, a changed body with no verdict, a verdict with no change —
+// contributes NOTHING, neither body nor facts. The two halves of an answer
+// vouch for each other: facts without a changed body would let a rewriter
+// steer the chain from a shape whose whole licence is "offer a repair", and
+// a changed body without ITS OWN repair verdict would dispatch bytes nobody
+// answered for — including a later rewriter's factless edit riding on an
+// earlier rewriter's verdict. Dropped reports stay on the timeline, which
+// records what was said, not what was acted on.
+//
+// The final chained body is also checked against the ORIGINAL dispatch: a
+// chain whose net effect restores the bytes that just failed has repaired
+// nothing, however each step reported itself.
+func (s *Service) rewriteAfterFailure(ctx context.Context, rc *Exchange, egress protocols.ProtocolID, body []byte, up fact.Upstream) ([]byte, decision.Resolved) {
+	if len(s.failureRewriters) == 0 {
+		return nil, decision.Resolved{}
+	}
+	base := newExchangeSink(rc)
+	var resolved decision.Resolved
+	current := body
+	accepted := false
+	for _, r := range s.failureRewriters {
+		sink := base.forObserver(r.name())
+		out, err := r.rewrite(ctx, rc, egress, bytes.Clone(current), isolate(up), sink)
+		if err != nil {
+			logger.Warn("gateway: failure rewriter could not produce a repair",
+				zap.String("request_id", rc.requestID),
+				zap.String("rewriter", r.name()),
+				zap.Error(err))
+			continue
+		}
+		if out == nil || bytes.Equal(out, current) {
+			continue
+		}
+		verdict := sink.resolve()
+		if verdict.Loop != decision.LoopRetrySameCandidate {
+			continue
+		}
+		resolved = decision.Combine(resolved, verdict)
+		current = out
+		accepted = true
+	}
+	if !accepted || bytes.Equal(current, body) {
+		return nil, resolved
+	}
+	return current, resolved
+}
+
 // rewriteEgress runs the registered rewriters in stage order over one attempt's
 // body, and reports the verdict the kernel should act on.
 //
