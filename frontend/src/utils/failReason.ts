@@ -33,6 +33,7 @@ const FAIL_REASON_CODES: Record<string, string> = {
   client_disconnected: 'failReason.clientDisconnected',
   panic_recovered: 'failReason.panicRecovered',
   all_candidates_failed: 'failReason.allCandidatesFailed',
+  request_budget_exhausted: 'failReason.requestBudgetExhausted',
   upstream_rate_limited: 'failReason.upstreamRateLimited',
   content_inspection_refused: 'failReason.contentInspectionRefused',
   partial_then_exhausted: 'failReason.partialThenExhausted',

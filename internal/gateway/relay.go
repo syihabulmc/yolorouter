@@ -158,6 +158,15 @@ type Service struct {
 // ResponseHeaderTimeout, while the remaining fields are read by the
 // per-attempt timeout orchestration.
 func NewService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp SettingsProvider, gatewayCfg config.GatewayConfig) *Service {
+	// Normalise the count budgets here rather than at every read: a config
+	// assembled without them (unit tests, older config files) means the
+	// defaults, not a request that stops before its first dispatch.
+	if gatewayCfg.MaxUpstreamAttempts <= 0 {
+		gatewayCfg.MaxUpstreamAttempts = config.DefaultMaxUpstreamAttempts
+	}
+	if gatewayCfg.MaxCandidateProbes <= 0 {
+		gatewayCfg.MaxCandidateProbes = config.DefaultMaxCandidateProbes
+	}
 	return &Service{
 		db:               db,
 		masterKey:        masterKey,
@@ -579,6 +588,17 @@ func (s *Service) checkKeyStateAndLimits(c *gin.Context, rc *Exchange, apiKey *m
 	return true
 }
 
+// exhaustedBudget reports whether any of the request's budgets — wall-clock,
+// attempts, probes — is spent. One predicate shared by the candidate-loop
+// gate and the exhausted-chain terminal, so the walk stops and the answer is
+// chosen by the same rule: a budget spent by the final candidate must produce
+// the same verdict as one spent with candidates still waiting.
+func (s *Service) exhaustedBudget(rc *Exchange) bool {
+	return (!rc.requestDeadline.IsZero() && time.Until(rc.requestDeadline) <= 0) ||
+		rc.attemptsSpent >= s.gateway.MaxUpstreamAttempts ||
+		rc.probesSpent >= s.gateway.MaxCandidateProbes
+}
+
 // relayCandidates walks the candidate chain in sort_order. For each
 // candidate it loads the provider's enabled keys, decrypts them one at a
 // time, and sends the upstream request; Key rotation and candidate failover
@@ -588,6 +608,18 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 	// individual candidate — threaded through every candidate/key attempt
 	// below.
 	ingress := rc.ingress
+	// skipCandidate books the probe a pre-dispatch abandonment costs and
+	// records the row for it, in one place so a new skip path cannot forget
+	// the charge. Every candidate walked past without a dispatch spends a
+	// probe — the table prices all such judgements identically — which is
+	// what keeps a large pool from being walked end to end for free. Key
+	// rotations inside a candidate deliberately spend nothing (the
+	// key-unusable row's call): a provider with several unusable keys must
+	// not eat the walk budget without the candidate itself being abandoned.
+	skipCandidate := func(cand model.ModelCandidate, provider *model.Provider, outcome, note string) {
+		rc.spendBudget(decision.BudgetConsumeProbe)
+		rc.recordAttempt(cand, provider, nil, 0, outcome, note)
+	}
 	for i := range candidates {
 		// Cleared here as well as on entry to each attempt, because the two
 		// clears cover paths the other cannot reach. A candidate can be dropped
@@ -600,16 +632,24 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// Placed ABOVE the budget gate for that second reason: a reset after it
 		// is skipped exactly when the previous attempt had just left a verdict
 		// behind.
+		//
+		// A known asymmetry follows and is accepted: a budget spent by the
+		// previous candidate's last attempt answers with that attempt's
+		// verdict when no further candidate exists, but with the budget
+		// verdict when one does — entering the next candidate is what retires
+		// the old verdict. The alternative (clearing after the gate) would
+		// let a chain that ran out of time quote a stale refusal from a
+		// candidate it had already moved past, sending the caller to edit a
+		// payload that was never the problem.
 		rc.attempt.ClearVerdict()
 		cand := candidates[i]
-		// Per-request total-budget gate: RequestDeadline is the hard cap that
-		// spans every candidate and key rotation. Checking it only at the
-		// first attempt left later candidates reachable after the budget had
-		// already elapsed, burning wall-clock on a chain that could never
-		// succeed. Stop walking as soon as the budget is gone and fall
-		// through to allCandidatesFailed so the caller sees the same 502
-		// without the extra latency.
-		if !rc.requestDeadline.IsZero() && time.Until(rc.requestDeadline) <= 0 {
+		// Per-request budget gate: the wall-clock and count caps span every
+		// candidate and key rotation. Checking only at the first attempt left
+		// later candidates reachable after a budget had already run out,
+		// burning work on a chain that could never succeed. Stop walking as
+		// soon as any budget is gone and fall through to the exhausted-chain
+		// terminal, which recomputes the same predicate to pick its answer.
+		if s.exhaustedBudget(rc) {
 			break
 		}
 		// Entering the candidate replaces the whole attempt state: provider is
@@ -625,11 +665,11 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 
 		provider := cand.Provider
 		if provider == nil {
-			rc.recordAttempt(cand, nil, nil, 0, AttemptBadStatus, "provider missing (preload)")
+			skipCandidate(cand, nil, AttemptBadStatus, "provider missing (preload)")
 			continue
 		}
 		if provider.ManagementStatus != model.ProviderStatusEnabled {
-			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, "provider disabled")
+			skipCandidate(cand, provider, AttemptBadStatus, "provider disabled")
 			continue
 		}
 		rc.attempt.BindProvider(provider)
@@ -646,7 +686,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 				return
 			}
 			logger.Error("gateway: list provider keys", zap.String("request_id", rc.requestID), zap.Error(err))
-			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, "load keys failed")
+			skipCandidate(cand, provider, AttemptBadStatus, "load keys failed")
 			continue
 		}
 		enabled, anyEnabledKey := filterEnabledKeys(keys)
@@ -655,7 +695,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 			if anyEnabledKey {
 				reason = "no verified key"
 			}
-			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, reason)
+			skipCandidate(cand, provider, AttemptBadStatus, reason)
 			continue
 		}
 
@@ -666,7 +706,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// encodes back from.
 		egress, err := Negotiate(ingress, provider)
 		if err != nil {
-			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, "negotiate egress: "+err.Error())
+			skipCandidate(cand, provider, AttemptBadStatus, "negotiate egress: "+err.Error())
 			continue // mapping failure -> skip candidate
 		}
 
@@ -685,7 +725,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 			MaxOutput:               cand.MaxOutput,
 		}
 		if v := adm.payload.Supports(offer); !v.OK {
-			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, v.Reason)
+			skipCandidate(cand, provider, AttemptBadStatus, v.Reason)
 			continue
 		}
 		// Built once per candidate: it depends on the candidate and the
@@ -693,7 +733,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// key attempt below reuses the same bytes.
 		call, err := adm.payload.PrepareUpstream(offer)
 		if err != nil {
-			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus, "build request: "+err.Error())
+			skipCandidate(cand, provider, AttemptBadStatus, "build request: "+err.Error())
 			continue // build failure -> skip candidate, nothing sent yet
 		}
 		// The origin and the credentials stay on this side of the interface:
@@ -713,7 +753,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// anyway would mean a reported judgement was overridden by omission.
 		// Under-executing a verdict is recoverable; ignoring it is not.
 		if verdict.Loop >= decision.LoopNextCandidate {
-			rc.recordAttempt(cand, provider, nil, 0, AttemptBadStatus,
+			skipCandidate(cand, provider, AttemptBadStatus,
 				"egress rewrite verdict "+verdict.LoopFrom().String())
 			continue
 		}
@@ -726,8 +766,19 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 				zap.String("verdict", verdict.LoopFrom().String()))
 		}
 
+		// A candidate can also die INSIDE the key loop without a single
+		// dispatch — every key stale or undecryptable, or the request
+		// impossible to build. Attempts are charged at the wire, so "nothing
+		// was dispatched" is visible as an unchanged attempt ledger, and such
+		// a candidate is charged the same one probe as any other pre-dispatch
+		// abandonment. Without this, a pool full of stale keys would repeat
+		// database and decryption work bounded by nothing but the wall clock.
+		attemptsBefore := rc.attemptsSpent
 		if s.tryKeys(c, rc, adm, enabled, egress, outBody, url, start) == outcomeDone {
 			return
+		}
+		if rc.attemptsSpent == attemptsBefore {
+			rc.spendBudget(decision.BudgetConsumeProbe)
 		}
 		// outcomeNextCandidate: fall through to the next candidate.
 	}
@@ -811,6 +862,13 @@ const (
 func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
 	provider := rc.attempt.Provider()
 	for i := range keys {
+		// The attempt budget spans key rotations too: a rotation that spent
+		// the last attempt must not dispatch the next key. Surfacing as a
+		// candidate switch lands on the loop gate above, which recognises the
+		// exhaustion and ends the walk.
+		if rc.attemptsSpent >= s.gateway.MaxUpstreamAttempts {
+			return outcomeNextCandidate
+		}
 		pk := keys[i]
 		// Cleared before the skip checks below, not inside attemptOne, because
 		// a key can be passed over without ever getting there — an unauthorized
@@ -994,6 +1052,13 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	codecsFor(egress.Protocol).RequestEncoder.SetupRequest(req, plaintext)
 
 	resp, err := s.client.SendUpstreamRequest(req)
+	// The request reached for the wire, and that is what the attempt budget
+	// counts. Every row the table prices for a dispatched upstream —
+	// transport failure, any status, a 2xx whose delivery later fails —
+	// says one attempt, so the charge lives at the dispatch itself rather
+	// than on each outcome branch, where the delivery failures that return
+	// through the 2xx path used to escape it.
+	rc.spendBudget(decision.BudgetConsumeAttempt)
 	if err != nil {
 		// Caller disconnected mid-request is terminal (can't switch — the
 		// caller is gone). Distinguish context.Canceled (client gone) from
@@ -1005,6 +1070,13 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 			s.abandonRequestAfterAttempt(rc, "client_disconnected", start) // nginx-style 499
 			return attemptTerminal
 		}
+		// Reported as the kernel's own fact so the timeline shows the
+		// judgement; the attempt was already charged at the dispatch above,
+		// and the routing (fail over) matches the row while staying explicit
+		// here because the disconnect branch above must keep precedence.
+		sink := newExchangeSink(rc)
+		sink.reporter = kernelReporter
+		sink.Report(fact.Fact{Kind: fact.KindUpstreamTransportFailure})
 		rc.recordCurrentAttempt(0, AttemptConnError,
 			redactedFailure(err, rc.attempt.UpstreamURL()))
 		return attemptNextCandidate
@@ -1233,6 +1305,27 @@ func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.T
 			detail = "upstream refused this request"
 		}
 		s.rejectRequest(c, rc, v.Status, v.ErrType, detail, v.Reason, fact.FaultUpstream, start)
+		return
+	}
+	// The chain ended with a budget — wall-clock or count — spent, and the
+	// table's request-budget row supplies the verdict for that. Recomputed
+	// here rather than flagged at the loop gate, because the gate only sees
+	// exhaustion when ANOTHER candidate iteration reaches it: a budget spent
+	// by the final candidate would otherwise change the answer depending on
+	// whether an unused candidate happened to remain. The sticky check above
+	// deliberately still wins: a held verdict names what actually went wrong
+	// before the allowance ran dry, and that is the answer the caller can
+	// act on.
+	if s.exhaustedBudget(rc) {
+		sink := newExchangeSink(rc)
+		sink.reporter = kernelReporter
+		// Reason is an explicit stable code (persisted, mapped in the
+		// frontend), never derived from the Kind's internal name.
+		sink.Report(fact.Fact{Kind: fact.KindRequestBudgetExhausted, Reason: "request_budget_exhausted"})
+		v := sink.resolve()
+		status, errType := v.CallerFacing(0, "")
+		s.rejectRequest(c, rc, status, errType,
+			"request budget exhausted", v.FailReason(), fact.FaultUpstream, start)
 		return
 	}
 	s.rejectRequest(c, rc, http.StatusBadGateway, errTypeUpstream,

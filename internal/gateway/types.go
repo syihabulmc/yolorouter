@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/gateway/attempt"
 	"github.com/yolorouter/yolorouter/internal/gateway/capture"
@@ -74,6 +75,18 @@ type Exchange struct {
 	// time.Until(requestDeadline)) so a request near its total budget can't
 	// start a fresh full-length attempt. Zero before Handle assigns it.
 	requestDeadline time.Time
+
+	// attemptsSpent and probesSpent are the request's count-budget ledger,
+	// the decision table's BudgetEffect made real: attempts count upstream
+	// dispatches, probes count candidates abandoned before anything was
+	// sent. The exchange records spending only — the limits live on the
+	// service's gateway config, so a zero-valued Exchange starts with a full
+	// budget rather than an exhausted one, and no reporter can refresh what
+	// was spent. Spending happens in one place (spendBudget), driven by the
+	// resolved decision's Budget effect, so what a judgement costs is the
+	// table's call rather than each call site's.
+	attemptsSpent int
+	probesSpent   int
 
 	// requestCtx is the context carrying RequestDeadline, set once at Handle
 	// entry. Candidate queries (model/candidate/key GORM reads) and each
@@ -154,6 +167,18 @@ type Exchange struct {
 // calls them. Nothing here can prevent that. What keeps a capability honest is
 // the narrow view it binds, which is a property of the assembly and not of this
 // file.
+// spendBudget books the count budget a resolved decision asks for. One spend
+// point for every call site keeps the cost of a judgement the table's call: a
+// path cannot decide its own price, and nothing ever books a refund.
+func (rc *Exchange) spendBudget(b decision.BudgetEffect) {
+	switch b {
+	case decision.BudgetConsumeAttempt:
+		rc.attemptsSpent++
+	case decision.BudgetConsumeProbe:
+		rc.probesSpent++
+	}
+}
+
 func (rc *Exchange) markFirstByteSent() bool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()

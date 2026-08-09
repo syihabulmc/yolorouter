@@ -528,6 +528,7 @@ export default {
     clientDisconnected: 'Client disconnected',
     panicRecovered: 'Internal error (recovered)',
     allCandidatesFailed: 'All upstream candidates failed',
+    requestBudgetExhausted: 'Request budget exhausted (time or retries)',
     upstreamRateLimited: 'Rate limited by upstream',
     contentInspectionRefused: 'Refused by upstream content inspection',
     partialThenExhausted: 'Partial success then all candidates exhausted',

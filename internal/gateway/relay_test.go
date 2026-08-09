@@ -2015,8 +2015,8 @@ func TestRelayCandidateLoopRespectsRequestBudget(t *testing.T) {
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
 	svc.Handle(c, apiKey)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 (all candidates failed after budget exhausted); body = %s", w.Code, w.Body.String())
+	if w.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504 (request budget exhausted); body = %s", w.Code, w.Body.String())
 	}
 	if !slowHit.Load() {
 		t.Error("slow upstream was never called - candidate 1 should have been attempted")

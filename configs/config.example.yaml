@@ -48,9 +48,9 @@ update:
 price_catalog:
   endpoint: "https://prices.yolorouter.com/catalog.json"
   refresh_interval: 24h
-# Gateway (upstream relay) timeouts. All seven default to the values shown
-# below when the block is absent, so an existing config without a `gateway:`
-# section upgrades automatically. All seven must be > 0. Required ordering
+# Gateway (upstream relay) budgets. Every field defaults to the value shown
+# below when absent, so an existing config without a `gateway:` section
+# upgrades automatically. All fields must be > 0. Required timeout ordering
 # (only the pairs that reflect a real same-attempt nesting relationship):
 # header_timeout <= attempt_timeout, first_byte_timeout <= attempt_timeout,
 # and attempt_timeout < request_timeout. connect_timeout and
@@ -66,3 +66,5 @@ gateway:
   attempt_timeout: 20m      # hard wall for a single upstream attempt (one key on one candidate)
   request_timeout: 30m      # total budget spanning all failover candidates
   tls_handshake_timeout: 10s # TLS handshake (transport.TLSHandshakeTimeout)
+  max_upstream_attempts: 3  # count cap on upstream dispatches per request, across all candidates and key rotations (first dispatch + retries)
+  max_candidate_probes: 20  # count cap on candidates abandoned before anything was sent (e.g. a rewriter refusing the candidate)

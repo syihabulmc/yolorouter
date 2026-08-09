@@ -55,7 +55,25 @@ type GatewayConfig struct {
 	AttemptTimeout      time.Duration `yaml:"attempt_timeout"`
 	RequestTimeout      time.Duration `yaml:"request_timeout"`
 	TLSHandshakeTimeout time.Duration `yaml:"tls_handshake_timeout"`
+	// MaxUpstreamAttempts caps how many upstream dispatches one request may
+	// spend across all candidates and key rotations combined — the count
+	// companion to RequestTimeout's wall-clock cap. Defaults to 3: the first
+	// dispatch plus two retries.
+	MaxUpstreamAttempts int `yaml:"max_upstream_attempts"`
+	// MaxCandidateProbes caps candidate walks that are abandoned before
+	// anything is sent (a rewriter refusing the candidate, and future
+	// pre-dispatch skips), so a large candidate pool cannot be walked end to
+	// end for free. Defaults to 20.
+	MaxCandidateProbes int `yaml:"max_candidate_probes"`
 }
+
+// Default sizes for the gateway's per-request count budgets. Exported so the
+// gateway can normalise a zero-valued config to the same numbers Load applies,
+// without duplicating the literals.
+const (
+	DefaultMaxUpstreamAttempts = 3
+	DefaultMaxCandidateProbes  = 20
+)
 
 type DatabaseConfig struct {
 	Driver     string `yaml:"driver"`
@@ -182,6 +200,12 @@ func applyGatewayDefaults(g *GatewayConfig) {
 	}
 	if g.TLSHandshakeTimeout == 0 {
 		g.TLSHandshakeTimeout = 10 * time.Second
+	}
+	if g.MaxUpstreamAttempts == 0 {
+		g.MaxUpstreamAttempts = DefaultMaxUpstreamAttempts
+	}
+	if g.MaxCandidateProbes == 0 {
+		g.MaxCandidateProbes = DefaultMaxCandidateProbes
 	}
 }
 
@@ -660,6 +684,9 @@ func validateGatewayTimeouts(g *GatewayConfig) error {
 	}
 	if g.AttemptTimeout >= g.RequestTimeout {
 		return fmt.Errorf("gateway: attempt_timeout (%v) must be < request_timeout (%v)", g.AttemptTimeout, g.RequestTimeout)
+	}
+	if g.MaxUpstreamAttempts <= 0 || g.MaxCandidateProbes <= 0 {
+		return fmt.Errorf("gateway: max_upstream_attempts and max_candidate_probes must be > 0")
 	}
 	return nil
 }

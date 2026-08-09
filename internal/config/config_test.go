@@ -691,6 +691,8 @@ func TestGatewayTimeoutsValidation(t *testing.T) {
 		AttemptTimeout:      20 * time.Minute,
 		RequestTimeout:      30 * time.Minute,
 		TLSHandshakeTimeout: 10 * time.Second,
+		MaxUpstreamAttempts: DefaultMaxUpstreamAttempts,
+		MaxCandidateProbes:  DefaultMaxCandidateProbes,
 	}
 	cases := []struct {
 		name    string
@@ -711,6 +713,8 @@ func TestGatewayTimeoutsValidation(t *testing.T) {
 		{"first_byte > attempt", func(g *GatewayConfig) { g.FirstByteTimeout = 25 * time.Minute }, true},
 		{"first_byte == attempt (equal allowed)", func(g *GatewayConfig) { g.FirstByteTimeout = 20 * time.Minute }, false},
 		{"attempt >= request", func(g *GatewayConfig) { g.AttemptTimeout = 30 * time.Minute }, true},
+		{"zero max_upstream_attempts", func(g *GatewayConfig) { g.MaxUpstreamAttempts = 0 }, true},
+		{"negative max_candidate_probes", func(g *GatewayConfig) { g.MaxCandidateProbes = -1 }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

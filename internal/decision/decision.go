@@ -39,8 +39,11 @@ import (
 //   - LoopRetrySameCandidate resolves but is not executed: a repaired body has
 //     no receiver until the failure-rewrite seam exists. The relay logs the
 //     verdict and routes by the kernel's own reading of the status instead.
-//   - Circuit, Budget and Settle are described here and NOT executed: the
-//     rows fill them, Combine folds them, and no kernel code acts on them yet.
+//   - Circuit and Settle are described here and NOT executed: the rows fill
+//     them, Combine folds them, and no kernel code acts on them yet. Budget
+//     IS executed: the exchange holds attempt and probe counters, every
+//     resolved decision's Budget effect is spent through one method, and the
+//     relay's loops stop when either budget is gone.
 //
 // This is written down rather than left to be discovered because the gap is
 // invisible from the table itself: a row exists, the completeness test passes,
