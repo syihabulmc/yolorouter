@@ -531,6 +531,7 @@ export default {
     clientDisconnected: '客户端已断开连接',
     panicRecovered: '内部错误（已恢复）',
     allCandidatesFailed: '所有上游候选均失败',
+    upstreamRateLimited: '被上游限流',
     contentInspectionRefused: '被上游内容审查拒绝',
     partialThenExhausted: '部分成功后所有候选耗尽',
     noCapabilityCandidate: '没有候选支持此模型',

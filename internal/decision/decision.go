@@ -21,36 +21,34 @@ import (
 //
 // WHAT IS ACTUALLY EXECUTED TODAY
 //
-// The table describes the intended behaviour of every Kind, but the relay does
-// not yet act on all of it. Three paths consume a decision:
+// The table's Loop effect is executed wherever a decision is resolved:
 //
-//   - The admission refusal path, which reads Status/Code/ErrType to build the
+//   - The admission refusal path reads Status/Code/ErrType to build the
 //     response a rejected caller sees.
-//   - The egress rewrite path, which skips the candidate when the verdict asks
-//     for LoopNextCandidate or stronger.
-//   - The non-2xx branch of the attempt loop, which reads Sticky (holding the
-//     verdict for the terminal to quote when the chain runs out) and performs
-//     a failover reclassification.
+//   - The egress rewrite path skips the candidate when the verdict asks for
+//     LoopNextCandidate or stronger.
+//   - The non-2xx branch of the attempt loop routes on the resolved Loop —
+//     rotate, fail over, or terminate all come out of the table. The kernel is
+//     itself a reporter there: when no registered observer expressed a routing
+//     opinion, it files its own reading of the status line as a baseline fact,
+//     so the routing is table-driven however the judgement was reached. Sticky
+//     is executed on the same path.
 //
-// That reclassification is keyed on a hardcoded Kind rather than on the table's
-// Loop effect, and the distinction is worth stating precisely: the branch does
-// not act on WHICH loop effect the row asks for — it does the same thing
-// whatever the row says — but the effect's STRENGTH is what makes that Kind win
-// the fold and become the one the branch recognises. Lowering it below a
-// co-reported verdict's silently disables the branch. So the row's Loop is not
-// free to change, it is just not read for what to do.
+// Two gaps remain:
 //
-// Everything else the table can express (retry against the same candidate, key
-// rotation, explicit termination, circuit effects, budget accounting,
-// settlement) is described here and NOT executed.
+//   - LoopRetrySameCandidate resolves but is not executed: a repaired body has
+//     no receiver until the failure-rewrite seam exists. The relay logs the
+//     verdict and routes by the kernel's own reading of the status instead.
+//   - Circuit, Budget and Settle are described here and NOT executed: the
+//     rows fill them, Combine folds them, and no kernel code acts on them yet.
 //
 // This is written down rather than left to be discovered because the gap is
 // invisible from the table itself: a row exists, the completeness test passes,
-// and a capability reporting that Kind gets nothing. Until the executor lands,
-// a verdict the relay cannot act on is logged as unexecuted rather than
-// dropped, so the gap is at least noisy. Do not add a capability that depends
-// on an unexecuted effect before the executor exists — it will compile, pass
-// its own tests, and do nothing.
+// and a capability reporting that Kind gets nothing. A verdict the relay
+// cannot act on is logged as unexecuted rather than dropped, so the gap is at
+// least noisy. Do not add a capability that depends on an unexecuted effect
+// before its executor exists — it will compile, pass its own tests, and do
+// nothing.
 
 // Caller-facing error "type" values (each failure class maps to one of
 // these). They are the vocabulary the table's StatusFixed rows speak and the

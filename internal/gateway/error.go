@@ -2,11 +2,13 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/yolorouter/yolorouter/internal/decision"
+	"github.com/yolorouter/yolorouter/internal/fact"
 )
 
 // relayContextKey is the gin.Context key Handle stores the in-flight
@@ -149,6 +151,56 @@ type upstreamStatusClass struct {
 	Category  statusCategory
 	Outcome   string
 	ErrorType string
+}
+
+// kindForUpstreamStatus is the kernel's own reading of a non-2xx upstream
+// status, spoken in the fact vocabulary so the decision table can resolve it
+// like any other report. It exists because the kernel is itself a reporter:
+// when no observer recognised anything in the response body, the status line
+// is the only evidence there is, and the routing it implies must come out of
+// the same table as everything else rather than out of a parallel switch.
+//
+// The mapping mirrors classifyUpstreamStatus, which keeps the label-side
+// vocabulary (attempt outcome, caller-facing error type); the two must agree
+// on which statuses mean what, and a test holds them together.
+func kindForUpstreamStatus(status int) fact.Kind {
+	switch {
+	case status == http.StatusUnauthorized:
+		return fact.KindUpstreamAuthRejected
+	case status == http.StatusTooManyRequests:
+		return fact.KindUpstreamRateLimited
+	case status >= 500:
+		return fact.KindUpstreamServerError
+	default:
+		return fact.KindUpstreamClientError
+	}
+}
+
+// kernelUpstreamFact is the kernel's baseline report for a non-2xx response,
+// built whole in one place so the fact and its persisted audit code cannot
+// drift apart.
+//
+// Reason is set explicitly for every reading that can end up persisted as a
+// fail_reason — a client error surfaced to the caller, a rate limit quoted
+// when the chain exhausts. The persisted column is a contract with dashboards
+// and log viewers, so the code must never be derived from the Kind's name:
+// Kind names are internal and get renamed as the vocabulary is refined, and a
+// rename must not silently change a column somebody queries. Readings that
+// are never persisted leave Reason empty.
+func kernelUpstreamFact(status int) fact.Fact {
+	kind := kindForUpstreamStatus(status)
+	switch kind {
+	case fact.KindUpstreamRateLimited:
+		return fact.Fact{Kind: kind, Status: status, Reason: "upstream_rate_limited"}
+	case fact.KindUpstreamClientError:
+		return fact.Fact{
+			Kind:   kind,
+			Status: status,
+			Reason: fmt.Sprintf("upstream_client_error_%d", status),
+		}
+	default:
+		return fact.Fact{Kind: kind, Status: status}
+	}
 }
 
 // classifyUpstreamStatus maps a non-2xx upstream status to its relay

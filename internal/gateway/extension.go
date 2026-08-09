@@ -210,6 +210,12 @@ func (s *Service) rewriteEgress(ctx context.Context, rc *Exchange, egress protoc
 	return body, sink.resolve()
 }
 
+// kernelReporter is the provenance name the kernel stamps on facts it reports
+// itself — its own reading of an upstream status line, filed through the same
+// vocabulary as every capability's report so the timeline shows who judged
+// what regardless of which side of the seam the judgement came from.
+const kernelReporter = "kernel"
+
 // exchangeSink collects what capabilities report during one exchange.
 //
 // It stamps provenance as reports arrive rather than asking reporters to supply

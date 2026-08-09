@@ -1114,27 +1114,48 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 		Body:       errBody,
 		Elapsed:    time.Since(start),
 	})
-	// Two effects are executed here; everything else the table can express is
-	// logged rather than silently dropped, because a reported judgement that
-	// vanishes without trace is the one failure mode that looks exactly like
-	// everything working. Sticky is read from the table, just below. The
-	// failover reclassification is still keyed on a hardcoded Kind rather than
-	// on the table's Loop — see the note at the top of the decision package
-	// for what that does and does not mean.
-	switch {
-	case observed.LoopFrom() == fact.KindPayloadRefused && class.Category == statusTerminalClient:
-		class.Category = statusFailover
-		class.Outcome = AttemptContentFiltered
-		note = fmt.Sprintf("upstream %d content inspection", statusCode)
-	case observed.Loop > decision.LoopContinue:
+	// A retry-same verdict cannot be executed on this path yet: a repaired
+	// body has no receiver until the failure-rewrite seam exists. It is
+	// logged loudly, and the fold below then treats it as no routing opinion,
+	// so the kernel's baseline decides — routing, sticky and status all
+	// together, exactly as if the repair had never been offered. Substituting
+	// the routing alone was tried and is not enough: it left the baseline's
+	// sticky behind, and a chain exhausted on rate limits then answered with
+	// a generic 502 instead of the 429 the caller should back off on.
+	if observed.Loop == decision.LoopRetrySameCandidate {
 		logger.Warn("gateway: reported verdict is not executed on this path",
 			zap.String("request_id", rc.requestID),
 			zap.String("verdict", observed.LoopFrom().String()),
 			zap.Int("upstream_status", statusCode))
 	}
+	// The kernel is a reporter too. When the observers expressed no
+	// executable routing opinion, the status line is the only evidence there
+	// is, and the kernel files its own reading of it through the same
+	// vocabulary, so the routing below comes out of one table however the
+	// judgement was reached.
+	//
+	// The baseline is folded in ONLY on that condition, and the asymmetry is
+	// deliberate: an observer that steered has read the body, the kernel has
+	// read three digits, and a body-informed verdict must beat a
+	// status-informed one outright. Folding the two unconditionally would let
+	// the baseline's "terminate" (any unrecognised 4xx) out-rank a moderation
+	// refusal's "try the next candidate" — the exact upgrade the observation
+	// point exists to make possible.
+	if observed.Loop <= decision.LoopContinue || observed.Loop == decision.LoopRetrySameCandidate {
+		sink := newExchangeSink(rc)
+		sink.reporter = kernelReporter
+		sink.Report(kernelUpstreamFact(statusCode))
+		observed = decision.Combine(observed, sink.resolve())
+	}
+	// A body-informed refusal relabels the attempt record: the payload was
+	// judged, not the provider, and the row should say which happened.
+	if observed.LoopFrom() == fact.KindPayloadRefused {
+		class.Outcome = AttemptContentFiltered
+		note = fmt.Sprintf("upstream %d content inspection", statusCode)
+	}
 
-	// Recorded from the table rather than from the branch above, which is what
-	// makes the slot general: the branch decides where the chain goes next, the
+	// Recorded from the table rather than from the routing below, which is what
+	// makes the slot general: the routing decides where the chain goes next, the
 	// table decides whether this verdict is worth quoting if the chain then
 	// runs out. A verdict with no status to offer records nothing — quoting a
 	// zero would tell the caller the request ended without ever being answered.
@@ -1150,19 +1171,37 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	}
 
 	rc.recordCurrentAttempt(statusCode, class.Outcome, note)
-	switch class.Category {
-	case statusRotateKey:
+
+	// The resolved Loop routes the chain from here.
+	switch {
+	case observed.Loop >= decision.LoopTerminate:
+		// The caller's request is the problem, or a reporter ended the chain:
+		// surfaced as-is, no rotation, no failover.
+		status, errType := observed.CallerFacing(statusCode, class.ErrorType)
+		if status == 0 {
+			status, errType = statusCode, class.ErrorType
+		}
+		if !c.Writer.Written() {
+			detail := observed.RejectDetail()
+			if detail == "" {
+				detail = safeUpstreamMessage(status)
+			}
+			WriteIngressError(c, rc.ingress, status, errType, detail, rc.requestID)
+		}
+		s.settleAfterAttempt(rc, fact.Rejected(status, fact.FaultUpstream,
+			observed.FailReason(), nil), start)
+		return attemptTerminal
+	case observed.Loop == decision.LoopNextCandidate:
+		return attemptNextCandidate
+	case observed.Loop == decision.LoopRotateKey:
 		// 401 CAS was already performed above, before the error body read.
 		return attemptRotateKey
-	case statusFailover:
+	default:
+		// Unreachable while the baseline fold above holds: every kernel row
+		// steers at least as strongly as a key rotation. Routed rather than
+		// panicking so a future weakening fails toward failover, the least
+		// damaging wrong answer.
 		return attemptNextCandidate
-	default: // statusTerminalClient — caller's request is the problem, no switch.
-		if !c.Writer.Written() {
-			WriteIngressError(c, rc.ingress, statusCode, class.ErrorType, safeUpstreamMessage(statusCode), rc.requestID)
-		}
-		s.settleAfterAttempt(rc, fact.Rejected(statusCode, fact.FaultUpstream,
-			fmt.Sprintf("upstream_client_error_%d", statusCode), nil), start)
-		return attemptTerminal
 	}
 }
 
