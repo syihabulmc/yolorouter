@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 
@@ -9,6 +8,7 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
+	"github.com/yolorouter/yolorouter/internal/providerproto"
 )
 
 // geminiIngressPathPrefix is the fixed prefix of a native Gemini ingress
@@ -105,67 +105,21 @@ func IsChatEndpoint(requestPath string) bool {
 	return false
 }
 
-// primaryProtocol returns the protocol a provider natively speaks, derived
-// from its provider_type column. An empty or unrecognized provider_type is
-// treated as openai.
-func primaryProtocol(p *model.Provider) protocols.ProtocolID {
-	switch p.ProviderType {
-	case "openai":
-		return protocols.ProtocolOpenAI
-	case "anthropic":
-		return protocols.ProtocolClaude
-	case "gemini":
-		return protocols.ProtocolGemini
-	case "responses":
-		return protocols.ProtocolResponses
-	default:
-		return protocols.ProtocolOpenAI
-	}
-}
-
-// parseProtocolEndpoints decodes a provider's protocol_endpoints column into
-// a map of protocol name to per-protocol base URL. This is deliberately
-// lenient: an empty or malformed value decodes to an empty map instead of
-// returning an error, mirroring the read-time leniency of
-// internal/service.SupportedProtocolSet (validation happens once at write
-// time via internal/service.ValidateProtocolEndpoints). Kept as a local copy
-// rather than importing internal/service, which would create an import
-// cycle (internal/service already imports internal/gateway).
-func parseProtocolEndpoints(protocolEndpoints string) map[string]string {
-	if protocolEndpoints == "" {
-		return nil
-	}
-	var endpoints map[string]string
-	if err := json.Unmarshal([]byte(protocolEndpoints), &endpoints); err != nil {
-		return nil
-	}
-	return endpoints
-}
-
 // providerSupportedProtocols returns the set of wire protocols a provider
-// accepts on egress: its primary protocol (from provider_type) plus
-// whatever extra protocols its protocol_endpoints column declares. An empty
-// or malformed protocol_endpoints degrades to just the primary protocol
-// rather than erroring, so negotiation always has a fallback.
+// accepts on egress — providerproto owns the reading of provider_type and
+// protocol_endpoints, this is just the model.Provider adapter.
 func providerSupportedProtocols(p *model.Provider) map[protocols.ProtocolID]bool {
-	set := map[protocols.ProtocolID]bool{primaryProtocol(p): true}
-	for protocol := range parseProtocolEndpoints(p.ProtocolEndpoints) {
-		set[protocols.ProtocolID(protocol)] = true
-	}
-	return set
+	return providerproto.SupportedSet(p.ProviderType, p.ProtocolEndpoints)
 }
 
-// egressBaseURL returns the base URL to use when speaking proto to
-// provider p: the per-protocol URL from protocol_endpoints if one is
-// declared and non-empty, otherwise the provider's default base_url. This
-// lets a provider expose independent upstream URLs per supported protocol
-// (e.g. an OpenAI-compatible gateway that proxies Claude requests to a
-// different host).
+// egressBaseURL returns the base URL to use when speaking proto to provider
+// p: the per-protocol URL from protocol_endpoints if one is declared and
+// non-empty, otherwise the provider's default base_url. This lets a provider
+// expose independent upstream URLs per supported protocol (e.g. an
+// OpenAI-compatible gateway that proxies Claude requests to a different
+// host).
 func egressBaseURL(p *model.Provider, proto protocols.ProtocolID) string {
-	if url, ok := parseProtocolEndpoints(p.ProtocolEndpoints)[string(proto)]; ok && url != "" {
-		return url
-	}
-	return p.BaseURL
+	return providerproto.ResolveURL(providerproto.ParseEndpoints(p.ProtocolEndpoints), proto, p.BaseURL)
 }
 
 // EgressDecision is the outcome of negotiating between the ingress protocol
@@ -194,6 +148,6 @@ func Negotiate(ingress protocols.ProtocolID, p *model.Provider) (*EgressDecision
 	if providerSupportedProtocols(p)[ingress] {
 		return &EgressDecision{Protocol: ingress, BaseURL: egressBaseURL(p, ingress), Passthrough: true}, nil
 	}
-	primary := primaryProtocol(p)
+	primary := providerproto.TypeOf(p.ProviderType)
 	return &EgressDecision{Protocol: primary, BaseURL: egressBaseURL(p, primary), Passthrough: false}, nil
 }

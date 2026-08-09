@@ -1,15 +1,17 @@
 package service
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/protocols/chat"
+	"github.com/yolorouter/yolorouter/internal/providerproto"
 )
 
 // TestUnknownProtocolFallsBackToOpenAI pins the fallback the table's own
 // comment promises: a protocol nobody registered probes exactly like OpenAI —
-// same encoder, same body shape — mirroring protocolForProviderType's
+// same encoder, same body shape — mirroring providerproto.TypeOf's
 // normalization of unknown provider_type values. Without this, an
 // unrecognized ProtocolID would silently probe with whatever spec the
 // fallback happens to hand out, and a credential test could pass against an
@@ -29,17 +31,26 @@ func TestUnknownProtocolFallsBackToOpenAI(t *testing.T) {
 		t.Errorf("chatCompletionPayload(unknown) model = %v, want the tested model", payload["model"])
 	}
 
-	if got := protocolForProviderType("bogus-protocol"); got != protocols.ProtocolOpenAI {
-		t.Errorf("protocolForProviderType(unknown) = %v, want OpenAI", got)
-	}
 }
 
 // TestEveryProbeSpecIsFullyPopulated makes a half-filled entry a red test
 // instead of a nil-dereference at probe time: every registered spec must
-// carry every function field and a catalogue path. successCertifiable is
-// deliberately absent here — false is a meaningful value (the entry defers
-// its success validation), not a hole.
+// carry every function field and a catalogue path — and the set of entries
+// must be exactly the protocol vocabulary providerproto declares, so adding
+// a protocol there is a red test here until its probe entry exists.
+// successCertifiable is deliberately absent — false is a meaningful value
+// (the entry defers its success validation), not a hole.
 func TestEveryProbeSpecIsFullyPopulated(t *testing.T) {
+	for _, want := range providerproto.All() {
+		if _, ok := probeSpecs[want]; !ok {
+			t.Errorf("providerproto declares %s but probeSpecs has no entry for it", want)
+		}
+	}
+	for proto := range probeSpecs {
+		if !slices.Contains(providerproto.All(), proto) {
+			t.Errorf("probeSpecs has an entry %s that providerproto does not declare", proto)
+		}
+	}
 	for proto, spec := range probeSpecs {
 		if spec.encoder == nil {
 			t.Errorf("%s: encoder is nil", proto)

@@ -188,20 +188,9 @@ func NewHTTPProviderClient(allowPrivate bool) *HTTPProviderClient {
 // credential test must drive for proto — the exact same encoders runtime
 // dispatch uses, so a provider that passes its test is guaranteed to be
 // hit the same way in production. Unknown protocols fall back to the
-// OpenAI codec, mirroring protocolForProviderType's own default.
+// OpenAI codec, mirroring providerproto.TypeOf's own default.
 func requestEncoderFor(proto protocols.ProtocolID) protocols.RequestEncoder {
 	return probeSpecFor(proto).encoder
-}
-
-// protocolForProviderType maps a provider_type column value to the wire
-// protocol its credential test must speak. Empty/unknown values normalize
-// to OpenAI, matching ValidateProviderType's own default for backward
-// compatibility with providers created before provider_type existed.
-func protocolForProviderType(providerType string) protocols.ProtocolID {
-	if _, ok := probeSpecs[protocols.ProtocolID(providerType)]; ok {
-		return protocols.ProtocolID(providerType)
-	}
-	return protocols.ProtocolOpenAI
 }
 
 // chatCompletionErrorBody and chatCompletionSuccessBody are OpenAI Chat

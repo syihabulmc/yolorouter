@@ -1,4 +1,4 @@
-package service
+package providerproto
 
 import (
 	"testing"
@@ -6,7 +6,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
-func TestValidateProviderType(t *testing.T) {
+func TestValidateType(t *testing.T) {
 	cases := []struct {
 		name    string
 		in      string
@@ -23,26 +23,26 @@ func TestValidateProviderType(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ValidateProviderType(tc.in)
+			got, err := ValidateType(tc.in)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("ValidateProviderType(%q): expected error, got nil", tc.in)
+					t.Fatalf("ValidateType(%q): expected error, got nil", tc.in)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("ValidateProviderType(%q): unexpected error: %v", tc.in, err)
+				t.Fatalf("ValidateType(%q): unexpected error: %v", tc.in, err)
 			}
-			if got != tc.want {
-				t.Fatalf("ValidateProviderType(%q) = %q, want %q", tc.in, got, tc.want)
+			if string(got) != tc.want {
+				t.Fatalf("ValidateType(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestValidateProtocolEndpoints(t *testing.T) {
+func TestValidateEndpoints(t *testing.T) {
 	t.Run("empty string is valid and stays empty", func(t *testing.T) {
-		got, err := ValidateProtocolEndpoints("")
+		got, err := ValidateEndpoints("")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -56,7 +56,7 @@ func TestValidateProtocolEndpoints(t *testing.T) {
 		// normalize to the same stored form so a name-only edit that
 		// re-submits the empty config never spuriously bumps
 		// destination_version.
-		got, err := ValidateProtocolEndpoints("{}")
+		got, err := ValidateEndpoints("{}")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -66,7 +66,7 @@ func TestValidateProtocolEndpoints(t *testing.T) {
 	})
 
 	t.Run("single reuse-base-url entry", func(t *testing.T) {
-		got, err := ValidateProtocolEndpoints(`{"anthropic":""}`)
+		got, err := ValidateEndpoints(`{"anthropic":""}`)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -77,7 +77,7 @@ func TestValidateProtocolEndpoints(t *testing.T) {
 	})
 
 	t.Run("single explicit URL entry", func(t *testing.T) {
-		got, err := ValidateProtocolEndpoints(`{"responses":"https://gw/v1"}`)
+		got, err := ValidateEndpoints(`{"responses":"https://gw/v1"}`)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -88,7 +88,7 @@ func TestValidateProtocolEndpoints(t *testing.T) {
 	})
 
 	t.Run("multiple entries normalized with sorted keys", func(t *testing.T) {
-		got, err := ValidateProtocolEndpoints(`{"responses":"https://gw/v1","anthropic":""}`)
+		got, err := ValidateEndpoints(`{"responses":"https://gw/v1","anthropic":""}`)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -99,44 +99,44 @@ func TestValidateProtocolEndpoints(t *testing.T) {
 	})
 
 	t.Run("malformed JSON rejected", func(t *testing.T) {
-		if _, err := ValidateProtocolEndpoints(`{not json`); err == nil {
+		if _, err := ValidateEndpoints(`{not json`); err == nil {
 			t.Fatal("expected error for malformed JSON, got nil")
 		}
 	})
 
 	t.Run("JSON array rejected", func(t *testing.T) {
-		if _, err := ValidateProtocolEndpoints(`["anthropic"]`); err == nil {
+		if _, err := ValidateEndpoints(`["anthropic"]`); err == nil {
 			t.Fatal("expected error for non-object JSON, got nil")
 		}
 	})
 
 	t.Run("unknown protocol key rejected", func(t *testing.T) {
-		if _, err := ValidateProtocolEndpoints(`{"claude":""}`); err == nil {
+		if _, err := ValidateEndpoints(`{"claude":""}`); err == nil {
 			t.Fatal("expected error for unknown protocol key, got nil")
 		}
 	})
 
 	t.Run("non-URL value rejected", func(t *testing.T) {
-		if _, err := ValidateProtocolEndpoints(`{"anthropic":"not-a-url"}`); err == nil {
+		if _, err := ValidateEndpoints(`{"anthropic":"not-a-url"}`); err == nil {
 			t.Fatal("expected error for non-URL value, got nil")
 		}
 	})
 
 	t.Run("bad scheme rejected", func(t *testing.T) {
-		if _, err := ValidateProtocolEndpoints(`{"anthropic":"ftp://x"}`); err == nil {
+		if _, err := ValidateEndpoints(`{"anthropic":"ftp://x"}`); err == nil {
 			t.Fatal("expected error for bad scheme, got nil")
 		}
 	})
 
 	t.Run("non-string value rejected", func(t *testing.T) {
-		if _, err := ValidateProtocolEndpoints(`{"anthropic":123}`); err == nil {
+		if _, err := ValidateEndpoints(`{"anthropic":123}`); err == nil {
 			t.Fatal("expected error for non-string value, got nil")
 		}
 	})
 
 	t.Run("normalized output is byte-stable regardless of key order", func(t *testing.T) {
-		gotA, errA := ValidateProtocolEndpoints(`{"gemini":"https://g","anthropic":"","responses":"https://r"}`)
-		gotB, errB := ValidateProtocolEndpoints(`{"responses":"https://r","gemini":"https://g","anthropic":""}`)
+		gotA, errA := ValidateEndpoints(`{"gemini":"https://g","anthropic":"","responses":"https://r"}`)
+		gotB, errB := ValidateEndpoints(`{"responses":"https://r","gemini":"https://g","anthropic":""}`)
 		if errA != nil || errB != nil {
 			t.Fatalf("unexpected errors: %v, %v", errA, errB)
 		}
@@ -146,7 +146,7 @@ func TestValidateProtocolEndpoints(t *testing.T) {
 	})
 }
 
-func TestSupportedProtocolSet(t *testing.T) {
+func TestSupportedSet(t *testing.T) {
 	cases := []struct {
 		name              string
 		providerType      string
@@ -188,13 +188,13 @@ func TestSupportedProtocolSet(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := SupportedProtocolSet(tc.providerType, tc.protocolEndpoints)
+			got := SupportedSet(tc.providerType, tc.protocolEndpoints)
 			if len(got) != len(tc.want) {
-				t.Fatalf("SupportedProtocolSet(%q, %q) = %v, want %v", tc.providerType, tc.protocolEndpoints, got, tc.want)
+				t.Fatalf("SupportedSet(%q, %q) = %v, want %v", tc.providerType, tc.protocolEndpoints, got, tc.want)
 			}
 			for k := range tc.want {
-				if !got[k] {
-					t.Fatalf("SupportedProtocolSet(%q, %q) = %v, missing key %q", tc.providerType, tc.protocolEndpoints, got, k)
+				if !got[protocols.ProtocolID(k)] {
+					t.Fatalf("SupportedSet(%q, %q) = %v, missing key %q", tc.providerType, tc.protocolEndpoints, got, k)
 				}
 			}
 		})
@@ -275,4 +275,46 @@ func TestVerificationTargets(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestTypeOfLenientFallback pins the read-path normalization: rows that
+// predate the provider_type column ("") and values no release ever wrote
+// both resolve to OpenAI instead of failing a read.
+func TestTypeOfLenientFallback(t *testing.T) {
+	cases := []struct {
+		in   string
+		want protocols.ProtocolID
+	}{
+		{"", protocols.ProtocolOpenAI},
+		{"openai", protocols.ProtocolOpenAI},
+		{"anthropic", protocols.ProtocolClaude},
+		{"gemini", protocols.ProtocolGemini},
+		{"responses", protocols.ProtocolResponses},
+		{"bogus", protocols.ProtocolOpenAI},
+	}
+	for _, tc := range cases {
+		if got := TypeOf(tc.in); got != tc.want {
+			t.Errorf("TypeOf(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestAllEnumeratesTheVocabularyInStableOrder guards the enumeration other
+// registries are held against.
+func TestAllEnumeratesTheVocabularyInStableOrder(t *testing.T) {
+	want := []protocols.ProtocolID{
+		protocols.ProtocolClaude, // "anthropic" sorts first
+		protocols.ProtocolGemini,
+		protocols.ProtocolOpenAI,
+		protocols.ProtocolResponses,
+	}
+	got := All()
+	if len(got) != len(want) {
+		t.Fatalf("All() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("All()[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
 }

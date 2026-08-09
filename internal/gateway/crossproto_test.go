@@ -40,7 +40,7 @@ func createAnthropicProvider(t *testing.T, db *gorm.DB, name, baseURL string) *m
 }
 
 // createGeminiProvider is createAnthropicProvider's Gemini counterpart:
-// provider_type="gemini" maps (negotiate.go's primaryProtocol) to
+// provider_type="gemini" maps (providerproto.TypeOf) to
 // protocols.ProtocolGemini, so a request against this provider from a native
 // Gemini ingress caller (/v1beta/...) is same-protocol passthrough — no IR
 // round trip — exercising the decoding pump's Gemini branch and, on a
@@ -60,7 +60,7 @@ func createGeminiProvider(t *testing.T, db *gorm.DB, name, baseURL string) *mode
 }
 
 // createResponsesProvider is createGeminiProvider's Responses counterpart:
-// provider_type="responses" maps (negotiate.go's primaryProtocol) to
+// provider_type="responses" maps (providerproto.TypeOf) to
 // protocols.ProtocolResponses, so a request against this provider from a
 // native Responses ingress caller (/v1/responses) is same-protocol
 // passthrough — no IR round trip.

@@ -72,9 +72,10 @@ type probeSpec struct {
 	extractMessage     func(body []byte) string
 }
 
-// probeSpecs is the per-protocol table. Membership doubles as the definition
-// of "known provider_type": protocolForProviderType normalizes anything not
-// listed here to OpenAI.
+// probeSpecs is the per-protocol table. The protocol vocabulary itself is
+// owned by internal/providerproto; a registry-completeness test holds this
+// table to exactly that set, so adding a protocol there stays red until its
+// probe entry exists here.
 var probeSpecs = map[protocols.ProtocolID]probeSpec{
 	protocols.ProtocolOpenAI:    openAIProbe,
 	protocols.ProtocolClaude:    claudeProbe,
@@ -83,7 +84,7 @@ var probeSpecs = map[protocols.ProtocolID]probeSpec{
 }
 
 // probeSpecFor resolves proto's spec, falling back to OpenAI for unknown
-// protocols — mirroring protocolForProviderType's own default.
+// protocols — mirroring providerproto.TypeOf's own default.
 func probeSpecFor(proto protocols.ProtocolID) probeSpec {
 	if spec, ok := probeSpecs[proto]; ok {
 		return spec

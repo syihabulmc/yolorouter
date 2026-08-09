@@ -24,11 +24,11 @@ type createProviderRequest struct {
 	TestModel        string `json:"test_model" binding:"required,max=100"`
 	ManagementStatus int    `json:"management_status" binding:"omitempty,oneof=1 2"`
 	// ProviderType and ProtocolEndpoints are deliberately unconstrained by
-	// gin binding tags: they are validated in the service layer via
-	// service.ValidateProviderType/ValidateProtocolEndpoints so a bad value
-	// surfaces as a clean 400 through writeServiceError rather than
-	// a gin binding error. Both are optional — omitting ProviderType
-	// normalizes to "openai" for backward compatibility.
+	// gin binding tags: the service layer validates them through
+	// providerproto's write-path validators so a bad value surfaces as a
+	// clean 400 through writeServiceError rather than a gin binding error.
+	// Both are optional — omitting ProviderType normalizes to "openai" for
+	// backward compatibility.
 	ProviderType      string `json:"provider_type"`
 	ProtocolEndpoints string `json:"protocol_endpoints"`
 }

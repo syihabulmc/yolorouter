@@ -16,6 +16,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/pricecatalog"
 	"github.com/yolorouter/yolorouter/internal/protocols"
+	"github.com/yolorouter/yolorouter/internal/providerproto"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
@@ -652,7 +653,7 @@ func (s *ModelService) probeCandidateMapping(ctx context.Context, providerID uin
 	if err != nil {
 		return CandidateTestReport{}, err
 	}
-	return s.runCandidateProbes(ctx, protocolForProviderType(provider.ProviderType), provider.BaseURL, plaintext, providerModelName)
+	return s.runCandidateProbes(ctx, providerproto.TypeOf(provider.ProviderType), provider.BaseURL, plaintext, providerModelName)
 }
 
 // TestAndCreateCandidate probes a mapping and only then decides whether to

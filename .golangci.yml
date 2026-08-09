@@ -96,6 +96,19 @@ linters:
             - $gostd
             - "github.com/yolorouter/yolorouter/internal/fact"
             - "github.com/yolorouter/yolorouter/internal/decision"
+        # providerproto owns how a provider row declares its wire protocols
+        # (provider_type + protocol_endpoints) and must stay importable by
+        # both service and gateway — anything beyond the protocol vocabulary
+        # itself would put a cycle one import away.
+        providerproto-leaf:
+          files:
+            - "**/internal/providerproto/*.go"
+            - "**/internal/providerproto/**/*.go"
+          list-mode: strict
+          allow:
+            - $gostd
+            - "github.com/yolorouter/yolorouter/internal/protocols"
+            - "github.com/yolorouter/yolorouter/internal/providerproto"
         # fact is the leaf every other package here depends on. An import that
         # is not the standard library puts a cycle one import away from every
         # package in the module. The package's own import path is allowed so

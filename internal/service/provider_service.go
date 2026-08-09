@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/providerproto"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
@@ -142,11 +143,11 @@ type CreateProviderInput struct {
 	ManagementStatus int // requested status; server independently re-verifies before honoring "enabled"
 	// ProviderType selects the wire protocol this provider primarily
 	// speaks (openai/anthropic/gemini/responses). Empty normalizes to
-	// "openai" via ValidateProviderType for backward compatibility.
+	// "openai" via providerproto.ValidateType for backward compatibility.
 	ProviderType string
 	// ProtocolEndpoints is optional JSON text declaring extra protocols
 	// (beyond ProviderType) this provider also accepts, each with its own
-	// endpoint URL. Empty means no extra protocols. See ValidateProtocolEndpoints.
+	// endpoint URL. Empty means no extra protocols. See providerproto.ValidateEndpoints.
 	ProtocolEndpoints string
 }
 
@@ -159,8 +160,8 @@ type UpdateProviderInput struct {
 	// points at an empty string — unlike CreateProviderInput's plain string
 	// fields, where empty always means "default/clear". A present-empty Note
 	// clears the note; a present-empty ProviderType normalizes to "openai"
-	// (see ValidateProviderType); a present-empty ProtocolEndpoints clears all
-	// additional protocols (see ValidateProtocolEndpoints). Name and BaseURL
+	// (see providerproto.ValidateType); a present-empty ProtocolEndpoints clears all
+	// additional protocols (see providerproto.ValidateEndpoints). Name and BaseURL
 	// stay plain strings (binding:"required", always resent). See
 	// UpdateProvider's doc comment for why this distinction matters.
 	Note              *string
@@ -316,11 +317,11 @@ func (s *ProviderService) CreateProvider(ctx context.Context, input CreateProvid
 	// Validated up front, before any DB work: an empty ProviderType
 	// normalizes to "openai" for backward compatibility with callers that
 	// don't supply one yet.
-	providerType, err := ValidateProviderType(input.ProviderType)
+	providerType, err := validateProviderType(input.ProviderType)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errcode.ErrProviderProtocolInvalid, err)
 	}
-	protocolEndpoints, err := ValidateProtocolEndpoints(input.ProtocolEndpoints)
+	protocolEndpoints, err := providerproto.ValidateEndpoints(input.ProtocolEndpoints)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errcode.ErrProviderProtocolInvalid, err)
 	}
@@ -419,8 +420,8 @@ func isSortOrderUniqueViolation(err error) bool {
 // extra endpoints. A non-nil pointer is authoritative and applied as given,
 // even when it points at an empty string: a present-empty Note clears the
 // note, a present-empty ProviderType normalizes to "openai" via
-// ValidateProviderType, and a present-empty ProtocolEndpoints clears all
-// additional protocols via ValidateProtocolEndpoints. This lets the edit UI —
+// providerproto.ValidateType, and a present-empty ProtocolEndpoints clears all
+// additional protocols via providerproto.ValidateEndpoints. This lets the edit UI —
 // which always sends these fields — legitimately clear the last extra
 // endpoint or repoint the primary protocol without a stale leftover entry
 // surviving in the stored JSON. Name and BaseURL stay plain strings because
@@ -445,11 +446,11 @@ func (s *ProviderService) UpdateProvider(id uint, input UpdateProviderInput, now
 		return normalized, nil
 	}
 
-	providerType, err := resolvePatchField(provider.ProviderType, input.ProviderType, ValidateProviderType)
+	providerType, err := resolvePatchField(provider.ProviderType, input.ProviderType, validateProviderType)
 	if err != nil {
 		return nil, err
 	}
-	protocolEndpoints, err := resolvePatchField(provider.ProtocolEndpoints, input.ProtocolEndpoints, ValidateProtocolEndpoints)
+	protocolEndpoints, err := resolvePatchField(provider.ProtocolEndpoints, input.ProtocolEndpoints, providerproto.ValidateEndpoints)
 	if err != nil {
 		return nil, err
 	}
@@ -656,7 +657,7 @@ func verificationSeverity(r TestResult) int {
 // the rejected destination. Picking the most severe result guarantees any
 // decisive failure anywhere demotes the key to Failed.
 func (s *ProviderService) verifyKeyAllDestinations(ctx context.Context, provider *model.Provider, plaintext, testModel string) (TestResult, error) {
-	targets := VerificationTargets(provider.ProviderType, provider.ProtocolEndpoints, provider.BaseURL)
+	targets := providerproto.VerificationTargets(provider.ProviderType, provider.ProtocolEndpoints, provider.BaseURL)
 
 	var chosen TestResult
 	chosenSeverity := -1
@@ -989,7 +990,7 @@ func (s *ProviderService) ReorderProviderKey(providerID, keyID uint, direction s
 // openai, letting existing callers that don't supply one yet keep working
 // unchanged.
 func (s *ProviderService) TestKeyPreview(ctx context.Context, baseURL, apiKey, model, providerType string) (TestResult, error) {
-	return s.client.TestChatCompletion(ctx, protocolForProviderType(providerType), baseURL, apiKey, model)
+	return s.client.TestChatCompletion(ctx, providerproto.TypeOf(providerType), baseURL, apiKey, model)
 }
 
 // ListModelsPreview fetches the upstream model catalogue for a candidate
@@ -997,7 +998,7 @@ func (s *ProviderService) TestKeyPreview(ctx context.Context, baseURL, apiKey, m
 // picker instead of a free-text model field. Like TestKeyPreview it is
 // stateless — nothing is persisted and no later request trusts the result.
 func (s *ProviderService) ListModelsPreview(ctx context.Context, baseURL, apiKey, providerType string) (ListModelsResult, error) {
-	return s.client.ListModels(ctx, protocolForProviderType(providerType), baseURL, apiKey)
+	return s.client.ListModels(ctx, providerproto.TypeOf(providerType), baseURL, apiKey)
 }
 
 // ListModelsForProvider fetches the upstream model catalogue for an already-
@@ -1027,7 +1028,7 @@ func (s *ProviderService) ListModelsForProvider(ctx context.Context, providerID 
 	if err != nil {
 		return ListModelsResult{}, fmt.Errorf("decrypt key: %w", err)
 	}
-	return s.client.ListModels(ctx, protocolForProviderType(provider.ProviderType), provider.BaseURL, plaintext)
+	return s.client.ListModels(ctx, providerproto.TypeOf(provider.ProviderType), provider.BaseURL, plaintext)
 }
 
 // pickKeyForCatalogueFetch chooses the stored key most likely to authenticate
@@ -1244,4 +1245,11 @@ func (s *ProviderService) TestAllProviderKeys(ctx context.Context, providerID ui
 		})
 	}
 	return results, nil
+}
+
+// validateProviderType adapts providerproto.ValidateType to the
+// string-in/string-out shape the provider row and the patch resolver use.
+func validateProviderType(t string) (string, error) {
+	id, err := providerproto.ValidateType(t)
+	return string(id), err
 }
