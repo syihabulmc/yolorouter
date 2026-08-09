@@ -7,8 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-09
+
+A feature and hardening release on top of 0.1.2: the console adapts to
+mobile, API keys can be re-viewed after creation, provider prices refresh
+themselves, and the relay kernel is restructured around explicit extension
+points with fixes to failover, usage accounting and the CLI's deployment
+handling.
+
+### Added
+
+- Responsive mobile layout across the console: pages, tables and dialogs adapt below the desktop breakpoint, with a shared bottom-sheet pattern for actions.
+- API keys can be re-viewed and copied in full from the list page after creation, with the revealed key kept out of caches. Importing a key into Claude Code Switch prefills the model and prefers one that is actually available.
+- The provider price catalog refreshes itself daily through the worker, and the price prefill hints in the provider forms follow the refreshed catalog.
+- Request log: a stream body viewer renders captured SSE stream bodies frame by frame, and the body viewer gained copy / expand actions.
+
+### Changed
+
+- The relay kernel is restructured around explicit extension points — admission, request rewrites, response observation, terminal recording — with a single closed decision table for routing verdicts, held in place by structural tests that run with the suite. No routing behaviour change is intended.
+- A service error crossing into another handler's domain maps to its own error code instead of falling through to a generic 500.
+- "Today" on the dashboard and in analytics is computed from one clock reading taken when the request arrives, so the day boundary can no longer drift around local midnight within a single request.
+
 ### Fixed
 
+- Failover now triggers when an upstream refuses a payload on content-inspection grounds, instead of surfacing the refusal to the caller while other providers might accept it. The refusal does not count against the provider's circuit breaker.
+- Stop reasons, usage, and cache token counts are normalised across every protocol boundary, so a caller sees the same accounting whichever upstream protocol served the request.
+- The Responses API accepts a content list as `function_call_output` output.
+- Credentials carried by a failed dispatch are no longer persisted with the request log.
+- Actions on revoked API keys are restricted to what a revoked key can meaningfully do.
+- Provider probes tell timeouts apart from unreachable destinations, so the test result names the actual failure.
+- The qwen price fetcher aligns columns by header rather than position, surviving column reordering in the source.
 - `stop` reported `no running instance` and exited 0 while the server was running, whenever it was invoked from a directory other than the one the service runs in. It generated a config in the working directory and probed that empty deployment's lock instead of the real one. It no longer generates anything: it reports the path it looked at, and — when the binary belongs to an installation — the `--config` line to use instead. It also prints the config it resolved alongside every result, so an answer about a deployment is never shown without the deployment it is about.
 - `db:rollback` generated a config when none was there, which on a deployment whose config had been lost pointed it straight back at the database still on disk. It now requires the config to exist, and prints the config and database it is about to act on.
 - `db:rollback` ran its down migrations against a live server. It now takes the same instance lock `serve` holds for its lifetime, which `db:reset` has always required, instead of dropping tables and columns out from under a running process.
@@ -112,7 +140,8 @@ failover, and observe usage and cost.
 - Single binary with the web console embedded via `go:embed`; SQLite or PostgreSQL storage; upstream keys encrypted at rest (AES-256).
 - Self-update via the `update` command and update-check API.
 
-[Unreleased]: https://github.com/yolorouter/yolorouter/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/yolorouter/yolorouter/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/yolorouter/yolorouter/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/yolorouter/yolorouter/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/yolorouter/yolorouter/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/yolorouter/yolorouter/releases/tag/v0.1.0
