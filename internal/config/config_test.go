@@ -684,15 +684,18 @@ func TestGenerateDefaultConfigWritesRealGatewayTimeouts(t *testing.T) {
 // future refactor flipping it to strict `<` would flip that case to wantErr.
 func TestGatewayTimeoutsValidation(t *testing.T) {
 	valid := GatewayConfig{
-		ConnectTimeout:      5 * time.Second,
-		HeaderTimeout:       600 * time.Second,
-		FirstByteTimeout:    600 * time.Second,
-		BodyIdleTimeout:     60 * time.Second,
-		AttemptTimeout:      20 * time.Minute,
-		RequestTimeout:      30 * time.Minute,
-		TLSHandshakeTimeout: 10 * time.Second,
-		MaxUpstreamAttempts: DefaultMaxUpstreamAttempts,
-		MaxCandidateProbes:  DefaultMaxCandidateProbes,
+		ConnectTimeout:          5 * time.Second,
+		HeaderTimeout:           600 * time.Second,
+		FirstByteTimeout:        600 * time.Second,
+		BodyIdleTimeout:         60 * time.Second,
+		AttemptTimeout:          20 * time.Minute,
+		RequestTimeout:          30 * time.Minute,
+		TLSHandshakeTimeout:     10 * time.Second,
+		MaxUpstreamAttempts:     DefaultMaxUpstreamAttempts,
+		MaxCandidateProbes:      DefaultMaxCandidateProbes,
+		CircuitFailureThreshold: DefaultCircuitFailureThreshold,
+		CircuitSuccessThreshold: DefaultCircuitSuccessThreshold,
+		CircuitOpenTimeout:      DefaultCircuitOpenTimeout,
 	}
 	cases := []struct {
 		name    string
@@ -715,6 +718,9 @@ func TestGatewayTimeoutsValidation(t *testing.T) {
 		{"attempt >= request", func(g *GatewayConfig) { g.AttemptTimeout = 30 * time.Minute }, true},
 		{"zero max_upstream_attempts", func(g *GatewayConfig) { g.MaxUpstreamAttempts = 0 }, true},
 		{"negative max_candidate_probes", func(g *GatewayConfig) { g.MaxCandidateProbes = -1 }, true},
+		{"zero circuit_failure_threshold", func(g *GatewayConfig) { g.CircuitFailureThreshold = 0 }, true},
+		{"negative circuit_success_threshold", func(g *GatewayConfig) { g.CircuitSuccessThreshold = -1 }, true},
+		{"sub-second circuit_open_timeout", func(g *GatewayConfig) { g.CircuitOpenTimeout = 500 * time.Millisecond }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

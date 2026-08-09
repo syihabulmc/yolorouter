@@ -65,6 +65,15 @@ type GatewayConfig struct {
 	// pre-dispatch skips), so a large candidate pool cannot be walked end to
 	// end for free. Defaults to 20.
 	MaxCandidateProbes int `yaml:"max_candidate_probes"`
+	// CircuitFailureThreshold is how many consecutive provider faults open
+	// that provider's breaker (traffic then skips it). Defaults to 5.
+	CircuitFailureThreshold int `yaml:"circuit_failure_threshold"`
+	// CircuitSuccessThreshold is how many successful probes close an open
+	// breaker again. Defaults to 2.
+	CircuitSuccessThreshold int `yaml:"circuit_success_threshold"`
+	// CircuitOpenTimeout is how long an open breaker refuses traffic before
+	// letting probe requests through. Defaults to 60s.
+	CircuitOpenTimeout time.Duration `yaml:"circuit_open_timeout"`
 }
 
 // Default sizes for the gateway's per-request count budgets. Exported so the
@@ -73,6 +82,14 @@ type GatewayConfig struct {
 const (
 	DefaultMaxUpstreamAttempts = 3
 	DefaultMaxCandidateProbes  = 20
+)
+
+// Default sizes for the per-provider circuit breaker, matching the values
+// battle-tested in production deployments of this gateway's lineage.
+const (
+	DefaultCircuitFailureThreshold = 5
+	DefaultCircuitSuccessThreshold = 2
+	DefaultCircuitOpenTimeout      = 60 * time.Second
 )
 
 type DatabaseConfig struct {
@@ -206,6 +223,15 @@ func applyGatewayDefaults(g *GatewayConfig) {
 	}
 	if g.MaxCandidateProbes == 0 {
 		g.MaxCandidateProbes = DefaultMaxCandidateProbes
+	}
+	if g.CircuitFailureThreshold == 0 {
+		g.CircuitFailureThreshold = DefaultCircuitFailureThreshold
+	}
+	if g.CircuitSuccessThreshold == 0 {
+		g.CircuitSuccessThreshold = DefaultCircuitSuccessThreshold
+	}
+	if g.CircuitOpenTimeout == 0 {
+		g.CircuitOpenTimeout = DefaultCircuitOpenTimeout
 	}
 }
 
@@ -687,6 +713,15 @@ func validateGatewayTimeouts(g *GatewayConfig) error {
 	}
 	if g.MaxUpstreamAttempts <= 0 || g.MaxCandidateProbes <= 0 {
 		return fmt.Errorf("gateway: max_upstream_attempts and max_candidate_probes must be > 0")
+	}
+
+	if g.CircuitFailureThreshold <= 0 || g.CircuitSuccessThreshold <= 0 {
+		return fmt.Errorf("gateway: circuit_failure_threshold and circuit_success_threshold must be > 0")
+	}
+	// A sub-second open window makes no sense against LLM upstreams and, cut
+	// into per-probe intervals, degenerates toward an always-pass rate limit.
+	if g.CircuitOpenTimeout < time.Second {
+		return fmt.Errorf("gateway: circuit_open_timeout must be >= 1s")
 	}
 	return nil
 }

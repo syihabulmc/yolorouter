@@ -68,3 +68,6 @@ gateway:
   tls_handshake_timeout: 10s # TLS handshake (transport.TLSHandshakeTimeout)
   max_upstream_attempts: 3  # count cap on upstream dispatches per request, across all candidates and key rotations (first dispatch + retries)
   max_candidate_probes: 20  # count cap on candidates abandoned before anything was sent (e.g. a rewriter refusing the candidate)
+  circuit_failure_threshold: 5 # consecutive provider faults that open its breaker (traffic then skips the provider)
+  circuit_success_threshold: 2 # successful probes that close an open breaker again
+  circuit_open_timeout: 60s    # how long an open breaker refuses traffic before probe requests are let through

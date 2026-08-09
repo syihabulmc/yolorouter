@@ -96,6 +96,18 @@ linters:
             - $gostd
             - "github.com/yolorouter/yolorouter/internal/fact"
             - "github.com/yolorouter/yolorouter/internal/decision"
+        # circuit is the provider health record: pure state over provider ids
+        # and a clock. Anything beyond the standard library would let the
+        # record depend on where its verdicts come from — the whole point is
+        # that it has one owner with no opinions about that.
+        circuit-leaf:
+          files:
+            - "**/internal/gateway/circuit/*.go"
+            - "**/internal/gateway/circuit/**/*.go"
+          list-mode: strict
+          allow:
+            - $gostd
+            - "github.com/yolorouter/yolorouter/internal/gateway/circuit"
         # jsonspan is a pure byte scanner; anything beyond the standard
         # library would be a foreign opinion inside a primitive that exists
         # to be reusable anywhere.

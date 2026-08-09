@@ -88,6 +88,12 @@ type Exchange struct {
 	attemptsSpent int
 	probesSpent   int
 
+	// circuitGen is the health-record generation the current candidate's
+	// provider was admitted under, set when the candidate loop consults the
+	// breaker and handed back when a result is booked, so a result that
+	// straddled a breaker transition cannot be booked against the wrong era.
+	circuitGen uint64
+
 	// requestCtx is the context carrying RequestDeadline, set once at Handle
 	// entry. Candidate queries (model/candidate/key GORM reads) and each
 	// per-attempt context derive from this, so a stalled DB cannot overrun

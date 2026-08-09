@@ -20,6 +20,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
+	"github.com/yolorouter/yolorouter/internal/gateway/circuit"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
@@ -116,6 +117,11 @@ type Service struct {
 	// off this struct instead of re-deriving them per call.
 	gateway config.GatewayConfig
 
+	// breaker is the per-provider health record the decision table's circuit
+	// effects are booked against, and the candidate loop consults before
+	// walking a candidate.
+	breaker *circuit.Breaker
+
 	// secondaryFetch is the shared client for downloading responses an upstream
 	// referred to rather than returned. Built once, on first use: a transport
 	// per request would pool connections nobody ever reuses or closes.
@@ -173,12 +179,26 @@ func NewService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp SettingsPro
 	if gatewayCfg.MaxCandidateProbes <= 0 {
 		gatewayCfg.MaxCandidateProbes = config.DefaultMaxCandidateProbes
 	}
+	if gatewayCfg.CircuitFailureThreshold <= 0 {
+		gatewayCfg.CircuitFailureThreshold = config.DefaultCircuitFailureThreshold
+	}
+	if gatewayCfg.CircuitSuccessThreshold <= 0 {
+		gatewayCfg.CircuitSuccessThreshold = config.DefaultCircuitSuccessThreshold
+	}
+	if gatewayCfg.CircuitOpenTimeout <= 0 {
+		gatewayCfg.CircuitOpenTimeout = config.DefaultCircuitOpenTimeout
+	}
 	return &Service{
 		db:               db,
 		masterKey:        masterKey,
 		client:           NewUpstreamClient(allowPrivate, gatewayCfg.HeaderTimeout, gatewayCfg.ConnectTimeout, gatewayCfg.TLSHandshakeTimeout),
 		settingsProvider: sp,
 		gateway:          gatewayCfg,
+		breaker: circuit.New(circuit.Config{
+			FailureThreshold: gatewayCfg.CircuitFailureThreshold,
+			SuccessThreshold: gatewayCfg.CircuitSuccessThreshold,
+			OpenTimeout:      gatewayCfg.CircuitOpenTimeout,
+		}),
 	}
 }
 
@@ -594,6 +614,37 @@ func (s *Service) checkKeyStateAndLimits(c *gin.Context, rc *Exchange, apiKey *m
 	return true
 }
 
+// executeCircuit books a resolved decision's circuit effect against the
+// current provider's health record.
+//
+// The record is keyed by PROVIDER, deliberately: finer keys (per protocol
+// endpoint, per model) would split the failure signal until low-traffic
+// routes never reach a threshold, and a provider whose infrastructure is
+// falling over usually falls over as a whole. A deployment that hosts truly
+// independent backends behind one provider row can model them as separate
+// providers.
+//
+// PenalizeSoft books half a fault: the
+// table uses it for signals that say more about load than about health (a
+// rate limit, a truncated stream), so they open the breaker only at twice
+// the threshold — tolerant of a traffic peak, but a provider that throttles
+// or truncates persistently is still taken out of rotation eventually.
+func (s *Service) executeCircuit(rc *Exchange, eff decision.CircuitEffect) {
+	p := rc.attempt.Provider()
+	if p == nil {
+		return
+	}
+	switch eff {
+	case decision.CircuitPenalize:
+		s.breaker.RecordFailure(p.ID, rc.circuitGen)
+	case decision.CircuitPenalizeSoft:
+		s.breaker.RecordSoftFailure(p.ID, rc.circuitGen)
+
+	case decision.CircuitReset:
+		s.breaker.RecordSuccess(p.ID, rc.circuitGen)
+	}
+}
+
 // exhaustedBudget reports whether any of the request's budgets — wall-clock,
 // attempts, probes — is spent. One predicate shared by the candidate-loop
 // gate and the exhausted-chain terminal, so the walk stops and the answer is
@@ -678,6 +729,17 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 			skipCandidate(cand, provider, AttemptBadStatus, "provider disabled")
 			continue
 		}
+		// The health record answers before any work is done for the
+		// candidate: an open breaker means this provider kept falling over
+		// moments ago, and walking it again would spend keys, rewrites and
+		// an attempt on an answer the record already knows. After the open
+		// window, Allow admits a bounded number of requests as the probes.
+		allowed, circuitGen := s.breaker.Allow(provider.ID, provider.DestinationVersion)
+		if !allowed {
+			skipCandidate(cand, provider, AttemptBadStatus, "provider circuit open")
+			continue
+		}
+		rc.circuitGen = circuitGen
 		rc.attempt.BindProvider(provider)
 
 		keys, err := repository.ListProviderKeysByProvider(s.db.WithContext(rc.requestCtx), provider.ID)
@@ -886,6 +948,14 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, keys []mod
 		if rc.attemptsSpent >= s.gateway.MaxUpstreamAttempts {
 			return outcomeNextCandidate
 		}
+		// The admission can be revoked mid-rotation: a fault booked by an
+		// earlier key in this very loop can be the one that opens the
+		// breaker, and rotating on would dispatch to a provider the record
+		// just declared down — with results that arrive pre-revocation
+		// stamped stale and discarded. A pure read, so it costs no probe.
+		if !s.breaker.StillAllowed(provider.ID, rc.circuitGen) {
+			return outcomeNextCandidate
+		}
 		pk := keys[i]
 		// Cleared before the skip checks below, not inside attemptOne, because
 		// a key can be passed over without ever getting there — an unauthorized
@@ -978,6 +1048,38 @@ func (s *Service) recordAndSettle(c *gin.Context, rc *Exchange, adm admitted, d 
 	// worse than being told the wrong thing.
 	sink := newExchangeSink(rc)
 	s.checkAndNote(rc, &d, sink)
+	// A settled, complete delivery is the healthy interaction the table's
+	// upstream-succeeded row resets the breaker for. A settled but
+	// INCOMPLETE delivery on the provider's fault is the truncated stream,
+	// booked at the soft weight its row prices — the request cannot fail
+	// over (bytes are committed), so the record is the only thing that can
+	// protect the NEXT request from a provider that truncates persistently.
+	// A delivery the chain continues past because the provider failed it — a
+	// 2xx whose body would not decode, would not read, or died before the
+	// first byte — is the full fault the undecodable-payload row penalises.
+	// The caller's and the gateway's own faults book nothing against the
+	// provider.
+	switch {
+	case d.Verdict == fact.VerdictSettled && d.Complete:
+		s.executeCircuit(rc, decision.CircuitReset)
+	case d.Fault != fact.FaultUpstream:
+		// Client or gateway fault: blameless for the provider.
+	case d.Verdict == fact.VerdictSettled:
+		// Routine endings are SUCCESSES, not merely non-faults: a provider
+		// that omits the stream terminator after delivering a complete answer
+		// is a documented vernacular, and every other ledger records it as
+		// served. Booking nothing was tried and is not enough — a provider
+		// whose every stream ends that way could never close a half-open
+		// breaker, because only successes close one. A genuinely truncated
+		// stream pays the soft penalty.
+		if settlementIsRoutine(d) {
+			s.executeCircuit(rc, decision.CircuitReset)
+		} else {
+			s.executeCircuit(rc, decision.CircuitPenalizeSoft)
+		}
+	case d.Verdict == fact.VerdictNextCandidate:
+		s.executeCircuit(rc, decision.CircuitPenalize)
+	}
 	rc.recordCurrentAttempt(upstreamStatus, attemptOutcomeFor(d, rc.isStream), attemptNoteFor(d))
 	if d.Verdict == fact.VerdictSettled {
 		// The one delivery that ended the request, which is the only one this
@@ -1110,6 +1212,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 		sink := newExchangeSink(rc)
 		sink.reporter = kernelReporter
 		sink.Report(fact.Fact{Kind: fact.KindUpstreamTransportFailure})
+		s.executeCircuit(rc, sink.resolve().Circuit)
 		rc.recordCurrentAttempt(0, AttemptConnError,
 			redactedFailure(err, rc.attempt.UpstreamURL()))
 		return attemptNextCandidate, nil
@@ -1276,6 +1379,10 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 		sink.Report(kernelUpstreamFact(statusCode))
 		observed = decision.Combine(observed, sink.resolve())
 	}
+	// The resolved circuit effect is booked whatever the routing below
+	// decides: the provider's health record describes the provider, not
+	// where this particular chain goes next.
+	s.executeCircuit(rc, observed.Circuit)
 	// The retry-same executor. The table judged a repaired body worth
 	// another attempt against this candidate, the failure was one a repair
 	// can address, and the body to re-send exists: the attempt is recorded
