@@ -561,7 +561,7 @@ func TestWriteStreamErrorEventCapturesToStreamFile(t *testing.T) {
 			c.Set(BodiesDirContextKey, dir)
 			rc := &Exchange{requestID: "req-" + tt.name + "-capture", ingress: IngressProtocol(tt.path)}
 			openStreamBodyFile(c, rc)
-			defer closeStreamBodyFile(rc)
+			defer rc.bodies.CloseStream()
 
 			_ = writeStreamErrorEvent(committedStreamClient(t, c, rc), rc.ingress, rc.requestID)
 
@@ -627,14 +627,14 @@ func TestOpeningTheCaptureFileTwiceKeepsCapturing(t *testing.T) {
 	rc := &Exchange{requestID: "twice-opened"}
 
 	openStreamBodyFile(c, rc)
-	defer closeStreamBodyFile(rc)
+	defer rc.bodies.CloseStream()
 	if !rc.bodies.StreamCaptured() {
 		t.Fatal("first open produced no capture file")
 	}
 
 	openStreamBodyFile(c, rc)
 	appendStreamBodyLine(rc, []byte("data: once\n\n"))
-	closeStreamBodyFile(rc)
+	rc.bodies.CloseStream()
 	captured, err := os.ReadFile(filepath.Join(dir, "twice-opened.stream"))
 	if err != nil {
 		t.Fatalf("read capture file: %v", err)
@@ -659,11 +659,11 @@ func TestANewAttemptReopensTheCaptureFileAndAppends(t *testing.T) {
 
 	openStreamBodyFile(c, rc)
 	appendStreamBodyLine(rc, []byte("data: first\n\n"))
-	closeStreamBodyFile(rc)
+	rc.bodies.CloseStream()
 
 	openStreamBodyFile(c, rc)
 	appendStreamBodyLine(rc, []byte("data: second\n\n"))
-	closeStreamBodyFile(rc)
+	rc.bodies.CloseStream()
 
 	captured, err := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 	if err != nil {

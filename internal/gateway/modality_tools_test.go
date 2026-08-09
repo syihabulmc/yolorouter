@@ -637,9 +637,9 @@ func TestAProgressiveDeliveryKeepsNoUpstreamBytes(t *testing.T) {
 
 	progressive, releaseProgressive := svc.newDeliveryTools(c, rc, TransferLimits{}, true)
 	defer releaseProgressive()
-	defer closeStreamBodyFile(rc)
+	defer rc.bodies.CloseStream()
 	progressive.Capture.Upstream([]byte("data: raw upstream line\n\n"))
-	closeStreamBodyFile(rc)
+	rc.bodies.CloseStream()
 
 	captured, err := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 	if err != nil {
@@ -707,7 +707,7 @@ func TestAProgressiveDeliveryRecordsWhatWasSentToTheCaptureFile(t *testing.T) {
 
 	tools, release := svc.newDeliveryTools(c, rc, TransferLimits{}, true)
 	defer release()
-	defer closeStreamBodyFile(rc)
+	defer rc.bodies.CloseStream()
 	if err := tools.Client.Commit(http.StatusOK); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -717,7 +717,7 @@ func TestAProgressiveDeliveryRecordsWhatWasSentToTheCaptureFile(t *testing.T) {
 	if err := tools.Client.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
-	closeStreamBodyFile(rc)
+	rc.bodies.CloseStream()
 
 	captured, err := os.ReadFile(filepath.Join(dir, rc.requestID+".stream"))
 	if err != nil {

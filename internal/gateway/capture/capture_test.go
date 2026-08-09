@@ -16,9 +16,9 @@ import (
 // reference to the first descriptor, and nothing would ever close it — one
 // leaked descriptor per stream, invisible until a busy process runs out.
 func TestOpeningTheStreamTwiceKeepsOneDescriptor(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "twice.stream")
+	dir := t.TempDir()
 	var b Bodies
-	if err := b.OpenStream(path); err != nil {
+	if err := b.OpenStream(dir, "twice"); err != nil {
 		t.Fatalf("first open: %v", err)
 	}
 	defer b.CloseStream()
@@ -26,7 +26,7 @@ func TestOpeningTheStreamTwiceKeepsOneDescriptor(t *testing.T) {
 	if first == nil {
 		t.Fatal("first open produced no capture file")
 	}
-	if err := b.OpenStream(path); err != nil {
+	if err := b.OpenStream(dir, "twice"); err != nil {
 		t.Fatalf("second open: %v", err)
 	}
 	if b.streamFile != first {
@@ -40,9 +40,10 @@ func TestOpeningTheStreamTwiceKeepsOneDescriptor(t *testing.T) {
 // keep what the first attempt wrote, since the capture is the whole exchange,
 // not the last try at it.
 func TestReopeningAfterCloseAppends(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "reopen.stream")
+	dir := t.TempDir()
+	path := filepath.Join(dir, StreamFileName("reopen"))
 	var b Bodies
-	if err := b.OpenStream(path); err != nil {
+	if err := b.OpenStream(dir, "reopen"); err != nil {
 		t.Fatalf("first open: %v", err)
 	}
 	if err := b.AppendStream([]byte("data: first\n\n")); err != nil {
@@ -50,7 +51,7 @@ func TestReopeningAfterCloseAppends(t *testing.T) {
 	}
 	b.CloseStream()
 
-	if err := b.OpenStream(path); err != nil {
+	if err := b.OpenStream(dir, "reopen"); err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	if err := b.AppendStream([]byte("data: second\n\n")); err != nil {
@@ -75,9 +76,10 @@ func TestAppendStopsAtTheBackstop(t *testing.T) {
 	MaxStreamFileBytes = 20
 	defer func() { MaxStreamFileBytes = orig }()
 
-	path := filepath.Join(t.TempDir(), "backstop.stream")
+	dir := t.TempDir()
+	path := filepath.Join(dir, StreamFileName("backstop"))
 	var b Bodies
-	if err := b.OpenStream(path); err != nil {
+	if err := b.OpenStream(dir, "backstop"); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	defer b.CloseStream()
@@ -110,28 +112,31 @@ func TestAppendStopsAtTheBackstop(t *testing.T) {
 func TestDiscardEmptyStreamDropsOnlyEmptyFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	empty := filepath.Join(dir, "empty.stream")
+	empty := filepath.Join(dir, StreamFileName("empty"))
 	var b Bodies
-	if err := b.OpenStream(empty); err != nil {
+	if err := b.OpenStream(dir, "empty"); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	b.DiscardEmptyStream(empty)
+	b.DiscardEmptyStream()
 	if _, err := os.Stat(empty); !os.IsNotExist(err) {
 		t.Fatal("an empty capture file was left behind")
 	}
 	if b.StreamCaptured() {
 		t.Fatal("a discarded capture still reports itself captured")
 	}
+	if got := b.StreamName(); got != "" {
+		t.Fatalf("StreamName() = %q after the capture was discarded; persisting it would point the audit row at a deleted file", got)
+	}
 
-	full := filepath.Join(dir, "full.stream")
+	full := filepath.Join(dir, StreamFileName("full"))
 	var c Bodies
-	if err := c.OpenStream(full); err != nil {
+	if err := c.OpenStream(dir, "full"); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if err := c.AppendStream([]byte("data: kept\n")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	c.DiscardEmptyStream(full)
+	c.DiscardEmptyStream()
 	c.CloseStream()
 	if _, err := os.Stat(full); err != nil {
 		t.Fatalf("a capture with content was discarded: %v", err)

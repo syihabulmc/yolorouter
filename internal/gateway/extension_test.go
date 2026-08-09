@@ -661,8 +661,11 @@ func settleOneDelivery(t *testing.T, svc *Service, rc *Exchange, d fact.Delivery
 	adm := admitFor(t, protocols.ProtocolOpenAI, "/v1/chat/completions",
 		`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`,
 		Candidate{ProviderModelName: "m", EgressProtocol: protocols.ProtocolOpenAI, Passthrough: true})
-	return svc.recordAndSettle(nil, rc, adm, d, model.ModelCandidate{}, &model.Provider{},
-		model.ProviderKey{}, 200, time.Now())
+	cand := model.ModelCandidate{}
+	rc.attempt.BeginCandidate(&cand)
+	rc.attempt.BindProvider(&model.Provider{})
+	rc.attempt.BindKey(&model.ProviderKey{})
+	return svc.recordAndSettle(nil, rc, adm, d, 200, time.Now())
 }
 
 // TestDeliveryIsRecordedAgainstTheAttemptItDescribes pins provenance for the

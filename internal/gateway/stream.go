@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -408,16 +407,9 @@ func openStreamBodyFile(c *gin.Context, rc *Exchange) {
 	if dir == "" {
 		return
 	}
-	path := filepath.Join(dir, rc.requestID+".stream")
-	if err := rc.bodies.OpenStream(path); err != nil {
+	if err := rc.bodies.OpenStream(dir, rc.requestID); err != nil {
 		logger.Warn("gateway: open stream body file failed", zap.String("request_id", rc.requestID), zap.Error(err))
 	}
-}
-
-// closeStreamBodyFile closes the stream capture file opened by
-// openStreamBodyFile, if any. Safe to call even when open never succeeded.
-func closeStreamBodyFile(rc *Exchange) {
-	rc.bodies.CloseStream()
 }
 
 // appendStreamBodyLine appends one already-caller-facing SSE line to the
@@ -430,21 +422,6 @@ func appendStreamBodyLine(rc *Exchange, line []byte) {
 	if err := rc.bodies.AppendStream(line); err != nil {
 		logger.Warn("gateway: write stream body failed", zap.String("request_id", rc.requestID), zap.Error(err))
 	}
-}
-
-// removeEmptyStreamBodyFile deletes the stream capture file for rc if it
-// ended up completely empty — the stream failed before any data ever
-// reached the caller (a pre-first-byte candidate failover, or a caller
-// disconnect before the first byte forwarded). Left in place, an empty
-// stream_body_path would show as an empty, useless "stream body" link on
-// the request-log detail page. A no-op when nothing was ever captured
-// (e.g. bodies_dir was never resolved) or the file legitimately has content.
-func removeEmptyStreamBodyFile(c *gin.Context, rc *Exchange) {
-	dir := streamBodiesDir(c)
-	if dir == "" {
-		return
-	}
-	rc.bodies.DiscardEmptyStream(filepath.Join(dir, rc.requestID+".stream"))
 }
 
 // BodiesDirContextKey is the gin.Context key under which a router-level

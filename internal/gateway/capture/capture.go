@@ -10,7 +10,10 @@
 // records.
 package capture
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 // MaxStreamFileBytes is a HARD anti-OOM disk backstop for the stream capture
 // file, NOT a content truncation (the capture must record every sent SSE
@@ -52,6 +55,11 @@ type Bodies struct {
 	streamCaptured  bool
 	streamTruncated bool
 	streamBytes     int64
+	// streamDir / streamName locate the capture file for the discard path
+	// and the persisted stream_body_path — set once by OpenStream, the only
+	// place the name is ever built.
+	streamDir  string
+	streamName string
 }
 
 // SetRequest records the caller's body, verbatim.
@@ -119,7 +127,15 @@ func (b *Bodies) BeginDeliveryCapture() {
 	b.upstreamResponse = nil
 }
 
-// OpenStream opens (or re-opens) the stream capture file at path.
+// StreamFileName is the naming rule for a request's stream capture file.
+// Declared here, where the file is opened, deleted and reported, so the name
+// exists in exactly one place: the persisted stream_body_path, the open and
+// the discard all go through it.
+func StreamFileName(requestID string) string { return requestID + ".stream" }
+
+// OpenStream opens (or re-opens) the stream capture file for requestID under
+// dir. The capture owns the file's name from here on: StreamName reports it
+// and DiscardEmptyStream deletes it without the caller respelling anything.
 //
 // Calling it twice for one attempt keeps the first file rather than opening a
 // second one — overwriting the handle would drop the only reference to a
@@ -132,20 +148,33 @@ func (b *Bodies) BeginDeliveryCapture() {
 //
 // The returned error is an OS-level open failure the caller should log; the
 // capture is skipped but the caller's own stream is unaffected.
-func (b *Bodies) OpenStream(path string) error {
+func (b *Bodies) OpenStream(dir, requestID string) error {
 	if b.streamFile != nil {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	name := StreamFileName(requestID)
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
 	b.streamFile = f
+	b.streamName = name
+	b.streamDir = dir
 	b.streamCaptured = true
 	if info, statErr := f.Stat(); statErr == nil {
 		b.streamBytes = info.Size()
 	}
 	return nil
+}
+
+// StreamName is the base name of the captured stream file — the value the
+// audit row persists as stream_body_path — or "" when no capture happened
+// (or an empty one was discarded).
+func (b *Bodies) StreamName() string {
+	if !b.streamCaptured {
+		return ""
+	}
+	return b.streamName
 }
 
 // AppendStream appends one already-caller-facing SSE line to the stream
@@ -174,21 +203,22 @@ func (b *Bodies) CloseStream() {
 	}
 }
 
-// DiscardEmptyStream deletes the capture file at path if it ended up
-// completely empty — the stream failed before any data reached the caller.
-// Left in place, an empty capture would show as an empty, useless "stream
-// body" link on the request-log detail page. A no-op when nothing was ever
-// captured or the file has content — a truncated capture in particular is
-// never discarded.
+// DiscardEmptyStream deletes the capture file if it ended up completely
+// empty — the stream failed before any data reached the caller. Left in
+// place, an empty capture would show as an empty, useless "stream body" link
+// on the request-log detail page. A no-op when nothing was ever captured or
+// the file has content — a truncated capture in particular is never
+// discarded.
 //
 // The descriptor is closed BEFORE unlinking: leaving it open past the remove
 // would let a later append write to an unlinked inode (bytes silently lost),
 // and on Windows removing an open file fails outright, leaving a stale empty
 // capture path behind.
-func (b *Bodies) DiscardEmptyStream(path string) {
+func (b *Bodies) DiscardEmptyStream() {
 	if !b.streamCaptured || b.streamTruncated {
 		return
 	}
+	path := filepath.Join(b.streamDir, b.streamName)
 	info, err := os.Stat(path)
 	if err != nil || info.Size() != 0 {
 		return

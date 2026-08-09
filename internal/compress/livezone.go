@@ -1,6 +1,6 @@
 package compress
 
-import "encoding/json"
+import "github.com/yolorouter/yolorouter/internal/compress/jsonspan"
 
 // LiveBlock is one text field eligible for compression. Range is the
 // half-open byte interval [start, end) of the QUOTED JSON string literal in
@@ -60,8 +60,8 @@ func locateLiveZone(body []byte, mode int) []LiveBlock {
 // the live zone. function_call_output items expose their text via the
 // "output" field rather than "content" and need dedicated handling.
 func locateResponsesLiveZone(body []byte) []LiveBlock {
-	p := &jsonParser{data: body}
-	if !p.seekTopLevelArray("input") {
+	p := &jsonParser{Scanner: jsonspan.Scanner{Data: body}}
+	if !p.SeekTopLevelArray("input") {
 		return nil
 	}
 	items := p.collectResponsesItems()
@@ -80,7 +80,7 @@ func locateResponsesLiveZone(body []byte) []LiveBlock {
 		if role != "user" && role != "tool" && role != "function_call_output" {
 			continue
 		}
-		cp := &jsonParser{data: body, i: items[i].start}
+		cp := &jsonParser{Scanner: jsonspan.Scanner{Data: body, Pos: items[i].start}}
 		blocks = append(blocks, cp.walkResponsesItem()...)
 	}
 	return blocks
@@ -89,8 +89,8 @@ func locateResponsesLiveZone(body []byte) []LiveBlock {
 // locateLiveZoneWithArrayKey is the generic form of locateLiveZone; arrayKey
 // names the top-level array to scan ("messages" for Claude/chat).
 func locateLiveZoneWithArrayKey(body []byte, mode int, arrayKey string) []LiveBlock {
-	p := &jsonParser{data: body}
-	if !p.seekTopLevelArray(arrayKey) {
+	p := &jsonParser{Scanner: jsonspan.Scanner{Data: body}}
+	if !p.SeekTopLevelArray(arrayKey) {
 		return nil
 	}
 	msgs := p.collectMessages()
@@ -115,7 +115,7 @@ func locateLiveZoneWithArrayKey(body []byte, mode int, arrayKey string) []LiveBl
 				continue
 			}
 		}
-		cp := &jsonParser{data: body, i: msgs[i].start}
+		cp := &jsonParser{Scanner: jsonspan.Scanner{Data: body, Pos: msgs[i].start}}
 		blocks = append(blocks, cp.walkMessage(mode)...)
 	}
 	return blocks
@@ -127,256 +127,92 @@ type msgSpan struct {
 	role       string
 }
 
-// jsonParser is a lightweight offset-aware JSON scanner. The field i is the
-// current absolute offset; every span it returns is relative to data.
-// It is lenient (it does not validate syntax); callers gate with json.Valid
-// beforehand when they need strict legality.
+// jsonParser layers the protocol-aware live-zone walkers over the generic
+// offset-preserving scanner. The scanner (jsonspan.Scanner) knows JSON; the
+// methods declared on this type know what a chat/claude/responses/gemini
+// request body looks like inside.
 type jsonParser struct {
-	data []byte
-	i    int
+	jsonspan.Scanner
 }
 
-func (p *jsonParser) skipWS() {
-	for p.i < len(p.data) {
-		switch p.data[p.i] {
-		case ' ', '\t', '\n', '\r':
-			p.i++
-		default:
-			return
-		}
-	}
+// walkObjectForKey adapts the scanner's visit-callback walk to the walkers'
+// block-collecting shape.
+func (p *jsonParser) walkObjectForKey(targetKey string, handler func() []LiveBlock) []LiveBlock {
+	var out []LiveBlock
+	p.WalkObjectForKey(targetKey, func() { out = append(out, handler()...) })
+	return out
 }
 
-// parseString reads a JSON string starting at data[p.i] (which must be the
-// opening quote). It advances p.i past the closing quote and returns the
-// decoded content plus the (start, end) offsets such that
-// data[start:end] is the quoted literal.
-func (p *jsonParser) parseString() (string, int, int) {
-	start := p.i
-	j := p.i + 1
-	for j < len(p.data) {
-		c := p.data[j]
-		if c == '\\' {
-			j += 2
-			continue
-		}
-		if c == '"' {
-			j++
-			break
-		}
-		j++
-	}
-	end := j
-	var decoded string
-	if err := json.Unmarshal(p.data[start:end], &decoded); err != nil {
-		// Fallback: strip the surrounding quotes and take the raw bytes.
-		// json.Valid is expected to have passed upstream, so this is defensive.
-		if end-start >= 2 {
-			decoded = string(p.data[start+1 : end-1])
-		}
-	}
-	p.i = end
-	return decoded, start, end
-}
-
-// skipValue advances p.i past one JSON value (string, object, array, number,
-// boolean, or null).
-func (p *jsonParser) skipValue() {
-	p.skipWS()
-	if p.i >= len(p.data) {
-		return
-	}
-	switch p.data[p.i] {
-	case '"':
-		p.parseString()
-	case '{':
-		p.skipContainer('{', '}')
-	case '[':
-		p.skipContainer('[', ']')
-	default:
-		for p.i < len(p.data) {
-			switch p.data[p.i] {
-			case ',', '}', ']', ' ', '\t', '\n', '\r':
-				return
-			}
-			p.i++
-		}
-	}
-}
-
-// skipContainer advances p.i past a matching open/close container (p.i must
-// point at open). Bytes inside string literals do not participate in pairing.
-func (p *jsonParser) skipContainer(open, close byte) {
-	depth := 0
-	for p.i < len(p.data) {
-		c := p.data[p.i]
-		switch c {
-		case '"':
-			p.parseString()
-		case open:
-			depth++
-			p.i++
-		case close:
-			depth--
-			p.i++
-			if depth == 0 {
-				return
-			}
-		default:
-			p.i++
-		}
-	}
-}
-
-// seekTopLevelArray looks up key in the top-level object and, on hit, leaves
-// p.i on the '[' that opens its array value. Returns true on hit.
-func (p *jsonParser) seekTopLevelArray(key string) bool {
-	p.skipWS()
-	if p.i >= len(p.data) || p.data[p.i] != '{' {
-		return false
-	}
-	p.i++
-	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
-			return false
-		}
-		if p.data[p.i] == '}' {
-			return false
-		}
-		if p.data[p.i] != '"' {
-			p.i++
-			continue
-		}
-		k, _, _ := p.parseString()
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ':' {
-			p.i++
-		}
-		p.skipWS()
-		if k == key {
-			return p.i < len(p.data) && p.data[p.i] == '['
-		}
-		p.skipValue()
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
-		}
-	}
-}
-
-// collectMessages walks the messages array (p.i must point at '[') and
+// collectMessages walks the messages array (p.Pos must point at '[') and
 // returns the byte span and role of each message object.
 func (p *jsonParser) collectMessages() []msgSpan {
 	var msgs []msgSpan
-	p.i++ // consume '['
+	p.Pos++ // consume '['
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			return msgs
 		}
-		if p.data[p.i] == ']' {
-			p.i++
+		if p.Data[p.Pos] == ']' {
+			p.Pos++
 			return msgs
 		}
-		if p.data[p.i] == '{' {
-			start := p.i
+		if p.Data[p.Pos] == '{' {
+			start := p.Pos
 			role := p.parseObjectRole()
-			msgs = append(msgs, msgSpan{start: start, end: p.i, role: role})
+			msgs = append(msgs, msgSpan{start: start, end: p.Pos, role: role})
 		} else {
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 }
 
-// parseObjectRole parses one object (p.i must point at '{') and returns the
-// value of its "role" field, advancing p.i past the closing '}'.
+// parseObjectRole parses one object (p.Pos must point at '{') and returns the
+// value of its "role" field, advancing p.Pos past the closing '}'.
 func (p *jsonParser) parseObjectRole() string {
-	p.i++ // consume '{'
+	p.Pos++ // consume '{'
 	var role string
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			return role
 		}
-		if p.data[p.i] == '}' {
-			p.i++
+		if p.Data[p.Pos] == '}' {
+			p.Pos++
 			return role
 		}
-		if p.data[p.i] != '"' {
-			p.i++
+		if p.Data[p.Pos] != '"' {
+			p.Pos++
 			continue
 		}
-		key, _, _ := p.parseString()
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ':' {
-			p.i++
+		key, _, _ := p.ParseString()
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ':' {
+			p.Pos++
 		}
-		p.skipWS()
+		p.SkipWS()
 		if key == "role" {
-			if p.i < len(p.data) && p.data[p.i] == '"' {
-				role, _, _ = p.parseString()
+			if p.Pos < len(p.Data) && p.Data[p.Pos] == '"' {
+				role, _, _ = p.ParseString()
 			} else {
-				p.skipValue()
+				p.SkipValue()
 				role = "\x00" // role is present but not a string (e.g. null) — do not treat as user
 			}
 		} else {
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
-		}
-	}
-}
-
-// walkObjectForKey scans a JSON object (p.i must point at '{'); when the
-// target key is encountered it delegates to handler to collect blocks, all
-// other values are skipped. Used to share structure between chat and Gemini
-// message walkers that differ only in target key.
-func (p *jsonParser) walkObjectForKey(targetKey string, handler func() []LiveBlock) []LiveBlock {
-	var out []LiveBlock
-	p.skipWS()
-	if p.i >= len(p.data) || p.data[p.i] != '{' {
-		return out
-	}
-	p.i++ // consume '{'
-	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
-			return out
-		}
-		if p.data[p.i] == '}' {
-			p.i++
-			return out
-		}
-		if p.data[p.i] != '"' {
-			p.i++
-			continue
-		}
-		key, _, _ := p.parseString()
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ':' {
-			p.i++
-		}
-		p.skipWS()
-		if key == targetKey {
-			out = append(out, handler()...)
-		} else {
-			p.skipValue()
-		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 }
 
-// walkMessage parses one message object (p.i must point at '{') and collects
+// walkMessage parses one message object (p.Pos must point at '{') and collects
 // compressible blocks from its "content" field according to mode.
 func (p *jsonParser) walkMessage(mode int) []LiveBlock {
 	return p.walkObjectForKey("content", func() []LiveBlock {
@@ -390,13 +226,13 @@ func (p *jsonParser) walkMessage(mode int) []LiveBlock {
 //   - claude: a bare string (plain user input) is not compressed; inside an
 //     array, type=tool_result blocks are collected per the tool_result rules.
 func (p *jsonParser) parseContent(mode int) []LiveBlock {
-	p.skipWS()
-	if p.i >= len(p.data) {
+	p.SkipWS()
+	if p.Pos >= len(p.Data) {
 		return nil
 	}
-	switch p.data[p.i] {
+	switch p.Data[p.Pos] {
 	case '"':
-		text, start, end := p.parseString()
+		text, start, end := p.ParseString()
 		if mode == modeChat || mode == modeResponses {
 			return []LiveBlock{{Range: [2]int{start, end}, Text: text}}
 		}
@@ -404,96 +240,96 @@ func (p *jsonParser) parseContent(mode int) []LiveBlock {
 	case '[':
 		return p.parseContentArray(mode)
 	default:
-		p.skipValue()
+		p.SkipValue()
 		return nil
 	}
 }
 
-// parseContentArray walks the content array (p.i must point at '[') and
+// parseContentArray walks the content array (p.Pos must point at '[') and
 // collects blocks from each object element according to mode.
 func (p *jsonParser) parseContentArray(mode int) []LiveBlock {
 	var out []LiveBlock
-	p.i++ // consume '['
+	p.Pos++ // consume '['
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			return out
 		}
-		if p.data[p.i] == ']' {
-			p.i++
+		if p.Data[p.Pos] == ']' {
+			p.Pos++
 			return out
 		}
-		if p.data[p.i] == '{' {
+		if p.Data[p.Pos] == '{' {
 			out = append(out, p.parseContentElement(mode)...)
 		} else {
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 }
 
 // parseContentElement parses one object element of the content array
-// (p.i must point at '{'). Field order does not matter: type / text / content
+// (p.Pos must point at '{'). Field order does not matter: type / text / content
 // candidates are buffered first, and the output is selected after the object
 // closes based on (mode, type).
 func (p *jsonParser) parseContentElement(mode int) []LiveBlock {
-	p.i++ // consume '{'
+	p.Pos++ // consume '{'
 	var typ string
 	var textBlock *LiveBlock     // "text" value of a type=text element
 	var trContentStr *LiveBlock  // string-form content of a tool_result
 	var trContentArr []LiveBlock // type=text blocks inside tool_result.content[]
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			break
 		}
-		if p.data[p.i] == '}' {
-			p.i++
+		if p.Data[p.Pos] == '}' {
+			p.Pos++
 			break
 		}
-		if p.data[p.i] != '"' {
-			p.i++
+		if p.Data[p.Pos] != '"' {
+			p.Pos++
 			continue
 		}
-		key, _, _ := p.parseString()
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ':' {
-			p.i++
+		key, _, _ := p.ParseString()
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ':' {
+			p.Pos++
 		}
-		p.skipWS()
+		p.SkipWS()
 		switch key {
 		case "type":
-			if p.i < len(p.data) && p.data[p.i] == '"' {
-				typ, _, _ = p.parseString()
+			if p.Pos < len(p.Data) && p.Data[p.Pos] == '"' {
+				typ, _, _ = p.ParseString()
 			} else {
-				p.skipValue()
+				p.SkipValue()
 			}
 		case "text":
-			if p.i < len(p.data) && p.data[p.i] == '"' {
-				t, s, e := p.parseString()
+			if p.Pos < len(p.Data) && p.Data[p.Pos] == '"' {
+				t, s, e := p.ParseString()
 				textBlock = &LiveBlock{Range: [2]int{s, e}, Text: t}
 			} else {
-				p.skipValue()
+				p.SkipValue()
 			}
 		case "content":
 			switch {
-			case p.i < len(p.data) && p.data[p.i] == '"':
-				t, s, e := p.parseString()
+			case p.Pos < len(p.Data) && p.Data[p.Pos] == '"':
+				t, s, e := p.ParseString()
 				trContentStr = &LiveBlock{Range: [2]int{s, e}, Text: t}
-			case p.i < len(p.data) && p.data[p.i] == '[':
+			case p.Pos < len(p.Data) && p.Data[p.Pos] == '[':
 				trContentArr = p.parseTextArray()
 			default:
-				p.skipValue()
+				p.SkipValue()
 			}
 		default:
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 
@@ -521,80 +357,80 @@ func (p *jsonParser) parseContentElement(mode int) []LiveBlock {
 	return nil
 }
 
-// parseTextArray walks the tool_result.content array (p.i must point at '[')
+// parseTextArray walks the tool_result.content array (p.Pos must point at '[')
 // and collects the text values of its type=text elements.
 func (p *jsonParser) parseTextArray() []LiveBlock {
 	var out []LiveBlock
-	p.i++ // consume '['
+	p.Pos++ // consume '['
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			return out
 		}
-		if p.data[p.i] == ']' {
-			p.i++
+		if p.Data[p.Pos] == ']' {
+			p.Pos++
 			return out
 		}
-		if p.data[p.i] == '{' {
+		if p.Data[p.Pos] == '{' {
 			if blk := p.parseTextElement(); blk != nil {
 				out = append(out, *blk)
 			}
 		} else {
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 }
 
-// parseTextElement parses a {"type":"text","text":"..."} element (p.i must
+// parseTextElement parses a {"type":"text","text":"..."} element (p.Pos must
 // point at '{'). Field order does not matter. The text range is returned
 // only when type=="text", otherwise nil.
 func (p *jsonParser) parseTextElement() *LiveBlock {
-	p.i++ // consume '{'
+	p.Pos++ // consume '{'
 	var typ string
 	var textBlock *LiveBlock
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			break
 		}
-		if p.data[p.i] == '}' {
-			p.i++
+		if p.Data[p.Pos] == '}' {
+			p.Pos++
 			break
 		}
-		if p.data[p.i] != '"' {
-			p.i++
+		if p.Data[p.Pos] != '"' {
+			p.Pos++
 			continue
 		}
-		key, _, _ := p.parseString()
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ':' {
-			p.i++
+		key, _, _ := p.ParseString()
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ':' {
+			p.Pos++
 		}
-		p.skipWS()
+		p.SkipWS()
 		switch key {
 		case "type":
-			if p.i < len(p.data) && p.data[p.i] == '"' {
-				typ, _, _ = p.parseString()
+			if p.Pos < len(p.Data) && p.Data[p.Pos] == '"' {
+				typ, _, _ = p.ParseString()
 			} else {
-				p.skipValue()
+				p.SkipValue()
 			}
 		case "text":
-			if p.i < len(p.data) && p.data[p.i] == '"' {
-				t, s, e := p.parseString()
+			if p.Pos < len(p.Data) && p.Data[p.Pos] == '"' {
+				t, s, e := p.ParseString()
 				textBlock = &LiveBlock{Range: [2]int{s, e}, Text: t}
 			} else {
-				p.skipValue()
+				p.SkipValue()
 			}
 		default:
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 	if typ == "text" {
@@ -605,73 +441,73 @@ func (p *jsonParser) parseTextElement() *LiveBlock {
 
 // --- OpenAI Responses API (/v1/responses) parsers ---
 
-// collectResponsesItems walks the input array (p.i must point at '[') and
+// collectResponsesItems walks the input array (p.Pos must point at '[') and
 // returns the byte span and role of each item. It extends collectMessages
 // by also recognizing items with type:"function_call_output" (which have no
 // role field), reporting them with the synthetic role "function_call_output".
 func (p *jsonParser) collectResponsesItems() []msgSpan {
 	var items []msgSpan
-	p.i++ // consume '['
+	p.Pos++ // consume '['
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			return items
 		}
-		if p.data[p.i] == ']' {
-			p.i++
+		if p.Data[p.Pos] == ']' {
+			p.Pos++
 			return items
 		}
-		if p.data[p.i] == '{' {
-			start := p.i
+		if p.Data[p.Pos] == '{' {
+			start := p.Pos
 			role := p.parseObjectRoleResponses()
-			items = append(items, msgSpan{start: start, end: p.i, role: role})
+			items = append(items, msgSpan{start: start, end: p.Pos, role: role})
 		} else {
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 }
 
-// parseObjectRoleResponses parses one object (p.i must point at '{') while
+// parseObjectRoleResponses parses one object (p.Pos must point at '{') while
 // looking at both the "role" and "type" fields:
 //   - "role" present  -> its value ("user" / "assistant" / "tool")
 //   - "type":"function_call_output" -> "function_call_output"
 //   - otherwise the empty string
 func (p *jsonParser) parseObjectRoleResponses() string {
-	p.i++ // consume '{'
+	p.Pos++ // consume '{'
 	var role, typ string
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			break
 		}
-		if p.data[p.i] == '}' {
-			p.i++
+		if p.Data[p.Pos] == '}' {
+			p.Pos++
 			break
 		}
-		if p.data[p.i] != '"' {
-			p.i++
+		if p.Data[p.Pos] != '"' {
+			p.Pos++
 			continue
 		}
-		key, _, _ := p.parseString()
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ':' {
-			p.i++
+		key, _, _ := p.ParseString()
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ':' {
+			p.Pos++
 		}
-		p.skipWS()
-		if key == "role" && p.i < len(p.data) && p.data[p.i] == '"' {
-			role, _, _ = p.parseString()
-		} else if key == "type" && p.i < len(p.data) && p.data[p.i] == '"' {
-			typ, _, _ = p.parseString()
+		p.SkipWS()
+		if key == "role" && p.Pos < len(p.Data) && p.Data[p.Pos] == '"' {
+			role, _, _ = p.ParseString()
+		} else if key == "type" && p.Pos < len(p.Data) && p.Data[p.Pos] == '"' {
+			typ, _, _ = p.ParseString()
 		} else {
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 	if typ == "function_call_output" {
@@ -687,8 +523,8 @@ func (p *jsonParser) parseObjectRoleResponses() string {
 // "assistant") and the field is "parts" (not "content"), hence the dedicated
 // implementation.
 func locateGeminiLiveZone(body []byte) []LiveBlock {
-	p := &jsonParser{data: body}
-	if !p.seekTopLevelArray("contents") {
+	p := &jsonParser{Scanner: jsonspan.Scanner{Data: body}}
+	if !p.SeekTopLevelArray("contents") {
 		return nil
 	}
 	msgs := p.collectMessages()
@@ -708,104 +544,104 @@ func locateGeminiLiveZone(body []byte) []LiveBlock {
 		if msgs[i].role != "user" && msgs[i].role != "" {
 			continue
 		}
-		cp := &jsonParser{data: body, i: msgs[i].start}
+		cp := &jsonParser{Scanner: jsonspan.Scanner{Data: body, Pos: msgs[i].start}}
 		blocks = append(blocks, cp.walkGeminiMessage()...)
 	}
 	return blocks
 }
 
 // walkGeminiMessage collects parts[].text blocks from a Gemini contents
-// entry (p.i must point at '{').
+// entry (p.Pos must point at '{').
 func (p *jsonParser) walkGeminiMessage() []LiveBlock {
 	return p.walkObjectForKey("parts", func() []LiveBlock {
 		return p.walkGeminiParts()
 	})
 }
 
-// walkGeminiParts walks the parts array (p.i must point at '[') and collects
+// walkGeminiParts walks the parts array (p.Pos must point at '[') and collects
 // the "text" field of each part. functionResponse.response is an object and
 // is skipped via skipValue.
 func (p *jsonParser) walkGeminiParts() []LiveBlock {
 	var out []LiveBlock
-	if p.i >= len(p.data) || p.data[p.i] != '[' {
-		p.skipValue()
+	if p.Pos >= len(p.Data) || p.Data[p.Pos] != '[' {
+		p.SkipValue()
 		return out
 	}
-	p.i++ // consume '['
+	p.Pos++ // consume '['
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			return out
 		}
-		if p.data[p.i] == ']' {
-			p.i++
+		if p.Data[p.Pos] == ']' {
+			p.Pos++
 			return out
 		}
-		if p.data[p.i] == '{' {
+		if p.Data[p.Pos] == '{' {
 			out = append(out, p.walkGeminiPart()...)
 		} else {
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 }
 
 // walkGeminiPart extracts the "text" field from a single part object
-// (p.i must point at '{'). Parts with thought:true (Gemini 2.0+ reasoning
+// (p.Pos must point at '{'). Parts with thought:true (Gemini 2.0+ reasoning
 // traces) are excluded: all keys are visited first, then the decision is
 // applied based on the buffered thought flag.
 func (p *jsonParser) walkGeminiPart() []LiveBlock {
-	p.skipWS()
-	if p.i >= len(p.data) || p.data[p.i] != '{' {
+	p.SkipWS()
+	if p.Pos >= len(p.Data) || p.Data[p.Pos] != '{' {
 		return nil
 	}
-	p.i++ // consume '{'
+	p.Pos++ // consume '{'
 	var thought bool
 	var blk *LiveBlock
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			break
 		}
-		if p.data[p.i] == '}' {
-			p.i++
+		if p.Data[p.Pos] == '}' {
+			p.Pos++
 			break
 		}
-		if p.data[p.i] != '"' {
-			p.i++
+		if p.Data[p.Pos] != '"' {
+			p.Pos++
 			continue
 		}
-		key, _, _ := p.parseString()
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ':' {
-			p.i++
+		key, _, _ := p.ParseString()
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ':' {
+			p.Pos++
 		}
-		p.skipWS()
+		p.SkipWS()
 		switch key {
 		case "thought":
-			if p.i+4 <= len(p.data) && string(p.data[p.i:p.i+4]) == "true" {
+			if p.Pos+4 <= len(p.Data) && string(p.Data[p.Pos:p.Pos+4]) == "true" {
 				thought = true
-				p.i += 4
+				p.Pos += 4
 			} else {
-				p.skipValue()
+				p.SkipValue()
 			}
 		case "text":
-			if p.i < len(p.data) && p.data[p.i] == '"' {
-				text, start, end := p.parseString()
+			if p.Pos < len(p.Data) && p.Data[p.Pos] == '"' {
+				text, start, end := p.ParseString()
 				b := LiveBlock{Range: [2]int{start, end}, Text: text}
 				blk = &b
 			} else {
-				p.skipValue()
+				p.SkipValue()
 			}
 		default:
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 	if thought || blk == nil {
@@ -815,53 +651,53 @@ func (p *jsonParser) walkGeminiPart() []LiveBlock {
 }
 
 // walkResponsesItem collects compressible blocks from one Responses API
-// input item (p.i must point at '{'):
+// input item (p.Pos must point at '{'):
 //   - role:user/tool items: blocks are taken from the "content" field
 //     (modeResponses; input_text / output_text / text block types).
 //   - type:function_call_output items: the "output" field is a plain string
 //     and is collected directly as one LiveBlock.
 func (p *jsonParser) walkResponsesItem() []LiveBlock {
 	var out []LiveBlock
-	p.skipWS()
-	if p.i >= len(p.data) || p.data[p.i] != '{' {
+	p.SkipWS()
+	if p.Pos >= len(p.Data) || p.Data[p.Pos] != '{' {
 		return out
 	}
-	p.i++ // consume '{'
+	p.Pos++ // consume '{'
 	for {
-		p.skipWS()
-		if p.i >= len(p.data) {
+		p.SkipWS()
+		if p.Pos >= len(p.Data) {
 			return out
 		}
-		if p.data[p.i] == '}' {
-			p.i++
+		if p.Data[p.Pos] == '}' {
+			p.Pos++
 			return out
 		}
-		if p.data[p.i] != '"' {
-			p.i++
+		if p.Data[p.Pos] != '"' {
+			p.Pos++
 			continue
 		}
-		key, _, _ := p.parseString()
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ':' {
-			p.i++
+		key, _, _ := p.ParseString()
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ':' {
+			p.Pos++
 		}
-		p.skipWS()
+		p.SkipWS()
 		switch key {
 		case "content":
 			out = append(out, p.parseContent(modeResponses)...)
 		case "output":
-			if p.i < len(p.data) && p.data[p.i] == '"' {
-				text, start, end := p.parseString()
+			if p.Pos < len(p.Data) && p.Data[p.Pos] == '"' {
+				text, start, end := p.ParseString()
 				out = append(out, LiveBlock{Range: [2]int{start, end}, Text: text})
 			} else {
-				p.skipValue()
+				p.SkipValue()
 			}
 		default:
-			p.skipValue()
+			p.SkipValue()
 		}
-		p.skipWS()
-		if p.i < len(p.data) && p.data[p.i] == ',' {
-			p.i++
+		p.SkipWS()
+		if p.Pos < len(p.Data) && p.Data[p.Pos] == ',' {
+			p.Pos++
 		}
 	}
 }

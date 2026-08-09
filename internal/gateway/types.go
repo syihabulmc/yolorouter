@@ -127,10 +127,8 @@ type Exchange struct {
 	// back, what the caller received, and the stream capture file. v0.1
 	// stores them VERBATIM — body content is not scrubbed (only request
 	// headers are masked; see RequestHeaders below). The capture package owns
-	// every write; this struct only holds it. finalize derives the persisted
-	// stream_body_path from RequestID (the path is always exactly
-	// "<request_id>.stream", so the capture only answers "was a file
-	// captured?", not carry the string itself).
+	// every write, including the stream file's name (capture.StreamFileName,
+	// reported back through StreamName); this struct only holds it.
 	bodies capture.Bodies
 	// requestHeaders is the caller's request headers as a JSON object, with
 	// sensitive headers already masked (SanitizeHeaders). This header-name
@@ -251,12 +249,7 @@ func (rc *Exchange) UpstreamResponseBody() []byte { return rc.bodies.UpstreamRes
 
 // StreamBodyPath is where a streamed response was captured, empty when the
 // response was not streamed or nothing was captured.
-func (rc *Exchange) StreamBodyPath() string {
-	if !rc.bodies.StreamCaptured() {
-		return ""
-	}
-	return rc.requestID + ".stream"
-}
+func (rc *Exchange) StreamBodyPath() string { return rc.bodies.StreamName() }
 
 // StreamBodyTruncated reports whether the stream capture hit its cap.
 func (rc *Exchange) StreamBodyTruncated() bool { return rc.bodies.StreamTruncated() }

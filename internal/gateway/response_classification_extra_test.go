@@ -370,7 +370,7 @@ func TestAFrameLostAtTheFlushIsNotRecordedAsSent(t *testing.T) {
 	c.Set(BodiesDirContextKey, dir)
 	rc := &Exchange{requestID: "req-flush-err", ingress: protocols.ProtocolOpenAI}
 	openStreamBodyFile(c, rc)
-	defer closeStreamBodyFile(rc)
+	defer rc.bodies.CloseStream()
 
 	err := sendSSEFrame(committedStreamClient(t, c, rc), []byte("data: test\n\n"))
 	if err == nil {
@@ -399,7 +399,7 @@ func TestAFrameIsRecordedOnlyOnceItsFlushSucceeds(t *testing.T) {
 	c.Set(BodiesDirContextKey, dir)
 	rc := &Exchange{requestID: "req-flush-ok", ingress: protocols.ProtocolOpenAI}
 	openStreamBodyFile(c, rc)
-	defer closeStreamBodyFile(rc)
+	defer rc.bodies.CloseStream()
 
 	data := []byte("data: hello\n\n")
 	if err := sendSSEFrame(committedStreamClient(t, c, rc), data); err != nil {
@@ -494,7 +494,10 @@ func TestACallerDisconnectOnTheIRPathIsNotBlamedOnTheProvider(t *testing.T) {
 	client := &stubClient{committed: true, status: http.StatusOK, gone: true}
 	payload := streamingPayload(t, protocols.ProtocolOpenAI, streamCallerBody)
 	d := payload.settleStream(DeliveryTools{Client: client, RequestID: rc.requestID}, resp, nil, err)
-	result := svc.recordAndSettle(c, rc, admitted{payload: payload}, d, cand, p, model.ProviderKey{},
+	rc.attempt.BeginCandidate(&cand)
+	rc.attempt.BindProvider(p)
+	rc.attempt.BindKey(&model.ProviderKey{})
+	result := svc.recordAndSettle(c, rc, admitted{payload: payload}, d,
 		resp.StatusCode, time.Now())
 
 	if result != attemptSuccess {
@@ -552,7 +555,10 @@ func TestALiveCallerStillGetsTheStreamClosedOffOnAProviderFailure(t *testing.T) 
 	client := &stubClient{committed: true, status: http.StatusOK}
 	payload := streamingPayload(t, protocols.ProtocolOpenAI, streamCallerBody)
 	d := payload.settleStream(DeliveryTools{Client: client, RequestID: rc.requestID}, resp, nil, err)
-	result := svc.recordAndSettle(c, rc, admitted{payload: payload}, d, cand, p, model.ProviderKey{},
+	rc.attempt.BeginCandidate(&cand)
+	rc.attempt.BindProvider(p)
+	rc.attempt.BindKey(&model.ProviderKey{})
+	result := svc.recordAndSettle(c, rc, admitted{payload: payload}, d,
 		resp.StatusCode, time.Now())
 
 	if result != attemptSuccess {

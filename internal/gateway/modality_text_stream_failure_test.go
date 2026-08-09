@@ -356,7 +356,7 @@ func TestAFrameOnlyCountsAsReceivedOnceItHasBeenFlushed(t *testing.T) {
 	c.Set(BodiesDirContextKey, dir)
 	rc := &Exchange{requestID: "flush-decides"}
 	openStreamBodyFile(c, rc)
-	defer closeStreamBodyFile(rc)
+	defer rc.bodies.CloseStream()
 
 	client := realStreamClient(&Service{}, c, rc)
 	if err := client.Commit(http.StatusOK); err != nil {

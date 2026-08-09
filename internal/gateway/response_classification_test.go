@@ -61,7 +61,7 @@ func TestAFrameThatFailedToSendIsNotRecordedAsSent(t *testing.T) {
 	// open; the response object built below writes into it rather than opening
 	// one of its own.
 	openStreamBodyFile(c, rc)
-	defer closeStreamBodyFile(rc)
+	defer rc.bodies.CloseStream()
 
 	err := sendSSEFrame(committedStreamClient(t, c, rc), []byte("data: test\n\n"))
 	if err == nil {
@@ -87,7 +87,7 @@ func TestAFrameThatWentOutIsRecordedAsSent(t *testing.T) {
 	c.Set(BodiesDirContextKey, dir)
 	rc := &Exchange{requestID: "req-ok-write", ingress: protocols.ProtocolOpenAI}
 	openStreamBodyFile(c, rc)
-	defer closeStreamBodyFile(rc)
+	defer rc.bodies.CloseStream()
 
 	data := []byte("data: hello\n\n")
 	if err := sendSSEFrame(committedStreamClient(t, c, rc), data); err != nil {
@@ -113,7 +113,7 @@ func TestWriteStreamErrorEvent_FailureReturnsError(t *testing.T) {
 	c.Set(BodiesDirContextKey, dir)
 	rc := &Exchange{requestID: "req-fail-evt", ingress: protocols.ProtocolOpenAI}
 	openStreamBodyFile(c, rc)
-	defer closeStreamBodyFile(rc)
+	defer rc.bodies.CloseStream()
 
 	err := writeStreamErrorEvent(committedStreamClient(t, c, rc), rc.ingress, rc.requestID)
 	if err == nil {

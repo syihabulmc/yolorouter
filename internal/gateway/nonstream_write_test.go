@@ -62,7 +62,10 @@ func TestANonStreamResponseTheCallerNeverReceivedIsNotRecordedAsDelivered(t *tes
 		Header:     make(http.Header),
 	}
 
-	result := svc.deliverAndSettle(c, rc, adm, cand, p, model.ProviderKey{}, resp, time.Now())
+	rc.attempt.BeginCandidate(&cand)
+	rc.attempt.BindProvider(p)
+	rc.attempt.BindKey(&model.ProviderKey{})
+	result := svc.deliverAndSettle(c, rc, adm, resp, time.Now())
 
 	if result != attemptSuccess {
 		t.Errorf("result = %v, want attemptSuccess (status+headers already committed, cannot fail over)", result)
@@ -125,7 +128,10 @@ func TestANonStreamResponseTheCallerReceivedIsRecordedAsDelivered(t *testing.T) 
 		Header:     make(http.Header),
 	}
 
-	result := svc.deliverAndSettle(c, rc, adm, cand, p, model.ProviderKey{}, resp, time.Now())
+	rc.attempt.BeginCandidate(&cand)
+	rc.attempt.BindProvider(p)
+	rc.attempt.BindKey(&model.ProviderKey{})
+	result := svc.deliverAndSettle(c, rc, adm, resp, time.Now())
 
 	if result != attemptSuccess {
 		t.Errorf("result = %v, want attemptSuccess", result)

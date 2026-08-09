@@ -2034,3 +2034,40 @@ func TestRelayCandidateLoopRespectsRequestBudget(t *testing.T) {
 		t.Errorf("expected exactly 1 attempt (budget gate stops the walk), got %d: %+v", len(captured.attempts), captured.attempts)
 	}
 }
+
+// TestRecordCurrentAttemptCarriesTheStagedIdentity pins the contract the
+// short recording form lives on: whatever identity the loops staged on
+// rc.attempt — candidate, provider, key — is exactly what lands on the row.
+// Dropping any one of the three here would strip attribution from every
+// post-dispatch attempt record at once.
+func TestRecordCurrentAttemptCarriesTheStagedIdentity(t *testing.T) {
+	rc := &Exchange{}
+	cand := model.ModelCandidate{ProviderModelName: "m-upstream"}
+	cand.ID = 7
+	rc.attempt.BeginCandidate(&cand)
+	prov := &model.Provider{Name: "prov-a"}
+	prov.ID = 3
+	rc.attempt.BindProvider(prov)
+	key := &model.ProviderKey{Label: "key-1"}
+	key.ID = 11
+	rc.attempt.BindKey(key)
+
+	rc.recordCurrentAttempt(200, AttemptBadStatus, "note")
+
+	if len(rc.attempts) != 1 {
+		t.Fatalf("attempts = %d rows, want 1", len(rc.attempts))
+	}
+	rec := rc.attempts[0]
+	if rec.CandidateID != 7 || rec.ProviderModelName != "m-upstream" {
+		t.Errorf("candidate on the row = (%d, %q), want the staged (7, m-upstream)", rec.CandidateID, rec.ProviderModelName)
+	}
+	if rec.ProviderID != 3 || rec.ProviderName != "prov-a" {
+		t.Errorf("provider on the row = (%d, %q), want the staged (3, prov-a)", rec.ProviderID, rec.ProviderName)
+	}
+	if rec.KeyID != 11 || rec.KeyLabel != "key-1" {
+		t.Errorf("key on the row = (%d, %q), want the staged (11, key-1)", rec.KeyID, rec.KeyLabel)
+	}
+	if rec.StatusCode != 200 || rec.Outcome != AttemptBadStatus || rec.FailReason != "note" {
+		t.Errorf("row = (%d, %q, %q), want (200, %q, note)", rec.StatusCode, rec.Outcome, rec.FailReason, AttemptBadStatus)
+	}
+}

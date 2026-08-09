@@ -726,7 +726,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 				zap.String("verdict", verdict.LoopFrom().String()))
 		}
 
-		if s.tryKeys(c, rc, adm, &cand, provider, enabled, egress, outBody, url, start) == outcomeDone {
+		if s.tryKeys(c, rc, adm, enabled, egress, outBody, url, start) == outcomeDone {
 			return
 		}
 		// outcomeNextCandidate: fall through to the next candidate.
@@ -808,7 +808,8 @@ const (
 // has been written to the client, or outcomeNextCandidate when every key on
 // this provider failed with a key-rotation error and the chain should move
 // to the next candidate (same-provider no usable key, THEN failover).
-func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *model.ModelCandidate, provider *model.Provider, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
+func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
+	provider := rc.attempt.Provider()
 	for i := range keys {
 		pk := keys[i]
 		// Cleared before the skip checks below, not inside attemptOne, because
@@ -819,6 +820,10 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *mode
 		// limit one key hit, quoted for a request that actually died with no
 		// usable key at all.
 		rc.attempt.ClearVerdict()
+		// Bound before the skip checks for the same reason the verdict is
+		// cleared before them: a skipped key's audit row must name the key
+		// that was passed over, not the previous one.
+		rc.attempt.BindKey(&pk)
 		// Destination-version guard (credential-scope mechanism): a key
 		// is only authorized for the provider destination it was verified
 		// against. When an admin changes BaseURL, DestinationVersion bumps
@@ -827,17 +832,17 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *mode
 		// to an unapproved destination. Skip and rotate to the next key,
 		// matching the destination-matched select in provider_repository.go.
 		if pk.AuthorizedDestinationVersion != provider.DestinationVersion {
-			rc.recordAttempt(*cand, provider, &pk, 0, AttemptAuthFailed, "destination version mismatch")
+			rc.recordCurrentAttempt(0, AttemptAuthFailed, "destination version mismatch")
 			continue
 		}
 		plaintext, derr := crypto.Decrypt(s.masterKey, pk.EncryptedKey)
 		if derr != nil {
 			logger.Warn("gateway: decrypt provider key failed",
 				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID), zap.Error(derr))
-			rc.recordAttempt(*cand, provider, &pk, 0, AttemptBadStatus, "decrypt failed")
+			rc.recordCurrentAttempt(0, AttemptBadStatus, "decrypt failed")
 			continue
 		}
-		result := s.attemptOne(c, rc, adm, *cand, provider, pk, plaintext, egress, outBody, url, start)
+		result := s.attemptOne(c, rc, adm, plaintext, egress, outBody, url, start)
 		if result == attemptSuccess || result == attemptTerminal {
 			return outcomeDone
 		}
@@ -856,7 +861,7 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, cand *mode
 // The modality delivers, this side settles. Keeping those apart is what stops
 // "how a response is delivered" and "what the request cost and how it is
 // recorded" from having to be known in one place.
-func (s *Service) deliverAndSettle(c *gin.Context, rc *Exchange, adm admitted, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, resp *http.Response, start time.Time) attemptResult {
+func (s *Service) deliverAndSettle(c *gin.Context, rc *Exchange, adm admitted, resp *http.Response, start time.Time) attemptResult {
 	// The payloads close the body themselves, from a defer INSIDE Deliver — but
 	// a panic can fire before that defer is registered: the call-order wrapper
 	// asserts before it forwards, and an assertion tripping there unwinds with
@@ -866,7 +871,7 @@ func (s *Service) deliverAndSettle(c *gin.Context, rc *Exchange, adm admitted, c
 	defer func() { _ = resp.Body.Close() }()
 	tools, release := s.newDeliveryTools(c, rc, adm.limits, rc.isStream)
 	defer release()
-	return s.recordAndSettle(c, rc, adm, adm.payload.Deliver(tools, resp), cand, provider, pk, resp.StatusCode, start)
+	return s.recordAndSettle(c, rc, adm, adm.payload.Deliver(tools, resp), resp.StatusCode, start)
 }
 
 // recordAndSettle turns what a delivery reported into the request's record.
@@ -875,7 +880,7 @@ func (s *Service) deliverAndSettle(c *gin.Context, rc *Exchange, adm admitted, c
 // a modality states what happened, and this decides what the request is
 // therefore billed, logged and answered as. Nothing here reads the response
 // body — by this point the only evidence is the Delivery.
-func (s *Service) recordAndSettle(c *gin.Context, rc *Exchange, adm admitted, d fact.Delivery, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, upstreamStatus int, start time.Time) attemptResult {
+func (s *Service) recordAndSettle(c *gin.Context, rc *Exchange, adm admitted, d fact.Delivery, upstreamStatus int, start time.Time) attemptResult {
 	// The order below is not arrangement. A delivery is checked before it is
 	// labelled, because checkAndNote replaces an impossible Delivery with one
 	// that says so, and the attempt row is built from whatever it is handed.
@@ -886,8 +891,7 @@ func (s *Service) recordAndSettle(c *gin.Context, rc *Exchange, adm admitted, d 
 	// worse than being told the wrong thing.
 	sink := newExchangeSink(rc)
 	s.checkAndNote(rc, &d, sink)
-	rc.recordAttempt(cand, provider, &pk,
-		upstreamStatus, attemptOutcomeFor(d, rc.isStream), attemptNoteFor(d))
+	rc.recordCurrentAttempt(upstreamStatus, attemptOutcomeFor(d, rc.isStream), attemptNoteFor(d))
 	if d.Verdict == fact.VerdictSettled {
 		// The one delivery that ended the request, which is the only one this
 		// question is asked about. Asking per attempt would tell the payload the
@@ -937,8 +941,14 @@ const (
 // and pre-first-byte stream failures are candidate-level (failover); 401/429
 // are key-level (rotate); 2xx is success; other 4xx is terminal (caller's
 // problem).
-func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand model.ModelCandidate, provider *model.Provider, pk model.ProviderKey, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time) attemptResult {
-	// Whatever the previous send left behind describes that send, not this one.
+func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time) attemptResult {
+	// The attempt's identity — candidate, provider, key — lives on rc.attempt,
+	// staged by the loops above; plaintext alone stays a parameter, because a
+	// credential parked on the exchange would outlive the one call that needs
+	// it. Whatever the previous send left behind describes that send, not
+	// this one.
+	pk := rc.attempt.Key()
+	provider := rc.attempt.Provider()
 	rc.beginUpstreamAttempt()
 
 	// Per-attempt deadline = min(attempt_timeout, remaining request budget).
@@ -948,7 +958,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	// cannot overrun the request cap.
 	remaining := time.Until(rc.requestDeadline)
 	if remaining <= 0 {
-		rc.recordAttempt(cand, provider, &pk, 0, AttemptConnError, "request budget exhausted")
+		rc.recordCurrentAttempt(0, AttemptConnError, "request budget exhausted")
 		return attemptNextCandidate
 	}
 	attemptBudget := min(s.gateway.AttemptTimeout, remaining)
@@ -977,7 +987,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 		// over. Every key on this candidate would fail identically (url is
 		// candidate-invariant), so the first key attempt already exhausts
 		// this candidate via tryKeys' immediate return on attemptNextCandidate.
-		rc.recordAttempt(cand, provider, &pk, 0, AttemptBadStatus,
+		rc.recordCurrentAttempt(0, AttemptBadStatus,
 			"build request: "+redactedFailure(err, rc.attempt.UpstreamURL()))
 		return attemptNextCandidate
 	}
@@ -991,11 +1001,11 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 		// is candidate-level, not a disconnect) so the log labels the right
 		// failure class. Any other transport failure is candidate-level.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			rc.recordAttempt(cand, provider, &pk, 0, AttemptConnError, "client disconnected")
+			rc.recordCurrentAttempt(0, AttemptConnError, "client disconnected")
 			s.abandonRequestAfterAttempt(rc, "client_disconnected", start) // nginx-style 499
 			return attemptTerminal
 		}
-		rc.recordAttempt(cand, provider, &pk, 0, AttemptConnError,
+		rc.recordCurrentAttempt(0, AttemptConnError,
 			redactedFailure(err, rc.attempt.UpstreamURL()))
 		return attemptNextCandidate
 	}
@@ -1043,7 +1053,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return s.deliverAndSettle(c, rc, adm, cand, provider, pk, resp, start)
+		return s.deliverAndSettle(c, rc, adm, resp, start)
 	}
 
 	statusCode := resp.StatusCode
@@ -1139,7 +1149,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, cand mo
 		}
 	}
 
-	rc.recordAttempt(cand, provider, &pk, statusCode, class.Outcome, note)
+	rc.recordCurrentAttempt(statusCode, class.Outcome, note)
 	switch class.Category {
 	case statusRotateKey:
 		// 401 CAS was already performed above, before the error body read.
@@ -1264,6 +1274,17 @@ func filterEnabledKeys(keys []model.ProviderKey) (out []model.ProviderKey, anyEn
 // per candidate in relayCandidates and set in attemptOne, so it reflects the
 // current attempt: empty for attempts that failed before any request was
 // sent.
+// recordCurrentAttempt records the attempt rc.attempt currently describes —
+// the form every post-BeginCandidate path uses, so the identity on the row
+// and the identity on the state cannot disagree. The explicit recordAttempt
+// below stays for the loop's pre-bind skip rows, which deliberately name a
+// provider the state never bound (a disabled provider is on the row so the
+// operator sees who was skipped, and off the state so finalize never reports
+// it as the final hit).
+func (rc *Exchange) recordCurrentAttempt(status int, outcome, failReason string) {
+	rc.recordAttempt(*rc.attempt.Candidate(), rc.attempt.Provider(), rc.attempt.Key(), status, outcome, failReason)
+}
+
 func (rc *Exchange) recordAttempt(cand model.ModelCandidate, provider *model.Provider, key *model.ProviderKey, status int, outcome, failReason string) {
 	rec := AttemptRecord{
 		CandidateID:       cand.ID,

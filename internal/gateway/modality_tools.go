@@ -676,9 +676,9 @@ func (s *Service) newDeliveryTools(c *gin.Context, rc *Exchange, want TransferLi
 // there it shows up as a capture worth opening. Removing it before the close is
 // deliberate — removal also closes and forgets the handle, so the close that
 // follows finds nothing left to do rather than racing it.
-func (s *Service) releaseDelivery(c *gin.Context, rc *Exchange) {
-	removeEmptyStreamBodyFile(c, rc)
-	closeStreamBodyFile(rc)
+func (s *Service) releaseDelivery(_ *gin.Context, rc *Exchange) {
+	rc.bodies.DiscardEmptyStream()
+	rc.bodies.CloseStream()
 }
 
 // secondaryFetchClient returns the shared client secondary fetches run on.

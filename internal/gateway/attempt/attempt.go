@@ -1,7 +1,7 @@
 // Package attempt owns the state that describes the attempt the gateway is
-// currently making: which candidate, which provider, the URL the request was
-// dispatched to, and the verdict the attempt left behind for the terminal to
-// quote. The fields are unexported and every write goes through a method, so
+// currently making: which candidate, which provider, which key, the URL the
+// request was dispatched to, and the verdict the attempt left behind for the
+// terminal to quote. The fields are unexported and every write goes through a method, so
 // the compiler holds what used to be a convention spread over one relay file:
 // one owner, and no way to update half the family.
 //
@@ -29,6 +29,10 @@ type State struct {
 	// provider is set only once the candidate's provider proved usable, so a
 	// candidate dropped early never shows a provider it did not reach.
 	provider *model.Provider
+	// key is the provider key the current rotation step holds, set as each
+	// key is entered — including one that is then skipped without a
+	// dispatch, so the skip's audit row names the key it passed over.
+	key *model.ProviderKey
 	// upstreamURL is the redacted URL of the current dispatch; empty until a
 	// request was actually built.
 	upstreamURL string
@@ -52,6 +56,9 @@ func (s *State) ClearVerdict() { s.verdict = decision.StickyVerdict{} }
 // BindProvider records that this candidate's provider proved usable.
 func (s *State) BindProvider(p *model.Provider) { s.provider = p }
 
+// BindKey records the key the rotation loop is currently holding.
+func (s *State) BindKey(k *model.ProviderKey) { s.key = k }
+
 // BeginUpstreamAttempt clears the dispatch URL so a build that fails before
 // sending never inherits the previous attempt's URL in its record.
 func (s *State) BeginUpstreamAttempt() { s.upstreamURL = "" }
@@ -70,6 +77,10 @@ func (s *State) Candidate() *model.ModelCandidate { return s.candidate }
 
 // Provider is the usable provider of the current candidate, nil until bound.
 func (s *State) Provider() *model.Provider { return s.provider }
+
+// Key is the provider key the current rotation step holds, nil before the
+// first key of a candidate is entered.
+func (s *State) Key() *model.ProviderKey { return s.key }
 
 // UpstreamURL is the redacted URL of the last dispatch, empty when none was
 // built.
