@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 
 	"github.com/yolorouter/yolorouter/internal/protocols"
@@ -36,6 +37,29 @@ type probeSpec struct {
 	// parseModelPage extracts one page of model ids from a 200 catalogue
 	// body plus the pagination cursor (param name + value), "" when done.
 	parseModelPage func(body []byte) (ids []string, nextParam, nextValue string)
+
+	// modelsPath is the catalogue endpoint path, resolved through the same
+	// version-aware joiner as every other probe URL (gemini's catalogue
+	// lives at /models under /v1beta; everyone else serves /v1/models).
+	modelsPath string
+
+	// successCertifiable states whether validSuccessBody genuinely validates
+	// this protocol's success shape. When false — the zero value, so a new
+	// entry stays uncertifiable until someone writes its validator — a 200 on
+	// the basic credential test reports TestVerificationUnsupported instead
+	// of TestSuccess: the request was not rejected outright, but a key must
+	// not be authorized against a destination that was never truly verified.
+	successCertifiable bool
+
+	// validStreamBody judges a 200 streaming response, returning an
+	// admin-facing detail when it fails. An entry whose SSE shape is not yet
+	// modelled uses unverifiedStreamPass and says so on the entry.
+	validStreamBody func(resp *http.Response, durationMs int64) (ok bool, detail string)
+
+	// validToolCallBody judges a 200 tool-calling response body. Entries
+	// whose tool-call shape is not yet modelled fall back to the parseable-
+	// JSON-without-error leniency check.
+	validToolCallBody func(body []byte) bool
 
 	// validSuccessBody judges a JSON 200 body (the shared content-type check
 	// has already run). modelScopedError / quotaError / modelNotFoundError
@@ -103,6 +127,10 @@ var openAIProbe = probeSpec{
 		}
 	},
 	parseModelPage:     parseDataModelPage,
+	modelsPath:         "/v1/models",
+	successCertifiable: true,
+	validStreamBody:    openAIStreamBody,
+	validToolCallBody:  isValidToolCallsBody,
 	validSuccessBody:   isValidOpenAIChatSuccessBody,
 	modelScopedError:   openAIModelScopedError,
 	quotaError:         openAIQuotaError,
@@ -144,7 +172,15 @@ var claudeProbe = probeSpec{
 			},
 		}
 	},
-	parseModelPage:     parseDataModelPage,
+	parseModelPage: parseDataModelPage,
+	modelsPath:     "/v1/models",
+	// claude's non-streaming success body is genuinely validated; its SSE
+	// delta shape (content_block_delta / message_stop) and tool_use blocks
+	// are not yet modelled, so streaming and tool-calling use the deferred
+	// checks.
+	successCertifiable: true,
+	validStreamBody:    unverifiedStreamPass,
+	validToolCallBody:  isParseableJSONObjectWithoutError,
 	validSuccessBody:   isValidClaudeSuccessBody,
 	modelScopedError:   claudeModelScopedError,
 	quotaError:         claudeQuotaError,
@@ -187,7 +223,14 @@ var geminiProbe = probeSpec{
 			},
 		}
 	},
-	parseModelPage:     parseGeminiModelPage,
+	parseModelPage: parseGeminiModelPage,
+	modelsPath:     "/models", // resolves under /v1beta via the version-aware joiner
+	// successCertifiable stays false: with only the leniency check for a
+	// success body, a 200 must report "cannot certify yet" rather than
+	// authorize a key against a destination that was never truly verified.
+	successCertifiable: false,
+	validStreamBody:    unverifiedStreamPass,
+	validToolCallBody:  isParseableJSONObjectWithoutError,
 	validSuccessBody:   isParseableJSONObjectWithoutError,
 	modelScopedError:   neverModelScoped,
 	quotaError:         neverQuotaError,
@@ -226,6 +269,10 @@ var responsesProbe = probeSpec{
 		}
 	},
 	parseModelPage:     parseDataModelPage,
+	modelsPath:         "/v1/models",
+	successCertifiable: false,
+	validStreamBody:    unverifiedStreamPass,
+	validToolCallBody:  isParseableJSONObjectWithoutError,
 	validSuccessBody:   isParseableJSONObjectWithoutError,
 	modelScopedError:   neverModelScoped,
 	quotaError:         neverQuotaError,

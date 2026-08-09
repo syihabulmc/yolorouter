@@ -33,3 +33,35 @@ func TestUnknownProtocolFallsBackToOpenAI(t *testing.T) {
 		t.Errorf("protocolForProviderType(unknown) = %v, want OpenAI", got)
 	}
 }
+
+// TestEveryProbeSpecIsFullyPopulated makes a half-filled entry a red test
+// instead of a nil-dereference at probe time: every registered spec must
+// carry every function field and a catalogue path. successCertifiable is
+// deliberately absent here — false is a meaningful value (the entry defers
+// its success validation), not a hole.
+func TestEveryProbeSpecIsFullyPopulated(t *testing.T) {
+	for proto, spec := range probeSpecs {
+		if spec.encoder == nil {
+			t.Errorf("%s: encoder is nil", proto)
+		}
+		if spec.basicPayload == nil || spec.streamingPayload == nil || spec.functionCallingPayload == nil {
+			t.Errorf("%s: a payload builder is nil", proto)
+		}
+		if spec.parseModelPage == nil {
+			t.Errorf("%s: parseModelPage is nil", proto)
+		}
+		if spec.modelsPath == "" {
+			t.Errorf("%s: modelsPath is empty", proto)
+		}
+		if spec.validStreamBody == nil {
+			t.Errorf("%s: validStreamBody is nil", proto)
+		}
+		if spec.validToolCallBody == nil {
+			t.Errorf("%s: validToolCallBody is nil", proto)
+		}
+		if spec.validSuccessBody == nil || spec.modelScopedError == nil || spec.quotaError == nil ||
+			spec.modelNotFoundError == nil || spec.extractMessage == nil {
+			t.Errorf("%s: a body predicate is nil", proto)
+		}
+	}
+}

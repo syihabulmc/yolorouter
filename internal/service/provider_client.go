@@ -412,10 +412,7 @@ const providerModelsMaxBodyBytes = 1 << 20
 // same version-aware joiner as the credential test, so a base URL with or
 // without an explicit /v1 (or /v1beta) segment resolves correctly.
 func providerModelsURL(baseURL string, proto protocols.ProtocolID) string {
-	if proto == protocols.ProtocolGemini {
-		return protocols.JoinUpstreamURL(baseURL, "/models", proto)
-	}
-	return protocols.JoinUpstreamURL(baseURL, "/v1/models", proto)
+	return protocols.JoinUpstreamURL(baseURL, probeSpecFor(proto).modelsPath, proto)
 }
 
 // providerModelsMaxPages caps how many catalogue pages ListModels follows — a
@@ -631,6 +628,34 @@ func streamingCompletionPayload(proto protocols.ProtocolID, model string) map[st
 	return probeSpecFor(proto).streamingPayload(model)
 }
 
+// openAIStreamBody is the real streaming validator: success requires BOTH a
+// produced content delta (content or reasoning_content — a bare role prelude
+// is not enough) AND a clean termination (explicit `data: [DONE]` or a normal
+// EOF). A delta followed by a hang/reset must not certify streaming — the
+// endpoint would leave real clients hanging. Many OpenAI-compatible upstreams
+// omit [DONE]; a clean EOF still counts as valid termination.
+func openAIStreamBody(resp *http.Response, durationMs int64) (bool, string) {
+	sawValidDelta, cleanTerminate := scanSSEStream(resp.Body)
+	if sawValidDelta && cleanTerminate {
+		return true, ""
+	}
+	return false, fmt.Sprintf("openai stream incomplete (content_delta=%v, clean_terminate=%v, %dms)", sawValidDelta, cleanTerminate, durationMs)
+}
+
+// unverifiedStreamPass is the deferred streaming validator for entries whose
+// SSE delta shape (Claude's content_block_delta/message_stop events, Gemini's
+// chunked generateContent stream, Responses' response.output_text.delta
+// events) is not yet modelled. A 200 with a non-empty body is treated as a
+// structurally-unverified pass — it proves the endpoint/auth/payload shape
+// was not rejected outright, nothing more.
+func unverifiedStreamPass(resp *http.Response, _ int64) (bool, string) {
+	body, ok := readBoundedBody(resp)
+	if !ok || len(body) == 0 {
+		return false, "HTTP 200 with empty streaming body"
+	}
+	return true, ""
+}
+
 func (c *HTTPProviderClient) TestStreamingCompletion(ctx context.Context, proto protocols.ProtocolID, baseURL, apiKey, model string) (TestResult, error) {
 	payload := streamingCompletionPayload(proto, model)
 	return c.runTestRequest(ctx, proto, baseURL, apiKey, model, payload, func(resp *http.Response, duration int64) (TestResult, error) {
@@ -642,34 +667,10 @@ func (c *HTTPProviderClient) TestStreamingCompletion(ctx context.Context, proto 
 			return classifyResponse(proto, resp, body, model, duration), nil
 		}
 
-		if proto != protocols.ProtocolOpenAI {
-			// Non-OpenAI SSE delta-shape validation (Claude's
-			// content_block_delta/message_stop events, Gemini's chunked
-			// generateContent stream, Responses' response.output_text.delta
-			// events) is deferred to a follow-up. A 200 status with a
-			// non-empty body is treated as a structurally-unverified pass —
-			// this at least proves the endpoint/auth/payload shape didn't
-			// get rejected outright, matching this task's "wire the
-			// mechanism, refine body classification later" scope for these
-			// protocols.
-			body, ok := readBoundedBody(resp)
-			if !ok || len(body) == 0 {
-				return TestResult{Outcome: TestUpstreamError, DurationMs: duration, Detail: "HTTP 200 with empty streaming body"}, nil
-			}
+		ok, detail := probeSpecFor(proto).validStreamBody(resp, duration)
+		if ok {
 			return TestResult{Outcome: TestSuccess, DurationMs: duration}, nil
 		}
-
-		sawValidDelta, cleanTerminate := scanSSEStream(resp.Body)
-		// Success requires BOTH a produced content delta (content or
-		// reasoning_content — a bare role prelude is not enough) AND a clean
-		// termination (explicit `data: [DONE]` or a normal EOF). A delta
-		// followed by a hang/reset must not certify streaming — the endpoint
-		// would leave real clients hanging. Many OpenAI-compatible upstreams
-		// omit [DONE]; a clean EOF still counts as valid termination.
-		if sawValidDelta && cleanTerminate {
-			return TestResult{Outcome: TestSuccess, DurationMs: duration}, nil
-		}
-		detail := fmt.Sprintf("openai stream incomplete (content_delta=%v, clean_terminate=%v, %dms)", sawValidDelta, cleanTerminate, duration)
 		logger.Warn("provider test: streaming validation failed",
 			zap.String("proto", string(proto)),
 			zap.String("base_url", protocols.RedactURL(baseURL)),
@@ -752,19 +753,7 @@ func (c *HTTPProviderClient) TestFunctionCalling(ctx context.Context, proto prot
 		if resp.StatusCode != http.StatusOK {
 			return classifyResponse(proto, resp, body, model, duration), nil
 		}
-		if proto != protocols.ProtocolOpenAI {
-			// Non-OpenAI tool-call body shapes (Claude's
-			// content[].type=="tool_use" blocks, Gemini's functionCall
-			// parts) are deferred; a parseable, error-free 200 body is
-			// treated as a structurally-unverified pass here — see
-			// functionCallingPayload's comment for the same deferral on the
-			// request side.
-			if !isParseableJSONObjectWithoutError(body) {
-				return TestResult{Outcome: TestUpstreamError, DurationMs: duration}, nil
-			}
-			return TestResult{Outcome: TestSuccess, DurationMs: duration}, nil
-		}
-		if !isValidToolCallsBody(body) {
+		if !probeSpecFor(proto).validToolCallBody(body) {
 			return TestResult{Outcome: TestUpstreamError, DurationMs: duration}, nil
 		}
 		return TestResult{Outcome: TestSuccess, DurationMs: duration}, nil
@@ -845,15 +834,14 @@ func truncateRuneSafe(s string, maxBytes int) string {
 func classifyResponseByStatus(proto protocols.ProtocolID, resp *http.Response, body []byte, model string, durationMs int64) TestResult {
 	switch resp.StatusCode {
 	case http.StatusOK:
-		if proto == protocols.ProtocolGemini || proto == protocols.ProtocolResponses {
-			// gemini/responses have no real success-body validator yet (see
-			// isParseableJSONObjectWithoutError's comment) — a 2xx here only
-			// proves the request wasn't rejected outright, not that the
-			// credential actually works. Treating that as TestSuccess would
-			// let a key be authorized against a destination that was never
-			// truly verified, so it is reported as "cannot certify yet"
-			// instead; real error statuses below stay meaningful for these
-			// protocols too.
+		if !probeSpecFor(proto).successCertifiable {
+			// The entry declares its success-body validator is only the
+			// leniency check — a 2xx proves the request wasn't rejected
+			// outright, not that the credential actually works. Treating
+			// that as TestSuccess would let a key be authorized against a
+			// destination that was never truly verified, so it is reported
+			// as "cannot certify yet" instead; real error statuses below
+			// stay meaningful for these protocols too.
 			return TestResult{Outcome: TestVerificationUnsupported, DurationMs: durationMs}
 		}
 		if isValidSuccessBody(proto, resp, body) {
@@ -884,12 +872,10 @@ func classifyResponseByStatus(proto protocols.ProtocolID, resp *http.Response, b
 }
 
 // isValidSuccessBody enforces the "success cannot be judged by the status
-// code alone" rule, branching to the protocol-appropriate body-shape check.
-// classifyResponse's own StatusOK case now intercepts gemini/responses
-// before ever calling this function (see its comment), so the
-// ProtocolGemini/ProtocolResponses branch below is unreachable from that one
-// call site — it stays purely for direct callers (tests) that still want the
-// old "parseable JSON, no top-level error" leniency check on its own.
+// code alone" rule: the shared content-type check, then the entry's own
+// body-shape validator. classifyResponseByStatus consults the entry's
+// successCertifiable field first, so an entry carrying only the leniency
+// validator never has a 200 certified through this path.
 func isValidSuccessBody(proto protocols.ProtocolID, resp *http.Response, body []byte) bool {
 	contentType := resp.Header.Get("Content-Type")
 	if !strings.Contains(strings.ToLower(contentType), "application/json") {
