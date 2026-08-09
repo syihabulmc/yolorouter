@@ -2,23 +2,15 @@ package errcode
 
 import "testing"
 
-func TestNewRouteCodesAreUniqueAndRegistered(t *testing.T) {
-	newCodes := []int{RouteNotFound, MethodNotAllowed, RequestEntityTooLarge, InternalError}
-	seen := map[int]bool{}
-	for _, code := range newCodes {
-		if code == 0 {
-			t.Fatalf("code must not be zero value")
-		}
-		if seen[code] {
-			t.Fatalf("duplicate code value: %d", code)
-		}
-		seen[code] = true
-		if _, ok := ErrorMessages[code]; !ok {
-			t.Fatalf("code %d has no entry in ErrorMessages", code)
-		}
-	}
-}
-
+// TestExistingSuccessCodeUnchanged pins the one code whose VALUE is a wire
+// contract in its own right: every response envelope tells success from
+// failure by code == 0, so Success moving off zero (or its message drifting)
+// would break every client at once.
+//
+// Coherence between the code constants, ErrorMessages and the Err* sentinels
+// is not asserted here per family any more — a structural check over the
+// whole registry covers every declaration at once, so a newly added family
+// is checked without anyone remembering to copy a test.
 func TestExistingSuccessCodeUnchanged(t *testing.T) {
 	if Success != 0 {
 		t.Fatalf("Success code must remain 0, got %d", Success)
@@ -28,106 +20,20 @@ func TestExistingSuccessCodeUnchanged(t *testing.T) {
 	}
 }
 
-func TestProviderKeyErrorCodesHaveMessagesAndSentinels(t *testing.T) {
-	cases := []struct {
-		code int
-		err  error
-	}{
-		{ProviderKeyNotFound, ErrProviderKeyNotFound},
-		{ProviderKeyLabelTaken, ErrProviderKeyLabelTaken},
-		{ProviderKeyNotVerified, ErrProviderKeyNotVerified},
-		{ProviderKeyNeedsReentry, ErrProviderKeyNeedsReentry},
+// TestGetMessageCoversEveryRegisteredCode exercises GetMessage at runtime for
+// every registered code — the structural registry check reads source, so a
+// behavioural regression in this function (returning the fallback for a
+// registered code, say) would not turn it red.
+func TestGetMessageCoversEveryRegisteredCode(t *testing.T) {
+	if len(ErrorMessages) == 0 {
+		t.Fatal("ErrorMessages is empty; the check would pass by finding nothing")
 	}
-	for _, c := range cases {
-		msg, ok := ErrorMessages[c.code]
-		if !ok || msg == "" {
-			t.Fatalf("code %d: missing ErrorMessages entry", c.code)
-		}
-		if c.err == nil || c.err.Error() != msg {
-			t.Fatalf("code %d: sentinel error text %q does not match ErrorMessages %q", c.code, c.err, msg)
+	for code, msg := range ErrorMessages {
+		if got := GetMessage(code); got != msg {
+			t.Errorf("GetMessage(%d) = %q, want %q", code, got, msg)
 		}
 	}
-}
-
-func TestCustomSystemPromptErrorCodesRegistered(t *testing.T) {
-	cases := []struct {
-		code int
-		err  error
-	}{
-		{CustomSystemPromptTooLong, ErrCustomSystemPromptTooLong},
-		{CustomSystemPromptEmpty, ErrCustomSystemPromptEmpty},
-		{CustomSystemPromptConflict, ErrCustomSystemPromptConflict},
-	}
-	for _, c := range cases {
-		msg, ok := ErrorMessages[c.code]
-		if !ok || msg == "" {
-			t.Fatalf("code %d: missing ErrorMessages entry", c.code)
-		}
-		// sentinel text must equal the map's single source of truth
-		if c.err == nil || c.err.Error() != msg {
-			t.Fatalf("code %d: sentinel error text %q does not match ErrorMessages %q", c.code, c.err, msg)
-		}
-		if GetMessage(c.code) == "unknown error" {
-			t.Fatalf("code %d: GetMessage returned unknown", c.code)
-		}
-	}
-}
-
-func TestInputCompressionConflictCodeRegistered(t *testing.T) {
-	if InputCompressionConflict != 11014 {
-		t.Fatalf("InputCompressionConflict must be 11014, got %d", InputCompressionConflict)
-	}
-	msg, ok := ErrorMessages[InputCompressionConflict]
-	if !ok || msg == "" {
-		t.Fatalf("code %d: missing ErrorMessages entry", InputCompressionConflict)
-	}
-	if ErrInputCompressionConflict == nil || ErrInputCompressionConflict.Error() != msg {
-		t.Fatalf("sentinel error text %q does not match ErrorMessages %q", ErrInputCompressionConflict, msg)
-	}
-	if GetMessage(InputCompressionConflict) == "unknown error" {
-		t.Fatalf("code %d: GetMessage returned unknown", InputCompressionConflict)
-	}
-}
-
-func TestCompressEnabledRequiredCodeRegistered(t *testing.T) {
-	if CompressEnabledRequired != 11015 {
-		t.Fatalf("CompressEnabledRequired must be 11015, got %d", CompressEnabledRequired)
-	}
-	msg, ok := ErrorMessages[CompressEnabledRequired]
-	if !ok || msg == "" {
-		t.Fatalf("code %d: missing ErrorMessages entry", CompressEnabledRequired)
-	}
-	if ErrCompressEnabledRequired == nil || ErrCompressEnabledRequired.Error() != msg {
-		t.Fatalf("sentinel error text %q does not match ErrorMessages %q", ErrCompressEnabledRequired, msg)
-	}
-	if GetMessage(CompressEnabledRequired) == "unknown error" {
-		t.Fatalf("code %d: GetMessage returned unknown", CompressEnabledRequired)
-	}
-}
-
-func TestModelErrorCodesAreUniqueWithMessagesAndSentinels(t *testing.T) {
-	cases := []struct {
-		code int
-		err  error
-	}{
-		{ModelNotFound, ErrModelNotFound},
-		{ModelNameTaken, ErrModelNameTaken},
-		{ModelCandidateNotFound, ErrModelCandidateNotFound},
-		{ModelCandidateProviderTaken, ErrModelCandidateProviderTaken},
-		{ModelCandidateNotVerified, ErrModelCandidateNotVerified},
-	}
-	seen := map[int]bool{}
-	for _, c := range cases {
-		if seen[c.code] {
-			t.Fatalf("duplicate code value: %d", c.code)
-		}
-		seen[c.code] = true
-		msg, ok := ErrorMessages[c.code]
-		if !ok || msg == "" {
-			t.Fatalf("code %d: missing ErrorMessages entry", c.code)
-		}
-		if c.err == nil || c.err.Error() != msg {
-			t.Fatalf("code %d: sentinel error text %q does not match ErrorMessages %q", c.code, c.err, msg)
-		}
+	if got := GetMessage(-1); got != "unknown error" {
+		t.Errorf("GetMessage(unregistered) = %q, want the unknown-error fallback", got)
 	}
 }
