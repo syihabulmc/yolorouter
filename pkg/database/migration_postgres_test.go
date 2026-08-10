@@ -49,8 +49,8 @@ func TestPostgresMigrationsApplyRollBackAndReapply(t *testing.T) {
 	}
 	// Kept in step with the SQLite assertion in TestGetCurrentVersionOnFreshSQLiteDB
 	// — the two trees are mirrors and must not drift apart in length.
-	if version != 19 {
-		t.Fatalf("expected version 19 after all migrations, got %d", version)
+	if version != 21 {
+		t.Fatalf("expected version 21 after all migrations, got %d", version)
 	}
 
 	// Rolling all the way back exercises every Down. An operator who has to
