@@ -1,5 +1,5 @@
 # Release workflow: push a `v*` tag to build and publish a GitHub Release
-# with cross-platform archives + checksums via goreleaser. See design doc §4.3.
+# with cross-platform archives + checksums via goreleaser.
 name: release
 
 on:
