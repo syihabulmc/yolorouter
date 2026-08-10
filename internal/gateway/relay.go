@@ -16,7 +16,6 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"github.com/yolorouter/yolorouter/internal/compress"
 	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
@@ -140,6 +139,11 @@ type Service struct {
 	// and non-streaming paths both settle here, so there is one call site
 	// rather than one per response shape.
 	deliveryObservers []deliveryObserver
+
+	// ingressRewriters rewrite the caller's own body once, before any
+	// candidate is chosen, ordered by stage at registration so no per-request
+	// sort is needed.
+	ingressRewriters []ingressRewriter
 
 	// egressRewriters rewrite the outbound body, ordered by stage at
 	// registration so no per-request sort is needed.
@@ -413,28 +417,30 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		rc.compressEnabled = enabled
 	}
 
-	// Compression runs before the request is admitted, not after it is
+	// The rewriters run before the request is admitted, not after it is
 	// validated, because the modality admits ONE body and everything
-	// downstream builds from that one. Running it later would leave the
-	// payload holding the uncompressed bytes while the exchange recorded the
-	// compressed ones. Safe in this order: the engine leaves a body it cannot
+	// downstream builds from that one. Running them later would leave the
+	// payload holding the original bytes while the exchange recorded the
+	// rewritten ones. Safe in this order: a rewriter leaves a body it cannot
 	// parse untouched, so an invalid request is still rejected by the
-	// validation below rather than slipping past a compressor that skipped it.
-	// the captured request body keeps what the caller actually sent.
-	admitBody := body
-	if rc.compressEnabled && rc.isChatEndpoint {
-		opts := compress.DefaultOptions()
-		cctx, cancel := context.WithTimeout(c.Request.Context(), opts.Timeout)
-		newBody, cres := compress.ByProtocol(ingress, cctx, body, opts)
-		cancel()
-		if cres.Skipped {
-			rc.compressSkipReason = string(cres.SkipReason)
-		} else {
-			rc.bodies.SetCompressedRequest(newBody)
-			rc.compressEstimatedTokensSaved = cres.EstimatedTokensSaved
-			rc.compressorsApplied = cres.CompressorsApplied
-			admitBody = newBody
-		}
+	// validation below rather than slipping past one that declined. The
+	// captured request body keeps what the caller actually sent.
+	admitBody, rewritten, ingressVerdict := s.rewriteIngress(requestCtx, rc, body)
+	if ingressVerdict.Loop >= decision.LoopNextCandidate {
+		// A rewriter declared the body unsendable. No candidate has been
+		// chosen, so there is nothing to fail over to and nothing to reverse:
+		// the table's terminal status is the whole answer.
+		status, errType := decision.PreDispatchRejectionResponse(ingressVerdict,
+			http.StatusInternalServerError, errTypeServer)
+		s.rejectRequest(c, rc, status, errType, ingressVerdict.RejectDetail(),
+			ingressVerdict.FailReason(), fact.FaultGateway, start)
+		return
+	}
+	if rewritten {
+		// Recorded separately from the caller's verbatim body: the audit row
+		// has to be able to show both what arrived and what was carried
+		// forward, or a rewrite becomes invisible the moment it succeeds.
+		rc.bodies.SetCompressedRequest(admitBody)
 	}
 
 	// The modality that serves this ingress protocol decides whether the

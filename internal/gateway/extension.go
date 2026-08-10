@@ -74,6 +74,164 @@ func RegisterUpstreamErrorObserver[V any](s *Service, o UpstreamErrorObserverOf[
 	s.upstreamErrorObservers = append(s.upstreamErrorObservers, upstreamErrorObserverAdapter[V]{inner: o, bind: bind, registeredName: o.Name()})
 }
 
+// IngressRewriterOf rewrites the caller's own body, ONCE per exchange, before
+// any candidate is chosen and before the modality is asked to admit it. That
+// placement is the whole point of a separate shape: everything downstream —
+// what the modality parses, what the audit row calls the request, what a token
+// estimate counts — builds from one body, and a rewrite that landed later
+// would leave those readings describing bytes that were never sent.
+//
+// It returns the body to carry forward. Returning the input unchanged — or
+// nil, which the kernel reads the same way — is how a rewriter declines.
+//
+// An error means "this body is unusable" and ends the exchange before any
+// upstream is contacted. That makes it the wrong tool for the common case: a
+// rewriter that merely could not do its job — a body it cannot parse is a body
+// the upstream may well accept — must return the ORIGINAL body and report what
+// happened. Reserve the error for a body that must not be sent at all, and
+// even then the rewriter does not choose the consequence: it says the body is
+// unusable and the kernel's table decides what that costs.
+//
+// There is no protocol parameter, unlike the egress shape. The ingress
+// protocol is fixed for the exchange, so a rewriter that needs it reads it off
+// its own view rather than being handed a value that cannot vary.
+//
+// THE BODY MUST NOT BE MODIFIED IN PLACE. Produce a new slice, or return the
+// input untouched; the bytes handed over are the same ones the audit row keeps
+// as the caller's verbatim request, so a rewriter that edits them rewrites the
+// record of what arrived. It is a contract rather than a defensive copy for a
+// reason: a body may run to twenty megabytes, and copying one per rewriter on
+// every request would cost more than it protects — worse, it would spend that
+// copy BEFORE the rewriter's own size and validity gates, which exist to keep
+// exactly those bodies cheap.
+//
+// Applies is asked first, and separately, so a capability the deployment has
+// switched off costs nothing at all: no call, no allocation, not even a sink.
+// It must read only the view, and it carries the whole applicability decision,
+// so RewriteIngress is reached only when there is real work to do.
+type IngressRewriterOf[V any] interface {
+	Name() string
+	Applies(view V) bool
+	RewriteIngress(ctx context.Context, view V, body []byte, sink fact.Sink) ([]byte, error)
+}
+
+// IngressStage fixes the order of ingress rewriters, on the same reasoning as
+// EgressStage: order is a property of the pipeline being assembled, not of the
+// rewriter, so it is supplied at registration and never named by the capability
+// itself — naming it would mean importing the kernel.
+type IngressStage uint8
+
+const (
+	// StageCompress shrinks the body, so it must run before anything that
+	// counts or prices tokens: an estimate taken ahead of it would charge for
+	// bytes that never left.
+	StageCompress IngressStage = 10
+)
+
+// ingressRewriter is the kernel-side, view-erased form.
+type ingressRewriter interface {
+	name() string
+	stage() IngressStage
+	applies(e *Exchange) bool
+	rewrite(ctx context.Context, e *Exchange, body []byte, sink fact.Sink) ([]byte, error)
+}
+
+type ingressRewriterAdapter[V any] struct {
+	inner   IngressRewriterOf[V]
+	bind    func(*Exchange) V
+	atStage IngressStage
+	// Captured at registration; see the field note on
+	// upstreamErrorObserverAdapter.
+	registeredName string
+}
+
+func (a ingressRewriterAdapter[V]) name() string        { return a.registeredName }
+func (a ingressRewriterAdapter[V]) stage() IngressStage { return a.atStage }
+
+func (a ingressRewriterAdapter[V]) applies(e *Exchange) bool { return a.inner.Applies(a.bind(e)) }
+
+func (a ingressRewriterAdapter[V]) rewrite(ctx context.Context, e *Exchange, body []byte, sink fact.Sink) ([]byte, error) {
+	return a.inner.RewriteIngress(ctx, a.bind(e), body, sink)
+}
+
+// RegisterIngressRewriter wires a rewriter into the service, keeping the slice
+// ordered by stage so the run order is settled at assembly rather than
+// recomputed per request. Two rewriters claiming the same stage is a
+// programming error and panics here, at startup, rather than resolving to
+// whichever was registered first.
+func RegisterIngressRewriter[V any](s *Service, r IngressRewriterOf[V], at IngressStage, bind func(*Exchange) V) {
+	adapter := ingressRewriterAdapter[V]{inner: r, bind: bind, atStage: at, registeredName: r.Name()}
+	for _, existing := range s.ingressRewriters {
+		if existing.stage() == adapter.stage() {
+			panic(fmt.Sprintf("gateway: ingress stage %d claimed by both %q and %q",
+				at, existing.name(), adapter.name()))
+		}
+	}
+	s.ingressRewriters = append(s.ingressRewriters, adapter)
+	sort.Slice(s.ingressRewriters, func(i, j int) bool {
+		return s.ingressRewriters[i].stage() < s.ingressRewriters[j].stage()
+	})
+}
+
+// rewriteIngress runs the registered rewriters in stage order over the caller's
+// body and reports the verdict the kernel should act on.
+//
+// The rewriters chain: each sees the previous one's output, so there is one
+// current body at every point rather than competing versions of it. The first
+// one is shown the very bytes the audit row keeps, which is why the shape
+// forbids editing in place; the alternative, a copy per rewriter, would spend a
+// full body — up to twenty megabytes here — ahead of the size and validity
+// gates a rewriter uses to decline cheaply, on every request of a deployment
+// that happens to have the capability switched on.
+//
+// A rewriter that errors has declared the body unusable, and this stops there
+// with the body unchanged. Carrying on with it would send upstream exactly what
+// a rewriter just refused to produce. Its own words stay in the log: this
+// verdict ends the request, so the detail is what the caller is shown, and an
+// error about a body a rewriter could not parse is not written for them.
+func (s *Service) rewriteIngress(ctx context.Context, rc *Exchange, body []byte) (out []byte, changed bool, verdict decision.Resolved) {
+	if len(s.ingressRewriters) == 0 {
+		return body, false, decision.Resolved{}
+	}
+	if ctx == nil {
+		// Reached only from a caller that never established a request context.
+		// A rewriter that consults ctx should see an inert one rather than a
+		// nil that panics on first use.
+		ctx = context.Background()
+	}
+	original := body
+	// Built on first use, so a request nobody applies to allocates nothing.
+	var sink *exchangeSink
+	for _, r := range s.ingressRewriters {
+		if !r.applies(rc) {
+			continue
+		}
+		if sink == nil {
+			sink = newExchangeSink(rc)
+		}
+		sink.reporter = r.name()
+		rewritten, err := r.rewrite(ctx, rc, body, sink)
+		if err != nil {
+			logger.Warn("gateway: ingress rewrite refused the body",
+				zap.String("request_id", rc.requestID),
+				zap.String("rewriter", r.name()),
+				zap.Error(err))
+			sink.Report(fact.Fact{
+				Kind:   fact.KindIngressRewriteFailed,
+				Detail: "the request could not be prepared for dispatch",
+			})
+			return original, false, sink.resolve()
+		}
+		if rewritten != nil {
+			body = rewritten
+		}
+	}
+	if sink == nil {
+		return original, false, decision.Resolved{}
+	}
+	return body, !bytes.Equal(body, original), sink.resolve()
+}
+
 // EgressRewriterOf rewrites the body about to be sent upstream, once per
 // CANDIDATE, after the modality has encoded it and before credentials are
 // attached. Key rotation within a candidate reuses the rewritten body — the

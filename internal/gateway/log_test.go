@@ -257,10 +257,8 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 		VerificationStatus: model.ModelVerificationStatusPassed,
 	}
 	rc := &Exchange{
-		requestID:                    "req-compress-1",
-		apiKeyID:                     apiKey.ID,
-		compressEstimatedTokensSaved: 1500,
-		compressorsApplied:           []string{"whitespace", "whitespace", "contractions"},
+		requestID: "req-compress-1",
+		apiKeyID:  apiKey.ID,
 		// One successful attempt — the request reached upstream, so the
 		// compress savings are real (not phantom) and must be persisted.
 		attempts: []AttemptRecord{{
@@ -269,6 +267,7 @@ func TestFinalizeWritesCompressColumns(t *testing.T) {
 		}},
 	}
 	rc.attempt.BeginCandidate(cand)
+	seedCompressionSaved(rc, 1500, "whitespace", "whitespace", "contractions")
 	rc.bodies.SetCompressedRequest([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
 	svc.finalize(rc, &Usage{PromptTokens: 100, CompletionTokens: 50}, 200, "", time.Now())
 	svc.recordTerminal(rc)
@@ -312,10 +311,10 @@ func TestFinalizeWritesCompressSkippedColumns(t *testing.T) {
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
 	rc := &Exchange{
-		requestID:          "req-compress-skip-1",
-		apiKeyID:           apiKey.ID,
-		compressSkipReason: "too_small",
+		requestID: "req-compress-skip-1",
+		apiKeyID:  apiKey.ID,
 	}
+	seedCompressionSkipped(rc, "too_small")
 	svc.finalize(rc, nil, 200, "", time.Now())
 	svc.recordTerminal(rc)
 
@@ -389,13 +388,12 @@ func TestFinalizeCompressCostSavedZeroWhenPricingUnknown(t *testing.T) {
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
 	rc := &Exchange{
-		requestID:                    "req-unknown-price-1",
-		apiKeyID:                     apiKey.ID,
-		compressEstimatedTokensSaved: 5000, // large, but no usage to price it
-		compressorsApplied:           []string{"whitespace"},
+		requestID: "req-unknown-price-1",
+		apiKeyID:  apiKey.ID,
 		// Usage and Candidate are nil — pricing is unknown, and crucially
 		// Attempts is empty (pre-relay rejection).
 	}
+	seedCompressionSaved(rc, 5000, "whitespace") // large, but no usage to price it
 	rc.bodies.SetCompressedRequest([]byte(`{"model":"gpt-4o"}`))
 	svc.finalize(rc, nil, http.StatusInternalServerError, "no_candidate", time.Now())
 	svc.recordTerminal(rc)
@@ -436,13 +434,12 @@ func TestFinalizeCompressPhantomSavingsZeroedOnPreRelayRejection(t *testing.T) {
 	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
 
 	rc := &Exchange{
-		requestID:                    "req-phantom-1",
-		apiKeyID:                     apiKey.ID,
-		compressEstimatedTokensSaved: 1500,
-		compressorsApplied:           []string{"whitespace", "log"},
+		requestID: "req-phantom-1",
+		apiKeyID:  apiKey.ID,
 		// No Attempts — simulates a pre-relay rejection (e.g. no routable
 		// candidate after compression already ran on the caller body).
 	}
+	seedCompressionSaved(rc, 1500, "whitespace", "log")
 	rc.bodies.SetCompressedRequest([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
 	// 503 = no routable candidate, the most common post-compress pre-relay path.
 	svc.finalize(rc, nil, http.StatusServiceUnavailable, "no_enabled_candidate", time.Now())

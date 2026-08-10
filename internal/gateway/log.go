@@ -144,6 +144,26 @@ func usageIsCoherent(u *Usage) bool {
 	return !u.toIRUsage().IsIncoherent()
 }
 
+// compressTokensSaved reads the input-compression estimate back off the
+// timeline.
+//
+// Pricing it needs the count, and only the kernel knows the rate — but the
+// count belongs to whichever capability did the shrinking, and it arrives the
+// same way every other capability observation does. Reading it here, from the
+// one record that carries it, is what keeps the priced saving and the audit
+// row describing the same pass: they are two readings of a single report
+// rather than two fields that can drift apart.
+//
+// Zero when nothing compressed, which prices to nothing.
+func compressTokensSaved(t fact.Timeline) int {
+	for _, e := range t.All() {
+		if rec, ok := e.Record.(fact.TokensSaved); ok {
+			return rec.EstimatedTokens
+		}
+	}
+	return 0
+}
+
 // computeCost returns the cost breakdown in integer micros (major-unit × 1e6,
 // i.e. CNY to 6 decimal places) and whether the cost is "known".
 // Unknown = usage missing — the row records cost_micros=0 with
@@ -264,7 +284,7 @@ func (s *Service) finalize(rc *Exchange, usage *Usage, statusCode int, failReaso
 	// net reading simply stays inclusive and is rejected as incoherent, exactly
 	// as it was before.
 	normalizeCacheConvention(usage)
-	cost := computeCost(rc.attempt.Candidate(), usage, rc.compressEstimatedTokensSaved)
+	cost := computeCost(rc.attempt.Candidate(), usage, compressTokensSaved(rc.timeline))
 
 	billedUsage := s.reportUsage(rc, usage, sink)
 	sink.Note(fact.CostComputed{
@@ -275,12 +295,6 @@ func (s *Service) finalize(rc *Exchange, usage *Usage, statusCode int, failReaso
 		CompressCostSavedMicros: cost.CompressCostSavedMicros,
 	})
 	sink.Note(attemptsRecord(rc))
-	if rc.compressEstimatedTokensSaved > 0 || len(rc.compressorsApplied) > 0 {
-		sink.Note(fact.TokensSaved{
-			Compressors:     rc.compressorsApplied,
-			EstimatedTokens: rc.compressEstimatedTokensSaved,
-		})
-	}
 
 	// Charging happens here rather than in a recorder: what the caller is billed
 	// is not an audit concern, and a deployment that swapped out its audit trail

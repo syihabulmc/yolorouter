@@ -518,10 +518,23 @@ func (v Resolved) CallerFacing(upstreamStatus int, upstreamErrType string) (int,
 // than inventing a specific one, because guessing a status is how a rate limit
 // ends up reported as a server fault.
 func AdmissionRejectionResponse(v Resolved) (status int, errType string) {
+	return PreDispatchRejectionResponse(v, http.StatusTooManyRequests, ErrTypeRateLimit)
+}
+
+// PreDispatchRejectionResponse is the same reading for any refusal raised
+// before an upstream exists, with the fallback supplied by the caller.
+//
+// The fallback is a parameter because it is the one part that cannot be shared:
+// what a verdict without a fixed status should degrade to depends entirely on
+// what refused. An admission that expressed nothing is a rate limit; a rewriter
+// that could not produce a sendable body is a fault on this side of the wire,
+// and reporting that as a rate limit would tell the caller to retry something
+// no amount of waiting will fix.
+func PreDispatchRejectionResponse(v Resolved, fallbackStatus int, fallbackErrType string) (status int, errType string) {
 	if v.Status == StatusFixed && v.Code != 0 {
 		return v.Code, v.ErrType
 	}
-	return http.StatusTooManyRequests, ErrTypeRateLimit
+	return fallbackStatus, fallbackErrType
 }
 
 // adoptVerdict takes the whole caller-facing verdict from one fact.

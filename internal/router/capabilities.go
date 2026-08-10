@@ -3,6 +3,7 @@ package router
 import (
 	"gorm.io/gorm"
 
+	"github.com/yolorouter/yolorouter/internal/capability/compress"
 	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
 	"github.com/yolorouter/yolorouter/internal/capability/ratelimit"
 	"github.com/yolorouter/yolorouter/internal/capability/requestlog"
@@ -24,6 +25,8 @@ import (
 // decoration — it is acquisition order, and therefore the reverse of
 // compensation order.
 func registerCapabilities(svc *gateway.Service, db *gorm.DB) {
+	gateway.RegisterIngressRewriter(svc, compress.New(), gateway.StageCompress,
+		func(e *gateway.Exchange) compress.View { return e })
 	gateway.RegisterUpstreamErrorObserver(svc, contentinspect.New(),
 		func(e *gateway.Exchange) contentinspect.View { return e })
 	gateway.RegisterEgressRewriter(svc, systemprompt.New(), gateway.StageCustomPrompt,

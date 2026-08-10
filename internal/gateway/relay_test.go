@@ -19,11 +19,13 @@ import (
 
 	ycrypto "github.com/yolorouter/yolorouter/pkg/crypto"
 
+	compresscap "github.com/yolorouter/yolorouter/internal/capability/compress"
 	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
 	"github.com/yolorouter/yolorouter/internal/capability/ratelimit"
 	"github.com/yolorouter/yolorouter/internal/capability/requestlog"
 	"github.com/yolorouter/yolorouter/internal/capability/systemprompt"
 	"github.com/yolorouter/yolorouter/internal/config"
+	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/settings"
@@ -141,6 +143,8 @@ func newSvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProv
 	// capabilities at all, which is the point of the split — so a test that
 	// expects capability-driven behaviour has to wire that capability in, just
 	// as production does.
+	RegisterIngressRewriter(svc, compresscap.New(), StageCompress,
+		func(e *Exchange) compresscap.View { return e })
 	RegisterUpstreamErrorObserver(svc, contentinspect.New(),
 		func(e *Exchange) contentinspect.View { return e })
 	RegisterEgressRewriter(svc, systemprompt.New(), StageCustomPrompt,
@@ -150,6 +154,44 @@ func newSvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProv
 	RegisterRecorder(svc, requestlog.New(db), func(e *Exchange) requestlog.View { return e })
 	svcLimiters.Store(svc, lim)
 	return svc
+}
+
+// compressionOn reads what the compression pass reported, the same way the
+// audit row does. The kernel holds no fields for it any more: a test that
+// asserted on those was asserting on the kernel's bookkeeping, and this asserts
+// on what the capability actually said.
+func compressionOn(rc *Exchange) (saved fact.TokensSaved, skipReason string, ran bool) {
+	for _, e := range rc.timeline.All() {
+		switch rec := e.Record.(type) {
+		case fact.TokensSaved:
+			// Named field by field rather than copied wholesale: a record this
+			// helper only half-reads would let a test pass on a saving that
+			// lost half of what was reported.
+			saved = fact.TokensSaved{Compressors: rec.Compressors, EstimatedTokens: rec.EstimatedTokens}
+			ran = true
+		case fact.CompressionSkipped:
+			skipReason, ran = rec.Reason, true
+		}
+	}
+	return saved, skipReason, ran
+}
+
+// seedCompressionSaved puts on the timeline what a successful compression pass
+// would have reported, so a finalize test can price a saving without standing
+// up the capability and a body it can actually shrink.
+func seedCompressionSaved(rc *Exchange, tokens int, compressors ...string) {
+	rc.timeline.Append(fact.Entry{
+		Reporter: "compress",
+		Record:   fact.TokensSaved{EstimatedTokens: tokens, Compressors: compressors},
+	})
+}
+
+// seedCompressionSkipped is the same shim for a pass that declined.
+func seedCompressionSkipped(rc *Exchange, reason string) {
+	rc.timeline.Append(fact.Entry{
+		Reporter: "compress",
+		Record:   fact.CompressionSkipped{Reason: reason},
+	})
 }
 
 // svcLimiters lets a test reach the limiter its fixture registered. The kernel
@@ -1349,14 +1391,18 @@ func TestCompressTriggersAcrossProtocols(t *testing.T) {
 				t.Errorf("compressed body (%d bytes) is not shorter than original (%d bytes)",
 					len(captured.CompressedRequestBody()), len(origBody))
 			}
-			if captured.compressEstimatedTokensSaved <= 0 {
-				t.Error("CompressEstimatedTokensSaved should be positive")
+			saved, skipReason, ran := compressionOn(captured)
+			if !ran {
+				t.Fatal("no compression record reached the timeline — the capability never ran")
 			}
-			if len(captured.compressorsApplied) == 0 {
-				t.Error("CompressorsApplied should not be empty")
+			if saved.EstimatedTokens <= 0 {
+				t.Error("reported tokens saved should be positive")
 			}
-			if captured.compressSkipReason != "" {
-				t.Errorf("CompressSkipReason = %q, want empty (compression applied)", captured.compressSkipReason)
+			if len(saved.Compressors) == 0 {
+				t.Error("reported compressors should not be empty")
+			}
+			if skipReason != "" {
+				t.Errorf("skip reason = %q, want empty (compression applied)", skipReason)
 			}
 		})
 	}
@@ -1400,8 +1446,8 @@ func TestCompressSkipsNoLiveZone(t *testing.T) {
 	if captured.CompressedRequestBody() != nil {
 		t.Error("RequestBodyCompressed should be nil when the engine skips")
 	}
-	if captured.compressSkipReason != "no_live_zone" {
-		t.Errorf("CompressSkipReason = %q, want %q", captured.compressSkipReason, "no_live_zone")
+	if _, skipReason, _ := compressionOn(captured); skipReason != "no_live_zone" {
+		t.Errorf("skip reason = %q, want %q", skipReason, "no_live_zone")
 	}
 }
 
@@ -1443,8 +1489,8 @@ func TestCompressDisabledBySwitch(t *testing.T) {
 	if captured.CompressedRequestBody() != nil {
 		t.Error("RequestBodyCompressed should be nil when compression is off")
 	}
-	if captured.compressSkipReason != "" {
-		t.Errorf("CompressSkipReason = %q, want empty (compression never attempted)", captured.compressSkipReason)
+	if _, _, ran := compressionOn(captured); ran {
+		t.Error("a compression record reached the timeline, but compression was never attempted")
 	}
 }
 
@@ -1490,8 +1536,8 @@ func TestCompressNonChatEndpointNotCompressed(t *testing.T) {
 	if captured.CompressedRequestBody() != nil {
 		t.Error("RequestBodyCompressed should be nil — non-chat endpoints are not compressed")
 	}
-	if captured.compressSkipReason != "" {
-		t.Errorf("CompressSkipReason = %q, want empty (gate never entered)", captured.compressSkipReason)
+	if _, _, ran := compressionOn(captured); ran {
+		t.Error("a compression record reached the timeline, but the gate was never entered")
 	}
 }
 
@@ -1536,8 +1582,8 @@ func TestCompressFailOpenProceeds(t *testing.T) {
 	if captured.CompressedRequestBody() != nil {
 		t.Error("RequestBodyCompressed should be nil when the engine skips")
 	}
-	if captured.compressSkipReason == "" {
-		t.Error("CompressSkipReason should record why the engine skipped")
+	if _, skipReason, _ := compressionOn(captured); skipReason == "" {
+		t.Error("the skipped pass should have reported why")
 	}
 	// The original body content reaches upstream unchanged.
 	if !bytes.Contains(upstreamBody, []byte("hello world")) {

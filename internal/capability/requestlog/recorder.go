@@ -43,8 +43,6 @@ type View interface {
 	IngressPath() string
 	UpstreamURL() string
 
-	CompressSkipReason() string
-
 	RequestHeaders() []byte
 	RequestBody() []byte
 	CompressedRequestBody() []byte
@@ -108,7 +106,7 @@ func (r *Recorder) Record(ctx context.Context, view View, out fact.Outcome, tl f
 		CacheWriteExtraMicros:            s.cacheWriteExtraMicros,
 		CompressEstimatedTokensSaved:     tokensSaved,
 		CompressEstimatedCostSavedMicros: costSaved,
-		CompressSkipReason:               view.CompressSkipReason(),
+		CompressSkipReason:               s.compressSkipReason,
 		CompressorsApplied:               compressors,
 		RequestPath:                      view.IngressPath(),
 		UpstreamURL:                      view.UpstreamURL(),
@@ -155,6 +153,7 @@ type summary struct {
 	compressCostSavedMicros           int64
 	compressTokensSaved               int
 	compressorsApplied                string
+	compressSkipReason                string
 	attempts                          int
 	attemptsDetail                    string
 	// overflow holds every record this build has no column for, so it is
@@ -270,6 +269,8 @@ func summarise(tl fact.Timeline) summary {
 		case fact.TokensSaved:
 			s.compressTokensSaved = rec.EstimatedTokens
 			s.compressorsApplied = joinCompressors(rec.Compressors)
+		case fact.CompressionSkipped:
+			s.compressSkipReason = rec.Reason
 		case fact.AttemptsRecorded:
 			s.attempts = rec.Count
 			s.attemptsDetail = rec.Detail

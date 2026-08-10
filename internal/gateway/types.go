@@ -48,20 +48,12 @@ type Exchange struct {
 	customSystemPromptEnabled bool
 	customSystemPrompt        string
 	// compressEnabled is the two-level-resolved input-compression switch for
-	// this request. When true and the ingress path is a chat endpoint, the
-	// caller's body is run through the compress engine before relay.
+	// this request. The kernel resolves it because it is configuration, not an
+	// observation; what the capability does with it is the capability's own
+	// business, and everything that pass produces comes back as a record on
+	// the timeline rather than as fields here.
 	compressEnabled bool
-	// compressSkipReason records why compression was skipped (when it was
-	// enabled but the engine returned Skipped=true). Empty when compression
-	// was disabled, applied successfully, or never attempted.
-	compressSkipReason string
-	// compressEstimatedTokensSaved / CompressorsApplied record the outcome of
-	// a successful compression pass; the compressed body itself lives in the
-	// bodies capture (what admission is handed and the payload encodes from,
-	// while the verbatim caller body stays for the audit row).
-	compressEstimatedTokensSaved int
-	compressorsApplied           []string
-	apiKeyID                     uint
+	apiKeyID        uint
 	// concurrencyLimit / rpmLimit are the caller's allowance, resolved once
 	// from the key. Zero means unlimited, which is also what an absent limit
 	// means — the distinction has no consumer, so it is not preserved.
@@ -257,8 +249,11 @@ func (rc *Exchange) ProviderID() *uint {
 	return &id
 }
 
-// CompressSkipReason says why compression declined, empty when it did not.
-func (rc *Exchange) CompressSkipReason() string { return rc.compressSkipReason }
+// CompressEnabled is the resolved input-compression switch for this request.
+func (rc *Exchange) CompressEnabled() bool { return rc.compressEnabled }
+
+// IngressProtocol is the wire protocol of the caller's request path.
+func (rc *Exchange) IngressProtocol() protocols.ProtocolID { return rc.ingress }
 
 // RequestHeaders is the masked header capture.
 func (rc *Exchange) RequestHeaders() []byte { return rc.requestHeaders }
