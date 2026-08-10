@@ -30,4 +30,18 @@ type Outcome struct {
 	Attempts    int
 	Delivered   bool
 	UpstreamURL string
+	// Usage is the billed usage the exchange settled on, nil when nothing
+	// billable was delivered. This is the field a Release acts on: usage
+	// present means the reservation settles into the actual charge, absent
+	// means there is nothing to book and the reservation is reversed. It is
+	// the settled copy — the same counts the audit row persists — so a
+	// capability settling from it cannot disagree with the books.
+	Usage *UsageReported
+	// CostMicros is the priced cost of that usage in millionths of the
+	// account currency, meaningful only when CostKnown. CostKnown false
+	// means the exchange could not be priced — no usage, or no price on the
+	// candidate — which is a different claim from a known zero-cost
+	// exchange, and one a settlement must not bill as free.
+	CostMicros int64
+	CostKnown  bool
 }

@@ -667,6 +667,21 @@ func isolateDelivery(d fact.Delivery) fact.Delivery {
 	return d
 }
 
+// isolateOutcome returns a copy whose usage a capability cannot write through.
+//
+// Outcome travels by value, but Usage is a pointer to the settled record — the
+// same one the audit row persists. Releases and recorders run in a chain over
+// the same outcome; one that adjusted the counts it was shown would change what
+// every callback after it settles from, and would rewrite the books themselves,
+// all through a shape documented as an immutable snapshot.
+func isolateOutcome(out fact.Outcome) fact.Outcome {
+	if out.Usage != nil {
+		usage := *out.Usage
+		out.Usage = &usage
+	}
+	return out
+}
+
 // AdmissionOf gates one exchange before any upstream work, and releases
 // whatever it took once the exchange is over.
 //
@@ -828,7 +843,7 @@ func (s *Service) releaseAdmissions(ctx context.Context, rc *Exchange, held []he
 						zap.Any("panic", v))
 				}
 			}()
-			held[i].by.release(ticketCtx, rc, held[i].ticket, out, sink)
+			held[i].by.release(ticketCtx, rc, held[i].ticket, isolateOutcome(out), sink)
 		}()
 		cancel()
 	}
@@ -921,7 +936,7 @@ func (s *Service) runRecorders(ctx context.Context, rc *Exchange, out fact.Outco
 						zap.Any("panic", v))
 				}
 			}()
-			r.record(ctx, rc, out, rc.timeline)
+			r.record(ctx, rc, isolateOutcome(out), rc.timeline)
 		}()
 	}
 }

@@ -21,39 +21,36 @@ import (
 //
 // WHAT IS ACTUALLY EXECUTED TODAY
 //
-// The table's Loop effect is executed wherever a decision is resolved:
+// Every effect the table can express has an executor:
 //
-//   - The admission refusal path reads Status/Code/ErrType to build the
-//     response a rejected caller sees.
-//   - The egress rewrite path skips the candidate when the verdict asks for
-//     LoopNextCandidate or stronger.
-//   - The non-2xx branch of the attempt loop routes on the resolved Loop —
-//     rotate, fail over, or terminate all come out of the table. The kernel is
-//     itself a reporter there: when no registered observer expressed a routing
-//     opinion, it files its own reading of the status line as a baseline fact,
-//     so the routing is table-driven however the judgement was reached. Sticky
-//     is executed on the same path.
+//   - Loop routes the chain wherever a decision is resolved: the admission
+//     refusal path reads Status/Code/ErrType, the egress rewrite path skips a
+//     candidate on LoopNextCandidate or stronger, and the non-2xx branch of
+//     the attempt loop routes on the resolved Loop — rotate, fail over,
+//     terminate, or re-send a repaired body to the same candidate. The kernel
+//     is itself a reporter there: when no observer expressed a routing
+//     opinion, its own reading of the status line is the baseline fact.
+//     LoopRetrySameCandidate executes only when a failure rewriter produced
+//     the body to re-send AND the status is one a payload repair can address;
+//     otherwise it is logged and the baseline routes.
+//   - Sticky is held by the attempt state and quoted by the exhausted-chain
+//     terminal.
+//   - Budget is a spend ledger on the exchange, charged at the two structural
+//     events the rows price uniformly — a dispatch spends an attempt, a
+//     candidate abandoned before dispatch spends a probe — and the relay's
+//     loops stop when either budget is gone.
+//   - Circuit is booked against the per-provider breaker: hard penalties
+//     count toward opening it, soft ones count half, resets record health,
+//     and the candidate loop consults it before spending work.
+//   - Settle is operationalised through fact.Outcome rather than branched on:
+//     the settlement seam puts the billed usage and priced cost on the one
+//     outcome every Release reads, and usage present-vs-absent is the
+//     settle-vs-reverse distinction the rows describe. No kernel code reads
+//     the SettleEffect enum itself; the column documents, per row, what the
+//     seam's contract produces.
 //
-// Two gaps remain:
-//
-//   - LoopRetrySameCandidate executes only when a failure rewriter produced a
-//     repaired body to re-send. Resolved with no body behind it, the relay
-//     logs the verdict and routes by the kernel's own reading of the status
-//     instead — there is nothing to dispatch.
-//   - Circuit and Settle are described here and NOT executed: the rows fill
-//     them, Combine folds them, and no kernel code acts on them yet. Budget
-//     IS executed: the exchange keeps a spend ledger charged at the two
-//     structural events the rows price uniformly — a dispatch spends an
-//     attempt, a candidate abandoned before dispatch spends a probe — and
-//     the relay's loops stop when either budget is gone.
-//
-// This is written down rather than left to be discovered because the gap is
-// invisible from the table itself: a row exists, the completeness test passes,
-// and a capability reporting that Kind gets nothing. A verdict the relay
-// cannot act on is logged as unexecuted rather than dropped, so the gap is at
-// least noisy. Do not add a capability that depends on an unexecuted effect
-// before its executor exists — it will compile, pass its own tests, and do
-// nothing.
+// A verdict the relay cannot act on — a retry-same with nothing to re-send —
+// is logged as unexecuted rather than dropped, so a gap is at least noisy.
 
 // Caller-facing error "type" values (each failure class maps to one of
 // these). They are the vocabulary the table's StatusFixed rows speak and the

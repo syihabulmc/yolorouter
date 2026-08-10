@@ -266,7 +266,7 @@ func (s *Service) finalize(rc *Exchange, usage *Usage, statusCode int, failReaso
 	normalizeCacheConvention(usage)
 	cost := computeCost(rc.attempt.Candidate(), usage, rc.compressEstimatedTokensSaved)
 
-	s.reportUsage(rc, usage, sink)
+	billedUsage := s.reportUsage(rc, usage, sink)
 	sink.Note(fact.CostComputed{
 		Known:                   cost.Known,
 		Micros:                  cost.CostMicros,
@@ -309,6 +309,13 @@ func (s *Service) finalize(rc *Exchange, usage *Usage, statusCode int, failReaso
 		Attempts:    len(rc.attempts),
 		Delivered:   rc.firstByteSent,
 		UpstreamURL: rc.attempt.UpstreamURL(),
+		// The settlement half: what the exchange is billed as, from the same
+		// records the audit trail keeps. Usage nil (nothing billable
+		// delivered, or counts too incoherent to bill) is what a Release
+		// reverses on; usage present is what it settles.
+		Usage:      billedUsage,
+		CostMicros: cost.CostMicros,
+		CostKnown:  cost.Known,
 	}
 	rc.outcomeSettled = true
 }
@@ -336,9 +343,9 @@ func (s *Service) recordTerminal(rc *Exchange) {
 // negative or impossible count poisons every SUM() the dashboard runs, and the
 // same rejection is applied to pricing, so the stored counts can never disagree
 // with the billing decision.
-func (s *Service) reportUsage(rc *Exchange, usage *Usage, sink fact.Sink) {
+func (s *Service) reportUsage(rc *Exchange, usage *Usage, sink fact.Sink) *fact.UsageReported {
 	if usage == nil {
-		return
+		return nil
 	}
 	if !usageIsCoherent(usage) {
 		logger.Warn("gateway: upstream reported incoherent token usage, counts dropped",
@@ -348,12 +355,12 @@ func (s *Service) reportUsage(rc *Exchange, usage *Usage, sink fact.Sink) {
 			zap.Int("cache_read_tokens", usage.CacheReadTokens),
 			zap.Int("cache_write_tokens", usage.CacheWriteTokens))
 		sink.Note(fact.UsageIncoherent{Reason: "upstream counts do not corroborate each other"})
-		return
+		return nil
 	}
 	// The NET input (cache excluded) is what is persisted, so every
 	// SUM(input_tokens) shares one convention across protocols and cache tokens
 	// stay in their own columns.
-	sink.Note(fact.UsageReported{
+	billed := fact.UsageReported{
 		Unit:       fact.UnitToken,
 		Source:     fact.UsageFromUpstream,
 		Prompt:     netPromptTokens(usage),
@@ -367,7 +374,12 @@ func (s *Service) reportUsage(rc *Exchange, usage *Usage, sink fact.Sink) {
 		// is gone by the time anyone could ask again. A record that omits them
 		// is a record that says none happened.
 		WebSearchCount: usage.WebSearchCount,
-	})
+	}
+	sink.Note(billed)
+	// Returned as well as noted, and it is the SAME record on purpose: the
+	// outcome the admission releases settle from must not be able to disagree
+	// with the row the audit trail persists.
+	return &billed
 }
 
 // attemptsRecord carries the attempt count and, when anything ran, its detail.
