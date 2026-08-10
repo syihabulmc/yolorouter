@@ -11,8 +11,9 @@
     <div class="auth-hero-warp">
       <img :src="loginBg" alt="" class="auth-hero-placeholder">
       <div class="auth-hero">
-        <img class="auth-hero-logo" :src="logo2" alt="" width="380" />
-        <img class="auth-hero-logo-mark" :src="titleImage" alt="" width="225" />
+        <!-- <img class="auth-hero-logo" :src="logo2" alt="" width="362" /> -->
+        <!-- <img class="auth-hero-logo-mark" :src="titleImage" alt="" width="225" /> -->
+         <img class="auth-hero-logo-mark" :src="logo2" alt="" width="225">
         <div>
           <div class="auth-hero-title">{{ t("auth.brandTagline") }}</div>
           <div class="auth-hero-subtitle">
@@ -63,11 +64,10 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 import LocaleSwitcher from "./LocaleSwitcher.vue";
-import logo2 from "../assets/logo-2.png";
+import logo2 from "../assets/logo-title.png";
 import logo3 from "../assets/logo-3.png";
 import banner from "../assets/banner.png";
 import loginBg from "../assets/login-bg.png";
-import titleImage from "../assets/title.png";
 import titleBlack from "../assets/title-black.png";
 
 defineProps<{ title: string; subtitle: string }>();
@@ -117,7 +117,7 @@ const { t } = useI18n();
   margin-bottom: 10px;
 }
 .auth-hero-logo-mark {
-  margin-top: -100px;
+  margin-bottom: 10px;
 }
 .auth-hero-title {
   font-size: 36px;
