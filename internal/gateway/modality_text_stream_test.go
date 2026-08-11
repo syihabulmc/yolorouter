@@ -80,8 +80,11 @@ func runStream(t *testing.T, ingress, egress protocols.ProtocolID, passthrough b
 		t.Fatalf("PrepareUpstream = %v", err)
 	}
 
-	rc := &Exchange{requestID: streamRequestID, ingress: ingress, isStream: true}
-	tools, release := (&Service{}).newDeliveryTools(c, rc, TransferLimits{}, true)
+	// originalModel comes from the payload's routing intent, the way Handle
+	// sets it; the codec wrappers the router registers read it from there.
+	rc := &Exchange{requestID: streamRequestID, ingress: ingress, isStream: true,
+		originalModel: payload.Routing().Model}
+	tools, release := serviceAsAssembled().newDeliveryTools(c, rc, TransferLimits{}, true)
 	d := payload.Deliver(tools, resp)
 	// The kernel takes the toolbox back before anything reads the audit trail:
 	// that is when an empty capture is removed and the file is closed, and a test

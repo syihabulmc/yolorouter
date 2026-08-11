@@ -844,6 +844,155 @@ func isolateOutcome(out fact.Outcome) fact.Outcome {
 	return out
 }
 
+// ResponseCodecWrapperOf decorates the encoders that turn an upstream response
+// back into the caller's own protocol. A capability is handed an encoder and
+// returns an encoder; it never sees the connection, the writer, or a byte.
+//
+// That boundary is the whole shape. Deciding what a response says is a
+// capability's business; deciding whether the caller received it is not, and
+// the kernel keeps the parts that answer the second question — flushing, what
+// has already been committed, and how a failed write is classified. A wrapper
+// that could reach those could turn "the caller hung up" into "we served them".
+//
+// It applies only where a response is converted between protocols. A request
+// forwarded to a provider speaking the caller's own protocol is relayed as
+// bytes, with no encoder to wrap: there is nothing here for a capability to
+// decorate, and the kernel rewrites those bytes itself.
+//
+// Applies is asked once per attempt rather than per frame. A stream can carry
+// hundreds of events and a question answered identically for all of them
+// belongs outside the loop.
+type ResponseCodecWrapperOf[V any] interface {
+	Name() string
+	Applies(view V) bool
+	WrapResponseEncoder(view V, enc protocols.ResponseEncoder, sink fact.Sink) protocols.ResponseEncoder
+	WrapStreamEncoder(view V, enc protocols.StreamEncoder, sink fact.Sink) protocols.StreamEncoder
+}
+
+// CodecStage fixes the order wrappers are applied in, supplied at registration
+// for the same reason the rewriter stages are: where something sits in a chain
+// is a property of the chain, not of the thing sitting in it.
+type CodecStage uint8
+
+const (
+	// StageModelName puts the caller's own model name back. It wraps closest
+	// to the encoder so that anything added later sees the name the caller
+	// will actually read.
+	StageModelName CodecStage = 10
+)
+
+// responseCodecWrapper is the kernel-side, view-erased form.
+type responseCodecWrapper interface {
+	name() string
+	stage() CodecStage
+	applies(e *Exchange) bool
+	wrapResponse(e *Exchange, enc protocols.ResponseEncoder, sink fact.Sink) protocols.ResponseEncoder
+	wrapStream(e *Exchange, enc protocols.StreamEncoder, sink fact.Sink) protocols.StreamEncoder
+}
+
+type responseCodecWrapperAdapter[V any] struct {
+	inner   ResponseCodecWrapperOf[V]
+	bind    func(*Exchange) V
+	atStage CodecStage
+	// Captured at registration; see the field note on
+	// upstreamErrorObserverAdapter.
+	registeredName string
+}
+
+func (a responseCodecWrapperAdapter[V]) name() string      { return a.registeredName }
+func (a responseCodecWrapperAdapter[V]) stage() CodecStage { return a.atStage }
+
+func (a responseCodecWrapperAdapter[V]) applies(e *Exchange) bool { return a.inner.Applies(a.bind(e)) }
+
+func (a responseCodecWrapperAdapter[V]) wrapResponse(e *Exchange, enc protocols.ResponseEncoder, sink fact.Sink) protocols.ResponseEncoder {
+	return a.inner.WrapResponseEncoder(a.bind(e), enc, sink)
+}
+
+func (a responseCodecWrapperAdapter[V]) wrapStream(e *Exchange, enc protocols.StreamEncoder, sink fact.Sink) protocols.StreamEncoder {
+	return a.inner.WrapStreamEncoder(a.bind(e), enc, sink)
+}
+
+// RegisterResponseCodecWrapper wires a wrapper into the service, keeping the
+// slice ordered by stage. Two wrappers claiming one stage is a programming
+// error and panics at startup rather than resolving to registration order.
+func RegisterResponseCodecWrapper[V any](s *Service, w ResponseCodecWrapperOf[V], at CodecStage, bind func(*Exchange) V) {
+	adapter := responseCodecWrapperAdapter[V]{inner: w, bind: bind, atStage: at, registeredName: w.Name()}
+	for _, existing := range s.responseCodecWrappers {
+		if existing.stage() == adapter.stage() {
+			panic(fmt.Sprintf("gateway: codec stage %d claimed by both %q and %q",
+				at, existing.name(), adapter.name()))
+		}
+	}
+	s.responseCodecWrappers = append(s.responseCodecWrappers, adapter)
+	sort.Slice(s.responseCodecWrappers, func(i, j int) bool {
+		return s.responseCodecWrappers[i].stage() < s.responseCodecWrappers[j].stage()
+	})
+}
+
+// ResponseCodecs is what a modality is handed to decorate the encoders it
+// builds for a converted response.
+//
+// A value rather than an interface, so the zero value works: a toolbox built
+// without one wraps nothing, which is what a service with no wrappers
+// registered should do anyway. A nil interface here would instead be a panic on
+// the delivery path.
+type ResponseCodecs struct {
+	wrappers []responseCodecWrapper
+	exchange *Exchange
+}
+
+// WrapResponse returns the encoder to use for a non-streaming response.
+func (c ResponseCodecs) WrapResponse(enc protocols.ResponseEncoder) protocols.ResponseEncoder {
+	base := c.newSink()
+	for _, w := range c.wrappers {
+		if !w.applies(c.exchange) {
+			continue
+		}
+		if wrapped := w.wrapResponse(c.exchange, enc, base.forObserver(w.name())); wrapped != nil {
+			enc = wrapped
+		}
+	}
+	return enc
+}
+
+// WrapStream returns the encoder to use for a streamed response.
+func (c ResponseCodecs) WrapStream(enc protocols.StreamEncoder) protocols.StreamEncoder {
+	base := c.newSink()
+	for _, w := range c.wrappers {
+		if !w.applies(c.exchange) {
+			continue
+		}
+		if wrapped := w.wrapStream(c.exchange, enc, base.forObserver(w.name())); wrapped != nil {
+			enc = wrapped
+		}
+	}
+	return enc
+}
+
+// newSink builds the sink the wrappers report through, one stamped copy per
+// wrapper the way every other shape's is.
+//
+// Provenance is the kernel's to write, not the capability's: a wrapper that
+// named itself could name anything, and a timeline entry with no name at all —
+// which is what handing over an unstamped sink produces — is a fact nobody can
+// trace to the code that reported it.
+//
+// A copy per wrapper rather than one sink re-stamped as the loop advances. This
+// shape hands back an ENCODER, and the natural thing for a wrapper to do with
+// its sink is keep it and report while encoding — which happens long after this
+// loop finished. A shared sink would by then be carrying the last wrapper's
+// name, and every deferred report in the chain would be filed under whoever
+// happened to be wrapped outermost.
+//
+// Built here rather than held on the struct so a delivery with no wrappers, or
+// none that apply, allocates nothing.
+func (c ResponseCodecs) newSink() *exchangeSink {
+	if len(c.wrappers) == 0 {
+		return nil
+	}
+	return newExchangeSink(c.exchange)
+}
+
 // AdmissionOf gates one exchange before any upstream work, and releases
 // whatever it took once the exchange is over.
 //

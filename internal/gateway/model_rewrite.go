@@ -3,7 +3,6 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
-	"slices"
 
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
@@ -27,67 +26,6 @@ func passthroughRequestBody(egressProtocol protocols.ProtocolID, body []byte, pr
 		return body, nil
 	}
 	return rewriteModelField(body, providerModelName)
-}
-
-// modelOverrideResponseEncoder decorates a protocols.ResponseEncoder to force
-// IRResponse.Model to the caller-facing external model name before encoding.
-// The IR decode step (egress side) fills Model from whatever the upstream
-// itself reported — the candidate's provider_model_name for every real
-// provider — which must never reach the client; the passthrough path
-// achieves the same end via RewriteNonStreamResponse's model-field rewrite.
-type modelOverrideResponseEncoder struct {
-	inner protocols.ResponseEncoder
-	model string
-}
-
-func (e modelOverrideResponseEncoder) EncodeResponse(resp *protocols.IRResponse) json.RawMessage {
-	if resp == nil || e.model == "" {
-		return e.inner.EncodeResponse(resp)
-	}
-	// A copy, not an edit. The caller still holds this response, and the name
-	// it carries is the provider's own — which is the right answer for anything
-	// still reasoning about which provider served the request. A wrapper whose
-	// job is to format output does not get to change the input behind them.
-	renamed := *resp
-	renamed.Model = e.model
-	return e.inner.EncodeResponse(&renamed)
-}
-
-// modelOverrideStreamEncoder decorates a protocols.StreamEncoder to force
-// every DeltaMessageStart's Model to the caller-facing external model name
-// before encoding — the streaming counterpart of modelOverrideResponseEncoder
-// above. The egress stream decoder fills DeltaMessageStart.Model from
-// whatever the upstream itself reported (the candidate's
-// provider_model_name), which must never reach the client.
-type modelOverrideStreamEncoder struct {
-	inner protocols.StreamEncoder
-	model string
-}
-
-func (e modelOverrideStreamEncoder) EncodeDeltas(deltas []protocols.IRStreamDelta) []protocols.SSEEvent {
-	if e.model == "" {
-		return e.inner.EncodeDeltas(deltas)
-	}
-	// Cloned for the same reason EncodeResponse copies: writing back into the
-	// caller's slice would rename the frames they still hold. The slice is one
-	// pump iteration's worth of deltas, so the copy costs nothing worth
-	// weighing against a wrapper reaching backwards into its caller.
-	renamed := slices.Clone(deltas)
-	for i, d := range renamed {
-		if ms, ok := d.(protocols.DeltaMessageStart); ok {
-			ms.Model = e.model
-			renamed[i] = ms
-		}
-	}
-	return e.inner.EncodeDeltas(renamed)
-}
-
-func (e modelOverrideStreamEncoder) EncodeDone() []protocols.SSEEvent {
-	return e.inner.EncodeDone()
-}
-
-func (e modelOverrideStreamEncoder) Usage() protocols.IRUsage {
-	return e.inner.Usage()
 }
 
 // ─────────────────── Same-protocol response rewriting ─────────────────────

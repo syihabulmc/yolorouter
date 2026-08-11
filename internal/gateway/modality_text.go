@@ -375,12 +375,10 @@ func (p *textPayload) deliverPassthroughNonStream(tools DeliveryTools, resp *htt
 // re-encodes it into the caller's.
 func (p *textPayload) deliverTranslatedNonStream(tools DeliveryTools, resp *http.Response) fact.Delivery {
 	decoder := codecsFor(p.cand.EgressProtocol).ResponseDecoder
-	// The encoder puts the caller's own model name back: what the upstream
-	// echoes is the provider's name for it, which must never reach the caller.
-	encoder := modelOverrideResponseEncoder{
-		inner: codecsFor(p.ingress).ResponseEncoder,
-		model: p.meta.Model,
-	}
+	// Whatever the kernel's registered wrappers do to this encoder, they do it
+	// here — this is the conversion path, the only one with an encoder to
+	// decorate. Putting the caller's own model name back is one of them.
+	encoder := tools.Codecs.WrapResponse(codecsFor(p.ingress).ResponseEncoder)
 
 	usage, err := protocols.IRNonStreamRelay(
 		tools.Client, resp, decoder, encoder, captureBuffer{capture: tools.Capture}, nil)

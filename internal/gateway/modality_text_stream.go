@@ -147,9 +147,7 @@ func (p *textPayload) deliverTranslatedStream(tools DeliveryTools, resp *http.Re
 			chatEncoder.IncludeUsage = p.meta.WantsStreamUsage
 		}
 	}
-	// The caller's own model name goes back into every event: what the upstream
-	// echoes is the provider's name for it, which must never reach the caller.
-	encoder := modelOverrideStreamEncoder{inner: inner, model: p.meta.Model}
+	encoder := tools.Codecs.WrapStream(inner)
 
 	buf := captureBuffer{capture: tools.Capture}
 	var usage *protocols.IRUsage

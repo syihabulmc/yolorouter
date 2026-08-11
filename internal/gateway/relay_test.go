@@ -22,6 +22,7 @@ import (
 	compresscap "github.com/yolorouter/yolorouter/internal/capability/compress"
 	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
 	"github.com/yolorouter/yolorouter/internal/capability/maxtokens"
+	"github.com/yolorouter/yolorouter/internal/capability/modelname"
 	"github.com/yolorouter/yolorouter/internal/capability/ratelimit"
 	"github.com/yolorouter/yolorouter/internal/capability/requestlog"
 	"github.com/yolorouter/yolorouter/internal/capability/systemprompt"
@@ -150,6 +151,8 @@ func newSvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProv
 		func(e *Exchange) contentinspect.View { return e })
 	RegisterEgressRewriter(svc, systemprompt.New(), StageCustomPrompt,
 		func(e *Exchange) systemprompt.View { return e })
+	RegisterResponseCodecWrapper(svc, modelname.New(), StageModelName,
+		func(e *Exchange) modelname.View { return e })
 	RegisterEgressRewriter(svc, maxtokens.New(), StageMaxTokens,
 		func(e *Exchange) maxtokens.View { return e })
 	lim := ratelimit.NewLimiter()

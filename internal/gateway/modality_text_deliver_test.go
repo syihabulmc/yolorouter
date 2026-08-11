@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yolorouter/yolorouter/internal/capability/modelname"
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
@@ -83,8 +84,11 @@ func runDelivery(t *testing.T, ingress protocols.ProtocolID, egress protocols.Pr
 		ProviderModelName: providerModel, EgressProtocol: egress, Passthrough: passthrough,
 	})
 
-	rc := &Exchange{requestID: "under-test", ingress: ingress}
-	tools, release := (&Service{}).newDeliveryTools(c, rc, TransferLimits{}, false)
+	// Handle sets this from the payload's own routing intent; a modality test
+	// that skipped it would be testing a pairing production never ships.
+	rc := &Exchange{requestID: "under-test", ingress: ingress,
+		originalModel: adm.payload.Routing().Model}
+	tools, release := serviceAsAssembled().newDeliveryTools(c, rc, TransferLimits{}, false)
 	defer release()
 	d := adm.payload.Deliver(tools, resp)
 
@@ -260,7 +264,7 @@ func TestDeliverRefusesABodyOverTheLimit(t *testing.T) {
 	}
 
 	rc := &Exchange{requestID: "too-big"}
-	tools, release := (&Service{}).newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
+	tools, release := serviceAsAssembled().newDeliveryTools(c, rc, TransferLimits{MaxResponseBytes: 8}, false)
 	defer release()
 	d := payload.Deliver(tools, upstreamResponse(t, 200, `{"aaaaaaaaaaaaaaaaaaaa":1}`))
 
@@ -315,7 +319,7 @@ func TestAFailedReadIsBlamedOnWhoeverCausedIt(t *testing.T) {
 			t.Fatalf("PrepareUpstream = %v", err)
 		}
 
-		tools, release := (&Service{}).newDeliveryTools(c, &Exchange{requestID: "read-fail"}, TransferLimits{}, false)
+		tools, release := serviceAsAssembled().newDeliveryTools(c, &Exchange{requestID: "read-fail"}, TransferLimits{}, false)
 		defer release()
 		return payload.Deliver(tools, &http.Response{
 			StatusCode: 200,
@@ -346,4 +350,14 @@ func TestAFailedReadIsBlamedOnWhoeverCausedIt(t *testing.T) {
 			t.Errorf("verdict = %v, want another candidate to be tried", d.Verdict)
 		}
 	})
+}
+
+// serviceAsAssembled is a Service carrying the response codec wrappers the
+// router registers, so a modality test that converts a response sees what
+// production would rather than a bare kernel that renames nothing.
+func serviceAsAssembled() *Service {
+	svc := &Service{}
+	RegisterResponseCodecWrapper(svc, modelname.New(), StageModelName,
+		func(e *Exchange) modelname.View { return e })
+	return svc
 }

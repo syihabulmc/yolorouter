@@ -149,6 +149,12 @@ type Service struct {
 	// registration so no per-request sort is needed.
 	egressRewriters []egressRewriter
 
+	// responseCodecWrappers decorate the encoders that turn a converted
+	// response back into the caller's protocol, ordered by stage at
+	// registration. They reach only the cross-protocol path: a response
+	// relayed in the caller's own protocol has no encoder to wrap.
+	responseCodecWrappers []responseCodecWrapper
+
 	// failureRewriters see a non-2xx upstream response together with the body
 	// that provoked it, and may offer a repaired body. They never decide what
 	// happens next: whether the repair is worth an attempt is the decision

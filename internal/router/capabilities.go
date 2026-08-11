@@ -6,6 +6,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/capability/compress"
 	"github.com/yolorouter/yolorouter/internal/capability/contentinspect"
 	"github.com/yolorouter/yolorouter/internal/capability/maxtokens"
+	"github.com/yolorouter/yolorouter/internal/capability/modelname"
 	"github.com/yolorouter/yolorouter/internal/capability/ratelimit"
 	"github.com/yolorouter/yolorouter/internal/capability/requestlog"
 	"github.com/yolorouter/yolorouter/internal/capability/systemprompt"
@@ -32,6 +33,8 @@ func registerCapabilities(svc *gateway.Service, db *gorm.DB) {
 		func(e *gateway.Exchange) contentinspect.View { return e })
 	gateway.RegisterEgressRewriter(svc, systemprompt.New(), gateway.StageCustomPrompt,
 		func(e *gateway.Exchange) systemprompt.View { return e })
+	gateway.RegisterResponseCodecWrapper(svc, modelname.New(), gateway.StageModelName,
+		func(e *gateway.Exchange) modelname.View { return e })
 	gateway.RegisterEgressRewriter(svc, maxtokens.New(), gateway.StageMaxTokens,
 		func(e *gateway.Exchange) maxtokens.View { return e })
 	gateway.RegisterAdmission(svc, ratelimit.NewLimiter(), gateway.AdmitOnArrival,

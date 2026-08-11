@@ -36,6 +36,11 @@ type DeliveryTools struct {
 	Facts   FactSink
 	Limits  TransferLimits
 	Fetch   SecondaryFetcher
+	// Codecs decorates the encoders this delivery builds when it has to convert
+	// a response into the caller's protocol. A modality passes the encoder it
+	// constructed through it and uses what comes back; the zero value wraps
+	// nothing, so a toolbox built without one is safe to use.
+	Codecs ResponseCodecs
 	// RequestID identifies this request wherever a modality has to name it to
 	// somebody outside. It reaches the caller in the text of an error, so that
 	// what they quote when they report a problem is the same string the logs
@@ -666,6 +671,7 @@ func (s *Service) newDeliveryTools(c *gin.Context, rc *Exchange, want TransferLi
 		Facts:     newExchangeSink(rc),
 		Limits:    limits,
 		Fetch:     &safeFetcher{client: s.secondaryFetchClient(), limit: limits.MaxResponseBytes},
+		Codecs:    ResponseCodecs{wrappers: s.responseCodecWrappers, exchange: rc},
 		RequestID: rc.requestID,
 	}, func() { s.releaseDelivery(c, rc) }
 }
