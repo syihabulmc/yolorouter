@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe, or its own switch — in the order the operator has to fix them.
 - The model list can be filtered by provider, answering "which models route
   through this one" at a glance.
+- A model with no usable route now tells the caller which kind of unusable:
+  "no enabled route" (an operator switched routing off) versus "routes not
+  verified yet" (a probe has not passed). Both were one shared "model is not
+  available".
 - An upstream key that answers 429 with an exhausted-quota body (OpenAI's
   insufficient_quota, or a quota/billing/credit message) is now marked for
   retest and taken out of routing, exactly as a 401 is — previously it kept

@@ -570,14 +570,18 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	}
 	routable, anyEnabled := filterCandidates(allCandidates)
 	if len(routable) == 0 {
-		reason := "no_enabled_candidate"
+		// The two states call for different people: no enabled route is a
+		// configuration an operator switched off, routes pending verification
+		// is a probe that has not passed yet. One shared "not available"
+		// hid that difference from the caller reporting the problem.
+		reason, message := "no_enabled_candidate", "model is not available: no enabled route"
 		if anyEnabled {
-			reason = "no_verified_candidate"
+			reason, message = "no_verified_candidate", "model is not available: routes not verified yet"
 		}
 		// No candidate was usable, so no provider was ever contacted. Blaming
 		// upstream here would point an operator at a provider that had no part
 		// in it; what is actually wrong is on our side of the wire.
-		s.rejectRequest(c, rc, http.StatusServiceUnavailable, errTypeUnavailable, "model is not available", reason, fact.FaultGateway, start)
+		s.rejectRequest(c, rc, http.StatusServiceUnavailable, errTypeUnavailable, message, reason, fact.FaultGateway, start)
 		return
 	}
 

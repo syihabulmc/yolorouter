@@ -2175,3 +2175,46 @@ func TestRelayQuotaExhausted429MarksKeyPlainRateLimitDoesNot(t *testing.T) {
 		})
 	}
 }
+
+// The two ways a model can have no usable route call for different people —
+// re-enabling a switched-off route vs waiting out (or running) verification —
+// so the caller's 503 must say which one it is, not one shared "not
+// available" that hides the difference from whoever reports the problem.
+func TestRelayModelUnavailableSaysWhy(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		enabled     bool
+		verified    int
+		wantMessage string
+	}{
+		{"all routes disabled", false, model.ModelVerificationStatusPassed, "model is not available: no enabled route"},
+		{"enabled but unverified", true, model.ModelVerificationStatusUntested, "model is not available: routes not verified yet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.NewSQLiteDB(t)
+			svc := newSvc(t, db)
+			p := createProvider(t, db, "p1", "http://127.0.0.1:0")
+			createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+			m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+			status := model.ModelCandidateStatusEnabled
+			if !tc.enabled {
+				status = model.ModelCandidateStatusDisabled
+			}
+			if err := db.Model(&model.ModelCandidate{}).Where("model_id = ?", m.ID).
+				Updates(map[string]any{"management_status": status, "verification_status": tc.verified}).Error; err != nil {
+				t.Fatalf("shape candidate: %v", err)
+			}
+			apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+			c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+			svc.Handle(c, apiKey)
+
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503; body = %s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.wantMessage) {
+				t.Fatalf("body = %s, want message %q", w.Body.String(), tc.wantMessage)
+			}
+		})
+	}
+}
