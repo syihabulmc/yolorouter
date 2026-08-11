@@ -153,6 +153,8 @@ export interface ProviderReportRow {
   avg_duration_ms: number
   cost_micros: number
   unknown_cost_calls: number
+  /** Provider-to-provider switches charged to the provider that failed. */
+  failovers: number
 }
 
 export interface CallerReportRow {
@@ -206,10 +208,14 @@ export function getAnalyticsReport(
   dimension: AnalyticsDimension,
   bucket: AnalyticsBucket,
   filter: AnalyticsFilter,
+  opts?: { withFailovers?: boolean },
 ): Promise<ReportResult> {
   const params = buildAnalyticsQuery(filter)
   params.set('dimension', dimension)
   if (dimension === 'time') params.set('bucket', bucket)
+  // Opt-in: failover counts walk every multi-attempt row server-side, so
+  // only the analytics report asks; cost pages reuse this endpoint without.
+  if (opts?.withFailovers) params.set('with_failovers', '1')
   return apiFetch(`/api/admin/analytics/report?${params.toString()}`)
 }
 

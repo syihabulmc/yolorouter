@@ -72,6 +72,11 @@ type AnalyticsFilter struct {
 	// grouping so analytics "today" matches the admin's wall clock. nil
 	// falls back to the server's local zone (location()).
 	Location *time.Location
+	// WithFailovers asks the provider dimension to also compute per-provider
+	// failover counts. Opt-in because the count walks every multi-attempt
+	// row in the window: the analytics report wants it, the cost breakdowns
+	// consuming the same endpoint do not, and they should not pay for it.
+	WithFailovers bool
 }
 
 // location returns the effective timezone for day-bucket aggregation,
@@ -203,6 +208,12 @@ func (s *AnalyticsService) GetReport(dimension, bucket string, filter AnalyticsF
 // failure here returns a JSON envelope, not a truncated CSV reported as
 // success.
 func (s *AnalyticsService) BuildCSVRecords(dimension, bucket string, filter AnalyticsFilter, now time.Time) ([]string, [][]string, error) {
+	// The CSV is the analytics report in file form; its provider sheet has a
+	// failovers column, so the data is always computed here regardless of
+	// what the querying page asked for on screen.
+	if dimension == DimensionProvider {
+		filter.WithFailovers = true
+	}
 	rows, err := s.runReport(dimension, bucket, filter, now)
 	if err != nil {
 		return nil, nil, err
@@ -234,7 +245,14 @@ func (s *AnalyticsService) runReport(dimension, bucket string, filter AnalyticsF
 	case DimensionModel:
 		return repository.AggregateByModel(s.db, rf)
 	case DimensionProvider:
-		return repository.AggregateByProvider(s.db, rf)
+		rows, err := repository.AggregateByProvider(s.db, rf)
+		if err != nil {
+			return nil, err
+		}
+		if filter.WithFailovers {
+			return repository.AttachProviderFailovers(s.db, rf, rows)
+		}
+		return rows, nil
 	case DimensionCaller:
 		return repository.AggregateByCaller(s.db, rf)
 	case DimensionTime:
@@ -315,7 +333,7 @@ func buildCSV(dimension string, rows interface{}) ([]string, [][]string, error) 
 		if !ok {
 			return nil, nil, errCSVTypeMismatch("ProviderReportRow")
 		}
-		headers := []string{"provider_id", "provider_name", "calls", "success_rate", "avg_duration_ms", "cost_micros", "unknown_cost_calls"}
+		headers := []string{"provider_id", "provider_name", "calls", "success_rate", "failovers", "avg_duration_ms", "cost_micros", "unknown_cost_calls"}
 		records := make([][]string, len(typed))
 		for i, r := range typed {
 			records[i] = []string{
@@ -323,6 +341,7 @@ func buildCSV(dimension string, rows interface{}) ([]string, [][]string, error) 
 				r.ProviderName,
 				strconv.FormatInt(r.Calls, 10),
 				formatRate(r.SuccessRate),
+				strconv.FormatInt(r.Failovers, 10),
 				strconv.FormatFloat(r.AvgDurationMs, 'f', 2, 64),
 				strconv.FormatInt(r.CostMicros, 10),
 				strconv.FormatInt(r.UnknownCostCalls, 10),

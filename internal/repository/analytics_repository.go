@@ -20,6 +20,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -99,6 +100,12 @@ type ProviderReportRow struct {
 	AvgDurationMs    float64 `json:"avg_duration_ms" gorm:"column:avg_duration_ms"`
 	CostMicros       int64   `json:"cost_micros" gorm:"column:cost_micros"`
 	UnknownCostCalls int64   `json:"unknown_cost_calls" gorm:"column:unknown_cost_calls"`
+	// Failovers is how many times this provider FAILED a request that a
+	// different provider then picked up — charged to the provider that
+	// failed, not the one that rescued. Computed post-aggregate from the
+	// per-attempt detail, so a provider that always fails away still gets a
+	// row (with zero calls): the report exists to surface exactly that one.
+	Failovers int64 `json:"failovers" gorm:"-"`
 }
 
 func (r *ProviderReportRow) finalizeRate() {
@@ -217,6 +224,108 @@ func AggregateByProvider(db *gorm.DB, f *RequestLogFilter) ([]ProviderReportRow,
 		rows = []ProviderReportRow{}
 	}
 	return rows, nil
+}
+
+// AttachProviderFailovers decorates a provider aggregate with each
+// provider's failover count, synthesizing rows for providers that only
+// appear as failed-away-from. Split from AggregateByProvider because the
+// scan behind it walks every multi-attempt row in the window: the analytics
+// report wants that, the cost breakdowns reuse the same aggregate and never
+// render failovers, and making them pay for the scan — or see zero-only
+// synthesized rows their tables cannot explain — served nobody.
+func AttachProviderFailovers(db *gorm.DB, f *RequestLogFilter, rows []ProviderReportRow) ([]ProviderReportRow, error) {
+	failovers, err := collectProviderFailovers(db, f)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[uint]bool, len(rows))
+	for i := range rows {
+		if rows[i].ProviderID != nil {
+			rows[i].Failovers = failovers[*rows[i].ProviderID]
+			seen[*rows[i].ProviderID] = true
+		}
+	}
+	// A provider every request failed away from serves nothing, so the
+	// grouped aggregate has no row for it — yet it is the row an operator
+	// most needs to see. Give it one, carrying only the failover count. Under
+	// a provider filter, only the filtered provider may gain such a row:
+	// synthesizing others would show providers the filter asked to exclude.
+	appended := false
+	for id, n := range failovers {
+		if !seen[id] {
+			if f.ProviderID != nil && *f.ProviderID != id {
+				continue
+			}
+			rows = append(rows, ProviderReportRow{ProviderID: &id, Failovers: n})
+			appended = true
+		}
+	}
+	if appended {
+		if err := resolveProviderNames(db, rows); err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
+}
+
+// attemptForFailover is the slice of the per-attempt JSON this count reads:
+// which provider tried. The gateway's own attempt record carries the full
+// shape, but this package sits below the gateway and must not import it, so
+// the one field is declared locally.
+type attemptForFailover struct {
+	ProviderID uint `json:"provider_id"`
+}
+
+// collectProviderFailovers charges each provider-to-provider switch to the
+// provider that was switched AWAY from. Key rotation within one provider is
+// not a failover and is not counted; attempts that never reached a provider
+// (id 0) are skipped, so a switch is judged against the next provider that
+// actually tried.
+//
+// The count deliberately ignores the filter's final-provider and status
+// dimensions: a failover is a per-attempt event, and those two describe how
+// the request ENDED. Filtering the source rows by them mis-charges every
+// switch (a report filtered to provider A would count only requests that
+// finished on A — none of which A failed away from) — time, model and key
+// scoping still apply.
+//
+// Only rows with more than one attempt can contain a switch, and those are
+// a small fraction of traffic, so the per-attempt JSON is decoded in Go —
+// one code path for every SQL driver — rather than unnested with
+// driver-specific JSON SQL. The load is unbounded by design: a LIMIT would
+// silently undercount, which is worse than the tens of megabytes a
+// worst-case 90-day retry-heavy window costs.
+func collectProviderFailovers(db *gorm.DB, f *RequestLogFilter) (map[uint]int64, error) {
+	scope := *f
+	scope.ProviderID = nil
+	scope.StatusClass = ""
+	var details []string
+	if err := scope.applyFilter(db).
+		Where("attempts > 1 AND attempts_detail IS NOT NULL").
+		Pluck("attempts_detail", &details).Error; err != nil {
+		return nil, err
+	}
+	counts := make(map[uint]int64)
+	for _, raw := range details {
+		var attempts []attemptForFailover
+		// A row this build cannot parse contributes nothing — the count is
+		// an aggregate, and failing the whole report over one malformed row
+		// would trade a metric for an outage.
+		if err := json.Unmarshal([]byte(raw), &attempts); err != nil {
+			continue
+		}
+		last := uint(0)
+		for _, a := range attempts {
+			if a.ProviderID == 0 {
+				continue
+			}
+			if last != 0 && a.ProviderID != last {
+				counts[last]++
+			}
+			last = a.ProviderID
+		}
+	}
+	return counts, nil
 }
 
 // resolveProviderNames populates ProviderName via a single batched SELECT

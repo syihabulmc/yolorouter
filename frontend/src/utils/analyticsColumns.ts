@@ -108,3 +108,17 @@ export function avgDurationColumn<T extends { avg_duration_ms: number }>(
     render: (r: T) => `${r.avg_duration_ms.toFixed(0)}ms`,
   }
 }
+
+// failoversColumn is provider-report-only, like avgDurationColumn: the
+// narrowed generic keeps it in this file so a metric column change still
+// lands in one place.
+export function failoversColumn<T extends MetricRow & { failovers: number }>(t: Translator): DataTableColumns<T>[number] {
+  return {
+    title: columnTitle(t('analytics.failoversColumn'), t('analytics.failoversColumn_tip')),
+    key: 'failovers',
+    width: 120,
+    align: 'right',
+    sorter: (a: T, b: T) => a.failovers - b.failovers,
+    render: (r: T) => formatNumber(r.failovers),
+  }
+}

@@ -180,6 +180,9 @@ func parseAnalyticsFilter(c *gin.Context) (service.AnalyticsFilter, bool) {
 		RequestID:   c.Query("request_id"),
 		ModelName:   c.Query("model_name"),
 		StatusClass: statusClass,
+		// Opt-in: only the analytics report page asks for failover counts;
+		// the cost pages hit the same endpoint and skip the scan behind it.
+		WithFailovers: c.Query("with_failovers") == "1",
 	}
 	if !applyUintQueryParam(c, "api_key_id", func(v uint) { filter.APIKeyID = &v }) {
 		return service.AnalyticsFilter{}, false

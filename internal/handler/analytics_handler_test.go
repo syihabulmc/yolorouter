@@ -1565,3 +1565,245 @@ func TestCallerReportRanksBySpendNotVolume(t *testing.T) {
 			env.Data.Rows[0].OwnerLabel, env.Data.Rows[0].Calls)
 	}
 }
+
+// Failovers are charged to the provider that was switched AWAY from, never
+// the one that rescued the request; key rotation within one provider is not
+// a failover; and a provider every request failed away from still gets a
+// report row — it served nothing, which is exactly why it must be visible.
+func TestProviderReportChargesFailoversToTheProviderThatFailed(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+	now := time.Now().UTC()
+	flaky := &model.Provider{Name: "flaky", BaseURL: "http://f", DestinationVersion: 1}
+	rescuer := &model.Provider{Name: "rescuer", BaseURL: "http://r", DestinationVersion: 1}
+	for _, p := range []*model.Provider{flaky, rescuer} {
+		if err := db.Create(p).Error; err != nil {
+			t.Fatalf("seed provider: %v", err)
+		}
+	}
+	detail := fmt.Sprintf(`[{"provider_id":%d,"outcome":"server_error"},{"provider_id":%d,"outcome":"success"}]`, flaky.ID, rescuer.ID)
+	seedRequestLog(t, db, "failover-1", now, func(rl *model.RequestLog) {
+		rl.ProviderID = &rescuer.ID
+		rl.StatusCode = 200
+		rl.Attempts = 2
+		rl.AttemptsDetail = &detail
+	})
+	// Key rotation on one provider: two attempts, same provider — no failover.
+	rotation := fmt.Sprintf(`[{"provider_id":%d,"outcome":"auth_failed"},{"provider_id":%d,"outcome":"success"}]`, rescuer.ID, rescuer.ID)
+	seedRequestLog(t, db, "rotation-1", now, func(rl *model.RequestLog) {
+		rl.ProviderID = &rescuer.ID
+		rl.StatusCode = 200
+		rl.Attempts = 2
+		rl.AttemptsDetail = &rotation
+	})
+
+	w, _ := doJSON(t, r, http.MethodGet, "/api/admin/analytics/report?dimension=provider&with_failovers=1", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data struct {
+			Rows []struct {
+				ProviderName string `json:"provider_name"`
+				Calls        int64  `json:"calls"`
+				Failovers    int64  `json:"failovers"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	byName := map[string]struct {
+		Calls     int64
+		Failovers int64
+	}{}
+	for _, row := range env.Data.Rows {
+		byName[row.ProviderName] = struct {
+			Calls     int64
+			Failovers int64
+		}{row.Calls, row.Failovers}
+	}
+	f, ok := byName["flaky"]
+	if !ok {
+		t.Fatalf("flaky served nothing but must still have a row; rows: %+v", env.Data.Rows)
+	}
+	if f.Calls != 0 || f.Failovers != 1 {
+		t.Fatalf("flaky = %+v, want calls 0 / failovers 1", f)
+	}
+	rsc := byName["rescuer"]
+	if rsc.Calls != 2 || rsc.Failovers != 0 {
+		t.Fatalf("rescuer = %+v, want calls 2 / failovers 0 (rescuing and key rotation are not its fault)", rsc)
+	}
+}
+
+// A failover is a per-attempt event; the provider filter describes where a
+// request ENDED. Filtering the report to one provider must neither hide
+// that provider's own failovers (they live in rows that ended elsewhere)
+// nor synthesize rows for providers the filter excluded.
+func TestProviderReportFailoversSurviveTheProviderFilter(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+	now := time.Now().UTC()
+	flaky := &model.Provider{Name: "flaky", BaseURL: "http://f", DestinationVersion: 1}
+	rescuer := &model.Provider{Name: "rescuer", BaseURL: "http://r", DestinationVersion: 1}
+	for _, p := range []*model.Provider{flaky, rescuer} {
+		if err := db.Create(p).Error; err != nil {
+			t.Fatalf("seed provider: %v", err)
+		}
+	}
+	detail := fmt.Sprintf(`[{"provider_id":%d,"outcome":"server_error"},{"provider_id":%d,"outcome":"success"}]`, flaky.ID, rescuer.ID)
+	seedRequestLog(t, db, "filtered-failover", now, func(rl *model.RequestLog) {
+		rl.ProviderID = &rescuer.ID
+		rl.StatusCode = 200
+		rl.Attempts = 2
+		rl.AttemptsDetail = &detail
+	})
+
+	parse := func(w *httptest.ResponseRecorder) map[string][2]int64 {
+		t.Helper()
+		var env struct {
+			Data struct {
+				Rows []struct {
+					ProviderName string `json:"provider_name"`
+					Calls        int64  `json:"calls"`
+					Failovers    int64  `json:"failovers"`
+				} `json:"rows"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		out := map[string][2]int64{}
+		for _, row := range env.Data.Rows {
+			out[row.ProviderName] = [2]int64{row.Calls, row.Failovers}
+		}
+		return out
+	}
+
+	// Filtered to flaky: its own failover must show, on a synthesized row.
+	w, _ := doJSON(t, r, http.MethodGet,
+		fmt.Sprintf("/api/admin/analytics/report?dimension=provider&with_failovers=1&provider_id=%d", flaky.ID), nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	rows := parse(w)
+	if got := rows["flaky"]; got != [2]int64{0, 1} {
+		t.Fatalf("flaky under its own filter = %v, want calls 0 / failovers 1", got)
+	}
+	if _, ok := rows["rescuer"]; ok {
+		t.Fatal("the filter excluded rescuer; it must not be synthesized into the report")
+	}
+
+	// Filtered to rescuer: no phantom flaky row, and rescuing is not charged.
+	w, _ = doJSON(t, r, http.MethodGet,
+		fmt.Sprintf("/api/admin/analytics/report?dimension=provider&with_failovers=1&provider_id=%d", rescuer.ID), nil, nil)
+	rows = parse(w)
+	if got := rows["rescuer"]; got != [2]int64{1, 0} {
+		t.Fatalf("rescuer under its own filter = %v, want calls 1 / failovers 0", got)
+	}
+	if _, ok := rows["flaky"]; ok {
+		t.Fatal("the filter excluded flaky; it must not be synthesized into the report")
+	}
+}
+
+// A failover is counted whatever the request's final status class: a chain
+// that ultimately failed still charged the provider that failed first, even
+// when the report itself is filtered to a class that excludes that request.
+func TestProviderReportFailoversIgnoreTheStatusFilter(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+	now := time.Now().UTC()
+	flaky := &model.Provider{Name: "flaky", BaseURL: "http://f", DestinationVersion: 1}
+	alsoBad := &model.Provider{Name: "also-bad", BaseURL: "http://b", DestinationVersion: 1}
+	for _, p := range []*model.Provider{flaky, alsoBad} {
+		if err := db.Create(p).Error; err != nil {
+			t.Fatalf("seed provider: %v", err)
+		}
+	}
+	// Both attempts failed: the request's final class is "failed", which a
+	// status=success report excludes — the switch must still be counted.
+	detail := fmt.Sprintf(`[{"provider_id":%d,"outcome":"server_error"},{"provider_id":%d,"outcome":"server_error"}]`, flaky.ID, alsoBad.ID)
+	seedRequestLog(t, db, "all-failed", now, func(rl *model.RequestLog) {
+		rl.ProviderID = &alsoBad.ID
+		rl.StatusCode = 502
+		rl.Attempts = 2
+		rl.AttemptsDetail = &detail
+	})
+
+	w, _ := doJSON(t, r, http.MethodGet,
+		"/api/admin/analytics/report?dimension=provider&with_failovers=1&status=success", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data struct {
+			Rows []struct {
+				ProviderName string `json:"provider_name"`
+				Failovers    int64  `json:"failovers"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := false
+	for _, row := range env.Data.Rows {
+		if row.ProviderName == "flaky" && row.Failovers == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("flaky's failover vanished under status=success; rows: %+v", env.Data.Rows)
+	}
+}
+
+// One malformed attempts_detail row must cost only its own contribution,
+// never the report: the endpoint stays 200 and the valid rows still count.
+func TestProviderReportSurvivesMalformedAttemptDetail(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+	now := time.Now().UTC()
+	flaky := &model.Provider{Name: "flaky", BaseURL: "http://f", DestinationVersion: 1}
+	rescuer := &model.Provider{Name: "rescuer", BaseURL: "http://r", DestinationVersion: 1}
+	for _, p := range []*model.Provider{flaky, rescuer} {
+		if err := db.Create(p).Error; err != nil {
+			t.Fatalf("seed provider: %v", err)
+		}
+	}
+	valid := fmt.Sprintf(`[{"provider_id":%d,"outcome":"server_error"},{"provider_id":%d,"outcome":"success"}]`, flaky.ID, rescuer.ID)
+	seedRequestLog(t, db, "valid-switch", now, func(rl *model.RequestLog) {
+		rl.ProviderID = &rescuer.ID
+		rl.StatusCode = 200
+		rl.Attempts = 2
+		rl.AttemptsDetail = &valid
+	})
+	broken := `{"this is": "not an attempt array"`
+	seedRequestLog(t, db, "corrupted", now, func(rl *model.RequestLog) {
+		rl.ProviderID = &rescuer.ID
+		rl.StatusCode = 200
+		rl.Attempts = 2
+		rl.AttemptsDetail = &broken
+	})
+
+	w, _ := doJSON(t, r, http.MethodGet,
+		"/api/admin/analytics/report?dimension=provider&with_failovers=1", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 despite the malformed row, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data struct {
+			Rows []struct {
+				ProviderName string `json:"provider_name"`
+				Failovers    int64  `json:"failovers"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := false
+	for _, row := range env.Data.Rows {
+		if row.ProviderName == "flaky" && row.Failovers == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the valid switch must still count beside the malformed row; rows: %+v", env.Data.Rows)
+	}
+}

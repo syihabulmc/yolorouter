@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe, or its own switch — in the order the operator has to fix them.
 - The model list can be filtered by provider, answering "which models route
   through this one" at a glance.
+- The provider report shows how many failovers each provider caused —
+  charged to the provider that failed the request, not the one that rescued
+  it, with key rotation within one provider not counted. A provider every
+  request failed away from now appears in the report even though it served
+  nothing, because that is precisely the provider worth noticing.
 - The caller ranking now leads with spend instead of call volume — the row
   to look at first is whoever costs the most — and the calls column is
   sortable for the old ordering. The model and provider report tables gain

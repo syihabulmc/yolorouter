@@ -166,7 +166,7 @@
             :columns="providerColumns"
             :data="displayedProviderRows"
             :loading="loading"
-            :scroll-x="920"
+            :scroll-x="1030"
             :row-key="providerRowKey"
           >
             <template #empty>
@@ -234,6 +234,7 @@ import { columnTitle } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
 import { formatNumber, formatRate } from '../../utils/format'
 import {
+  failoversColumn,
   avgDurationColumn,
   callsColumn,
   costColumn,
@@ -371,7 +372,7 @@ async function reload() {
   try {
     const [ov, report] = await Promise.all([
       getAnalyticsOverview(effectiveBucket, filter.value),
-      getAnalyticsReport(dimension.value, bucket.value, filter.value),
+      getAnalyticsReport(dimension.value, bucket.value, filter.value, { withFailovers: dimension.value === 'provider' }),
     ])
     if (mySeq !== reloadSeq) return // a newer reload started; discard this one
     overview.value = ov
@@ -523,6 +524,7 @@ const providerColumns = computed<DataTableColumns<ProviderReportRow>>(() => [
   },
   callsColumn<ProviderReportRow>(t, { sortable: true }),
   successRateColumn<ProviderReportRow>(t),
+  failoversColumn<ProviderReportRow>(t),
   avgDurationColumn<ProviderReportRow>(t),
   costColumn<ProviderReportRow>(t, { sortable: true }),
   unknownCostColumn<ProviderReportRow>(t),
