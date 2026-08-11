@@ -79,7 +79,6 @@
           :value="streamSelect"
           :options="streamOptions"
           :placeholder="t('requestLogs.allFilterStream')"
-          :clearable="false"
           width="100%"
           @update:value="onStreamChange"
         />
@@ -205,11 +204,12 @@ const filter = reactive<ListFilter>({
   status: null,
   is_stream: null,
 })
-// Three-state stream filter UI value. The 'all' sentinel maps to
-// filter.is_stream = null at the call site (onStreamChange), NOT via a
-// direct v-model two-way binding — NSelect can't cleanly carry null as a
-// value, so we drive the binding through :value + @update:value instead.
-const streamSelect = ref<'all' | 'stream' | 'non-stream'>('all')
+// Stream filter UI value. null means "no filter" (cleared select, matches
+// the placeholder's "all streams" wording); 'stream' / 'non-stream' map to
+// filter.is_stream = true / false. Wired via :value + @update:value rather
+// than v-model so the null → is_stream=null mapping happens in one place
+// (onStreamChange).
+const streamSelect = ref<'stream' | 'non-stream' | null>(null)
 // Start / end are the source of truth for the time filter. Desktop binds a
 // single datetimerange picker through the `timeRange` computed below; mobile
 // binds these two refs directly to standalone datetime pickers. Keeping the
@@ -292,7 +292,6 @@ const statusOptions = computed<SelectOption[]>(() => ([
 ]))
 
 const streamOptions = computed<SelectOption[]>(() => ([
-  { label: t('requestLogs.allFilterStream'), value: 'all' },
   { label: t('requestLogs.stream_true'), value: 'stream' },
   { label: t('requestLogs.stream_false'), value: 'non-stream' },
 ]))
@@ -346,9 +345,9 @@ function hasRelevantQuery(): boolean {
 // applyQueryFilter maps deep-link query params onto the local filter model.
 // Cost detail pages emit /request-logs?api_key_id=X&start=...&end=... etc.
 // — start/end arrive as RFC3339 strings and are converted to the epoch-ms
-// tuple NDatePicker holds. is_stream's three-state UI value mirrors the
-// streamSelect ref ('all' | 'stream' | 'non-stream'). model_name and
-// request_id are preserved verbatim (see querySourced* flags).
+// tuple NDatePicker holds. is_stream's UI value mirrors the streamSelect
+// ref ('stream' | 'non-stream' | null). model_name and request_id are
+// preserved verbatim (see querySourced* flags).
 function applyQueryFilter() {
   const q = route.query
   if (typeof q.request_id === 'string' && q.request_id) {
@@ -371,10 +370,10 @@ function applyQueryFilter() {
     filter.status = q.status as StatusClass
   }
   if (typeof q.is_stream === 'string') {
-    const v: 'all' | 'stream' | 'non-stream' =
+    const v: 'stream' | 'non-stream' | null =
       q.is_stream === 'true' ? 'stream'
         : q.is_stream === 'false' ? 'non-stream'
-          : 'all'
+          : null
     streamSelect.value = v
     filter.is_stream = v === 'stream' ? true : v === 'non-stream' ? false : null
   }
@@ -504,7 +503,7 @@ function onReset() {
   filter.provider_id = null
   filter.status = null
   filter.is_stream = null
-  streamSelect.value = 'all'
+  streamSelect.value = null
   startTime.value = null
   endTime.value = null
   // Drop the verbatim-no-trim override too, so post-reset typed searches
@@ -527,11 +526,12 @@ async function onExport() {
   }
 }
 
-// onStreamChange decodes the three-state UI value into the boolean-or-null
-// the backend expects, then fires a search. Wired via :value + @update:value
-// rather than v-model so the 'all' → null mapping happens in one place.
-function onStreamChange(v: 'all' | 'stream' | 'non-stream' | null) {
-  streamSelect.value = v ?? 'all'
+// onStreamChange decodes the UI value into the boolean-or-null the backend
+// expects, then fires a search. null = cleared select = no filter. Wired
+// via :value + @update:value rather than v-model so the null → null mapping
+// happens in one place.
+function onStreamChange(v: 'stream' | 'non-stream' | null) {
+  streamSelect.value = v
   filter.is_stream = v === 'stream' ? true : v === 'non-stream' ? false : null
   void onSearch()
 }

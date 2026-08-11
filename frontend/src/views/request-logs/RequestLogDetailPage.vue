@@ -469,26 +469,26 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
     // 3rd try" label.
     title: columnTitle(t('requestLogs.attempt_index'), t('requestLogs.attempt_index_tip')),
     key: 'index',
-    width: 80,
+    minWidth: 70,
     align: 'center',
     render: (_row, index) => h('span', { class: 'mono-cell' }, String(index + 1)),
   },
   {
     title: columnTitle(t('requestLogs.attempt_provider'), t('requestLogs.attempt_provider_tip')),
     key: 'provider_name',
-    minWidth: 140,
+    minWidth: 200,
     render: (row) => row.provider_name || '—',
   },
   {
     title: columnTitle(t('requestLogs.attempt_model'), t('requestLogs.attempt_model_tip')),
     key: 'provider_model_name',
-    minWidth: 160,
+    minWidth: 170,
     render: (row) => row.provider_model_name || '—',
   },
   {
     title: columnTitle(t('requestLogs.attempt_keyLabel'), t('requestLogs.attempt_keyLabel_tip')),
     key: 'key_label',
-    minWidth: 140,
+    minWidth: 130,
     render: (row) => row.key_label || '—',
   },
   {
@@ -514,7 +514,7 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
   {
     title: columnTitle(t('requestLogs.attempt_upstreamEndpoint'), t('requestLogs.attempt_upstreamEndpoint_tip')),
     key: 'upstream_url',
-    minWidth: 240,
+    minWidth: 400,
     render: (row) => h('span', { class: 'mono-cell' }, row.upstream_url || '—'),
   },
 ])
@@ -648,4 +648,11 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
     border-radius: var(--radius-lg, 8px) var(--radius-lg, 8px) 0 0 ;
   }
 }
+:deep(.section-card .n-descriptions-table-header) {
+  width: 280px !important;
+}
+:deep(.section-card .n-descriptions-table-content) {
+  width: 420px !important;
+}
+
 </style>
