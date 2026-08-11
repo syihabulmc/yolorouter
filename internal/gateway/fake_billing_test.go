@@ -198,11 +198,11 @@ func TestAQuotaWithNoLimitReservesNothingAndIsNotReleased(t *testing.T) {
 			var log []string
 			svc := &Service{}
 			money := &fakePrepaidBalance{state: tc.state, balance: 500, reserve: 120, log: &log}
-			RegisterAdmission(svc, money, attemptView)
+			RegisterAdmission(svc, money, AdmitOnArrival, attemptView)
 
 			rc := &Exchange{}
 			var held []heldTicket
-			verdict := svc.admit(context.Background(), rc, &held)
+			verdict := svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 
 			admitted := verdict.Loop == decision.LoopNone
 			if admitted != tc.wantAdmit {
@@ -241,11 +241,11 @@ func TestAnUnservedRequestGetsItsReservationBack(t *testing.T) {
 	var log []string
 	svc := &Service{}
 	money := &fakePrepaidBalance{state: quotaWithinLimit, balance: 500, reserve: 120, log: &log}
-	RegisterAdmission(svc, money, attemptView)
+	RegisterAdmission(svc, money, AdmitOnArrival, attemptView)
 
 	rc := &Exchange{}
 	var held []heldTicket
-	svc.admit(context.Background(), rc, &held)
+	svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 	if money.balance != 380 {
 		t.Fatalf("balance after reserving = %d, want 380; the fixture never debited anything", money.balance)
 	}
@@ -273,8 +273,8 @@ func TestAnUnservedRequestGetsItsReservationBack(t *testing.T) {
 func TestTheSubRequestChargeIsReversedBeforeTheBalanceItCameOutOf(t *testing.T) {
 	var log []string
 	svc := &Service{}
-	RegisterAdmission(svc, &fakePrepaidBalance{state: quotaWithinLimit, balance: 500, reserve: 120, log: &log}, attemptView)
-	RegisterAdmission(svc, &fakeSubRequestCharge{state: visionCharged, gross: 40, net: 52, log: &log}, attemptView)
+	RegisterAdmission(svc, &fakePrepaidBalance{state: quotaWithinLimit, balance: 500, reserve: 120, log: &log}, AdmitOnArrival, attemptView)
+	RegisterAdmission(svc, &fakeSubRequestCharge{state: visionCharged, gross: 40, net: 52, log: &log}, AdmitOnArrival, attemptView)
 
 	if got := svc.RegisteredAdmissions(); len(got) != 2 ||
 		got[0] != "fake_prepaid_balance" || got[1] != "fake_sub_request_charge" {
@@ -283,7 +283,7 @@ func TestTheSubRequestChargeIsReversedBeforeTheBalanceItCameOutOf(t *testing.T) 
 
 	rc := &Exchange{}
 	var held []heldTicket
-	svc.admit(context.Background(), rc, &held)
+	svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 	svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{Delivered: false})
 
 	want := []string{"admit:reserved", "admit:subrequest", "release:subrequest", "release:balance"}
@@ -320,11 +320,11 @@ func TestTheSubRequestReversalCarriesBothFiguresAndOnlyWhenSomethingWasCharged(t
 			var log []string
 			svc := &Service{}
 			vision := &fakeSubRequestCharge{state: tc.state, gross: 40, net: 52, log: &log}
-			RegisterAdmission(svc, vision, attemptView)
+			RegisterAdmission(svc, vision, AdmitOnArrival, attemptView)
 
 			rc := &Exchange{}
 			var held []heldTicket
-			svc.admit(context.Background(), rc, &held)
+			svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 			svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{Delivered: false})
 
 			if len(log) == 0 || log[0] != tc.wantAdmit {
@@ -374,12 +374,12 @@ func TestOneAdmissionPanickingStillReversesTheOthers(t *testing.T) {
 	var log []string
 	svc := &Service{}
 	money := &fakePrepaidBalance{state: quotaWithinLimit, balance: 500, reserve: 120, log: &log}
-	RegisterAdmission(svc, money, attemptView)
-	RegisterAdmission(svc, &explodingAdmission{log: &log}, attemptView)
+	RegisterAdmission(svc, money, AdmitOnArrival, attemptView)
+	RegisterAdmission(svc, &explodingAdmission{log: &log}, AdmitOnArrival, attemptView)
 
 	rc := &Exchange{requestID: "req-exploding-release"}
 	var held []heldTicket
-	svc.admit(context.Background(), rc, &held)
+	svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 
 	svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{Delivered: false})
 
@@ -423,12 +423,12 @@ func (*explodingAdmission) Release(_ context.Context, _ struct{}, _ struct{}, _ 
 func TestARefusedBalanceStopsTheSubRequestFromBeingCharged(t *testing.T) {
 	var log []string
 	svc := &Service{}
-	RegisterAdmission(svc, &fakePrepaidBalance{state: quotaExhausted, log: &log}, attemptView)
-	RegisterAdmission(svc, &fakeSubRequestCharge{state: visionCharged, gross: 40, net: 52, log: &log}, attemptView)
+	RegisterAdmission(svc, &fakePrepaidBalance{state: quotaExhausted, log: &log}, AdmitOnArrival, attemptView)
+	RegisterAdmission(svc, &fakeSubRequestCharge{state: visionCharged, gross: 40, net: 52, log: &log}, AdmitOnArrival, attemptView)
 
 	rc := &Exchange{}
 	var held []heldTicket
-	verdict := svc.admit(context.Background(), rc, &held)
+	verdict := svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 
 	if verdict.Loop == decision.LoopNone {
 		t.Fatal("an exhausted balance admitted the request")
@@ -452,11 +452,11 @@ func TestARefusedBalanceStopsTheSubRequestFromBeingCharged(t *testing.T) {
 func TestAReleaseOutlivesTheCallerAndHearsTheWholeOutcome(t *testing.T) {
 	svc := &Service{}
 	probe := &outcomeProbe{}
-	RegisterAdmission(svc, probe, attemptView)
+	RegisterAdmission(svc, probe, AdmitOnArrival, attemptView)
 
 	rc := &Exchange{requestID: "req-release-outcome"}
 	var held []heldTicket
-	svc.admit(context.Background(), rc, &held)
+	svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel() // the caller is gone by the time the deferred release runs

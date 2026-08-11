@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -859,23 +860,80 @@ type AdmissionOf[V, T any] interface {
 	Release(ctx context.Context, view V, ticket T, out fact.Outcome, sink fact.Sink)
 }
 
+// AdmissionPhase says WHEN an admission is asked, and it is supplied at
+// registration for the same reason a rewriter's stage is: where something sits
+// in the pipeline is a property of the pipeline being assembled, not of the
+// thing itself.
+//
+// Two moments exist because the useful ones are genuinely different. Some
+// admissions can answer the instant a request arrives — a rate limiter needs
+// only the caller's identity, and asking early is the point, since the cheapest
+// refusal is the one that happens before any work. Others cannot: an admission
+// that reserves money has to know how much, and the amount depends on the body
+// after every rewriter has had it and on the price of the candidate it is going
+// to. Both of those are unknown on arrival, so an admission asked only then
+// would have to guess, and a reservation made from a guess is either short —
+// letting a request through the caller cannot pay for — or padded, refusing one
+// they can.
+//
+// Both phases share one stack. Tickets are released newest-first across the
+// whole of it, so a reservation taken in the second phase is given back before
+// whatever the first phase took to make it possible.
+type AdmissionPhase uint8
+
+const (
+	// AdmitOnArrival runs before the body has even been read: nothing about
+	// this request is known yet beyond who is asking.
+	AdmitOnArrival AdmissionPhase = 10
+	// AdmitWhenPriced runs once the caller's body has been through every
+	// ingress rewriter and a routable candidate exists, and still before
+	// anything is sent upstream.
+	//
+	// Two things are NOT settled here, and an implementation that assumes
+	// otherwise is wrong about money. The body is ingress-final, not outbound:
+	// the modality re-encodes per candidate afterwards and the egress rewriters
+	// append to that, the configured system prompt among them. And no candidate
+	// has been committed to — the chain can skip or fail over, and settlement
+	// prices whichever one actually served. So what can be computed here is a
+	// floor against one candidate's rates, not the amount the request will cost.
+	AdmitWhenPriced AdmissionPhase = 20
+)
+
+// admissionPhases is every phase the exchange actually asks, and registration
+// is checked against it.
+//
+// Without the check an unrecognised value — a zero left by a struct literal, a
+// constant added here but never wired into the exchange — registers happily and
+// appears in the roster, and then nothing ever asks it. That is the worst
+// possible failure for this shape: a gate that exists to refuse requests, and
+// silently permits every one of them. A missing gate must be a startup failure,
+// like a stage collision, rather than a permission nobody notices being granted.
+var admissionPhases = []AdmissionPhase{AdmitOnArrival, AdmitWhenPriced}
+
+func (p AdmissionPhase) supported() bool {
+	return slices.Contains(admissionPhases, p)
+}
+
 // admission is the kernel-side, view-erased form. The ticket travels as an any:
 // the kernel never inspects it, it only hands the same value back.
 type admission interface {
 	name() string
+	phase() AdmissionPhase
 	admit(ctx context.Context, e *Exchange, sink fact.Sink) (any, bool)
 	release(ctx context.Context, e *Exchange, ticket any, out fact.Outcome, sink fact.Sink)
 }
 
 type admissionAdapter[V, T any] struct {
-	inner AdmissionOf[V, T]
-	bind  func(*Exchange) V
+	inner   AdmissionOf[V, T]
+	bind    func(*Exchange) V
+	atPhase AdmissionPhase
 	// Captured at registration; see the field note on
 	// upstreamErrorObserverAdapter.
 	registeredName string
 }
 
-func (a admissionAdapter[V, T]) name() string { return a.registeredName }
+func (a admissionAdapter[V, T]) name() string          { return a.registeredName }
+func (a admissionAdapter[V, T]) phase() AdmissionPhase { return a.atPhase }
 
 func (a admissionAdapter[V, T]) admit(ctx context.Context, e *Exchange, sink fact.Sink) (any, bool) {
 	ticket, held := a.inner.Admit(ctx, a.bind(e), sink)
@@ -895,14 +953,27 @@ func (a admissionAdapter[V, T]) release(ctx context.Context, e *Exchange, ticket
 	a.inner.Release(ctx, a.bind(e), typed, out, sink)
 }
 
-// RegisterAdmission wires an admission into the service.
+// RegisterAdmission wires an admission into the service at the given phase.
 //
-// Registration order is acquisition order, and release runs in reverse — plain
-// stack discipline, which is what makes "release what was taken last, first"
-// true by construction rather than by everyone agreeing on a set of ordinal
-// constants nobody can get wrong only if they are all correct.
-func RegisterAdmission[V, T any](s *Service, a AdmissionOf[V, T], bind func(*Exchange) V) {
-	s.admissions = append(s.admissions, admissionAdapter[V, T]{inner: a, bind: bind, registeredName: a.Name()})
+// Registration order is acquisition order WITHIN a phase, and release runs in
+// reverse across every phase — plain stack discipline, which is what makes
+// "release what was taken last, first" true by construction rather than by
+// everyone agreeing on a set of ordinal constants nobody can get wrong only if
+// they are all correct.
+//
+// The sort is stable, and that is what keeps the sentence above true: it makes
+// the slice read in acquisition order regardless of the order the assembly
+// happened to register phases in, without disturbing the relative order of the
+// admissions sharing one.
+func RegisterAdmission[V, T any](s *Service, a AdmissionOf[V, T], at AdmissionPhase, bind func(*Exchange) V) {
+	if !at.supported() {
+		panic(fmt.Sprintf("gateway: admission %q registered at phase %d, which nothing asks: it would never gate anything",
+			a.Name(), at))
+	}
+	s.admissions = append(s.admissions, admissionAdapter[V, T]{inner: a, bind: bind, atPhase: at, registeredName: a.Name()})
+	sort.SliceStable(s.admissions, func(i, j int) bool {
+		return s.admissions[i].phase() < s.admissions[j].phase()
+	})
 }
 
 // RegisteredAdmissions names the admissions in acquisition order, which is the
@@ -941,12 +1012,15 @@ type heldTicket struct {
 // caller's deferred release can see it; had the tickets only appeared in a
 // return value, that release would never have been installed and the resources
 // would be held until the process restarts.
-func (s *Service) admit(ctx context.Context, rc *Exchange, held *[]heldTicket) decision.Resolved {
+func (s *Service) admit(ctx context.Context, rc *Exchange, at AdmissionPhase, held *[]heldTicket) decision.Resolved {
 	if len(s.admissions) == 0 {
 		return decision.Resolved{}
 	}
 	sink := newExchangeSink(rc)
 	for _, a := range s.admissions {
+		if a.phase() != at {
+			continue
+		}
 		sink.reporter = a.name()
 		ticket, ok := a.admit(ctx, rc, sink)
 		if ok {

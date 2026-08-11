@@ -53,7 +53,25 @@ type Exchange struct {
 	// business, and everything that pass produces comes back as a record on
 	// the timeline rather than as fields here.
 	compressEnabled bool
-	apiKeyID        uint
+	// pricingBasis is the per-million rates the pre-dispatch estimate is taken
+	// against: the FIRST routable candidate's, fixed once so everything asking
+	// that question reads one answer instead of each picking its own candidate.
+	//
+	// It is deliberately not exposed to capabilities, and the reason is a real
+	// unsolved question rather than an oversight. The chain can skip past that
+	// candidate or fail over off it, and settlement prices what actually served
+	// — so a reservation made from this basis is wrong by the difference
+	// between two providers' rates whenever the request does not end on the
+	// first one. Cheap-first ordering under-reserves and lets a caller overspend;
+	// the reverse refuses requests they could afford.
+	//
+	// Neither answer is the kernel's to invent: reserving per candidate means
+	// releasing and re-taking across failover, and reserving the dearest
+	// candidate's rate up front changes who gets refused. Whoever brings the
+	// first real reservation decides it, against what the paid deployment
+	// actually does, and adds the accessor then.
+	pricingBasis PricingView
+	apiKeyID     uint
 	// concurrencyLimit / rpmLimit are the caller's allowance, resolved once
 	// from the key. Zero means unlimited, which is also what an absent limit
 	// means — the distinction has no consumer, so it is not preserved.
@@ -261,7 +279,9 @@ func (rc *Exchange) RequestHeaders() []byte { return rc.requestHeaders }
 // RequestBody is the caller's body, verbatim.
 func (rc *Exchange) RequestBody() []byte { return rc.bodies.Request() }
 
-// CompressedRequestBody is the post-compression body, empty when none was made.
+// CompressedRequestBody is what the ingress rewriters produced, empty when none
+// of them acted. Named for compression because that is what fills it today and
+// what the audit column it feeds is called; any ingress rewrite lands here.
 func (rc *Exchange) CompressedRequestBody() []byte { return rc.bodies.CompressedRequest() }
 
 // UpstreamRequestBody is what the last attempt sent.

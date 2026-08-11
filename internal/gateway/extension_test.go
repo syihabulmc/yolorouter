@@ -356,14 +356,14 @@ func (a trackingAdmission) Release(_ context.Context, _ struct{}, ticket string,
 func TestAdmissionsReleaseInReverseOrder(t *testing.T) {
 	var log []string
 	svc := &Service{}
-	RegisterAdmission(svc, trackingAdmission{name: "first", log: &log, takeHold: true},
+	RegisterAdmission(svc, trackingAdmission{name: "first", log: &log, takeHold: true}, AdmitOnArrival,
 		attemptView)
-	RegisterAdmission(svc, trackingAdmission{name: "second", log: &log, takeHold: true},
+	RegisterAdmission(svc, trackingAdmission{name: "second", log: &log, takeHold: true}, AdmitOnArrival,
 		attemptView)
 
 	rc := &Exchange{}
 	var held []heldTicket
-	verdict := svc.admit(context.Background(), rc, &held)
+	verdict := svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 	if verdict.Loop != decision.LoopNone {
 		t.Fatalf("loop = %v, want LoopNone when nothing refused", verdict.Loop)
 	}
@@ -387,14 +387,14 @@ func TestAdmissionsReleaseInReverseOrder(t *testing.T) {
 func TestAdmissionRefusalStopsLaterAdmissions(t *testing.T) {
 	var log []string
 	svc := &Service{}
-	RegisterAdmission(svc, trackingAdmission{name: "refuser", log: &log, refuse: true},
+	RegisterAdmission(svc, trackingAdmission{name: "refuser", log: &log, refuse: true}, AdmitOnArrival,
 		attemptView)
-	RegisterAdmission(svc, trackingAdmission{name: "later", log: &log, takeHold: true},
+	RegisterAdmission(svc, trackingAdmission{name: "later", log: &log, takeHold: true}, AdmitOnArrival,
 		attemptView)
 
 	rc := &Exchange{}
 	var held []heldTicket
-	verdict := svc.admit(context.Background(), rc, &held)
+	verdict := svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 
 	if verdict.Loop != decision.LoopTerminate {
 		t.Fatalf("loop = %v, want decision.LoopTerminate", verdict.Loop)
@@ -418,12 +418,12 @@ func TestAdmissionRefusalStopsLaterAdmissions(t *testing.T) {
 func TestAdmissionReleasesOnlyWhatWasHeld(t *testing.T) {
 	var log []string
 	svc := &Service{}
-	RegisterAdmission(svc, trackingAdmission{name: "nothing", log: &log, takeHold: false},
+	RegisterAdmission(svc, trackingAdmission{name: "nothing", log: &log, takeHold: false}, AdmitOnArrival,
 		attemptView)
 
 	rc := &Exchange{}
 	var held []heldTicket
-	svc.admit(context.Background(), rc, &held)
+	svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 	svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{})
 
 	for _, e := range log {
@@ -459,9 +459,9 @@ func (a panickingAdmission) Release(context.Context, struct{}, string, fact.Outc
 func TestAdmissionPanicStillReleasesEarlierTickets(t *testing.T) {
 	var log []string
 	svc := &Service{}
-	RegisterAdmission(svc, trackingAdmission{name: "first", log: &log, takeHold: true},
+	RegisterAdmission(svc, trackingAdmission{name: "first", log: &log, takeHold: true}, AdmitOnArrival,
 		attemptView)
-	RegisterAdmission(svc, panickingAdmission{log: &log},
+	RegisterAdmission(svc, panickingAdmission{log: &log}, AdmitOnArrival,
 		attemptView)
 
 	rc := &Exchange{}
@@ -480,7 +480,7 @@ func TestAdmissionPanicStillReleasesEarlierTickets(t *testing.T) {
 		defer func() {
 			svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{})
 		}()
-		svc.admit(context.Background(), rc, &held)
+		svc.admit(context.Background(), rc, AdmitOnArrival, &held)
 	}()
 
 	var released bool
@@ -814,12 +814,12 @@ func TestEachReleaseGetsItsOwnClock(t *testing.T) {
 	var got []releaseClockSample
 	svc := &Service{}
 	for _, name := range []string{"first", "second", "third"} {
-		RegisterAdmission(svc, clockProbeAdmission{name: name, got: &got}, attemptView)
+		RegisterAdmission(svc, clockProbeAdmission{name: name, got: &got}, AdmitOnArrival, attemptView)
 	}
 
 	rc := &Exchange{}
 	var held []heldTicket
-	if v := svc.admit(context.Background(), rc, &held); v.Loop != decision.LoopNone {
+	if v := svc.admit(context.Background(), rc, AdmitOnArrival, &held); v.Loop != decision.LoopNone {
 		t.Fatalf("loop = %v, want LoopNone", v.Loop)
 	}
 	svc.releaseAdmissions(context.Background(), rc, held, fact.Outcome{})

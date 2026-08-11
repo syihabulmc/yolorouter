@@ -31,7 +31,7 @@ func registerCapabilities(svc *gateway.Service, db *gorm.DB) {
 		func(e *gateway.Exchange) contentinspect.View { return e })
 	gateway.RegisterEgressRewriter(svc, systemprompt.New(), gateway.StageCustomPrompt,
 		func(e *gateway.Exchange) systemprompt.View { return e })
-	gateway.RegisterAdmission(svc, ratelimit.NewLimiter(),
+	gateway.RegisterAdmission(svc, ratelimit.NewLimiter(), gateway.AdmitOnArrival,
 		func(e *gateway.Exchange) ratelimit.View { return e })
 	gateway.RegisterRecorder(svc, requestlog.New(db),
 		func(e *gateway.Exchange) requestlog.View { return e })

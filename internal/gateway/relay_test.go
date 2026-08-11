@@ -150,7 +150,7 @@ func newSvcWithSettingsAndGateway(t *testing.T, db *gorm.DB, sp stubSettingsProv
 	RegisterEgressRewriter(svc, systemprompt.New(), StageCustomPrompt,
 		func(e *Exchange) systemprompt.View { return e })
 	lim := ratelimit.NewLimiter()
-	RegisterAdmission(svc, lim, func(e *Exchange) ratelimit.View { return e })
+	RegisterAdmission(svc, lim, AdmitOnArrival, func(e *Exchange) ratelimit.View { return e })
 	RegisterRecorder(svc, requestlog.New(db), func(e *Exchange) requestlog.View { return e })
 	svcLimiters.Store(svc, lim)
 	return svc

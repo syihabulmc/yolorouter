@@ -132,7 +132,7 @@ func TestReleaseSeesTheSettledUsageAndCost(t *testing.T) {
 
 	svc := newSvc(t, db)
 	var got fact.Outcome
-	RegisterAdmission(svc, captureAdmission{got: &got}, func(*Exchange) struct{} { return struct{}{} })
+	RegisterAdmission(svc, captureAdmission{got: &got}, AdmitOnArrival, func(*Exchange) struct{} { return struct{}{} })
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
@@ -171,7 +171,7 @@ func TestReleaseSeesNoUsageOnARejectedExchange(t *testing.T) {
 
 	svc := newSvc(t, db)
 	var got fact.Outcome
-	RegisterAdmission(svc, captureAdmission{got: &got}, func(*Exchange) struct{} { return struct{}{} })
+	RegisterAdmission(svc, captureAdmission{got: &got}, AdmitOnArrival, func(*Exchange) struct{} { return struct{}{} })
 	p := createProvider(t, db, "p1", upstream.URL)
 	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
 	m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)

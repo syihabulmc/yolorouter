@@ -362,7 +362,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	if !s.checkKeyStateAndLimits(c, rc, apiKey, start) {
 		return
 	}
-	verdict := s.admit(rc.requestCtx, rc, &held)
+	verdict := s.admit(rc.requestCtx, rc, AdmitOnArrival, &held)
 	if verdict.Loop >= decision.LoopNextCandidate {
 		captureRejectedBody(c, rc)
 		status, errType := decision.AdmissionRejectionResponse(verdict)
@@ -574,21 +574,48 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		return
 	}
 
-	// Asked before any candidate is tried, because that is the only window in
-	// which the answer could still change what happens: an estimate produced
-	// after the request was sent is a number nobody can act on.
-	//
 	// The prices come from the first routable candidate, and that is a seam
-	// showing. Prices live on candidates, one per provider, while this question
-	// is asked once for the request — so a modality that priced its work up
-	// front would be pricing it against whichever provider happened to sort
-	// first. Text answers that it cannot say and nothing acts on the estimate
-	// yet, so nothing is wrong today; a modality that CAN answer is the reason
-	// to settle whether this question is per-request or per-candidate.
-	_ = adm.payload.EstimateCost(PricingView{
+	// showing. Prices live on candidates, one per provider, while the question
+	// is asked once for the request — so pricing up front prices against
+	// whichever provider happened to sort first, and the chain can end on a
+	// different one. Fixed here, in one place, so there is a single answer to
+	// pick apart rather than one per call site. Nothing outside this file reads
+	// it; the field's own note says why not.
+	rc.pricingBasis = PricingView{
 		InputPricePerMillion:  routable[0].InputPrice,
 		OutputPricePerMillion: routable[0].OutputPrice,
-	})
+	}
+
+	// Asked before any candidate is tried, because that is the only window in
+	// which the answer could still change what happens: an estimate produced
+	// after the request was sent is a number nobody can act on. Text answers
+	// that it cannot say and nothing acts on the estimate yet; a modality that
+	// CAN answer is the reason to settle whether this question is per-request
+	// or per-candidate.
+	_ = adm.payload.EstimateCost(rc.pricingBasis)
+
+	// The second admission phase: after every ingress rewriter has had the
+	// body, after a routable candidate exists, and before anything is dialled.
+	// An admission is asked here rather than on arrival because on arrival
+	// none of that was true.
+	//
+	// This is the last point where all of it holds at once, NOT a point where
+	// the request is fully determined — the outbound body is built per
+	// candidate further down, and the candidate itself is not committed to. The
+	// phase constant's own documentation carries that limit.
+	//
+	// Tickets land in the same stack the first phase used, so the deferred
+	// release already armed above gives them back newest-first without knowing
+	// phases exist.
+	if verdict := s.admit(requestCtx, rc, AdmitWhenPriced, &held); verdict.Loop >= decision.LoopNextCandidate {
+		// The caller is refused something they asked for — an amount they
+		// cannot cover — so this is their fault to fix, the same as the
+		// arrival-phase refusals above. The body was captured when it was read,
+		// so unlike those there is nothing to capture here.
+		status, errType := decision.AdmissionRejectionResponse(verdict)
+		s.rejectRequest(c, rc, status, errType, verdict.RejectDetail(), verdict.FailReason(), fact.FaultClient, start)
+		return
+	}
 
 	// Steps 8–12.
 	s.relayCandidates(c, rc, adm, routable, start)
