@@ -332,3 +332,20 @@ func DeleteModelCandidate(svc *service.ModelService) gin.HandlerFunc {
 		response.Success(c, nil)
 	}
 }
+
+// GetModelImpact returns what disabling or renaming the model touches, for
+// the confirm dialogs and the impact tab.
+func GetModelImpact(svc *service.ModelService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, ok := parseUintParam(c, "id")
+		if !ok {
+			return
+		}
+		view, err := svc.GetModelImpact(id, timeNow())
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		response.Success(c, view)
+	}
+}

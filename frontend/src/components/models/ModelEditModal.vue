@@ -29,13 +29,14 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useMessage, type FormInst, type FormRules } from 'naive-ui'
+import { useDialog, useMessage, type FormInst, type FormRules } from 'naive-ui'
 import HelpLabel from '../HelpLabel.vue'
 import ModalDrawer from '../common/ModalDrawer.vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import type { Model } from '../../api/models'
 import { modelNameRule } from '../../utils/modelValidators'
+import { modelRenameContent } from '../../utils/impactSummary'
 
 const props = defineProps<{ show: boolean; model: Model | null }>()
 const emit = defineEmits<{ 'update:show': [boolean]; updated: [] }>()
@@ -48,6 +49,7 @@ const showModel = computed({
 })
 
 const { t } = useI18n()
+const dialog = useDialog()
 const message = useMessage()
 const store = useModelsStore()
 
@@ -71,6 +73,41 @@ async function onSubmit() {
   } catch {
     return
   }
+  // An unchanged name is not a rename — close without a scare dialog.
+  if (form.name === props.model.name) {
+    showModel.value = false
+    return
+  }
+  // Renaming breaks callers, not key allowlists (those follow the model id),
+  // so the confirm leads with the live-traffic number for the old name.
+  // submitting covers the fetch too: a second click while the impact loads
+  // would stack a second confirm dialog.
+  submitting.value = true
+  let content: string
+  try {
+    content = await modelRenameContent(props.model.id, props.model.name, t)
+  } finally {
+    submitting.value = false
+  }
+  // The cancel button stays live while the preview loads, so the editor may
+  // already be closed by the time it arrives. A confirm dialog for a rename
+  // the user walked away from must not appear — accepting it would rename
+  // anyway.
+  if (!props.show || !props.model) return
+  dialog.warning({
+    title: t('models.confirmRenameModelTitle'),
+    content,
+    style: 'white-space: pre-line',
+    positiveText: t('models.save'),
+    negativeText: t('models.cancel'),
+    onPositiveClick: () => {
+      void doRename()
+    },
+  })
+}
+
+async function doRename() {
+  if (!props.model) return
   submitting.value = true
   try {
     await store.update(props.model.id, form.name)

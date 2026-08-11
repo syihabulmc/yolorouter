@@ -1,4 +1,5 @@
 import { apiFetch } from './client'
+import type { ModelImpactKey } from './models'
 import { BATCH_TEST_BUDGET_MS, SINGLE_PROBE_BUDGET_MS, keyTestBudgetMs } from './probeBudget'
 import { verificationDestinationCount } from '../utils/providerProtocol'
 
@@ -118,6 +119,25 @@ export function updateProvider(id: number, input: UpdateProviderInput): Promise<
 
 export function setProviderStatus(id: number, enabled: boolean): Promise<void> {
   return apiFetch(`/api/admin/providers/${id}/status`, { method: 'PATCH', body: JSON.stringify({ enabled }) })
+}
+
+export interface ProviderImpactModel {
+  id: number
+  name: string
+  /** Disabling the provider leaves this model with no routable candidate at all. */
+  no_other_routable_source: boolean
+}
+
+export interface ProviderImpact {
+  models: ProviderImpactModel[]
+  /** Callable keys allowlisting a model this disable would strand; empty when nothing is stranded. */
+  affected_keys: ModelImpactKey[]
+  /** Callable allow-all keys, counted only when something is stranded. */
+  allow_all_key_count: number
+}
+
+export function getProviderImpact(id: number): Promise<ProviderImpact> {
+  return apiFetch(`/api/admin/providers/${id}/impact`)
 }
 
 // testKeyPreview checks a key against a single protocol — the selected

@@ -3103,3 +3103,247 @@ func TestListModelsForProviderUnknownProviderReturnsNotFound(t *testing.T) {
 		t.Fatalf("expected ErrProviderNotFound, got %v", err)
 	}
 }
+
+// A model with a second routable source survives losing this provider; a model
+// whose only routable candidate is here does not. The flag must tell those two
+// apart, and a provider nothing references must report an empty list — not an
+// error, and not nil.
+func TestProviderImpactFlagsModelsLosingTheirLastRoutableSource(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
+	providerB := seedEnabledProviderForModelTest(t, providerService, "provider-b")
+	providerIdle := seedEnabledProviderForModelTest(t, providerService, "provider-idle")
+
+	modelSvc := NewModelService(db, testMasterKey(), client)
+	client.result = TestResult{Outcome: TestSuccess}
+	survivor, err := modelSvc.CreateModel(CreateModelInput{Name: "survivor"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	stranded, err := modelSvc.CreateModel(CreateModelInput{Name: "stranded"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	addCandidate := func(modelID, providerID uint) {
+		t.Helper()
+		if _, err := modelSvc.CreateModelCandidate(context.Background(), modelID, CreateCandidateInput{
+			ProviderID: providerID, ProviderModelName: "gpt-4o", InputPrice: 1, OutputPrice: 2,
+			ManagementStatus: model.ModelCandidateStatusEnabled,
+		}, now); err != nil {
+			t.Fatalf("CreateModelCandidate failed: %v", err)
+		}
+	}
+	addCandidate(survivor.ID, providerA.ID)
+	addCandidate(survivor.ID, providerB.ID)
+	addCandidate(stranded.ID, providerA.ID)
+
+	impact, err := providerService.GetProviderImpact(providerA.ID, now)
+	if err != nil {
+		t.Fatalf("GetProviderImpact failed: %v", err)
+	}
+	if len(impact.Models) != 2 {
+		t.Fatalf("impact models = %+v, want the two models referencing provider-a", impact.Models)
+	}
+	byName := map[string]bool{}
+	for _, m := range impact.Models {
+		byName[m.Name] = m.NoOtherRoutableSource
+	}
+	if byName["survivor"] {
+		t.Error("survivor has a routable candidate on provider-b and must not be flagged")
+	}
+	if !byName["stranded"] {
+		t.Error("stranded has no other source and must be flagged")
+	}
+
+	idleImpact, err := providerService.GetProviderImpact(providerIdle.ID, now)
+	if err != nil {
+		t.Fatalf("GetProviderImpact failed: %v", err)
+	}
+	if idleImpact.Models == nil || len(idleImpact.Models) != 0 {
+		t.Fatalf("idle provider impact = %+v, want empty non-nil list", idleImpact.Models)
+	}
+}
+
+// The fallback source must actually be routable, not merely exist: here the
+// other provider's candidate exists but is disabled, so the model is flagged.
+func TestProviderImpactIgnoresUnroutableFallbackCandidates(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
+	providerB := seedEnabledProviderForModelTest(t, providerService, "provider-b")
+
+	modelSvc := NewModelService(db, testMasterKey(), client)
+	client.result = TestResult{Outcome: TestSuccess}
+	m, err := modelSvc.CreateModel(CreateModelInput{Name: "fragile"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	if _, err := modelSvc.CreateModelCandidate(context.Background(), m.ID, CreateCandidateInput{
+		ProviderID: providerA.ID, ProviderModelName: "gpt-4o", InputPrice: 1, OutputPrice: 2,
+		ManagementStatus: model.ModelCandidateStatusEnabled,
+	}, now); err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+	fallback, err := modelSvc.CreateModelCandidate(context.Background(), m.ID, CreateCandidateInput{
+		ProviderID: providerB.ID, ProviderModelName: "gpt-4o", InputPrice: 1, OutputPrice: 2,
+		ManagementStatus: model.ModelCandidateStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+	if err := modelSvc.SetCandidateStatus(fallback.ID, false, now); err != nil {
+		t.Fatalf("SetCandidateStatus failed: %v", err)
+	}
+
+	impact, err := providerService.GetProviderImpact(providerA.ID, now)
+	if err != nil {
+		t.Fatalf("GetProviderImpact failed: %v", err)
+	}
+	if len(impact.Models) != 1 || !impact.Models[0].NoOtherRoutableSource {
+		t.Fatalf("impact = %+v, want fragile flagged: its only fallback is disabled", impact.Models)
+	}
+}
+
+func TestProviderImpactUnknownProvider(t *testing.T) {
+	providerService, _, _ := newTestProviderService(t)
+	if _, err := providerService.GetProviderImpact(9999, time.Now().UTC()); !errors.Is(err, errcode.ErrProviderNotFound) {
+		t.Fatalf("err = %v, want ErrProviderNotFound", err)
+	}
+}
+
+// A model this provider does not currently serve loses nothing when the
+// provider is disabled: its only candidate here is disabled, so it stays in
+// the reference list but must not be flagged as losing its last source.
+func TestProviderImpactDoesNotBlameAlreadyDeadModelsOnThisProvider(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
+
+	modelSvc := NewModelService(db, testMasterKey(), client)
+	client.result = TestResult{Outcome: TestSuccess}
+	dead, err := modelSvc.CreateModel(CreateModelInput{Name: "already-dead"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	only, err := modelSvc.CreateModelCandidate(context.Background(), dead.ID, CreateCandidateInput{
+		ProviderID: providerA.ID, ProviderModelName: "gpt-4o", InputPrice: 1, OutputPrice: 2,
+		ManagementStatus: model.ModelCandidateStatusEnabled,
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+	if err := modelSvc.SetCandidateStatus(only.ID, false, now); err != nil {
+		t.Fatalf("SetCandidateStatus failed: %v", err)
+	}
+
+	impact, err := providerService.GetProviderImpact(providerA.ID, now)
+	if err != nil {
+		t.Fatalf("GetProviderImpact failed: %v", err)
+	}
+	if len(impact.Models) != 1 || impact.Models[0].Name != "already-dead" {
+		t.Fatalf("impact = %+v, want the referencing model listed", impact.Models)
+	}
+	if impact.Models[0].NoOtherRoutableSource {
+		t.Error("already-dead is not served by this provider — disabling it takes nothing away, it must not be flagged")
+	}
+}
+
+// A disabled model is rejected by the gateway before candidate selection, so
+// it is already unavailable to callers — disabling the provider that holds
+// its only routable candidate takes nothing away, and it must not be flagged.
+func TestProviderImpactDoesNotBlameDisabledModels(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
+
+	modelSvc := NewModelService(db, testMasterKey(), client)
+	client.result = TestResult{Outcome: TestSuccess}
+	m, err := modelSvc.CreateModel(CreateModelInput{Name: "switched-off"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	if _, err := modelSvc.CreateModelCandidate(context.Background(), m.ID, CreateCandidateInput{
+		ProviderID: providerA.ID, ProviderModelName: "gpt-4o", InputPrice: 1, OutputPrice: 2,
+		ManagementStatus: model.ModelCandidateStatusEnabled,
+	}, now); err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+	if err := modelSvc.SetModelStatus(m.ID, false, now); err != nil {
+		t.Fatalf("SetModelStatus failed: %v", err)
+	}
+
+	impact, err := providerService.GetProviderImpact(providerA.ID, now)
+	if err != nil {
+		t.Fatalf("GetProviderImpact failed: %v", err)
+	}
+	if len(impact.Models) != 1 || impact.Models[0].Name != "switched-off" {
+		t.Fatalf("impact = %+v, want the referencing model listed", impact.Models)
+	}
+	if impact.Models[0].NoOtherRoutableSource {
+		t.Error("a disabled model is already unavailable — disabling its provider must not be reported as an outage")
+	}
+}
+
+// Keys are named through stranded models only, once each: a key allowlisting
+// two stranded models appears once, a key allowlisting only the surviving
+// model is not named, and when nothing is stranded no key is named at all.
+func TestProviderImpactNamesKeysOnlyThroughStrandedModels(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
+	providerB := seedEnabledProviderForModelTest(t, providerService, "provider-b")
+
+	modelSvc := NewModelService(db, testMasterKey(), client)
+	client.result = TestResult{Outcome: TestSuccess}
+	makeModel := func(name string, providers ...*ProviderView) uint {
+		t.Helper()
+		m, err := modelSvc.CreateModel(CreateModelInput{Name: name}, now)
+		if err != nil {
+			t.Fatalf("CreateModel failed: %v", err)
+		}
+		for _, p := range providers {
+			if _, err := modelSvc.CreateModelCandidate(context.Background(), m.ID, CreateCandidateInput{
+				ProviderID: p.ID, ProviderModelName: "gpt-4o", InputPrice: 1, OutputPrice: 2,
+				ManagementStatus: model.ModelCandidateStatusEnabled,
+			}, now); err != nil {
+				t.Fatalf("CreateModelCandidate failed: %v", err)
+			}
+		}
+		return m.ID
+	}
+	stranded1 := makeModel("stranded-1", providerA)
+	stranded2 := makeModel("stranded-2", providerA)
+	survivor := makeModel("survivor", providerA, providerB)
+
+	keySvc := NewAPIKeyService(db, testMasterKey())
+	both, err := keySvc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "both-stranded", ModelIDs: []uint{stranded1, stranded2}}, now)
+	if err != nil {
+		t.Fatalf("CreateAPIKey failed: %v", err)
+	}
+	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "survivor-only", ModelIDs: []uint{survivor}}, now); err != nil {
+		t.Fatalf("CreateAPIKey failed: %v", err)
+	}
+	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "allow-all", AllowAllModels: true}, now); err != nil {
+		t.Fatalf("CreateAPIKey failed: %v", err)
+	}
+
+	impact, err := providerService.GetProviderImpact(providerA.ID, now)
+	if err != nil {
+		t.Fatalf("GetProviderImpact failed: %v", err)
+	}
+	if len(impact.AffectedKeys) != 1 || impact.AffectedKeys[0].ID != both.APIKey.ID {
+		t.Fatalf("affected keys = %+v, want exactly one entry for the both-stranded key", impact.AffectedKeys)
+	}
+	if impact.AllowAllKeyCount != 1 {
+		t.Fatalf("allow-all count = %d, want 1", impact.AllowAllKeyCount)
+	}
+
+	impactB, err := providerService.GetProviderImpact(providerB.ID, now)
+	if err != nil {
+		t.Fatalf("GetProviderImpact failed: %v", err)
+	}
+	if len(impactB.AffectedKeys) != 0 || impactB.AllowAllKeyCount != 0 {
+		t.Fatalf("provider-b strands nothing, yet keys reported: %+v allowAll=%d", impactB.AffectedKeys, impactB.AllowAllKeyCount)
+	}
+}

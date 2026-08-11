@@ -318,3 +318,27 @@ func SwapModelCandidateSortOrder(db *gorm.DB, modelID, candidateID uint, directi
 func DeleteModelCandidate(db *gorm.DB, id uint) error {
 	return db.Where("id = ?", id).Delete(&model.ModelCandidate{}).Error
 }
+
+// ListModelCandidatesByProviderID returns every candidate on one provider,
+// across all models and management states — the reference list an impact
+// preview starts from when the provider is about to be disabled.
+func ListModelCandidatesByProviderID(db *gorm.DB, providerID uint) ([]model.ModelCandidate, error) {
+	var candidates []model.ModelCandidate
+	if err := db.Where("provider_id = ?", providerID).Order("model_id ASC, sort_order ASC").Find(&candidates).Error; err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
+// ListModelsByIDs batch-fetches models by id (the same N+1 fix as
+// ListModelCandidatesByModelIDs). Empty input returns nil without querying.
+func ListModelsByIDs(db *gorm.DB, ids []uint) ([]model.Model, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var models []model.Model
+	if err := db.Where("id IN ?", ids).Order("id ASC").Find(&models).Error; err != nil {
+		return nil, err
+	}
+	return models, nil
+}

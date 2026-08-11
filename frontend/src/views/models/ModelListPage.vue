@@ -81,7 +81,8 @@ import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } 
 import { Boxes, Plus, Search, MoreHorizontal } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
-import { toggleStatusWithConfirm } from '../../composables/useConfirmedStatusToggle'
+import { useConfirmedStatusToggle } from '../../composables/useConfirmedStatusToggle'
+import { modelDisableCopy } from '../../utils/impactSummary'
 import { modelRunningStatusDisplay, MODEL_RUNNING_STATUS_DISPLAY } from '../../utils/modelStatusDisplay'
 import { columnTitle } from '../../utils/columnTitle'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
@@ -99,6 +100,7 @@ import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
 const { t } = useI18n()
 const router = useRouter()
 const dialog = useDialog()
+const toggleStatusWithConfirm = useConfirmedStatusToggle(dialog)
 const message = useMessage()
 const store = useModelsStore()
 const { importToCCS } = useCCSwitchImport()
@@ -183,14 +185,8 @@ function rowProps(row: Model) {
 
 function onToggleStatus(row: Model, enable: boolean) {
   toggleStatusWithConfirm(
-    dialog,
     enable,
-    {
-      title: t('models.confirmDisableModelTitle'),
-      content: t('models.confirmDisableModelContent', { count: 0 }),
-      positiveText: t('models.statusDisabled'),
-      negativeText: t('models.cancel'),
-    },
+    () => modelDisableCopy(row.id, t),
     async () => {
       try {
         await store.setStatus(row.id, enable)

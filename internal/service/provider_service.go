@@ -1253,3 +1253,121 @@ func validateProviderType(t string) (string, error) {
 	id, err := providerproto.ValidateType(t)
 	return string(id), err
 }
+
+// ProviderImpactModelView is one model that references the provider.
+// NoOtherRoutableSource is the severity flag: disabling the provider leaves
+// this model with no routable candidate anywhere, so requests for it start
+// failing rather than falling over to another provider.
+type ProviderImpactModelView struct {
+	ID                    uint   `json:"id"`
+	Name                  string `json:"name"`
+	NoOtherRoutableSource bool   `json:"no_other_routable_source"`
+}
+
+// ProviderImpactView is what disabling this provider touches: every model
+// with a candidate on it, flagged by whether another provider can still
+// serve the model. AffectedKeys are the callable keys whose allowlist names
+// a model this disable would strand — the callers who feel it; empty when
+// nothing is stranded. AllowAllKeyCount likewise counts allow-all keys only
+// when something is stranded, since only then do they lose anything.
+type ProviderImpactView struct {
+	Models           []ProviderImpactModelView `json:"models"`
+	AffectedKeys     []ModelImpactKeyView      `json:"affected_keys"`
+	AllowAllKeyCount int64                     `json:"allow_all_key_count"`
+}
+
+// GetProviderImpact answers "what breaks if I disable this provider" for the
+// confirm dialogs. A model counts as still served when at least one candidate
+// on a different provider is routable right now — the same routability rule
+// the candidate list reports, applied with this provider taken out.
+func (s *ProviderService) GetProviderImpact(id uint, now time.Time) (*ProviderImpactView, error) {
+	if _, err := repository.FindProviderByID(s.db, id); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errcode.ErrProviderNotFound
+		}
+		return nil, err
+	}
+	onThis, err := repository.ListModelCandidatesByProviderID(s.db, id)
+	if err != nil {
+		return nil, err
+	}
+	if len(onThis) == 0 {
+		return &ProviderImpactView{Models: []ProviderImpactModelView{}, AffectedKeys: []ModelImpactKeyView{}}, nil
+	}
+	modelIDSet := make(map[uint]struct{}, len(onThis))
+	modelIDs := make([]uint, 0, len(onThis))
+	for _, c := range onThis {
+		if _, seen := modelIDSet[c.ModelID]; seen {
+			continue
+		}
+		modelIDSet[c.ModelID] = struct{}{}
+		modelIDs = append(modelIDs, c.ModelID)
+	}
+	models, err := repository.ListModelsByIDs(s.db, modelIDs)
+	if err != nil {
+		return nil, err
+	}
+	allCandidates, err := repository.ListModelCandidatesByModelIDs(s.db, modelIDs)
+	if err != nil {
+		return nil, err
+	}
+	keysByProvider, err := keysByProviderForCandidates(s.db, allCandidates)
+	if err != nil {
+		return nil, err
+	}
+	// A model is flagged only when disabling this provider actually takes its
+	// last source away: the model itself is enabled (the gateway rejects a
+	// disabled model before it ever reaches candidate selection, so such a
+	// model is already unavailable and loses nothing), this provider currently
+	// gives it a routable candidate, and no other provider does. Anything less
+	// dresses a harmless disable up as an outage.
+	servedElsewhere := make(map[uint]bool, len(modelIDs))
+	servedByThis := make(map[uint]bool, len(modelIDs))
+	for _, c := range allCandidates {
+		if c.Provider == nil {
+			continue
+		}
+		providerEnabled := c.Provider.ManagementStatus == model.ProviderStatusEnabled
+		hasKey := providerHasAvailableKey(keysByProvider[c.ProviderID], c.Provider.DestinationVersion)
+		if candidateBlockedBy(c, providerEnabled, hasKey) != "" {
+			continue
+		}
+		if c.ProviderID == id {
+			servedByThis[c.ModelID] = true
+		} else {
+			servedElsewhere[c.ModelID] = true
+		}
+	}
+	views := make([]ProviderImpactModelView, 0, len(models))
+	strandedIDs := make([]uint, 0, len(models))
+	for _, m := range models {
+		stranded := m.ManagementStatus == model.ModelStatusEnabled && servedByThis[m.ID] && !servedElsewhere[m.ID]
+		if stranded {
+			strandedIDs = append(strandedIDs, m.ID)
+		}
+		views = append(views, ProviderImpactModelView{
+			ID:                    m.ID,
+			Name:                  m.Name,
+			NoOtherRoutableSource: stranded,
+		})
+	}
+	// Keys are affected through the stranded models only: a model that keeps
+	// a source elsewhere keeps serving its keys, so those keys lose nothing
+	// and must not be named.
+	affectedKeys := []ModelImpactKeyView{}
+	var allowAll int64
+	if len(strandedIDs) > 0 {
+		keys, err := repository.ListCallableAPIKeysAllowlistingAny(s.db, strandedIDs, now)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range keys {
+			affectedKeys = append(affectedKeys, ModelImpactKeyView{ID: k.ID, OwnerLabel: k.OwnerLabel, KeyPrefix: k.KeyPrefix})
+		}
+		allowAll, err = repository.CountCallableAllowAllAPIKeys(s.db, now)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &ProviderImpactView{Models: views, AffectedKeys: affectedKeys, AllowAllKeyCount: allowAll}, nil
+}

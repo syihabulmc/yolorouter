@@ -10,6 +10,7 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/pricecatalog"
+	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
@@ -2478,5 +2479,106 @@ func TestUpdateModelCandidateRetargetWinsTheNextSuggestion(t *testing.T) {
 	}
 	if got.Source != "history" || got.InputPrice != 1 || got.OutputPrice != 2 {
 		t.Fatalf("want the retargeted 1/2 from history, got %+v", got)
+	}
+}
+
+// The impact preview must not scare an operator with keys that could not call
+// anyway: a revoked key and an expired key both allowlist the model here, and
+// neither may appear. Only the callable allowlisting key is named; the
+// allow-all key is counted, not named.
+func TestModelImpactNamesOnlyKeysThatCanStillCall(t *testing.T) {
+	_, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	svc := NewModelService(db, testMasterKey(), client)
+	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	otherModel, err := svc.CreateModel(CreateModelInput{Name: "other"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+
+	keySvc := NewAPIKeyService(db, testMasterKey())
+	callable, err := keySvc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "alice", ModelIDs: []uint{modelView.ID}}, now)
+	if err != nil {
+		t.Fatalf("CreateAPIKey failed: %v", err)
+	}
+	revoked, err := keySvc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "bob", ModelIDs: []uint{modelView.ID}}, now)
+	if err != nil {
+		t.Fatalf("CreateAPIKey failed: %v", err)
+	}
+	if err := db.Model(&model.APIKey{}).Where("id = ?", revoked.APIKey.ID).
+		Update("status", model.APIKeyStatusRevoked).Error; err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	expired, err := keySvc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "carol", ModelIDs: []uint{modelView.ID}}, now)
+	if err != nil {
+		t.Fatalf("CreateAPIKey failed: %v", err)
+	}
+	past := now.Add(-time.Hour)
+	if err := db.Model(&model.APIKey{}).Where("id = ?", expired.APIKey.ID).
+		Update("expires_at", past).Error; err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "dave", ModelIDs: []uint{otherModel.ID}}, now); err != nil {
+		t.Fatalf("CreateAPIKey failed: %v", err)
+	}
+	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "erin", AllowAllModels: true}, now); err != nil {
+		t.Fatalf("CreateAPIKey failed: %v", err)
+	}
+
+	impact, err := svc.GetModelImpact(modelView.ID, now)
+	if err != nil {
+		t.Fatalf("GetModelImpact failed: %v", err)
+	}
+	if len(impact.AllowlistedKeys) != 1 || impact.AllowlistedKeys[0].ID != callable.APIKey.ID {
+		t.Fatalf("allowlisted keys = %+v, want exactly the callable key %d", impact.AllowlistedKeys, callable.APIKey.ID)
+	}
+	if impact.AllowlistedKeys[0].OwnerLabel != "alice" {
+		t.Fatalf("owner label = %q, want alice", impact.AllowlistedKeys[0].OwnerLabel)
+	}
+	if impact.AllowAllKeyCount != 1 {
+		t.Fatalf("allow-all count = %d, want 1", impact.AllowAllKeyCount)
+	}
+}
+
+// The live-traffic number is scoped by name and by window: a request for a
+// different model and a request older than the window must not count.
+func TestModelImpactCountsOnlyRecentTrafficForThisName(t *testing.T) {
+	_, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	svc := NewModelService(db, testMasterKey(), client)
+	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	seed := func(name string, at time.Time) {
+		t.Helper()
+		if err := repository.CreateRequestLog(db, &model.RequestLog{RequestID: name + at.String(), ModelName: name, CreatedAt: at}); err != nil {
+			t.Fatalf("seed request log: %v", err)
+		}
+	}
+	seed("smart", now.Add(-time.Hour))
+	seed("smart", now.Add(-8*24*time.Hour))
+	seed("other", now.Add(-time.Hour))
+
+	impact, err := svc.GetModelImpact(modelView.ID, now)
+	if err != nil {
+		t.Fatalf("GetModelImpact failed: %v", err)
+	}
+	if impact.RecentRequestCount != 1 {
+		t.Fatalf("recent request count = %d, want 1 (in-window, this name only)", impact.RecentRequestCount)
+	}
+	if impact.RecentWindowDays != 7 {
+		t.Fatalf("window days = %d, want 7", impact.RecentWindowDays)
+	}
+}
+
+func TestModelImpactUnknownModel(t *testing.T) {
+	_, db, client := newTestProviderService(t)
+	svc := NewModelService(db, testMasterKey(), client)
+	if _, err := svc.GetModelImpact(9999, time.Now().UTC()); !errors.Is(err, errcode.ErrModelNotFound) {
+		t.Fatalf("err = %v, want ErrModelNotFound", err)
 	}
 }

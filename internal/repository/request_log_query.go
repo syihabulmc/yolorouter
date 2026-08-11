@@ -328,3 +328,16 @@ func AggregateRequestLogMetrics(db *gorm.DB, f *RequestLogFilter) (*MetricTotals
 		CacheWriteExtraMicros: r.CacheWriteExtraMicros,
 	}, nil
 }
+
+// CountRequestLogsForModelSince counts requests that asked for one model name
+// after a cutoff. Impact previews use it as the live-traffic signal for
+// disabling or renaming a model: allowlists reference models by id and follow
+// a rename, but callers ask by name, and this is how many recent calls would
+// have missed.
+func CountRequestLogsForModelSince(db *gorm.DB, modelName string, since time.Time) (int64, error) {
+	var cnt int64
+	err := db.Model(&model.RequestLog{}).
+		Where("model_name = ? AND created_at >= ?", modelName, since).
+		Count(&cnt).Error
+	return cnt, err
+}

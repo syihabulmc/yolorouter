@@ -120,6 +120,28 @@ export function setModelStatus(id: number, enabled: boolean): Promise<void> {
   return apiFetch(`/api/admin/models/${id}/status`, { method: 'PATCH', body: JSON.stringify({ enabled }) })
 }
 
+export interface ModelImpactKey {
+  id: number
+  owner_label: string
+  key_prefix: string
+}
+
+/**
+ * What disabling or renaming the model touches. Allowlists reference the model
+ * by id and survive a rename, so recent_request_count carries the rename risk:
+ * callers ask by name.
+ */
+export interface ModelImpact {
+  allowlisted_keys: ModelImpactKey[]
+  allow_all_key_count: number
+  recent_request_count: number
+  recent_window_days: number
+}
+
+export function getModelImpact(id: number): Promise<ModelImpact> {
+  return apiFetch(`/api/admin/models/${id}/impact`)
+}
+
 
 export function createCandidate(modelId: number, input: CreateCandidateInput): Promise<ModelCandidate> {
   return apiFetch(`/api/admin/models/${modelId}/candidates`, { method: 'POST', body: JSON.stringify(input) })

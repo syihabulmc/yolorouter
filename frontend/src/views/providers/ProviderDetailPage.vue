@@ -104,6 +104,8 @@ import { useProvidersStore } from '../../store/providers'
 import { useModelsStore } from '../../store/models'
 import type { ModelCandidate } from '../../api/models'
 import { displayMessage } from '../../api/client'
+import { useConfirmedStatusToggle } from '../../composables/useConfirmedStatusToggle'
+import { providerDisableCopy } from '../../utils/impactSummary'
 import type { BatchTestResult, Provider, ProviderKey } from '../../api/providers'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
@@ -122,6 +124,7 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const dialog = useDialog()
+const toggleStatusWithConfirm = useConfirmedStatusToggle(dialog)
 const message = useMessage()
 const store = useProvidersStore()
 const modelsStore = useModelsStore()
@@ -501,17 +504,11 @@ function onToggleProviderStatus() {
       message.error(displayMessage(err, t))
     }
   }
-  if (!enabling) {
-    dialog.warning({
-      title: t('providers.confirmDisableProviderTitle'),
-      content: t('providers.confirmDisableProviderContent'),
-      positiveText: t('providers.statusDisabled'),
-      negativeText: t('providers.cancel'),
-      onPositiveClick: proceed,
-    })
-    return
-  }
-  void proceed()
+  toggleStatusWithConfirm(
+    enabling,
+    () => providerDisableCopy(providerId, t),
+    proceed,
+  )
 }
 
 async function onTestAll() {

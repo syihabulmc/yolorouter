@@ -93,6 +93,8 @@ import { MoreHorizontal, Plus, Search, Server } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
 import { displayMessage } from '../../api/client'
 import type { Provider } from '../../api/providers'
+import { useConfirmedStatusToggle } from '../../composables/useConfirmedStatusToggle'
+import { providerDisableCopy } from '../../utils/impactSummary'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import NewProviderModal from '../../components/providers/NewProviderModal.vue'
@@ -107,6 +109,7 @@ import { ALL_PROTOCOLS, enabledProtocolEndpoints } from '../../utils/providerPro
 const { t } = useI18n()
 const router = useRouter()
 const dialog = useDialog()
+const toggleStatusWithConfirm = useConfirmedStatusToggle(dialog)
 const message = useMessage()
 const store = useProvidersStore()
 const showCreate = ref(false)
@@ -231,17 +234,11 @@ function onToggleStatus(row: Provider, enable: boolean) {
       message.error(displayMessage(err, t))
     }
   }
-  if (!enable) {
-    dialog.warning({
-      title: t('providers.confirmDisableProviderTitle'),
-      content: t('providers.confirmDisableProviderContent'),
-      positiveText: t('providers.statusDisabled'),
-      negativeText: t('providers.cancel'),
-      onPositiveClick: proceed,
-    })
-    return
-  }
-  void proceed()
+  toggleStatusWithConfirm(
+    enable,
+    () => providerDisableCopy(row.id, t),
+    proceed,
+  )
 }
 
 // computed, not a plain const: this was previously captured once at setup

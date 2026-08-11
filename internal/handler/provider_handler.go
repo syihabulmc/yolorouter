@@ -408,3 +408,20 @@ func PostProviderKeysTestAll(svc *service.ProviderService) gin.HandlerFunc {
 // stamped mutation receives this value explicitly, and nothing below the
 // handler reads the wall clock for query windowing.
 var timeNow = func() time.Time { return time.Now().UTC() }
+
+// GetProviderImpact returns the models that depend on the provider, for the
+// disable confirm dialog.
+func GetProviderImpact(svc *service.ProviderService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, ok := parseUintParam(c, "id")
+		if !ok {
+			return
+		}
+		view, err := svc.GetProviderImpact(id, timeNow())
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		response.Success(c, view)
+	}
+}

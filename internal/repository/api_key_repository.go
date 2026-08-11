@@ -339,3 +339,53 @@ func HasAPIKeyModelAccess(db *gorm.DB, apiKeyID, modelID uint) (bool, error) {
 	}
 	return cnt > 0, nil
 }
+
+// callableAPIKeyScope narrows to keys that can currently make a request —
+// the same predicate as the "active" display-status filter above: not
+// revoked, not expired, budget not exhausted. Impact previews use it so a
+// "this key is affected" claim never counts a key that could not call anyway.
+func callableAPIKeyScope(db *gorm.DB, now time.Time) *gorm.DB {
+	return db.Where(
+		"api_keys.status = ? AND (api_keys.expires_at IS NULL OR api_keys.expires_at >= ?) AND (api_keys.budget_limit_micros IS NULL OR api_keys.budget_spent_micros < api_keys.budget_limit_micros)",
+		model.APIKeyStatusActive, now,
+	)
+}
+
+// ListCallableAPIKeysAllowlisting returns the keys that can currently call
+// and whose allowlist explicitly names the model — the keys an operator
+// breaks by disabling it.
+func ListCallableAPIKeysAllowlisting(db *gorm.DB, modelID uint, now time.Time) ([]model.APIKey, error) {
+	return ListCallableAPIKeysAllowlistingAny(db, []uint{modelID}, now)
+}
+
+// ListCallableAPIKeysAllowlistingAny is the multi-model form: keys that can
+// currently call and allowlist at least one of the models. Each key appears
+// once however many of the models it names. Empty input returns nil without
+// querying.
+func ListCallableAPIKeysAllowlistingAny(db *gorm.DB, modelIDs []uint, now time.Time) ([]model.APIKey, error) {
+	if len(modelIDs) == 0 {
+		return nil, nil
+	}
+	var keys []model.APIKey
+	err := callableAPIKeyScope(db.Model(&model.APIKey{}), now).
+		Distinct("api_keys.*").
+		Joins("JOIN api_key_models ON api_key_models.api_key_id = api_keys.id").
+		Where("api_key_models.model_id IN ?", modelIDs).
+		Order("api_keys.id ASC").
+		Find(&keys).Error
+	if err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
+// CountCallableAllowAllAPIKeys counts keys that can currently call any
+// enabled model. They are affected by every model action, so impact previews
+// report them as a count rather than by name.
+func CountCallableAllowAllAPIKeys(db *gorm.DB, now time.Time) (int64, error) {
+	var cnt int64
+	err := callableAPIKeyScope(db.Model(&model.APIKey{}), now).
+		Where("api_keys.allow_all_models = ?", true).
+		Count(&cnt).Error
+	return cnt, err
+}

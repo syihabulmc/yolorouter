@@ -52,7 +52,7 @@
       </n-tab-pane>
 
       <n-tab-pane name="impact" :tab="t('models.tabImpact')">
-        <div class="section-card">{{ t('models.tabImpact') }}: 0</div>
+        <div class="section-card" style="white-space: pre-line">{{ impactText }}</div>
       </n-tab-pane>
     </n-tabs>
 
@@ -79,11 +79,12 @@ import { NButton, NSwitch, NTag, NTooltip, useDialog, useMessage, type DataTable
 import { ChevronDown, ChevronUp, MoreHorizontal, Plus } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
-import { toggleStatusWithConfirm } from '../../composables/useConfirmedStatusToggle'
+import { useConfirmedStatusToggle } from '../../composables/useConfirmedStatusToggle'
+import { modelDisableCopy, modelImpactOverview } from '../../utils/impactSummary'
 import { candidateTestResultText, capabilityState, modelRunningStatusDisplay } from '../../utils/modelStatusDisplay'
 import { isTestSuccess } from '../../utils/testOutcomeDisplay'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
-import type { Model, ModelCandidate } from '../../api/models'
+import { getModelImpact, type Model, type ModelCandidate, type ModelImpact } from '../../api/models'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import CandidateEditModal from '../../components/models/CandidateEditModal.vue'
@@ -98,6 +99,7 @@ const { t, te } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const dialog = useDialog()
+const toggleStatusWithConfirm = useConfirmedStatusToggle(dialog)
 const message = useMessage()
 const store = useModelsStore()
 const isMobile = useIsMobile()
@@ -149,7 +151,23 @@ onMounted(() => {
 
 async function reload() {
   modelData.value = await store.fetchDetail(modelId)
+  // Refreshed alongside the detail so the impact tab tracks status changes;
+  // a failed fetch degrades the tab, never the page.
+  try {
+    impact.value = await getModelImpact(modelId)
+    impactFailed.value = false
+  } catch {
+    impact.value = null
+    impactFailed.value = true
+  }
 }
+
+const impact = ref<ModelImpact | null>(null)
+const impactFailed = ref(false)
+const impactText = computed(() => {
+  if (impact.value) return modelImpactOverview(t, impact.value, true)
+  return impactFailed.value ? t('models.impactLoadFailed') : t('common.loading')
+})
 
 function onEditCandidate(candidate: ModelCandidate) {
   editingCandidate.value = candidate
@@ -223,14 +241,8 @@ function onToggleModelStatus() {
   if (!modelData.value) return
   const enabling = modelData.value.management_status !== 1
   toggleStatusWithConfirm(
-    dialog,
     enabling,
-    {
-      title: t('models.confirmDisableModelTitle'),
-      content: t('models.confirmDisableModelContent', { count: 0 }),
-      positiveText: t('models.statusDisabled'),
-      negativeText: t('models.cancel'),
-    },
+    () => modelDisableCopy(modelId, t),
     async () => {
       try {
         await store.setStatus(modelId, enabling)

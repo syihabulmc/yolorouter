@@ -1236,3 +1236,63 @@ func (s *ModelService) SetModelStatus(id uint, enabled bool, now time.Time) erro
 	}
 	return repository.UpdateModelNameStatus(s.db, id, m.Name, status, now)
 }
+
+// modelImpactRecentWindow is how far back the impact preview counts live
+// traffic. A week catches weekly batch jobs, the slowest cadence a caller
+// realistically runs at, without the count going stale-heavy.
+const modelImpactRecentWindow = 7 * 24 * time.Hour
+
+// ModelImpactKeyView is one key an operator would break: enough to recognize
+// it in the key list (label plus prefix), nothing that could rebuild it.
+type ModelImpactKeyView struct {
+	ID         uint   `json:"id"`
+	OwnerLabel string `json:"owner_label"`
+	KeyPrefix  string `json:"key_prefix"`
+}
+
+// ModelImpactView is what disabling or renaming this model touches.
+// AllowlistedKeys are callable keys that name the model explicitly;
+// AllowAllKeyCount is how many callable keys reach it implicitly. Allowlists
+// reference the model by id and survive a rename, so RecentRequestCount
+// carries the rename risk instead: callers ask by name, and this is how many
+// recent requests would have asked for a name that no longer routes.
+type ModelImpactView struct {
+	AllowlistedKeys    []ModelImpactKeyView `json:"allowlisted_keys"`
+	AllowAllKeyCount   int64                `json:"allow_all_key_count"`
+	RecentRequestCount int64                `json:"recent_request_count"`
+	RecentWindowDays   int                  `json:"recent_window_days"`
+}
+
+// GetModelImpact answers "what breaks if I disable or rename this model" for
+// the confirm dialogs and the impact tab.
+func (s *ModelService) GetModelImpact(id uint, now time.Time) (*ModelImpactView, error) {
+	m, err := repository.FindModelByID(s.db, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errcode.ErrModelNotFound
+		}
+		return nil, err
+	}
+	keys, err := repository.ListCallableAPIKeysAllowlisting(s.db, id, now)
+	if err != nil {
+		return nil, err
+	}
+	keyViews := make([]ModelImpactKeyView, 0, len(keys))
+	for _, k := range keys {
+		keyViews = append(keyViews, ModelImpactKeyView{ID: k.ID, OwnerLabel: k.OwnerLabel, KeyPrefix: k.KeyPrefix})
+	}
+	allowAll, err := repository.CountCallableAllowAllAPIKeys(s.db, now)
+	if err != nil {
+		return nil, err
+	}
+	recent, err := repository.CountRequestLogsForModelSince(s.db, m.Name, now.Add(-modelImpactRecentWindow))
+	if err != nil {
+		return nil, err
+	}
+	return &ModelImpactView{
+		AllowlistedKeys:    keyViews,
+		AllowAllKeyCount:   allowAll,
+		RecentRequestCount: recent,
+		RecentWindowDays:   int(modelImpactRecentWindow / (24 * time.Hour)),
+	}, nil
+}

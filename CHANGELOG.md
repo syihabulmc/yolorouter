@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The console's danger actions now say what they touch before they do it.
+  Disabling a model lists the API keys whose allowlist names it, how many
+  allow-all keys can also call it, and how many requests asked for it in the
+  last week; renaming a model leads with that live-traffic number, since
+  allowlists follow the model but callers ask by name; disabling a provider
+  names the models with candidates on it, flags any that would be left with
+  no routable source at all, and names the keys whose allowlist contains such
+  a model. The model detail page's impact tab shows the
+  same facts instead of a placeholder.
+- A candidate that cannot be routed to now says what blocks it — the provider
+  switched off, no usable key, a missing provider-side model name, a missing
+  probe, or its own switch — in the order the operator has to fix them.
+
 ### Fixed
 
 - A request asking for more output than the candidate serving it allows is now
