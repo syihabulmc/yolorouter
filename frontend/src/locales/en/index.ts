@@ -547,6 +547,7 @@ export default {
     bodyTooLarge: 'Request body exceeds size limit',
     concurrencyLimit: 'Concurrency limit reached',
     rpmExceeded: 'Rate limit (RPM) exceeded',
+    tpmExceeded: 'Token limit (TPM) exceeded',
     budgetExceeded: 'Budget limit exceeded',
     revoked: 'API key has been revoked',
     expired: 'API key has expired',

@@ -550,6 +550,7 @@ export default {
     bodyTooLarge: '请求体超出大小限制',
     concurrencyLimit: '并发数已达上限',
     rpmExceeded: '每分钟请求已达上限',
+    tpmExceeded: '每分钟 Token 已达上限',
     budgetExceeded: '预算已达上限',
     revoked: 'API Key 已被吊销',
     expired: 'API Key 已过期',

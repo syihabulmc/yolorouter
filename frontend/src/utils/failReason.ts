@@ -27,6 +27,7 @@ const FAIL_REASON_CODES: Record<string, string> = {
   body_too_large: 'failReason.bodyTooLarge',
   concurrency_limit: 'failReason.concurrencyLimit',
   rpm_exceeded: 'failReason.rpmExceeded',
+  tpm_exceeded: 'failReason.tpmExceeded',
   budget_exceeded: 'failReason.budgetExceeded',
   revoked: 'failReason.revoked',
   expired: 'failReason.expired',

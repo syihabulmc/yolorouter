@@ -260,6 +260,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		apiKeyID:         apiKey.ID,
 		concurrencyLimit: derefLimit(apiKey.ConcurrencyLimit),
 		rpmLimit:         derefLimit(apiKey.RPMLimit),
+		tpmLimit:         derefLimit(apiKey.TPMLimit),
 	}
 	// Stamp the per-request total-budget deadline up front, before any
 	// attempt logic, so every exit path (including early rejections below)

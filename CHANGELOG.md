@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe, or its own switch — in the order the operator has to fix them.
 - The model list can be filtered by provider, answering "which models route
   through this one" at a glance.
+- The per-key TPM limit is now enforced. Settled usage is tallied into a
+  per-key minute window and requests are rejected with 429 once the window
+  reaches the configured limit — no prompt-token estimation, so a concurrent
+  burst can overshoot the window once before it starts rejecting. Previously
+  the console accepted and stored the limit but nothing ever applied it.
 
 ### Fixed
 

@@ -77,6 +77,7 @@ type Exchange struct {
 	// means — the distinction has no consumer, so it is not preserved.
 	concurrencyLimit int
 	rpmLimit         int
+	tpmLimit         int
 
 	// requestDeadline is the absolute cutoff for the whole request across all
 	// failover candidates (the request_timeout budget). Set once at Handle
@@ -220,6 +221,10 @@ func (rc *Exchange) ConcurrencyLimit() int { return rc.concurrencyLimit }
 // RPMLimit is how many requests this key may make per minute. Zero means
 // unlimited.
 func (rc *Exchange) RPMLimit() int { return rc.rpmLimit }
+
+// TPMLimit is how many tokens this key may settle per minute. Zero means
+// unlimited.
+func (rc *Exchange) TPMLimit() int { return rc.tpmLimit }
 
 // CustomSystemPromptEnabled reports whether a prompt was resolved for this
 // request, from either the global setting or a per-key override.
