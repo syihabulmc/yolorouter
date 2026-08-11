@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -320,5 +321,35 @@ func TestIngressRefusalDoesNotLeakTheRewritersErrorToTheCaller(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "leaker") {
 		t.Errorf("the response names an internal capability: %s", w.Body.String())
+	}
+}
+
+// The clamp is only worth anything if the clamped body is what actually leaves.
+// Its own package tests drive it directly with a stub view; this one proves the
+// wiring — that production's assembly reaches it, that it is handed the
+// candidate's real limit, and that the number the upstream reads is the clamped
+// one.
+func TestTheOutputCeilingReachingTheUpstreamIsTheCandidatesLimit(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	var sent []byte
+	upstream := upstreamEchoingBody(t, &sent)
+	svc := newSvc(t, db)
+	apiKey := wireOneCandidate(t, svc, db, upstream.URL)
+
+	// The fixture's candidate allows 4096; ask for well over it.
+	c, w := newCtx([]byte(`{"model":"gpt-4o","max_tokens":9000,"messages":[{"role":"user","content":"hi"}]}`))
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	var doc struct {
+		MaxTokens int `json:"max_tokens"`
+	}
+	if err := json.Unmarshal(sent, &doc); err != nil {
+		t.Fatalf("upstream body is not JSON: %v (%s)", err, sent)
+	}
+	if doc.MaxTokens != 4096 {
+		t.Fatalf("upstream was asked for %d output tokens, want the candidate's 4096: the request was forwarded over the provider's limit", doc.MaxTokens)
 	}
 }

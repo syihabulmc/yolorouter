@@ -51,7 +51,28 @@ make vet            # go vet (plain and -tags release)
 
 ```
 cmd/yolorouter/     CLI entry point (serve, db:migrate, update, version)
-internal/           Backend: handler → service → repository, gateway, middleware
+internal/           Backend: handler → service → repository, middleware
+  gateway/          The relay kernel: admission, candidate selection, dispatch,
+                    delivery, settlement. Holds no feature logic of its own.
+  capability/       One package per thing the gateway does to a request beyond
+                    relaying it — rate limiting, content inspection, system
+                    prompt injection, request logging, input compression,
+                    output-ceiling clamping. Each registers itself with the
+                    kernel at assembly (internal/router/capabilities.go) and
+                    never imports it.
+  decision/         The table that says what each observation costs a request:
+                    whether to retry, what the caller sees, what is billed.
+                    Capabilities report; this decides.
+  fact/             The vocabulary capabilities report in — routing verdicts
+                    and accounting records. Adding a record type here is how a
+                    capability gets something onto the audit row.
+  gates/            Structural checks that run as tests. They enforce rules a
+                    linter cannot: error codes must be registered, the decision
+                    table must be exhaustive, comments must not name symbols
+                    that no longer exist. A pull request that trips one fails
+                    here rather than in review — run `make gates` locally.
+  protocols/        Wire formats (OpenAI chat, Anthropic, Gemini, Responses)
+                    and the intermediate form they convert through.
 pkg/                Reusable packages (crypto, database, response, ...)
 migrations/         goose migrations (sqlite/ and postgres/)
 web/                go:embed of the built frontend

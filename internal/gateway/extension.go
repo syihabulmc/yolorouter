@@ -283,6 +283,9 @@ const (
 	// StageCustomPrompt appends to the system text, so it runs late: it must
 	// see the body every other rewriter has finished shaping.
 	StageCustomPrompt EgressStage = 50
+	// StageMaxTokens holds the output ceiling down to the candidate's, and runs
+	// after anything that could rename or introduce that field.
+	StageMaxTokens EgressStage = 60
 )
 
 // egressRewriter is the kernel-side, view-erased form.

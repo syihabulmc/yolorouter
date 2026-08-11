@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A request asking for more output than the candidate serving it allows is now
+  held down to that candidate's ceiling instead of being forwarded as written.
+  Upstreams disagreed about what to do with an over-large ceiling — clamp,
+  refuse, or accept and bill for it — so the same request could cost wildly
+  different amounts depending on which provider took it.
+- An OpenAI-format request stating its output ceiling as `max_completion_tokens`
+  no longer loses it on the way to a provider that speaks another format. Only
+  the older `max_tokens` spelling was read, so the ceiling of exactly the
+  newest requests — the reasoning models require this field and reject the old
+  one — vanished during protocol conversion, and the provider's own default
+  applied instead. Where a request states both, the lower is used.
+
+### Changed
+
+- The relay kernel keeps growing extension points rather than feature code.
+  A capability can now rewrite the caller's body before any candidate is
+  chosen (which is how input compression works), repair a body an upstream
+  refused and have it retried against the same candidate, and be asked to admit
+  a request a second time once its price is known — the point at which a
+  reservation can be computed at all. Providers carry a health record the
+  decision table books failures against, and every request carries a retry
+  budget that table prices.
+
 ## [0.1.3] - 2026-08-09
 
 A feature and hardening release on top of 0.1.2: the console adapts to

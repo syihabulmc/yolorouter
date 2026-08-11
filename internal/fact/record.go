@@ -177,6 +177,43 @@ type TokensSaved struct {
 
 func (TokensSaved) RecordName() string { return "tokens_saved" }
 
+// MaxTokensClamped reports that a request asked for more output than the
+// candidate serving it allows, and was held down to that candidate's ceiling.
+//
+// Both numbers are kept because only the pair explains the row: the ceiling
+// alone says what the provider allows, and the asked-for figure is what an
+// operator compares it against when a caller reports being cut short.
+type MaxTokensClamped struct {
+	Base
+	Asked   int
+	Allowed int
+}
+
+func (MaxTokensClamped) RecordName() string { return "max_tokens_clamped" }
+
+// MaxTokensClampSkipped reports that a request was over the candidate's ceiling
+// and was sent anyway, because holding it down would have produced a request
+// the upstream must reject.
+//
+// Deliberately a separate type rather than a flag on MaxTokensClamped, for the
+// same reason CompressionSkipped is separate from TokensSaved: "held down" and
+// "could not be held down" are different events, and an operator investigating
+// an over-budget response needs to see the second one rather than infer it from
+// the absence of the first.
+//
+// Asked and Allowed carry the same two numbers as MaxTokensClamped and mean the
+// same things — the ceiling the caller stated and the one the candidate allows.
+// Reason names what made the gap unbridgeable, which is the only part the two
+// records do not share.
+type MaxTokensClampSkipped struct {
+	Base
+	Reason  string
+	Asked   int
+	Allowed int
+}
+
+func (MaxTokensClampSkipped) RecordName() string { return "max_tokens_clamp_skipped" }
+
 // CompressionSkipped reports that compression was enabled but declined to act.
 // Deliberately a separate type from TokensSaved rather than a zero value of it:
 // "compressed nothing" and "did not compress" are different events, and a

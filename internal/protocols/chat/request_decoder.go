@@ -19,11 +19,17 @@ func (d RequestDecoder) DecodeRequest(body json.RawMessage, model string, isStre
 		Stream      bool            `json:"stream"`
 		Temperature *float64        `json:"temperature,omitempty"`
 		MaxTokens   *int            `json:"max_tokens,omitempty"`
-		TopP        *float64        `json:"top_p,omitempty"`
-		TopK        *int            `json:"top_k,omitempty"`
-		TopA        *float64        `json:"top_a,omitempty"`
-		MinP        *float64        `json:"min_p,omitempty"`
-		Seed        *int64          `json:"seed,omitempty"`
+		// MaxCompletionTokens is the same ceiling under the name the reasoning
+		// models require and current SDKs send. Reading only max_tokens drops
+		// the ceiling of exactly the newest and most expensive requests, and it
+		// disappears silently: the field is simply absent from whatever this
+		// request is re-encoded into.
+		MaxCompletionTokens *int     `json:"max_completion_tokens,omitempty"`
+		TopP                *float64 `json:"top_p,omitempty"`
+		TopK                *int     `json:"top_k,omitempty"`
+		TopA                *float64 `json:"top_a,omitempty"`
+		MinP                *float64 `json:"min_p,omitempty"`
+		Seed                *int64   `json:"seed,omitempty"`
 		// Stop is OpenAI's "stop" field, which the API accepts as EITHER a
 		// single string OR an array of strings — decoded via decodeStopSequences
 		// below rather than a fixed shape, since a plain json.RawMessage array
@@ -72,7 +78,7 @@ func (d RequestDecoder) DecodeRequest(body json.RawMessage, model string, isStre
 	// be forwarded to the egress provider as-is.
 	irReq.Generation = protocols.IRGenerationConfig{
 		Temperature:         req.Temperature,
-		MaxTokens:           req.MaxTokens,
+		MaxTokens:           pickCeiling(req.MaxTokens, req.MaxCompletionTokens),
 		TopP:                req.TopP,
 		TopK:                req.TopK,
 		TopA:                req.TopA,
@@ -493,5 +499,34 @@ func budgetToEffort(budget int) string {
 		return "medium"
 	default:
 		return "high"
+	}
+}
+
+// pickCeiling settles which of OpenAI's two spellings of the output ceiling
+// applies when a request carries both.
+//
+// The lower one wins. OpenAI's own precedence depends on the model — the
+// reasoning models honour max_completion_tokens and reject max_tokens outright,
+// older ones know only max_tokens — and the decoder does not know which model
+// the request will end up at, since a candidate can rewrite it. Taking the
+// lower is the only choice that cannot raise a ceiling the caller stated: a
+// request that says "at most 4096" under either name is not asking for more
+// than 4096, whichever spelling the destination reads.
+//
+// This is a choice, not a rule read off a specification: no upstream defines
+// what a body carrying both spellings means, because no upstream reads both.
+// It changes what this decoder used to do — max_tokens was taken and the other
+// name ignored — and it changes it only for requests that state both, which a
+// client sends by mistake or in transition. Erring low keeps the mistake cheap.
+func pickCeiling(maxTokens, maxCompletionTokens *int) *int {
+	switch {
+	case maxTokens == nil:
+		return maxCompletionTokens
+	case maxCompletionTokens == nil:
+		return maxTokens
+	case *maxCompletionTokens < *maxTokens:
+		return maxCompletionTokens
+	default:
+		return maxTokens
 	}
 }

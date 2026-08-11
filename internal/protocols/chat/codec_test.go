@@ -1077,3 +1077,45 @@ func TestChatStreamEncoder_PartialUsageDoesNotOverwritePrompt(t *testing.T) {
 		t.Error("CacheIncludedInPrompt must stay true (pricing basis is locked to avoid cross-protocol double billing)")
 	}
 }
+
+// The reasoning models require max_completion_tokens and reject max_tokens, so
+// current SDKs send the former. Dropping it here is invisible and expensive:
+// the ceiling simply does not appear in whatever this request is re-encoded
+// into, so a request that was capped on an OpenAI-speaking provider loses its
+// cap the moment it fails over to one that speaks anything else.
+func TestDecodeRequestReadsBothSpellingsOfTheOutputCeiling(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"modern name only", `{"model":"m","max_completion_tokens":4096,"messages":[]}`, 4096},
+		{"legacy name only", `{"model":"m","max_tokens":4096,"messages":[]}`, 4096},
+		{"both, modern lower", `{"model":"m","max_tokens":9000,"max_completion_tokens":4096,"messages":[]}`, 4096},
+		{"both, legacy lower", `{"model":"m","max_tokens":4096,"max_completion_tokens":9000,"messages":[]}`, 4096},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ir, err := RequestDecoder{}.DecodeRequest(json.RawMessage(tc.body), "m", false)
+			if err != nil {
+				t.Fatalf("DecodeRequest: %v", err)
+			}
+			if ir.Generation.MaxTokens == nil {
+				t.Fatal("the ceiling was dropped: nothing downstream can re-state a limit it never received")
+			}
+			if *ir.Generation.MaxTokens != tc.want {
+				t.Fatalf("ceiling = %d, want %d — the lower of the two stated is the only one that cannot raise what the caller asked for", *ir.Generation.MaxTokens, tc.want)
+			}
+		})
+	}
+}
+
+// A request stating no ceiling must not acquire one.
+func TestDecodeRequestLeavesAnAbsentCeilingAbsent(t *testing.T) {
+	ir, err := RequestDecoder{}.DecodeRequest(json.RawMessage(`{"model":"m","messages":[]}`), "m", false)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	if ir.Generation.MaxTokens != nil {
+		t.Fatalf("ceiling = %d, want none stated", *ir.Generation.MaxTokens)
+	}
+}

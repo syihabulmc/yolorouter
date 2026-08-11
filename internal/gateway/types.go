@@ -247,6 +247,21 @@ func (rc *Exchange) RequestID() string { return rc.requestID }
 // OriginalModel is the model name the caller asked for.
 func (rc *Exchange) OriginalModel() string { return rc.originalModel }
 
+// CandidateMaxOutput is the most output the candidate now being tried will
+// produce, zero when it states no limit or when no candidate is bound yet.
+//
+// It is a property of the candidate rather than of the request, so it changes
+// under failover: the same request can be clamped to one limit on the first
+// provider and a different one on the next. Anything reading it must therefore
+// read it per attempt, not once.
+func (rc *Exchange) CandidateMaxOutput() int {
+	cand := rc.attempt.Candidate()
+	if cand == nil {
+		return 0
+	}
+	return cand.MaxOutput
+}
+
 // IsStream reports whether the caller asked for a streamed response.
 func (rc *Exchange) IsStream() bool { return rc.isStream }
 
