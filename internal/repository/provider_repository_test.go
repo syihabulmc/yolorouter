@@ -63,7 +63,7 @@ func TestMarkProviderKeyVerificationFailedIfCurrentCAS(t *testing.T) {
 	}
 
 	// Happy path: Passed + destination matches -> flipped to Failed.
-	applied, err := MarkProviderKeyVerificationFailedIfCurrent(db, key.ID, provider.DestinationVersion, now)
+	applied, err := MarkProviderKeyVerificationFailedIfCurrent(db, key.ID, provider.DestinationVersion, key.ConfigVersion, key.TestGeneration, now)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestMarkProviderKeyVerificationFailedIfCurrentCAS(t *testing.T) {
 		Update("verification_status", model.VerificationStatusPassed).Error; err != nil {
 		t.Fatalf("seed passed: %v", err)
 	}
-	applied, err = MarkProviderKeyVerificationFailedIfCurrent(db, key2.ID, provider.DestinationVersion+999, now)
+	applied, err = MarkProviderKeyVerificationFailedIfCurrent(db, key2.ID, provider.DestinationVersion+999, key2.ConfigVersion, key2.TestGeneration, now)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1203,5 +1203,47 @@ func TestProviderKeyFingerprintClaimNeverOverwritesExistingRow(t *testing.T) {
 	}
 	if fp.EncryptedProbe != "first-writer-probe" {
 		t.Fatalf("expected the first writer's probe to be preserved, got %q", fp.EncryptedProbe)
+	}
+}
+
+// A late rejection of a credential that has since been replaced or retested
+// must lose the CAS: the request went out with the OLD plaintext, and
+// branding the row Failed now would take down the NEW credential that just
+// passed its test. Any replacement bumps config_version and any test bumps
+// test_generation, so a mismatch on either leaves the row untouched.
+func TestMarkProviderKeyVerificationFailedLosesToReplacedOrRetestedKey(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	now := time.Now().UTC()
+	provider, key := seedProviderWithKey(t, db, "openai-main")
+	if err := db.Model(&model.ProviderKey{}).Where("id = ?", key.ID).
+		Update("verification_status", model.VerificationStatusPassed).Error; err != nil {
+		t.Fatalf("seed passed: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		configDiff int
+		genDiff    int
+	}{
+		{"plaintext was replaced since dispatch", -1, 0},
+		{"a test ran since dispatch", 0, -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			applied, err := MarkProviderKeyVerificationFailedIfCurrent(db, key.ID,
+				provider.DestinationVersion, key.ConfigVersion+tc.configDiff, key.TestGeneration+tc.genDiff, now)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if applied {
+				t.Fatal("a stale dispatch snapshot must lose the CAS, not brand the current credential")
+			}
+			var reloaded model.ProviderKey
+			if err := db.First(&reloaded, key.ID).Error; err != nil {
+				t.Fatalf("reload: %v", err)
+			}
+			if reloaded.VerificationStatus != model.VerificationStatusPassed {
+				t.Fatalf("row must stay Passed, got %d", reloaded.VerificationStatus)
+			}
+		})
 	}
 }

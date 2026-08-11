@@ -1174,6 +1174,29 @@ const (
 // and pre-first-byte stream failures are candidate-level (failover); 401/429
 // are key-level (rotate); 2xx is success; other 4xx is terminal (caller's
 // problem).
+// markProviderKeyForRetest persists a key-scoped upstream rejection as a
+// verification failure, so routing stops offering the key and the console
+// shows it needs a retest. The CAS uses a context deliberately detached from
+// the attempt/request context so that a client disconnect or attempt-deadline
+// expiry arriving between the upstream's response headers and this DB write
+// cannot cancel the UPDATE — a cancelled CAS would leave a dead key marked as
+// valid, causing every subsequent request to burn a full upstream timeout on
+// it. WithoutCancel decouples from request cancellation; the 5s budget bounds
+// a stuck DB so it cannot hang the goroutine indefinitely. The CAS's own
+// version guard (expectedDestinationVersion) already protects against
+// concurrent edits, so the detached context is safe.
+func (s *Service) markProviderKeyForRetest(ctx context.Context, rc *Exchange, pk *model.ProviderKey, provider *model.Provider) {
+	casCtx, casCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer casCancel()
+	if applied, mErr := repository.MarkProviderKeyVerificationFailedIfCurrent(s.db.WithContext(casCtx), pk.ID, provider.DestinationVersion, pk.ConfigVersion, pk.TestGeneration, time.Now()); mErr != nil {
+		logger.Warn("gateway: mark provider key failed",
+			zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID), zap.Error(mErr))
+	} else if !applied {
+		logger.Debug("gateway: provider key invalidation CAS lost race",
+			zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID))
+	}
+}
+
 func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plaintext string, egress *EgressDecision, outBody []byte, url string, start time.Time, repairAllowed bool) (attemptResult, []byte) {
 	// The attempt's identity — candidate, provider, key — lives on rc.attempt,
 	// staged by the loops above; plaintext alone stays a parameter, because a
@@ -1309,26 +1332,10 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	note := fmt.Sprintf("upstream %d", statusCode)
 
 	// For 401, persist the key verification failure BEFORE reading the
-	// error body. The CAS uses a context deliberately detached from the
-	// attempt/request context so that a client disconnect or attempt-deadline
-	// expiry arriving between the 401 response headers and this DB write
-	// cannot cancel the UPDATE — a cancelled CAS would leave a dead key
-	// marked as valid, causing every subsequent request to burn a full
-	// upstream timeout on it. WithoutCancel decouples from request
-	// cancellation; the 5s budget bounds a stuck DB so it cannot hang the
-	// goroutine indefinitely. The CAS's own version guard
-	// (expectedDestinationVersion) already protects against concurrent
-	// edits, so the detached context is safe.
+	// error body: the status line alone is proof, and the body read can be
+	// cut short by a disconnect.
 	if statusCode == http.StatusUnauthorized {
-		casCtx, casCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer casCancel()
-		if applied, mErr := repository.MarkProviderKeyVerificationFailedIfCurrent(s.db.WithContext(casCtx), pk.ID, provider.DestinationVersion, time.Now()); mErr != nil {
-			logger.Warn("gateway: mark provider key failed",
-				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID), zap.Error(mErr))
-		} else if !applied {
-			logger.Debug("gateway: provider key invalidation CAS lost race",
-				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID))
-		}
+		s.markProviderKeyForRetest(ctx, rc, pk, provider)
 	}
 
 	// Capture the obtainable upstream error body before close, verbatim.
@@ -1345,6 +1352,17 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	// open beyond that window.
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	rc.bodies.SetUpstreamResponse(errBody)
+
+	// A 429 whose body claims exhausted quota or billing is not the
+	// transient rate limit its status pretends to be: the key keeps failing
+	// until the account is topped up. Mark it for retest exactly as a 401
+	// is — rotation already carries this request to the next key — so
+	// routing stops burning attempts on a key that cannot pay. A plain
+	// rate-limit 429 stays unmarked: it heals on its own, and flagging it
+	// would take a healthy key out of rotation.
+	if statusCode == http.StatusTooManyRequests && quotaExhaustedBody(errBody) {
+		s.markProviderKeyForRetest(ctx, rc, pk, provider)
+	}
 	_ = resp.Body.Close()
 
 	// Observers get the response and report what they recognise in it; the

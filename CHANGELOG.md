@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe, or its own switch — in the order the operator has to fix them.
 - The model list can be filtered by provider, answering "which models route
   through this one" at a glance.
+- An upstream key that answers 429 with an exhausted-quota body (OpenAI's
+  insufficient_quota, or a quota/billing/credit message) is now marked for
+  retest and taken out of routing, exactly as a 401 is — previously it kept
+  being offered and every request burned an attempt on it. A plain
+  rate-limit 429 still rotates without marking, since it heals on its own.
 - The per-key TPM limit is now enforced. Settled usage is tallied into a
   per-key minute window and requests are rejected with 429 once the window
   reaches the configured limit — no prompt-token estimation, so a concurrent

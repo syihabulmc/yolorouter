@@ -539,21 +539,23 @@ func CommitProviderKeyRetestResult(
 }
 
 // MarkProviderKeyVerificationFailedIfCurrent is the gateway's CAS write to
-// invalidate a provider key after a real upstream 401. Unlike the
-// test-flow CAS functions above (CommitProviderKeyPlaintextTestResult /
-// CommitProviderKeyRetestResult, which guard on config_version +
-// test_generation because they belong to a plaintext/retest lifecycle), this
-// guards only on verification_status=Passed AND authorized_destination_version
-// = the destination the key was just sent to — i.e. "the key was valid for
-// exactly this destination, and the upstream rejected the credential".
+// invalidate a provider key after a key-scoped upstream rejection (a 401, or
+// a 429 whose body claims exhausted quota). It applies only when the row is
+// still the credential the request was dispatched with: verification_status
+// = Passed, authorized_destination_version = the destination it was sent to,
+// AND the config_version/test_generation captured at dispatch. The last two
+// close a stale-response race: a request can still be in flight with the old
+// plaintext while an admin replaces the key and the replacement passes its
+// test — without the generation guards, the late rejection of the OLD
+// credential would brand the NEW one Failed. Any replacement or intervening
+// test bumps one of the two, so the stale write loses the CAS instead.
 // CommitProviderKeyRetestResult's CAS does NOT check verification_status, so
 // a gateway-invalidated key can still be recovered by a later retest.
-// Returns applied=false (no error) if the row no longer matches (concurrent
-// edit, destination change, or already invalidated) — callers treat that as
-// a benign lost race, not an error.
-func MarkProviderKeyVerificationFailedIfCurrent(db *gorm.DB, keyID uint, expectedDestinationVersion int, now time.Time) (bool, error) {
+// Returns applied=false (no error) if the row no longer matches — callers
+// treat that as a benign lost race, not an error.
+func MarkProviderKeyVerificationFailedIfCurrent(db *gorm.DB, keyID uint, expectedDestinationVersion, expectedConfigVersion, expectedTestGeneration int, now time.Time) (bool, error) {
 	return execReturningApplied(db,
 		`UPDATE provider_keys SET verification_status = ?, updated_at = ?
-		 WHERE id = ? AND verification_status = ? AND authorized_destination_version = ?`,
-		model.VerificationStatusFailed, now, keyID, model.VerificationStatusPassed, expectedDestinationVersion)
+		 WHERE id = ? AND verification_status = ? AND authorized_destination_version = ? AND config_version = ? AND test_generation = ?`,
+		model.VerificationStatusFailed, now, keyID, model.VerificationStatusPassed, expectedDestinationVersion, expectedConfigVersion, expectedTestGeneration)
 }

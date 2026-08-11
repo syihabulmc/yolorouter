@@ -90,3 +90,33 @@ func TestWriteOpenAIErrorNoExchangeIsNoop(t *testing.T) {
 		t.Fatalf("status = %d, want 401", w.Code)
 	}
 }
+
+// quotaExhaustedBody separates "the account cannot pay" from "slow down".
+// The former is key-scoped and permanent until topped up; the latter heals
+// on its own — conflating them either strands healthy keys or burns
+// attempts on dead ones.
+func TestQuotaExhaustedBody(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"openai insufficient_quota code", `{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}`, true},
+		{"insufficient_quota type without code, as a yolorouter upstream sends it", `{"error":{"type":"insufficient_quota","message":"budget limit exceeded"}}`, true},
+		{"billing in message", `{"error":{"message":"billing hard limit reached"}}`, true},
+		{"credit in message", `{"error":{"message":"Your credit balance is too low"}}`, true},
+		{"plain rate limit", `{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached, retry after 2s"}}`, false},
+		{"gemini per-minute throttle is not exhaustion", `{"error":{"code":429,"message":"Quota exceeded for quota metric 'GenerateContentRequestsPerMinute' and limit 'per minute' of service","status":"RESOURCE_EXHAUSTED"}}`, false},
+		{"bare quota word is not a signal", `{"error":{"message":"Request quota reached, slow down"}}`, false},
+		{"numeric code does not panic", `{"error":{"code":429,"message":"too many requests"}}`, false},
+		{"empty body", ``, false},
+		{"not json", `slow down`, false},
+		{"no error object", `{"message":"quota"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := quotaExhaustedBody([]byte(tc.body)); got != tc.want {
+				t.Fatalf("quotaExhaustedBody(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}

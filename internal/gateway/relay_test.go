@@ -2123,3 +2123,55 @@ func TestRecordCurrentAttemptCarriesTheStagedIdentity(t *testing.T) {
 		t.Errorf("row = (%d, %q, %q), want (200, %q, note)", rec.StatusCode, rec.Outcome, rec.FailReason, AttemptBadStatus)
 	}
 }
+
+// A 429 whose body says the quota is exhausted is key-scoped and stays dead
+// until the account is topped up: the gateway must rotate to the next key
+// AND mark the exhausted one verification-failed so routing stops offering
+// it. A plain rate-limit 429 must rotate without marking — flagging it would
+// take a healthy key out of rotation.
+func TestRelayQuotaExhausted429MarksKeyPlainRateLimitDoesNot(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		errBody    string
+		wantMarked bool
+	}{
+		{"insufficient quota marks the key", `{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}`, true},
+		{"plain rate limit does not", `{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached, retry shortly"}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.NewSQLiteDB(t)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") == "Bearer sk-broke" {
+					w.WriteHeader(http.StatusTooManyRequests)
+					_, _ = w.Write([]byte(tc.errBody))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"model":"m","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+			}))
+			defer upstream.Close()
+
+			svc := newSvc(t, db)
+			p := createProvider(t, db, "p1", upstream.URL)
+			createProviderKey(t, db, svc.masterKey, p.ID, "sk-broke", "broke", 1, true)
+			createProviderKey(t, db, svc.masterKey, p.ID, "sk-good", "good", 2, true)
+			m := createModelAndCandidate(t, db, p, "gpt-4o", "gpt-4o-real", true, true, 1)
+			apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+			c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+			svc.Handle(c, apiKey)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 after rotation; body = %s", w.Code, w.Body.String())
+			}
+			var broke model.ProviderKey
+			if err := db.Where("provider_id = ? AND label = ?", p.ID, "broke").First(&broke).Error; err != nil {
+				t.Fatalf("load key: %v", err)
+			}
+			marked := broke.VerificationStatus == model.VerificationStatusFailed
+			if marked != tc.wantMarked {
+				t.Fatalf("key verification_status = %d, marked=%v, want marked=%v", broke.VerificationStatus, marked, tc.wantMarked)
+			}
+		})
+	}
+}

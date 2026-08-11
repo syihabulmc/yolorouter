@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -254,4 +255,37 @@ func classifyUpstreamStatus(status int) upstreamStatusClass {
 		}
 		return upstreamStatusClass{Category: statusTerminalClient, Outcome: AttemptClientError, ErrorType: errType}
 	}
+}
+
+// quotaExhaustedBody reports whether an upstream 429 error body claims an
+// account that cannot pay, as opposed to transient rate limiting. The verdict
+// sets routing state — a match takes the key out of rotation until a retest —
+// so the signal set is deliberately narrower than the connection tester's
+// display-only labels: the explicit "insufficient_quota" enum in error.code
+// (OpenAI's convention; a string or a number depending on the upstream, hence
+// the loose decode) or in error.type (OpenAI sets both; a Yolorouter upstream
+// reporting budget exhaustion sets only the type), or "billing"/"credit" in
+// the message. The bare word "quota" is deliberately NOT a signal:
+// Gemini-style upstreams describe ordinary per-minute throttling as "Quota
+// exceeded for quota metric ...", and matching it would strand a healthy key
+// on a limit that heals itself.
+func quotaExhaustedBody(body []byte) bool {
+	var parsed struct {
+		Error *struct {
+			Code    any    `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Error == nil {
+		return false
+	}
+	if code, ok := parsed.Error.Code.(string); ok && code == "insufficient_quota" {
+		return true
+	}
+	if parsed.Error.Type == "insufficient_quota" {
+		return true
+	}
+	msg := strings.ToLower(parsed.Error.Message)
+	return strings.Contains(msg, "billing") || strings.Contains(msg, "credit")
 }
