@@ -262,7 +262,12 @@ func AggregateByCaller(db *gorm.DB, f *RequestLogFilter) ([]CallerReportRow, err
 		COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
 		COALESCE(SUM(cost_micros), 0) AS cost_micros,
 		SUM(CASE WHEN cost_known = ? THEN 1 ELSE 0 END) AS unknown_cost_calls
-	`, false).Group("api_key_id").Order("calls DESC").Scan(&rows).Error
+	`, false).Group("api_key_id").
+		// Spend, not volume, is what a caller ranking is read for: the row
+		// to look at first is whoever costs the most, and a cheap chatty key
+		// outranking an expensive quiet one buries it. The table offers
+		// call-count sorting client-side.
+		Order("cost_micros DESC").Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}

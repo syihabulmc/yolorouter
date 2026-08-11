@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe, or its own switch — in the order the operator has to fix them.
 - The model list can be filtered by provider, answering "which models route
   through this one" at a glance.
+- The caller ranking now leads with spend instead of call volume — the row
+  to look at first is whoever costs the most — and the calls column is
+  sortable for the old ordering. The model and provider report tables gain
+  the same sortable calls/cost headers (their default order is unchanged),
+  and on mobile, where cards have no headers, a sort selector covers all
+  three tabs. The time tab stays chronological.
 - A provider key's row now shows the outcome category of its last test —
   rate limited, unreachable, quota unavailable, and so on — with the
   category's actionable hint. Previously the category flashed by in a toast

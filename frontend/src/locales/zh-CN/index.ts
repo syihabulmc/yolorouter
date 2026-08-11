@@ -630,6 +630,8 @@ export default {
     cacheReadTokensColumn: '缓存读取 Token',
     cacheReadTokensColumn_tip: '该分组累计的缓存读取（cache hit）Token 数',
     costColumn: '成本',
+    mobileSortBy: '排序方式',
+    mobileSortDefault: '默认排序',
     costColumn_tip: '该分组已知成本累计（人民币元），未知成本的请求不纳入',
     unknownCostColumn: '费用未知',
     unknownCostColumn_tip: '该分组因定价缺失无法计费的请求数',

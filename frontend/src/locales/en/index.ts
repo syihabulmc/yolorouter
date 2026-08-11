@@ -627,6 +627,8 @@ export default {
     cacheReadTokensColumn: 'Cache Read Tokens',
     cacheReadTokensColumn_tip: 'Cumulative cache-read (cache hit) tokens for this group',
     costColumn: 'Cost',
+    mobileSortBy: 'Sort by',
+    mobileSortDefault: 'Default order',
     costColumn_tip: 'Known cost total for this group (CNY); unknown-cost requests are excluded',
     unknownCostColumn: 'Unknown Cost',
     unknownCostColumn_tip: 'Requests in this group that could not be priced',

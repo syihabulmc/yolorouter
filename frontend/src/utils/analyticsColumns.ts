@@ -22,12 +22,24 @@ export type MetricRow = {
   unknown_cost_calls: number
 }
 
-export function callsColumn<T extends MetricRow>(t: Translator): DataTableColumns<T>[number] {
+// SortOptions: pass sortable to let the table reorder by this metric
+// client-side (rows arrive unpaged, so no server round-trip is involved);
+// defaultDescend marks the column the table opens sorted by, and only takes
+// effect together with sortable — a default order on an unsortable column
+// would be a state the user cannot leave.
+export interface SortOptions {
+  sortable?: boolean
+  defaultDescend?: boolean
+}
+
+export function callsColumn<T extends MetricRow>(t: Translator, sort?: SortOptions): DataTableColumns<T>[number] {
   return {
     title: columnTitle(t('analytics.callsColumn'), t('analytics.callsColumn_tip')),
     key: 'calls',
     width: 120,
     align: 'right',
+    sorter: sort?.sortable ? (a: T, b: T) => a.calls - b.calls : undefined,
+    defaultSortOrder: sort?.sortable && sort?.defaultDescend ? 'descend' : undefined,
     render: (r: T) => formatNumber(r.calls),
   }
 }
@@ -42,12 +54,14 @@ export function successRateColumn<T extends MetricRow>(t: Translator): DataTable
   }
 }
 
-export function costColumn<T extends MetricRow>(t: Translator): DataTableColumns<T>[number] {
+export function costColumn<T extends MetricRow>(t: Translator, sort?: SortOptions): DataTableColumns<T>[number] {
   return {
     title: columnTitle(t('analytics.costColumn'), t('analytics.costColumn_tip')),
     key: 'cost_micros',
     width: 140,
     align: 'right',
+    sorter: sort?.sortable ? (a: T, b: T) => a.cost_micros - b.cost_micros : undefined,
+    defaultSortOrder: sort?.sortable && sort?.defaultDescend ? 'descend' : undefined,
     render: (r: T) => `¥${formatMicros(r.cost_micros)}`,
   }
 }

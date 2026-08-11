@@ -127,9 +127,20 @@
     <div class="section-card  table-card">
       <NTabs :value="dimension" type="line" @update:value="onDimensionChange">
         <NTabPane :name="'model'" :tab="t('analytics.dimensionModel')">
+          <!-- Mobile cards have no sortable headers, so metric sorting
+               lives in this shared selector on the three entity tabs. -->
+          <FilterSelectField
+            v-if="isMobile"
+            v-model:value="mobileSort"
+            :label="t('analytics.mobileSortBy')"
+            :options="mobileSortOptions"
+            :placeholder="t('analytics.mobileSortDefault')"
+            size="small"
+            width="100%"
+          />
           <ResponsiveDataTable
             :columns="modelColumns"
-            :data="modelRows"
+            :data="displayedModelRows"
             :loading="loading"
             :scroll-x="1330"
             :row-key="(r: ModelReportRow) => r.model_name"
@@ -140,9 +151,20 @@
           </ResponsiveDataTable>
         </NTabPane>
         <NTabPane :name="'provider'" :tab="t('analytics.dimensionProvider')">
+          <!-- Mobile cards have no sortable headers, so metric sorting
+               lives in this shared selector on the three entity tabs. -->
+          <FilterSelectField
+            v-if="isMobile"
+            v-model:value="mobileSort"
+            :label="t('analytics.mobileSortBy')"
+            :options="mobileSortOptions"
+            :placeholder="t('analytics.mobileSortDefault')"
+            size="small"
+            width="100%"
+          />
           <ResponsiveDataTable
             :columns="providerColumns"
-            :data="providerRows"
+            :data="displayedProviderRows"
             :loading="loading"
             :scroll-x="920"
             :row-key="providerRowKey"
@@ -166,9 +188,18 @@
           </ResponsiveDataTable>
         </NTabPane>
         <NTabPane :name="'caller'" :tab="t('analytics.dimensionCaller')">
+          <FilterSelectField
+            v-if="isMobile"
+            v-model:value="mobileSort"
+            :label="t('analytics.mobileSortBy')"
+            :options="mobileSortOptions"
+            :placeholder="t('analytics.mobileSortDefault')"
+            size="small"
+            width="100%"
+          />
           <ResponsiveDataTable
             :columns="callerColumns"
-            :data="callerRows"
+            :data="displayedCallerRows"
             :loading="loading"
             :scroll-x="1330"
             :row-key="callerRowKey"
@@ -193,6 +224,7 @@ import EmptyState from '../../components/EmptyState.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import FilterSelectField from '../../components/common/FilterSelectField.vue'
+import { useIsMobile } from '../../composables/useIsMobile'
 import TimeRangeSelect, { type RangePreset, type TimeRange } from '../../components/analytics/TimeRangeSelect.vue'
 import { listProviders } from '../../api/providers'
 import { listModels } from '../../api/models'
@@ -270,7 +302,25 @@ const statusOptions = computed<SelectOption[]>(() => [
 const overview = ref<OverviewRow | null>(null)
 const modelRows = ref<ModelReportRow[]>([])
 const providerRows = ref<ProviderReportRow[]>([])
+const isMobile = useIsMobile()
 const callerRows = ref<CallerReportRow[]>([])
+// Mobile-only sort preference, shared across the model/provider/caller tabs
+// (the time tab stays chronological — reordering date buckets destroys the
+// trend it exists to show). null keeps each dimension's server order: calls
+// for model/provider, spend for caller.
+const mobileSort = ref<'cost' | 'calls' | null>(null)
+const mobileSortOptions = computed(() => [
+  { label: t('analytics.costColumn'), value: 'cost' },
+  { label: t('analytics.callsColumn'), value: 'calls' },
+])
+function mobileSorted<T extends { calls: number; cost_micros: number }>(rows: T[]): T[] {
+  if (!isMobile.value || mobileSort.value === null) return rows
+  const key = mobileSort.value
+  return [...rows].sort((a, b) => (key === 'cost' ? b.cost_micros - a.cost_micros : b.calls - a.calls))
+}
+const displayedModelRows = computed(() => mobileSorted(modelRows.value))
+const displayedProviderRows = computed(() => mobileSorted(providerRows.value))
+const displayedCallerRows = computed(() => mobileSorted(callerRows.value))
 const timeRows = ref<TimeReportRow[]>([])
 const loading = ref(false)
 const exporting = ref(false)
@@ -454,13 +504,13 @@ const modelColumns = computed<DataTableColumns<ModelReportRow>>(() => [
     minWidth: 200,
     render: (r) => h('span', { class: 'mono-cell' }, r.model_name || '—'),
   },
-  callsColumn<ModelReportRow>(t),
+  callsColumn<ModelReportRow>(t, { sortable: true }),
   successRateColumn<ModelReportRow>(t),
   tokenColumn<ModelReportRow>(t, 'input_tokens', 'inputTokensColumn'),
   tokenColumn<ModelReportRow>(t, 'output_tokens', 'outputTokensColumn'),
   tokenColumn<ModelReportRow>(t, 'cache_write_tokens', 'cacheWriteTokensColumn', 150),
   tokenColumn<ModelReportRow>(t, 'cache_read_tokens', 'cacheReadTokensColumn', 150),
-  costColumn<ModelReportRow>(t),
+  costColumn<ModelReportRow>(t, { sortable: true }),
   unknownCostColumn<ModelReportRow>(t),
 ])
 
@@ -471,10 +521,10 @@ const providerColumns = computed<DataTableColumns<ProviderReportRow>>(() => [
     minWidth: 200,
     render: (r) => r.provider_name || t('analytics.unroutedBucket'),
   },
-  callsColumn<ProviderReportRow>(t),
+  callsColumn<ProviderReportRow>(t, { sortable: true }),
   successRateColumn<ProviderReportRow>(t),
   avgDurationColumn<ProviderReportRow>(t),
-  costColumn<ProviderReportRow>(t),
+  costColumn<ProviderReportRow>(t, { sortable: true }),
   unknownCostColumn<ProviderReportRow>(t),
 ])
 
@@ -485,13 +535,16 @@ const callerColumns = computed<DataTableColumns<CallerReportRow>>(() => [
     minWidth: 200,
     render: (r) => r.owner_label || t('analytics.unknownCallerBucket'),
   },
-  callsColumn<CallerReportRow>(t),
+  // The ranking leads with spend (the server orders by it); the calls
+  // column stays sortable so the old by-volume ordering remains reachable
+  // from the header.
+  callsColumn<CallerReportRow>(t, { sortable: true }),
   successRateColumn<CallerReportRow>(t),
   tokenColumn<CallerReportRow>(t, 'input_tokens', 'inputTokensColumn'),
   tokenColumn<CallerReportRow>(t, 'output_tokens', 'outputTokensColumn'),
   tokenColumn<CallerReportRow>(t, 'cache_write_tokens', 'cacheWriteTokensColumn', 150),
   tokenColumn<CallerReportRow>(t, 'cache_read_tokens', 'cacheReadTokensColumn', 150),
-  costColumn<CallerReportRow>(t),
+  costColumn<CallerReportRow>(t, { sortable: true, defaultDescend: true }),
   unknownCostColumn<CallerReportRow>(t),
 ])
 

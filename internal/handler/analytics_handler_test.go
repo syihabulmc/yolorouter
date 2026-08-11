@@ -9,6 +9,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -1511,4 +1512,56 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// The caller ranking leads with spend, not volume: a quiet key that costs
+// more sorts above a chatty cheap one. Call-count ordering is a client-side
+// toggle on the table, not a server contract.
+func TestCallerReportRanksBySpendNotVolume(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+	now := time.Now().UTC()
+	cheap := &model.APIKey{OwnerLabel: "cheap-chatty", KeyHash: "h1", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
+	pricey := &model.APIKey{OwnerLabel: "pricey-quiet", KeyHash: "h2", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
+	for _, k := range []*model.APIKey{cheap, pricey} {
+		if err := db.Create(k).Error; err != nil {
+			t.Fatalf("seed api_key: %v", err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		seedRequestLog(t, db, fmt.Sprintf("cheap-%d", i), now, func(rl *model.RequestLog) {
+			rl.APIKeyID = &cheap.ID
+			rl.StatusCode = 200
+			rl.CostMicros = 1
+			rl.CostKnown = true
+		})
+	}
+	seedRequestLog(t, db, "pricey-1", now, func(rl *model.RequestLog) {
+		rl.APIKeyID = &pricey.ID
+		rl.StatusCode = 200
+		rl.CostMicros = 1000
+		rl.CostKnown = true
+	})
+
+	w, _ := doJSON(t, r, http.MethodGet, "/api/admin/analytics/report?dimension=caller", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data struct {
+			Rows []struct {
+				OwnerLabel string `json:"owner_label"`
+				Calls      int64  `json:"calls"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(env.Data.Rows) < 2 {
+		t.Fatalf("rows = %d, want at least 2", len(env.Data.Rows))
+	}
+	if env.Data.Rows[0].OwnerLabel != "pricey-quiet" {
+		t.Fatalf("first row = %q (calls=%d), want pricey-quiet on top despite fewer calls",
+			env.Data.Rows[0].OwnerLabel, env.Data.Rows[0].Calls)
+	}
 }
