@@ -256,6 +256,8 @@ export default {
     filterName: '搜索模型名称',
     filterRunningStatus: '运行状态',
     filterManagementStatus: '管理状态',
+    filterProvider: '供应商',
+    filterMatchedVia: '筛选命中：{route}（第 {position} 顺位）',
     search: '搜索',
     reset: '重置',
     presetTitle: '常用模型预置',

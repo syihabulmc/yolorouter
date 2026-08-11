@@ -48,6 +48,16 @@
             width="100%"
             @update:value="onSearch"
           />
+          <FilterSelectField
+            v-model:value="filter.provider"
+            :label="t('models.filterProvider')"
+            :options="providerOptions"
+            :placeholder="t('models.filterProvider')"
+            filterable
+            size="small"
+            width="100%"
+            @update:value="onSearch"
+          />
           <div class="filter-actions">
             <n-button size="small" type="primary" @click="onSearch">{{ t('models.search') }}</n-button>
             <n-button size="small" quaternary @click="onReset">{{ t('models.reset') }}</n-button>
@@ -74,7 +84,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
@@ -128,8 +138,9 @@ interface ModelFilter {
   name: string
   running: string | null
   management: number | null
+  provider: number | null
 }
-const emptyFilter = (): ModelFilter => ({ name: '', running: null, management: null })
+const emptyFilter = (): ModelFilter => ({ name: '', running: null, management: null, provider: null })
 const filter = reactive<ModelFilter>(emptyFilter())
 const applied = reactive<ModelFilter>(emptyFilter())
 
@@ -144,12 +155,37 @@ const managementStatusOptions = computed(() => [
   { label: t('models.statusDisabled'), value: 2 },
 ])
 
+// The provider filter answers "which models route through this provider" —
+// options are the union of providers across every model's candidates, so
+// only providers that actually appear somewhere are offered.
+const providerOptions = computed(() => {
+  const byId = new Map<number, string>()
+  for (const m of store.list) {
+    for (const c of m.candidates) {
+      if (!byId.has(c.provider_id)) byId.set(c.provider_id, c.provider_name)
+    }
+  }
+  return [...byId.entries()]
+    .map(([value, label]) => ({ label, value }))
+    .sort((a, b) => a.label.localeCompare(b.label))
+})
+
+// A selected provider can drop out of the options when its last candidate
+// goes away and the list refreshes. Left in place it becomes a ghost filter:
+// a blank select over an empty table with nothing explaining why.
+watch(providerOptions, (opts) => {
+  const known = (v: number | null) => v === null || opts.some((o) => o.value === v)
+  if (!known(filter.provider)) filter.provider = null
+  if (!known(applied.provider)) applied.provider = null
+})
+
 const filteredModels = computed(() => {
   const q = applied.name.trim().toLowerCase()
   return store.list.filter((m) => {
     if (q && !m.name.toLowerCase().includes(q)) return false
     if (applied.running && m.running_status !== applied.running) return false
     if (applied.management !== null && m.management_status !== applied.management) return false
+    if (applied.provider !== null && !m.candidates.some((c) => c.provider_id === applied.provider)) return false
     return true
   })
 })
@@ -226,7 +262,26 @@ const columns = computed<DataTableColumns<Model>>(() => [
     minWidth: 200,
     render: (row) => {
       const first = row.candidates[0]
-      return first ? `${first.provider_name} / ${first.provider_model_name}` : '-'
+      const firstText = first ? `${first.provider_name} / ${first.provider_model_name}` : '-'
+      // With a provider filter active, a row can match through a candidate
+      // that is not the preferred route — the very thing that makes the row
+      // look wrong ("why did Zhipu surface a deepseek model?"). Name the
+      // matching candidate so the connection is visible.
+      const pid = applied.provider
+      if (pid === null) return firstText
+      const matched = row.candidates.find((c) => c.provider_id === pid)
+      if (!matched || matched === first) return firstText
+      return h('div', [
+        h('div', firstText),
+        h(
+          'div',
+          { style: 'font-size: 12px; color: #999;' },
+          t('models.filterMatchedVia', {
+            route: `${matched.provider_name} / ${matched.provider_model_name}`,
+            position: matched.sort_order,
+          }),
+        ),
+      ])
     },
   },
   {

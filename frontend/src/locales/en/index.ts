@@ -253,6 +253,8 @@ export default {
     filterName: 'Search model name',
     filterRunningStatus: 'Running status',
     filterManagementStatus: 'Management status',
+    filterProvider: 'Provider',
+    filterMatchedVia: 'Filter match: {route} (priority {position})',
     search: 'Search',
     reset: 'Reset',
     presetTitle: 'Common model presets',

@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A candidate that cannot be routed to now says what blocks it — the provider
   switched off, no usable key, a missing provider-side model name, a missing
   probe, or its own switch — in the order the operator has to fix them.
+- The model list can be filtered by provider, answering "which models route
+  through this one" at a glance.
 
 ### Fixed
 
