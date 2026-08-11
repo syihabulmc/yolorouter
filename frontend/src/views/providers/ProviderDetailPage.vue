@@ -88,7 +88,7 @@
       :provider-type="provider.provider_type"
       :destination-count="destinationCount"
       :editing-key="editingKey"
-      @saved="reload"
+      @saved="onKeySaved"
     />
     <ProviderEditModal v-model:show="showEditProvider" :provider="provider" @updated="reload" />
   </div>
@@ -114,13 +114,14 @@ import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import ResponsiveDropdown from '../../components/common/ResponsiveDropdown.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
-import { testOutcomeLabel } from '../../utils/testOutcomeDisplay'
+import { isTestSuccess, testOutcomeI18nKey, testOutcomeLabel, TEST_OUTCOME_MODEL_NOT_FOUND, TEST_OUTCOME_UPSTREAM_ERROR } from '../../utils/testOutcomeDisplay'
+import { hintTag } from '../../utils/hintTag'
 import { verificationDestinationCount } from '../../utils/providerProtocol'
 import { useSingleRowAction } from '../../composables/useSingleRowAction'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { useIsMobile } from '../../composables/useIsMobile'
 
-const { t } = useI18n()
+const { t, te } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const dialog = useDialog()
@@ -211,6 +212,34 @@ function batchResultLabel(result: BatchTestResult): string {
 function batchResultTagType(result: BatchTestResult): 'success' | 'warning' | 'error' {
   if (result.needs_reentry || result.skipped) return 'warning'
   return result.outcome === 0 ? 'success' : 'error'
+}
+
+// Some category hints are written for the test-connection dialog and direct
+// the operator at controls that only exist there (an expandable raw-error
+// panel, a "Fetch models" button); those categories get row-specific copy
+// instead. Keyed by outcome int, not by derived i18n key — the key lookup
+// falls back for unknown values and would silently extend an override to
+// categories it was never written for.
+const ROW_HINT_OVERRIDES: Record<number, string> = {
+  [TEST_OUTCOME_UPSTREAM_ERROR]: 'providers.outcomeUpstreamError_rowHint',
+  [TEST_OUTCOME_MODEL_NOT_FOUND]: 'providers.outcomeModelNotFound_rowHint',
+}
+
+// The stored outcome category of the key's last test, rendered so the
+// specific failure ("rate limited" vs "unreachable" vs "quota unavailable")
+// survives a page reload instead of living only in a transient toast. A
+// successful last test adds nothing the Passed verification tag doesn't
+// already say, so only non-success categories get a tag. A needs_reentry key
+// shows nothing either: its stored result was authorized against a
+// superseded destination and presenting it as current would mislead.
+function lastTestResultTag(row: ProviderKey) {
+  if (row.last_test_result === null || isTestSuccess(row.last_test_result) || row.needs_reentry) return null
+  const label = testOutcomeLabel(t, row.last_test_result)
+  const hintKey = ROW_HINT_OVERRIDES[row.last_test_result] ?? `providers.${testOutcomeI18nKey(row.last_test_result)}_hint`
+  // Gated on te(): a future category without a hint must degrade to the bare
+  // label, not read its raw message key to a screen reader.
+  const hint = te(hintKey) ? t(hintKey) : ''
+  return hintTag({ text: label, type: 'warning', hint })
 }
 
 onMounted(async () => {
@@ -327,7 +356,12 @@ const keyColumns = computed<DataTableColumns<ProviderKey>>(() => [
         )
       }
       const batchResult = batchResultByKeyId.value[row.id]
-      if (batchResult) {
+      if (!batchResult) {
+        // The fresh in-session batch verdict outranks the stored one — the
+        // row's last_test_result is stale until the next reload.
+        const stored = lastTestResultTag(row)
+        if (stored) tags.push(stored)
+      } else {
         tags.push(
           h(
             NTag,
@@ -420,10 +454,22 @@ function onEditKey(key: ProviderKey) {
   showEditKey.value = true
 }
 
+// A key edit re-tests the credential server-side only when a new plaintext
+// was submitted; only then is the batch run's verdict for it out of date. A
+// rename-only save keeps the batch entry — evicting it would erase
+// distinctions that exist nowhere else, like "skipped" or "not run".
+function onKeySaved(retested: boolean) {
+  if (retested && editingKey.value) delete batchResultByKeyId.value[editingKey.value.id]
+  void reload()
+}
+
 async function onTestOneKey(keyId: number) {
   testingKeyId.value = keyId
   try {
     const updated = await store.testKey(providerId, keyId, destinationCount.value)
+    // This key's batch verdict is now out of date, and leaving it in place
+    // would keep outranking the fresh stored result in the status cell.
+    delete batchResultByKeyId.value[keyId]
     await reload()
     // Two-tier feedback so the click is never silent: pass (green) vs
     // everything else (yellow) named by its specific outcome reason

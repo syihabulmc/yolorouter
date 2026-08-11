@@ -73,7 +73,11 @@ const props = defineProps<{
   destinationCount: number
   editingKey?: ProviderKey | null
 }>()
-const emit = defineEmits<{ 'update:show': [boolean]; saved: [] }>()
+// saved carries whether the save re-tested the credential: the server runs a
+// fresh test only when a new plaintext was submitted, and callers keeping
+// per-key result caches need to know which saves actually produced a new
+// verdict.
+const emit = defineEmits<{ 'update:show': [boolean]; saved: [retested: boolean] }>()
 
 // ModalDrawer owns a v-model:show; bridge it to this component's existing
 // :show / @update:show contract so the parent doesn't have to change.
@@ -154,7 +158,7 @@ async function onSubmit() {
         management_status: form.enabled ? 1 : 2,
       }, props.destinationCount)
     }
-    emit('saved')
+    emit('saved', !props.editingKey || form.plaintext !== '')
     showModel.value = false
   } catch (err) {
     message.error(displayMessage(err, t))

@@ -47,6 +47,13 @@ export function isTestSuccess(outcome: number): boolean {
   return outcome === TEST_OUTCOME_SUCCESS
 }
 
+// Named alongside the other outcome constants so callers compare the int, not
+// a derived i18n key string — the key lookup falls back for out-of-range
+// values, and comparing against its result would silently extend any
+// category-specific behavior to unknown outcomes.
+export const TEST_OUTCOME_MODEL_NOT_FOUND = 3
+export const TEST_OUTCOME_UPSTREAM_ERROR = 7
+
 // testOutcomeLabel resolves an outcome int straight to its localized category
 // label (the `providers.*` text) — the shape nearly every caller wants, so
 // they don't each re-wrap testOutcomeI18nKey in t(`providers.${...}`).

@@ -180,6 +180,8 @@ export default {
     outcomeRateLimited_hint: '触发上游限流，请稍后重试',
     outcomeUnreachable_hint: '无法连接服务地址，请检查地址拼写与网络连通性',
     outcomeUpstreamError_hint: '上游返回了异常响应，可展开查看原始报错',
+    outcomeUpstreamError_rowHint: '上游返回了异常响应，可重新测试查看当前详情',
+    outcomeModelNotFound_rowHint: '请确认测试模型名是否正确，可在编辑 Key 时拉取可用模型列表',
     outcomeVerificationUnsupported_hint: '该协议暂无响应校验器，返回内容无法被判定为通过——映射本身可能是可用的',
     outcomeTimeout_hint: '服务地址可以连通，但上游在 60 秒内没有返回；可能是上游繁忙或正在逐个尝试其它渠道，稍后重试即可',
     confirmDisableProviderTitle: '停用供应商',

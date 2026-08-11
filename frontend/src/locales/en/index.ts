@@ -176,6 +176,8 @@ export default {
     outcomeRateLimited_hint: 'Upstream rate limit hit — retry in a moment',
     outcomeUnreachable_hint: 'Cannot reach the base URL — check the spelling and network',
     outcomeUpstreamError_hint: 'The upstream returned an error response — expand for details',
+    outcomeUpstreamError_rowHint: 'The upstream returned an error response — re-run the test to see the current details',
+    outcomeModelNotFound_rowHint: 'Check the test model name — edit the key to fetch the available model list',
     outcomeVerificationUnsupported_hint: 'This protocol has no response validator yet, so a reply cannot be certified as a pass — the mapping may still work',
     outcomeTimeout_hint: 'The base URL is reachable but the upstream did not answer within 60s — it may be busy or working through its own fallback chain. Retry shortly',
     confirmDisableProviderTitle: 'Disable Provider',

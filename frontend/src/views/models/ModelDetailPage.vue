@@ -81,6 +81,7 @@ import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import { useConfirmedStatusToggle } from '../../composables/useConfirmedStatusToggle'
 import { modelDisableCopy, modelImpactOverview } from '../../utils/impactSummary'
+import { hintTag } from '../../utils/hintTag'
 import { candidateTestResultText, capabilityState, modelRunningStatusDisplay } from '../../utils/modelStatusDisplay'
 import { isTestSuccess } from '../../utils/testOutcomeDisplay'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
@@ -269,22 +270,7 @@ function renderRoutable(row: ModelCandidate) {
   // must not surface as a raw message key; the generic fallback covers it.
   const reasonKey = `models.blockedBy.${row.blocked_by}`
   const reason = row.blocked_by && te(reasonKey) ? t(reasonKey) : t('models.blockedBy.unknown')
-  return h(
-    NTooltip,
-    { trigger: 'hover' },
-    {
-      // The tooltip only opens on hover, which keyboard and screen-reader
-      // users cannot do — so the reason is also the tag's accessible name,
-      // and the tag is focusable so it is reachable at all.
-      trigger: () =>
-        h(
-          NTag,
-          { size: 'small', type: 'warning', bordered: false, role: 'img', 'aria-label': reason, tabindex: 0 },
-          { default: () => '✗' },
-        ),
-      default: () => reason,
-    },
-  )
+  return hintTag({ text: '✗', type: 'warning', hint: reason, ariaLabel: reason })
 }
 
 function renderCapability(row: ModelCandidate, flag: boolean | null) {
@@ -307,8 +293,20 @@ function renderCapability(row: ModelCandidate, flag: boolean | null) {
                 type: 'warning',
                 bordered: false,
                 style: busy ? 'cursor: progress' : 'cursor: pointer',
+                // Clickable, so button semantics rather than the display-only
+                // hintTag shape: focusable, named by the hint, and operable
+                // from the keyboard.
+                role: 'button',
+                'aria-label': t('models.probeUnconfirmedHint'),
+                tabindex: 0,
                 onClick: () => {
                   if (!busy) void onRetestCandidate(row.id)
+                },
+                onKeydown: (e: KeyboardEvent) => {
+                  if ((e.key === 'Enter' || e.key === ' ') && !busy) {
+                    e.preventDefault()
+                    void onRetestCandidate(row.id)
+                  }
                 },
               },
               { default: () => '?' },
