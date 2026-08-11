@@ -20,6 +20,8 @@ export interface ModelCandidate {
   sort_order: number
   verification_status: number
   routable: boolean
+  /** Why the candidate cannot be routed to; empty when it can. */
+  blocked_by: string
   last_test_result: number | null
   last_test_duration_ms: number | null
   last_tested_at: string | null

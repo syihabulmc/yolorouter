@@ -54,15 +54,20 @@ type CandidateView struct {
 	MaxOutput         int      `json:"max_output"`
 	// Mirrors model.ModelCandidate: true when the last probe confirmed the
 	// capability, null when it did not. Informational — routing ignores these.
-	SupportsStreaming       *bool      `json:"supports_streaming"`
-	SupportsFunctionCalling *bool      `json:"supports_function_calling"`
-	ManagementStatus        int        `json:"management_status"`
-	SortOrder               int        `json:"sort_order"`
-	VerificationStatus      int        `json:"verification_status"`
-	Routable                bool       `json:"routable"`
-	LastTestResult          *int       `json:"last_test_result"`
-	LastTestDurationMs      *int64     `json:"last_test_duration_ms"`
-	LastTestedAt            *time.Time `json:"last_tested_at"`
+	SupportsStreaming       *bool `json:"supports_streaming"`
+	SupportsFunctionCalling *bool `json:"supports_function_calling"`
+	ManagementStatus        int   `json:"management_status"`
+	SortOrder               int   `json:"sort_order"`
+	VerificationStatus      int   `json:"verification_status"`
+	Routable                bool  `json:"routable"`
+	// BlockedBy names what stops this candidate being routed to, empty when
+	// nothing does. Routable is kept alongside it rather than derived at every
+	// call site: a list that only wants to grey out a row should not have to
+	// know the vocabulary of reasons to do it.
+	BlockedBy          string     `json:"blocked_by"`
+	LastTestResult     *int       `json:"last_test_result"`
+	LastTestDurationMs *int64     `json:"last_test_duration_ms"`
+	LastTestedAt       *time.Time `json:"last_tested_at"`
 }
 
 type ModelView struct {
@@ -74,22 +79,48 @@ type ModelView struct {
 	CreatedAt        time.Time       `json:"created_at"`
 }
 
-// isCandidateRoutable implements the exhaustive routable-candidate list —
+// Why a candidate cannot be routed to. Each value names a different repair, and
+// which one applies is the whole question an operator has when a model will not
+// serve: turning a provider back on, adding a key, filling in a name, and
+// running a probe are four unrelated pieces of work.
+//
+// Empty means routable.
+const (
+	CandidateBlockedByOwnStatus   = "candidate_disabled"
+	CandidateBlockedByProvider    = "provider_disabled"
+	CandidateBlockedByNoUsableKey = "no_usable_key"
+	CandidateBlockedByMissingName = "no_provider_model_name"
+	CandidateBlockedByUnverified  = "not_verified"
+)
+
+// candidateBlockedBy implements the exhaustive routable-candidate list,
+// answering not just whether a candidate can be routed to but what stops it —
 // this deliberately does NOT check anything resembling the
 // authorized_destination_version/destination_version staleness gate; a
 // candidate's mapping validity and a provider key's credential validity are
 // different dimensions.
-func isCandidateRoutable(c model.ModelCandidate, providerEnabled, providerHasAvailableKey bool) bool {
-	if c.ManagementStatus != model.ModelCandidateStatusEnabled {
-		return false
+//
+// The order is the order an operator fixes things in, and it is why only one
+// reason is reported rather than all of them: each step is a precondition of
+// the next. A probe needs an enabled provider with a usable key and a name to
+// probe under, and SetCandidateStatus refuses to enable a candidate that has
+// not passed a probe — so the candidate's own switch comes last, because until
+// everything before it is cleared, flipping it cannot succeed.
+func candidateBlockedBy(c model.ModelCandidate, providerEnabled, providerHasAvailableKey bool) string {
+	switch {
+	case !providerEnabled:
+		return CandidateBlockedByProvider
+	case !providerHasAvailableKey:
+		return CandidateBlockedByNoUsableKey
+	case c.ProviderModelName == "":
+		return CandidateBlockedByMissingName
+	case c.VerificationStatus != model.ModelVerificationStatusPassed:
+		return CandidateBlockedByUnverified
+	case c.ManagementStatus != model.ModelCandidateStatusEnabled:
+		return CandidateBlockedByOwnStatus
+	default:
+		return ""
 	}
-	if !providerEnabled || !providerHasAvailableKey {
-		return false
-	}
-	if c.ProviderModelName == "" {
-		return false
-	}
-	return c.VerificationStatus == model.ModelVerificationStatusPassed
 }
 
 func computeModelRunningStatus(candidates []CandidateView) string {
@@ -134,13 +165,14 @@ func providerHasAvailableKey(keys []model.ProviderKey, destinationVersion int) b
 // provider name/routability into the API-facing CandidateView shape — the
 // one piece of construction shared by toModelView (batched, list-wide) and
 // toCandidateView (single candidate, always fetches its own provider/keys).
-func buildCandidateView(c model.ModelCandidate, providerName string, routable bool) CandidateView {
+func buildCandidateView(c model.ModelCandidate, providerName string, blockedBy string) CandidateView {
 	return CandidateView{
 		ID: c.ID, ProviderID: c.ProviderID, ProviderName: providerName, ProviderModelName: c.ProviderModelName,
 		InputPrice: c.InputPrice, OutputPrice: c.OutputPrice, CacheWritePrice: c.CacheWritePrice, CacheReadPrice: c.CacheReadPrice,
 		MaxOutput: c.MaxOutput, SupportsStreaming: c.SupportsStreaming, SupportsFunctionCalling: c.SupportsFunctionCalling,
 		ManagementStatus: c.ManagementStatus, SortOrder: c.SortOrder, VerificationStatus: c.VerificationStatus,
-		Routable:           routable,
+		Routable:           blockedBy == "",
+		BlockedBy:          blockedBy,
 		LastTestResult:     c.LastTestResult,
 		LastTestDurationMs: c.LastTestDurationMs,
 		LastTestedAt:       c.LastTestedAt,
@@ -162,8 +194,8 @@ func (s *ModelService) toModelView(m model.Model, candidates []model.ModelCandid
 			providerName = c.Provider.Name
 			hasAvailableKey = providerHasAvailableKey(keysByProvider[c.ProviderID], c.Provider.DestinationVersion)
 		}
-		routable := isCandidateRoutable(c, providerEnabled, hasAvailableKey)
-		views = append(views, buildCandidateView(c, providerName, routable))
+		blockedBy := candidateBlockedBy(c, providerEnabled, hasAvailableKey)
+		views = append(views, buildCandidateView(c, providerName, blockedBy))
 	}
 	return ModelView{
 		ID: m.ID, Name: m.Name, ManagementStatus: m.ManagementStatus,
@@ -459,7 +491,7 @@ func (s *ModelService) decryptHighestPriorityAvailableKey(keys []model.ProviderK
 // not. Everything else describes the provider's health or the credential rather
 // than the mapping — and a candidate's mapping validity is deliberately a
 // separate dimension from its key's credential validity (see
-// isCandidateRoutable), so a bad or rate-limited key must not brand the mapping
+// candidateBlockedBy), so a bad or rate-limited key must not brand the mapping
 // broken. An unusable key already makes the candidate unroutable through
 // providerHasAvailableKey.
 func classifyBasicResult(result TestResult) (status int, overwrite bool) {
@@ -905,8 +937,8 @@ func (s *ModelService) toCandidateView(c model.ModelCandidate) (*CandidateView, 
 		return nil, err
 	}
 	hasAvailableKey := providerHasAvailableKey(keys, provider.DestinationVersion)
-	routable := isCandidateRoutable(c, provider.ManagementStatus == model.ProviderStatusEnabled, hasAvailableKey)
-	view := buildCandidateView(c, provider.Name, routable)
+	blockedBy := candidateBlockedBy(c, provider.ManagementStatus == model.ProviderStatusEnabled, hasAvailableKey)
+	view := buildCandidateView(c, provider.Name, blockedBy)
 	return &view, nil
 }
 

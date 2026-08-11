@@ -94,7 +94,7 @@ import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { useSingleRowAction } from '../../composables/useSingleRowAction'
 import { useIsMobile } from '../../composables/useIsMobile.ts'
-const { t } = useI18n()
+const { t, te } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const dialog = useDialog()
@@ -245,6 +245,36 @@ function onToggleModelStatus() {
 // Capability cells render each state distinctly. An unconfirmed capability is not
 // a failure — routing ignores these flags entirely — it just means no probe has
 // confirmed it yet, so the tag is clickable to retest rather than alarming.
+// A candidate that cannot be routed to is shown with the reason, not just the
+// fact: each reason names a different repair — switch something back on, add a
+// key, fill in a name, run a probe — and the fact alone leaves an operator to
+// guess which of them applies.
+function renderRoutable(row: ModelCandidate) {
+  if (row.routable) {
+    return h(NTag, { size: 'small', type: 'success', bordered: false }, { default: () => '✓' })
+  }
+  // A reason the locale does not know (a newer backend, an older frontend)
+  // must not surface as a raw message key; the generic fallback covers it.
+  const reasonKey = `models.blockedBy.${row.blocked_by}`
+  const reason = row.blocked_by && te(reasonKey) ? t(reasonKey) : t('models.blockedBy.unknown')
+  return h(
+    NTooltip,
+    { trigger: 'hover' },
+    {
+      // The tooltip only opens on hover, which keyboard and screen-reader
+      // users cannot do — so the reason is also the tag's accessible name,
+      // and the tag is focusable so it is reachable at all.
+      trigger: () =>
+        h(
+          NTag,
+          { size: 'small', type: 'warning', bordered: false, role: 'img', 'aria-label': reason, tabindex: 0 },
+          { default: () => '✗' },
+        ),
+      default: () => reason,
+    },
+  )
+}
+
 function renderCapability(row: ModelCandidate, flag: boolean | null) {
   const busy = testingCandidateId.value === row.id
   switch (capabilityState(flag)) {
@@ -288,6 +318,13 @@ const candidateColumns = computed<DataTableColumns<ModelCandidate>>(() => [
     width: STATUS_COL_WIDTH,
     align: 'center',
     render: (row) => h(NSwitch, { value: row.management_status === 1, 'onUpdate:value': (v: boolean) => onToggleCandidateStatus(row.id, v) }),
+  },
+  {
+    title: columnTitle(t('models.routableColumn'), t('models.routableColumn_tip')),
+    key: 'routable',
+    width: STATUS_COL_WIDTH,
+    align: 'center',
+    render: (row) => renderRoutable(row),
   },
   {
     title: columnTitle(t('models.supportsStreaming'), t('models.supportsStreaming_tip')),

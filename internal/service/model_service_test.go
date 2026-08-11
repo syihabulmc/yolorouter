@@ -1468,45 +1468,89 @@ func TestComputeModelRunningStatusUnavailableWhenNoCandidateRoutable(t *testing.
 	}
 }
 
-func TestIsCandidateRoutableRejectsDisabledCandidate(t *testing.T) {
-	c := model.ModelCandidate{ManagementStatus: model.ModelCandidateStatusDisabled, ProviderModelName: "gpt-4o", VerificationStatus: model.ModelVerificationStatusPassed}
-	if isCandidateRoutable(c, true, true) {
-		t.Fatalf("expected false for a disabled candidate")
+// Each of these leaves a candidate unroutable, and each needs a different
+// repair: switch the candidate back on, switch the provider back on, add a
+// usable key, fill in the provider's name for the model, run a probe. Reporting
+// only that it is unroutable leaves an operator to guess which.
+func TestACandidateSaysWhatStopsItBeingRoutedTo(t *testing.T) {
+	enabled := model.ModelCandidate{
+		ManagementStatus:   model.ModelCandidateStatusEnabled,
+		ProviderModelName:  "gpt-4o",
+		VerificationStatus: model.ModelVerificationStatusPassed,
+	}
+	disabled := enabled
+	disabled.ManagementStatus = model.ModelCandidateStatusDisabled
+	unnamed := enabled
+	unnamed.ProviderModelName = ""
+	unverified := enabled
+	unverified.VerificationStatus = model.ModelVerificationStatusUntested
+
+	for _, tc := range []struct {
+		name            string
+		candidate       model.ModelCandidate
+		providerEnabled bool
+		providerHasKey  bool
+		want            string
+	}{
+		{"nothing stops it", enabled, true, true, ""},
+		{"the candidate is switched off", disabled, true, true, CandidateBlockedByOwnStatus},
+		{"the provider is switched off", enabled, false, true, CandidateBlockedByProvider},
+		{"no key can be used", enabled, true, false, CandidateBlockedByNoUsableKey},
+		{"the provider's name for the model is missing", unnamed, true, true, CandidateBlockedByMissingName},
+		{"nothing has probed it", unverified, true, true, CandidateBlockedByUnverified},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := candidateBlockedBy(tc.candidate, tc.providerEnabled, tc.providerHasKey)
+			if got != tc.want {
+				t.Fatalf("blocked by %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestIsCandidateRoutableRejectsDisabledProvider(t *testing.T) {
-	c := model.ModelCandidate{ManagementStatus: model.ModelCandidateStatusEnabled, ProviderModelName: "gpt-4o", VerificationStatus: model.ModelVerificationStatusPassed}
-	if isCandidateRoutable(c, false, true) {
-		t.Fatalf("expected false when the provider is disabled")
+// A candidate that is both disabled and unverified must report the unverified
+// state, not the disabled one: SetCandidateStatus refuses to enable a candidate
+// that has not passed a probe, so "switch it back on" is advice that cannot be
+// followed until the probe passes.
+func TestADisabledUnverifiedCandidateReportsTheProbeItNeedsFirst(t *testing.T) {
+	c := model.ModelCandidate{
+		ManagementStatus:   model.ModelCandidateStatusDisabled,
+		ProviderModelName:  "gpt-4o",
+		VerificationStatus: model.ModelVerificationStatusUntested,
+	}
+	if got := candidateBlockedBy(c, true, true); got != CandidateBlockedByUnverified {
+		t.Fatalf("blocked by %q, want the missing probe — enabling is refused until it passes", got)
 	}
 }
 
-func TestIsCandidateRoutableRejectsNoAvailableKey(t *testing.T) {
-	c := model.ModelCandidate{ManagementStatus: model.ModelCandidateStatusEnabled, ProviderModelName: "gpt-4o", VerificationStatus: model.ModelVerificationStatusPassed}
-	if isCandidateRoutable(c, true, false) {
-		t.Fatalf("expected false when the provider has no available key")
+// When more than one thing is wrong, the one reported is the one to fix first.
+// A candidate whose provider is switched off has nothing to probe yet, so
+// naming the unprobed state would send an operator to run a probe against a
+// provider that cannot answer.
+func TestTheReasonReportedIsTheOneToFixFirst(t *testing.T) {
+	everythingWrong := model.ModelCandidate{
+		ManagementStatus:   model.ModelCandidateStatusEnabled,
+		ProviderModelName:  "",
+		VerificationStatus: model.ModelVerificationStatusUntested,
+	}
+	if got := candidateBlockedBy(everythingWrong, false, false); got != CandidateBlockedByProvider {
+		t.Fatalf("blocked by %q, want the provider being switched off — the one that has to be fixed before any of the others can be", got)
 	}
 }
 
-func TestIsCandidateRoutableRejectsEmptyProviderModelName(t *testing.T) {
-	c := model.ModelCandidate{ManagementStatus: model.ModelCandidateStatusEnabled, ProviderModelName: "", VerificationStatus: model.ModelVerificationStatusPassed}
-	if isCandidateRoutable(c, true, true) {
-		t.Fatalf("expected false for an empty provider_model_name")
+// The bool the console greys a row with and the reason it explains it with must
+// not be able to disagree: one is derived from the other.
+func TestRoutableIsExactlyTheAbsenceOfAReason(t *testing.T) {
+	blocked := buildCandidateView(model.ModelCandidate{}, "p", CandidateBlockedByUnverified)
+	if blocked.Routable {
+		t.Error("a candidate with a reason not to route is marked routable")
 	}
-}
-
-func TestIsCandidateRoutableRejectsUnverifiedCandidate(t *testing.T) {
-	c := model.ModelCandidate{ManagementStatus: model.ModelCandidateStatusEnabled, ProviderModelName: "gpt-4o", VerificationStatus: model.ModelVerificationStatusUntested}
-	if isCandidateRoutable(c, true, true) {
-		t.Fatalf("expected false for an unverified candidate")
+	clear := buildCandidateView(model.ModelCandidate{}, "p", "")
+	if !clear.Routable {
+		t.Error("a candidate with no reason not to route is marked unroutable")
 	}
-}
-
-func TestIsCandidateRoutableAcceptsFullyQualifiedCandidate(t *testing.T) {
-	c := model.ModelCandidate{ManagementStatus: model.ModelCandidateStatusEnabled, ProviderModelName: "gpt-4o", VerificationStatus: model.ModelVerificationStatusPassed}
-	if !isCandidateRoutable(c, true, true) {
-		t.Fatalf("expected true when every condition is satisfied")
+	if clear.BlockedBy != "" {
+		t.Errorf("a routable candidate reports %q", clear.BlockedBy)
 	}
 }
 
