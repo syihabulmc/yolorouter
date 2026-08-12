@@ -117,6 +117,7 @@ import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { isTestSuccess, testOutcomeI18nKey, testOutcomeLabel, TEST_OUTCOME_MODEL_NOT_FOUND, TEST_OUTCOME_UPSTREAM_ERROR } from '../../utils/testOutcomeDisplay'
 import { hintTag } from '../../utils/hintTag'
 import { verificationDestinationCount } from '../../utils/providerProtocol'
+import { isKeyUsable } from '../../utils/providerStatusDisplay'
 import { useSingleRowAction } from '../../composables/useSingleRowAction'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { useIsMobile } from '../../composables/useIsMobile'
@@ -500,24 +501,20 @@ async function onReorder(keyId: number, direction: 'up' | 'down') {
 }
 
 // A key actually contributes to routing only when it's enabled AND has
-// passed verification AND doesn't need re-entry — "enabled" alone
-// (management_status === 1) is not the same thing, and the warning
+// passed verification AND doesn't need re-entry (isKeyUsable) — "enabled"
+// alone (management_status === 1) is not the same thing, and the warning
 // below previously used the weaker enabled-count check, so it silently skipped the
 // "you're about to disable the only key actually keeping this provider
 // available" warning whenever another merely-enabled-but-unverified key
 // was also present.
-function isKeyAvailable(k: ProviderKey): boolean {
-  return k.management_status === 1 && k.verification_status === 1 && !k.needs_reentry
-}
-
 function onToggleKeyStatus(keyId: number, enable: boolean) {
   const targetKey = provider.value?.keys.find((k) => k.id === keyId)
   const isLastAvailable =
     !enable &&
     provider.value !== null &&
     targetKey !== undefined &&
-    isKeyAvailable(targetKey) &&
-    provider.value.keys.filter(isKeyAvailable).length === 1
+    isKeyUsable(targetKey) &&
+    provider.value.keys.filter(isKeyUsable).length === 1
   const proceed = async () => {
     try {
       await store.setKeyStatus(providerId, keyId, enable)

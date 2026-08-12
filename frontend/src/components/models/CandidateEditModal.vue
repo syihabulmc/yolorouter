@@ -214,6 +214,7 @@ import { displayMessage } from '../../api/client'
 import { providerModelNameRule, nonNegativePriceRule } from '../../utils/modelValidators'
 import { capabilityState } from '../../utils/modelStatusDisplay'
 import { testOutcomeI18nKey, TEST_OUTCOME_VERIFICATION_UNSUPPORTED } from '../../utils/testOutcomeDisplay'
+import { providerRunningStatusDisplay, usableKeyCount } from '../../utils/providerStatusDisplay'
 import HelpLabel from '../HelpLabel.vue'
 import ModalDrawer from '../common/ModalDrawer.vue'
 import FilterSelectField from '../common/FilterSelectField.vue'
@@ -453,8 +454,24 @@ function failureVerdict(p: ProbeReport): string {
   return `${t('models.testFailed')}: ${t(`providers.${testOutcomeI18nKey(p.outcome)}`)}`
 }
 
+// Each option carries the provider's state alongside its name: a manually
+// disabled provider says so outright (its running status may still read
+// fine, but no candidate on it can route), otherwise the live running
+// status; plus how many keys are actually usable for routing — so a
+// provider that will silently fail is visible before the candidate is saved.
 const providerOptions = computed(() =>
-  providersStore.list.map((p) => ({ label: p.name, value: p.id, disabled: false })),
+  providersStore.list.map((p) => ({
+    label: t('models.candidateProviderOption', {
+      name: p.name,
+      status:
+        p.management_status === 1
+          ? t(`providers.running${providerRunningStatusDisplay(p.running_status).i18nKey}`)
+          : t('providers.statusDisabled'),
+      n: usableKeyCount(p.keys),
+    }),
+    value: p.id,
+    disabled: false,
+  })),
 )
 
 // Model-name picker: the catalogue is fetched lazily for the selected provider

@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe, or its own switch — in the order the operator has to fix them.
 - The model list can be filtered by provider, answering "which models route
   through this one" at a glance.
+- List rows now expand in place. A model row opens its full candidate chain
+  in route order — provider, provider-side name, and whether the gateway can
+  actually route there, with the blocking reason when it can't. A provider
+  row opens the mirror view: every model that routes through it and the
+  provider-side name each one maps to.
+- Picking a provider for a candidate now shows what you're getting into:
+  each option in the dropdown carries the provider's live status (or
+  "disabled" when it's switched off) and how many of its keys are actually
+  usable for routing, so a candidate that would go nowhere is visible before
+  it is saved.
 - The dashboard and the analytics reports drill through. Every KPI card,
   trend-chart day, upstream-status figure and top-caller row on the
   dashboard now opens the page that explains it — destinations in the

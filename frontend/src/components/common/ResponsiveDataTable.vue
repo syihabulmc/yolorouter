@@ -53,7 +53,7 @@
           <Cell :content="cellValue(headerColumn, row)" />
         </div>
         <div class="rdt-card__body">
-          <div v-for="(col,index) of bodyColumns" :key="String(col.key)" class="rdt-card__field" :style="bodyColumns.length === index + 1 && bodyColumns.length % 2 ? 'grid-column: 1 / -1;' : ''">
+          <div v-for="(col,index) of bodyColumns" :key="String(col.key)" class="rdt-card__field" :style="fieldSpanStyle(col, index)">
             <span class="rdt-card__label"><Cell :content="cellTitle(col)" /></span>
             <span class="rdt-card__value"><Cell :content="cellValue(col, row)" /></span>
           </div>
@@ -106,6 +106,10 @@ const props = defineProps<{
   pagination?: PaginationProps | false
   remote?: boolean
   rowProps?: (row: Row) => Record<string, unknown>
+  // Keys of columns whose card field must span the full card width — for
+  // panel-like content (an expand summary) that cannot share a half-width
+  // cell with a sibling field.
+  fullSpanKeys?: (string | number)[]
 }>()
 
 const isMobile = useIsMobile()
@@ -127,6 +131,16 @@ const bodyColumns = computed<Col[]>(() => {
 
 function cellTitle(col: Col): VNodeChild {
   return typeof col.title === 'function' ? col.title() : col.title
+}
+
+// A field spans the full card width when the parent asked for it by key, or
+// when it is an unpaired last field (spanning it avoids a lone half-width
+// cell at the bottom of the card).
+function fieldSpanStyle(col: Col, index: number): string {
+  const full =
+    (props.fullSpanKeys ?? []).includes(col.key as string | number) ||
+    (bodyColumns.value.length === index + 1 && bodyColumns.value.length % 2 === 1)
+  return full ? 'grid-column: 1 / -1;' : ''
 }
 
 function cellValue(col: Col, row: Row): VNodeChild {

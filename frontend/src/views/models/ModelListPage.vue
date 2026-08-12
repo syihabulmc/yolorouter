@@ -73,6 +73,7 @@
           :scroll-x="910"
           :row-key="(row: Model) => row.id"
           :row-props="rowProps"
+          :full-span-keys="['expand_candidates']"
           :pagination="pagination"
         />
       </div>
@@ -93,11 +94,14 @@ import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import { useConfirmedStatusToggle } from '../../composables/useConfirmedStatusToggle'
 import { modelDisableCopy } from '../../utils/impactSummary'
-import { modelRunningStatusDisplay, MODEL_RUNNING_STATUS_DISPLAY } from '../../utils/modelStatusDisplay'
+import { modelRunningStatusDisplay, MODEL_RUNNING_STATUS_DISPLAY, routableMark } from '../../utils/modelStatusDisplay'
 import { columnTitle } from '../../utils/columnTitle'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import { useClientPagination } from '../../composables/useClientPagination'
-import type { Model } from '../../api/models'
+import { useIsMobile } from '../../composables/useIsMobile'
+import { expandPanel, EXPAND_EMPTY_STYLE, rowNavigationProps } from '../../utils/expandPanel'
+import type { VNodeChild } from 'vue'
+import type { Model, ModelCandidate } from '../../api/models'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import NewModelModal from '../../components/models/NewModelModal.vue'
@@ -107,7 +111,8 @@ import ResponsiveDropdown from '../../components/common/ResponsiveDropdown.vue'
 import FilterSelectField from '../../components/common/FilterSelectField.vue'
 import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
 
-const { t } = useI18n()
+const { t, te } = useI18n()
+const isMobile = useIsMobile()
 const route = useRoute()
 const router = useRouter()
 const dialog = useDialog()
@@ -231,7 +236,51 @@ function goDetail(id: number) {
 }
 
 function rowProps(row: Model) {
-  return { style: 'cursor: pointer', onClick: () => goDetail(row.id) }
+  return rowNavigationProps(() => goDetail(row.id))
+}
+
+// The route chain as an aligned grid: order marker, provider, the provider's
+// own name for the model (monospace — it's a wire identifier, not prose),
+// and whether the gateway can actually send traffic there. A candidate whose
+// provider-side name is still blank shows a muted placeholder — the backend
+// refuses to route it (its ✗ names the reason), so inventing a fallback name
+// here would dress up a dead route as a live one. Inline styles because
+// scoped CSS does not reach h()-rendered nodes.
+function candidateCells(c: ModelCandidate): VNodeChild[] {
+  return [
+    h(
+      'span',
+      { style: 'font-size:var(--text-xs); color:var(--color-text-muted); font-variant-numeric:tabular-nums; justify-self:end;' },
+      String(c.sort_order),
+    ),
+    h('span', { style: 'font-size:var(--text-sm); font-weight:500; color:var(--color-text);' }, c.provider_name),
+    c.provider_model_name
+      ? h(
+          'span',
+          { style: 'font-family:var(--font-mono); font-size:var(--text-xs); color:var(--color-text-secondary);' },
+          c.provider_model_name,
+        )
+      : h('span', { style: 'font-size:var(--text-xs); color:var(--color-text-muted);' }, '—'),
+    routableMark(t, te, c, { inlineReason: isMobile.value }),
+  ]
+}
+
+function renderModelExpand(row: Model) {
+  if (!row.candidates.length) {
+    return expandPanel({ eyebrow: isMobile.value ? undefined : t('models.expandCandidates'), indent: !isMobile.value }, [
+      h('div', { style: EXPAND_EMPTY_STYLE }, t('models.expandNoCandidates')),
+    ])
+  }
+  const grid = h(
+    'div',
+    {
+      style:
+        'display:grid; grid-template-columns:max-content max-content max-content max-content;' +
+        ' column-gap:12px; row-gap:6px; align-items:center; justify-items:start;',
+    },
+    row.candidates.flatMap(candidateCells),
+  )
+  return expandPanel({ eyebrow: isMobile.value ? undefined : t('models.expandCandidates'), indent: !isMobile.value }, [grid])
 }
 
 function onToggleStatus(row: Model, enable: boolean) {
@@ -249,7 +298,24 @@ function onToggleStatus(row: Model, enable: boolean) {
   )
 }
 
-const columns = computed<DataTableColumns<Model>>(() => [
+// Desktop gets a real expand column (route order at a glance without leaving
+// the list); mobile card mode uses columns[0] as the card header, so the
+// expand column must not lead there — the same panel becomes a labeled card
+// row instead.
+const columns = computed<DataTableColumns<Model>>(() =>
+  isMobile.value
+    ? [
+        ...sharedColumns.value,
+        {
+          title: columnTitle(t('models.expandCandidates'), t('models.expandCandidates_tip')),
+          key: 'expand_candidates',
+          render: renderModelExpand,
+        },
+      ]
+    : [{ type: 'expand', renderExpand: renderModelExpand }, ...sharedColumns.value],
+)
+
+const sharedColumns = computed<DataTableColumns<Model>>(() => [
   {
     title: columnTitle(t('models.name'), t('models.name_tip')),
     key: 'name',

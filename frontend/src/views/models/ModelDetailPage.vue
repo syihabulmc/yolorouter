@@ -81,8 +81,7 @@ import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
 import { useConfirmedStatusToggle } from '../../composables/useConfirmedStatusToggle'
 import { modelDisableCopy, modelImpactOverview } from '../../utils/impactSummary'
-import { hintTag } from '../../utils/hintTag'
-import { candidateTestResultText, capabilityState, modelRunningStatusDisplay } from '../../utils/modelStatusDisplay'
+import { candidateTestResultText, capabilityState, modelRunningStatusDisplay, routableMark } from '../../utils/modelStatusDisplay'
 import { isTestSuccess } from '../../utils/testOutcomeDisplay'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import { getModelImpact, type Model, type ModelCandidate, type ModelImpact } from '../../api/models'
@@ -258,19 +257,8 @@ function onToggleModelStatus() {
 // Capability cells render each state distinctly. An unconfirmed capability is not
 // a failure — routing ignores these flags entirely — it just means no probe has
 // confirmed it yet, so the tag is clickable to retest rather than alarming.
-// A candidate that cannot be routed to is shown with the reason, not just the
-// fact: each reason names a different repair — switch something back on, add a
-// key, fill in a name, run a probe — and the fact alone leaves an operator to
-// guess which of them applies.
 function renderRoutable(row: ModelCandidate) {
-  if (row.routable) {
-    return h(NTag, { size: 'small', type: 'success', bordered: false }, { default: () => '✓' })
-  }
-  // A reason the locale does not know (a newer backend, an older frontend)
-  // must not surface as a raw message key; the generic fallback covers it.
-  const reasonKey = `models.blockedBy.${row.blocked_by}`
-  const reason = row.blocked_by && te(reasonKey) ? t(reasonKey) : t('models.blockedBy.unknown')
-  return hintTag({ text: '✗', type: 'warning', hint: reason, ariaLabel: reason })
+  return routableMark(t, te, row)
 }
 
 function renderCapability(row: ModelCandidate, flag: boolean | null) {

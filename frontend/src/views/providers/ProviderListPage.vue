@@ -72,6 +72,7 @@
           :scroll-x="1010"
           :row-key="(row: Provider) => row.id"
           :row-props="rowProps"
+          :full-span-keys="['expand_mappings']"
           :pagination="pagination"
         />
       </div>
@@ -91,6 +92,8 @@ import { useRouter } from 'vue-router'
 import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { MoreHorizontal, Plus, Search, Server } from '@lucide/vue'
 import { useProvidersStore } from '../../store/providers'
+import { useModelsStore } from '../../store/models'
+import { useIsMobile } from '../../composables/useIsMobile'
 import { displayMessage } from '../../api/client'
 import type { Provider } from '../../api/providers'
 import { useConfirmedStatusToggle } from '../../composables/useConfirmedStatusToggle'
@@ -105,13 +108,19 @@ import FilterSelectField from '../../components/common/FilterSelectField.vue'
 import { columnTitle } from '../../utils/columnTitle'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { ALL_PROTOCOLS, enabledProtocolEndpoints } from '../../utils/providerProtocol'
+import { PROVIDER_RUNNING_STATUS_DISPLAY, providerRunningStatusDisplay } from '../../utils/providerStatusDisplay'
+import { expandPanel, EXPAND_EMPTY_STYLE, rowNavigationProps } from '../../utils/expandPanel'
+import { routableMark } from '../../utils/modelStatusDisplay'
+import type { VNodeChild } from 'vue'
 
-const { t } = useI18n()
+const { t, te } = useI18n()
 const router = useRouter()
 const dialog = useDialog()
 const toggleStatusWithConfirm = useConfirmedStatusToggle(dialog)
 const message = useMessage()
 const store = useProvidersStore()
+const modelsStore = useModelsStore()
+const isMobile = useIsMobile()
 const showCreate = ref(false)
 // Inline row edit: open the provider edit modal straight from the list so a
 // quick change needs no navigation into the detail page.
@@ -123,8 +132,17 @@ function openEditProvider(row: Provider) {
   showEditProvider.value = true
 }
 
+// The expand panels derive their mapping rows and ✓/✗ marks from the models
+// list, so any provider mutation that can change routability (status toggle,
+// URL/protocol edit) must refetch models too — otherwise the mount-time
+// snapshot keeps showing marks the mutation just invalidated.
+function refreshModels() {
+  void modelsStore.fetchList().catch((err) => message.error(displayMessage(err, t)))
+}
+
 function onEdited() {
   void store.fetchList().catch((err) => message.error(displayMessage(err, t)))
+  refreshModels()
 }
 
 // In-page filters over the fully-fetched list. `filter` is the live draft the
@@ -145,7 +163,7 @@ const protocolOptions = computed(() =>
   ALL_PROTOCOLS.map((p) => ({ label: t(`providers.protocol_${p}`), value: p })),
 )
 const runningStatusOptions = computed(() =>
-  Object.entries(RUNNING_STATUS_DISPLAY).map(([value, { i18nKey }]) => ({
+  Object.entries(PROVIDER_RUNNING_STATUS_DISPLAY).map(([value, { i18nKey }]) => ({
     label: t(`providers.running${i18nKey}`),
     value,
   })),
@@ -185,6 +203,10 @@ function onReset() {
 
 onMounted(() => {
   void store.fetchList().catch((err) => message.error(displayMessage(err, t)))
+  // Models feed the per-row mapping summary in the expand panel. A failure
+  // only degrades that panel (it reads as "no models"), so it reports the
+  // same way as the main fetch but doesn't block the list.
+  void modelsStore.fetchList().catch((err) => message.error(displayMessage(err, t)))
 })
 
 function goDetail(id: number) {
@@ -192,22 +214,69 @@ function goDetail(id: number) {
 }
 
 function rowProps(row: Provider) {
-  return { style: 'cursor: pointer', onClick: () => goDetail(row.id) }
+  return rowNavigationProps(() => goDetail(row.id))
 }
 
-// Single lookup table keyed by the same 5 running-status values instead of
-// a separate map + switch that were always consulted together for the
-// same row.
-const RUNNING_STATUS_DISPLAY: Record<string, { i18nKey: string; type: 'default' | 'success' | 'warning' | 'error' }> = {
-  not_configured: { i18nKey: 'NotConfigured', type: 'default' },
-  pending_test: { i18nKey: 'Pending', type: 'default' },
-  available: { i18nKey: 'Available', type: 'success' },
-  partial: { i18nKey: 'Partial', type: 'warning' },
-  unavailable: { i18nKey: 'Unavailable', type: 'error' },
-}
-
-function runningStatusDisplay(status: string) {
-  return RUNNING_STATUS_DISPLAY[status] ?? RUNNING_STATUS_DISPLAY.unavailable
+// The expand panel's mapping summary: every model with a candidate on this
+// provider, as an aligned grid of "external name → provider-side name" plus
+// the same ✓/✗ routability mark the model pages use. A same-name mapping
+// says so instead of printing the name twice; a blank provider-side name
+// shows a muted placeholder — the backend refuses to route such a candidate
+// (its ✗ names the reason), so inventing a fallback name would dress up a
+// dead route as a live one. Service addresses are already a permanent
+// column, so the panel only adds what the row can't show. Inline styles
+// because scoped CSS does not reach h()-rendered nodes.
+function renderProviderExpand(row: Provider) {
+  const cells: VNodeChild[] = []
+  for (const m of modelsStore.list) {
+    for (const c of m.candidates) {
+      if (c.provider_id !== row.id) continue
+      cells.push(
+        h('span', { style: 'font-size:var(--text-sm); font-weight:500; color:var(--color-text);' }, m.name),
+        h('span', { style: 'color:var(--color-text-muted);' }, '→'),
+        !c.provider_model_name
+          ? h('span', { style: 'font-size:var(--text-xs); color:var(--color-text-muted);' }, '—')
+          : c.provider_model_name === m.name
+            ? h('span', { style: 'font-size:var(--text-xs); color:var(--color-text-muted);' }, t('providers.expandSameName'))
+            : h(
+                'span',
+                { style: 'font-family:var(--font-mono); font-size:var(--text-xs); color:var(--color-text-secondary);' },
+                c.provider_model_name,
+              ),
+        routableMark(t, te, c, { inlineReason: isMobile.value }),
+      )
+    }
+  }
+  const eyebrow = isMobile.value ? undefined : t('providers.expandMappings')
+  // "No mappings" is a claim about the data, so it must wait for the data:
+  // while the models request is still in flight (or after it failed) an empty
+  // list proves nothing, and mobile cards would assert the false state on
+  // every row automatically.
+  if (!modelsStore.list.length && modelsStore.loading) {
+    return expandPanel({ eyebrow, indent: !isMobile.value }, [
+      h('div', { style: EXPAND_EMPTY_STYLE }, t('common.loading')),
+    ])
+  }
+  if (!modelsStore.list.length && modelsStore.error) {
+    return expandPanel({ eyebrow, indent: !isMobile.value }, [
+      h('div', { style: EXPAND_EMPTY_STYLE }, t('providers.expandMappingsLoadFailed')),
+    ])
+  }
+  if (!cells.length) {
+    return expandPanel({ eyebrow, indent: !isMobile.value }, [
+      h('div', { style: EXPAND_EMPTY_STYLE }, t('providers.expandNoMappings')),
+    ])
+  }
+  const grid = h(
+    'div',
+    {
+      style:
+        'display:grid; grid-template-columns:max-content max-content max-content max-content;' +
+        ' column-gap:12px; row-gap:6px; align-items:center; justify-items:start;',
+    },
+    cells,
+  )
+  return expandPanel({ eyebrow, indent: !isMobile.value }, [grid])
 }
 
 // Every distinct address this provider actually serves on: the primary
@@ -230,6 +299,7 @@ function onToggleStatus(row: Provider, enable: boolean) {
     try {
       await store.setStatus(row.id, enable)
       await store.fetchList()
+      refreshModels()
     } catch (err) {
       message.error(displayMessage(err, t))
     }
@@ -241,12 +311,27 @@ function onToggleStatus(row: Provider, enable: boolean) {
   )
 }
 
-// computed, not a plain const: this was previously captured once at setup
-// time, so column TITLES (unlike each cell's
-// own render(), which re-evaluates t() every render) never re-translated
-// after a locale switch — the sibling ProviderDetailPage.vue's keyColumns
-// already gets this right via computed().
-const columns = computed<DataTableColumns<Provider>>(() => [
+// Desktop gets a real expand column; mobile card mode uses columns[0] as the
+// card header, so the expand column must not lead there — the same mapping
+// summary becomes a labeled card row instead.
+const columns = computed<DataTableColumns<Provider>>(() =>
+  isMobile.value
+    ? [
+        ...sharedColumns.value,
+        {
+          title: columnTitle(t('providers.expandMappings'), t('providers.expandMappings_tip')),
+          key: 'expand_mappings',
+          render: renderProviderExpand,
+        },
+      ]
+    : [{ type: 'expand', renderExpand: renderProviderExpand }, ...sharedColumns.value],
+)
+
+// computed, not a plain const: column titles captured once at setup time
+// would never re-translate after a locale switch (unlike each cell's own
+// render(), which re-evaluates t() every render) — the sibling
+// ProviderDetailPage.vue's keyColumns already gets this right via computed().
+const sharedColumns = computed<DataTableColumns<Provider>>(() => [
   {
     title: columnTitle(t('providers.name'), t('providers.name_tip')),
     key: 'name',
@@ -276,7 +361,7 @@ const columns = computed<DataTableColumns<Provider>>(() => [
     key: 'running_status',
     width: 210,
     render: (row) => {
-      const display = runningStatusDisplay(row.running_status)
+      const display = providerRunningStatusDisplay(row.running_status)
       return h(
         NTag,
         { size: 'small', bordered: false, type: display.type },
