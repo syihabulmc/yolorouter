@@ -7,6 +7,7 @@ package repository
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -64,10 +65,17 @@ type RequestLogFilter struct {
 	// searchable identity a key HAS (the plaintext is never stored), matched
 	// via a subquery on api_keys so this table needs no join or new column.
 	KeyPrefix string
-	StartTime *time.Time // inclusive
-	EndTime   *time.Time // exclusive
-	Page      int
-	PageSize  int
+	// RequestPath narrows on the caller-side request path. Matched exactly,
+	// except a value ending in "/" selects the whole subtree — needed for the
+	// Gemini-compatible ingress, whose paths embed the model name
+	// (/v1beta/models/{model}:{action}) and so cannot be listed exactly.
+	// Exact-by-default keeps a fixed path like /v1/messages from also
+	// pulling in sibling paths under it.
+	RequestPath string
+	StartTime   *time.Time // inclusive
+	EndTime     *time.Time // exclusive
+	Page        int
+	PageSize    int
 }
 
 // applyFilter returns a scoped query with the filter's WHERE conditions
@@ -98,6 +106,13 @@ func (f *RequestLogFilter) applyFilter(db *gorm.DB) *gorm.DB {
 		// LOWER on both sides, like every other LIKE in this package: search
 		// must not depend on the driver, and prefixes mix case freely.
 		q = q.Where("api_key_id IN (SELECT id FROM api_keys WHERE LOWER(key_prefix) LIKE LOWER(?) ESCAPE '\\')", likePrefixPattern(f.KeyPrefix))
+	}
+	if f.RequestPath != "" {
+		if strings.HasSuffix(f.RequestPath, "/") {
+			q = q.Where("LOWER(request_path) LIKE LOWER(?) ESCAPE '\\'", likePrefixPattern(f.RequestPath))
+		} else {
+			q = q.Where("LOWER(request_path) = LOWER(?)", f.RequestPath)
+		}
 	}
 	if f.StartTime != nil {
 		q = q.Where("created_at >= ?", *f.StartTime)

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -944,5 +945,80 @@ func TestListRequestLogsFiltersByKeyPrefix(t *testing.T) {
 	csv := we.Body.String()
 	if !strings.Contains(csv, "from-alpha") || strings.Contains(csv, "from-beta") {
 		t.Fatalf("export must contain from-alpha only, got: %s", csv)
+	}
+}
+
+// TestListRequestLogsFiltersByRequestPath pins the endpoint filter's
+// semantics: a plain path matches exactly (a sibling path under it must NOT
+// match), while a value ending in "/" selects the whole subtree — the
+// Gemini-compatible family embeds the model name in its paths and so cannot
+// be matched exactly from a fixed option list.
+func TestListRequestLogsFiltersByRequestPath(t *testing.T) {
+	r, db, _ := newRequestLogTestRouter(t)
+	now := time.Now().UTC()
+	paths := map[string]string{
+		"via-chat":   "/v1/chat/completions",
+		"via-msgs":   "/v1/messages",
+		"via-gemini": "/v1beta/models/gemini-2.5-pro:generateContent",
+		// Extends "/v1/messages" — pins exact matching, so prefix semantics
+		// on a fixed path cannot pass unnoticed.
+		"via-batches": "/v1/messages/batches",
+		// Contains but does not start with "/v1/messages" — pins anchoring,
+		// so a substring match cannot pass unnoticed either.
+		"via-proxied": "/proxy/v1/messages",
+	}
+	for id, p := range paths {
+		seedRequestLog(t, db, id, now, func(rl *model.RequestLog) {
+			rl.StatusCode = 200
+			rl.RequestPath = p
+		})
+	}
+
+	listIDs := func(query string) []string {
+		t.Helper()
+		w, _ := doJSON(t, r, http.MethodGet, "/api/admin/request-logs?request_path="+query, nil, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+		}
+		var env struct {
+			Data struct {
+				List []struct {
+					RequestID string `json:"request_id"`
+				} `json:"list"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		ids := make([]string, 0, len(env.Data.List))
+		for _, it := range env.Data.List {
+			ids = append(ids, it.RequestID)
+		}
+		return ids
+	}
+
+	if got := listIDs(url.QueryEscape("/v1/messages")); len(got) != 1 || got[0] != "via-msgs" {
+		t.Fatalf("exact path filter = %v, want [via-msgs]", got)
+	}
+	if got := listIDs(url.QueryEscape("/v1beta/")); len(got) != 1 || got[0] != "via-gemini" {
+		t.Fatalf("gemini subtree filter = %v, want [via-gemini]", got)
+	}
+	// Subtree values go through LIKE, so wildcard characters must be escaped:
+	// unescaped, "_" matches any single character and "/v1_eta/" would match
+	// the "/v1beta/..." row; escaped, it is a literal no path contains.
+	if got := listIDs(url.QueryEscape("/v1_eta/")); len(got) != 0 {
+		t.Fatalf("literal underscore must match nothing, got %v", got)
+	}
+
+	// CSV export honors the same filter.
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/request-logs/export?request_path="+url.QueryEscape("/v1/chat/completions"), nil)
+	we := httptest.NewRecorder()
+	r.ServeHTTP(we, req)
+	if we.Code != http.StatusOK {
+		t.Fatalf("export: expected 200, got %d, body: %s", we.Code, we.Body.String())
+	}
+	csv := we.Body.String()
+	if !strings.Contains(csv, "via-chat") || strings.Contains(csv, "via-msgs") || strings.Contains(csv, "via-gemini") {
+		t.Fatalf("export must contain via-chat only, got: %s", csv)
 	}
 }

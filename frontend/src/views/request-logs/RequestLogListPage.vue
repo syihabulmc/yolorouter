@@ -1,8 +1,8 @@
 <!-- frontend/src/views/request-logs/RequestLogListPage.vue
      Request-log list. Server-side paged with a filter set matching what the
      backend handler accepts (request_log_handler.go): request_id /
-     model_name / key_prefix / api_key_id / provider_id / status_class /
-     is_stream / cost_known / start / end.
+     model_name / key_prefix / request_path / api_key_id / provider_id /
+     status_class / is_stream / cost_known / start / end.
 
      Rows expand for identity/routing detail (full request id, retry
      breakdown, cache tokens); the View button opens the
@@ -99,6 +99,14 @@
           :placeholder="t('requestLogs.allFilterCostKnown')"
           width="100%"
           @update:value="onCostKnownChange"
+        />
+        <FilterSelectField
+          :label="t('requestLogs.filterEndpoint')"
+          :value="filter.request_path"
+          :options="endpointOptions"
+          :placeholder="t('requestLogs.allFilterEndpoint')"
+          width="100%"
+          @update:value="onEndpointChange"
         />
         <div class="filter-item filter-item--range">
           <!-- Desktop: a single datetimerange picker. On mobile the range
@@ -213,6 +221,9 @@ interface ListFilter {
   status: StatusClass | null
   is_stream: boolean | null
   cost_known: boolean | null
+  // The selected endpoint option's value. The backend matches it exactly,
+  // except a trailing "/" selects the whole subtree (the Gemini option).
+  request_path: string | null
 }
 const filter = reactive<ListFilter>({
   request_id: '',
@@ -223,6 +234,7 @@ const filter = reactive<ListFilter>({
   status: null,
   is_stream: null,
   cost_known: null,
+  request_path: null,
 })
 // Stream filter UI value. null means "no filter" (cleared select, matches
 // the placeholder's "all streams" wording); 'stream' / 'non-stream' map to
@@ -324,6 +336,17 @@ const costOptions = computed<SelectOption[]>(() => ([
   { label: t('requestLogs.costKnown_false'), value: 'unknown' },
 ]))
 
+// Endpoint options mirror the gateway's ingress routes (router.go). The
+// backend matches the value exactly, except a trailing "/" selects the whole
+// subtree — the Gemini-compatible ingress embeds the model name in its path
+// (/v1beta/models/{model}:{action}), so its option is the family prefix.
+const endpointOptions = computed<SelectOption[]>(() => ([
+  { label: '/v1/chat/completions', value: '/v1/chat/completions' },
+  { label: '/v1/messages', value: '/v1/messages' },
+  { label: '/v1/responses', value: '/v1/responses' },
+  { label: t('requestLogs.filterEndpointGemini'), value: '/v1beta/' },
+]))
+
 // Preset shortcuts for the date-range picker: today / yesterday / last 7
 // days / last 30 days. End is set to "now" for the rolling windows so the
 // preset matches the admin's mental model ("last 7 days" includes today),
@@ -358,8 +381,8 @@ onBeforeUnmount(() => {
 // URL query keys this page knows how to ingest. Used by hasRelevantQuery
 // to decide whether mount should apply the query before the first load.
 const RELEVANT_QUERY_KEYS = [
-  'request_id', 'model_name', 'key_prefix', 'api_key_id', 'provider_id',
-  'status', 'is_stream', 'cost_known', 'start', 'end',
+  'request_id', 'model_name', 'key_prefix', 'request_path', 'api_key_id',
+  'provider_id', 'status', 'is_stream', 'cost_known', 'start', 'end',
 ] as const
 
 function hasRelevantQuery(): boolean {
@@ -388,6 +411,9 @@ function applyQueryFilter() {
   }
   if (typeof q.key_prefix === 'string' && q.key_prefix) {
     filter.key_prefix = q.key_prefix
+  }
+  if (typeof q.request_path === 'string' && q.request_path) {
+    filter.request_path = q.request_path
   }
   if (typeof q.api_key_id === 'string' && q.api_key_id) {
     const n = Number(q.api_key_id)
@@ -473,6 +499,7 @@ function buildListParams(): RequestLogListParams {
   if (filter.provider_id != null) params.provider_id = filter.provider_id
   if (filter.status) params.status = filter.status
   if (filter.key_prefix.trim()) params.key_prefix = filter.key_prefix.trim()
+  if (filter.request_path) params.request_path = filter.request_path
   if (filter.is_stream != null) params.is_stream = filter.is_stream
   if (filter.cost_known != null) params.cost_known = filter.cost_known
   // start / end are independent bounds — on mobile the user may set only one.
@@ -548,6 +575,7 @@ function onReset() {
   streamSelect.value = null
   filter.cost_known = null
   costSelect.value = null
+  filter.request_path = null
   startTime.value = null
   endTime.value = null
   // Drop the verbatim-no-trim override too, so post-reset typed searches
@@ -583,6 +611,11 @@ function onStreamChange(v: 'stream' | 'non-stream' | null) {
 function onCostKnownChange(v: 'known' | 'unknown' | null) {
   costSelect.value = v
   filter.cost_known = v === 'known' ? true : v === 'unknown' ? false : null
+  void onSearch()
+}
+
+function onEndpointChange(v: string | null) {
+  filter.request_path = v
   void onSearch()
 }
 

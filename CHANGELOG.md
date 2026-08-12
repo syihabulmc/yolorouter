@@ -40,8 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider-side model that actually served the request — and in full in a
   new per-row expansion alongside the complete request id and cache tokens.
   The table itself was reworked to never scroll sideways. The list can also
-  be filtered by API key prefix, and the CSV export carries the split
-  columns in place of the merged count.
+  be filtered by API key prefix and by ingress endpoint (the fixed paths
+  exactly, the Gemini-compatible family by its /v1beta/ prefix, since those
+  paths embed the model name), and the CSV export carries the split columns
+  in place of the merged count.
 - The request log gains a cost filter (priced / unknown cost) — the
   dashboard's unknown-cost figure drills into exactly the rows it counts.
 - The provider report shows how many failovers each provider caused —

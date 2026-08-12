@@ -55,6 +55,10 @@ type RequestLogListFilter struct {
 	IsStream    *bool
 	CostKnown   *bool
 	KeyPrefix   string
+	// RequestPath narrows on the caller-side request path. Exact match,
+	// except a trailing "/" selects the whole subtree — covering the
+	// model-bearing Gemini path family with one value.
+	RequestPath string
 	StartTime   *time.Time // inclusive
 	EndTime     *time.Time // exclusive
 	Page        int
@@ -522,6 +526,7 @@ func toRepoFilterFromList(f RequestLogListFilter) *repository.RequestLogFilter {
 		IsStream:    f.IsStream,
 		CostKnown:   f.CostKnown,
 		KeyPrefix:   f.KeyPrefix,
+		RequestPath: f.RequestPath,
 		StartTime:   f.StartTime,
 		EndTime:     f.EndTime,
 		Page:        f.Page,

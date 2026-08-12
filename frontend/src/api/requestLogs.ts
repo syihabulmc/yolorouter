@@ -118,6 +118,8 @@ export interface RequestLogListParams {
   provider_id?: number
   status?: StatusClass
   key_prefix?: string
+  /** Caller-side request path, matched exactly; a trailing "/" selects the whole subtree. */
+  request_path?: string
   is_stream?: boolean
   cost_known?: boolean
   start?: string
@@ -151,6 +153,7 @@ export function listRequestLogs(filter: RequestLogListParams): Promise<RequestLo
     provider_id: filter.provider_id,
     status: filter.status,
     key_prefix: filter.key_prefix,
+    request_path: filter.request_path,
     is_stream: filter.is_stream,
     cost_known: filter.cost_known,
     start: filter.start,
@@ -247,6 +250,7 @@ export async function exportRequestLogsCSV(filter: Omit<RequestLogListParams, 'p
     provider_id: filter.provider_id,
     status: filter.status,
     key_prefix: filter.key_prefix,
+    request_path: filter.request_path,
     is_stream: filter.is_stream,
     cost_known: filter.cost_known,
     start: filter.start,
