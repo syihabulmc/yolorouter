@@ -86,7 +86,7 @@
 <script setup lang="ts">
 import { computed, h, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { NButton, NSwitch, NTag, useDialog, useMessage, type DataTableColumns } from 'naive-ui'
 import { Boxes, Plus, Search, MoreHorizontal } from '@lucide/vue'
 import { useModelsStore } from '../../store/models'
@@ -108,6 +108,7 @@ import FilterSelectField from '../../components/common/FilterSelectField.vue'
 import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
 
 const { t } = useI18n()
+const route = useRoute()
 const router = useRouter()
 const dialog = useDialog()
 const toggleStatusWithConfirm = useConfirmedStatusToggle(dialog)
@@ -208,6 +209,20 @@ function onReset() {
 }
 
 onMounted(() => {
+  // Deep links: ?management=1|2 (the dashboard's unavailable-models figure
+  // counts disabled models, so its drill-down filters this dimension) and
+  // ?running=<running status>. Other filters have no inbound links today;
+  // add their keys here when one appears.
+  const management = route.query.management
+  if (management === '1' || management === '2') {
+    filter.management = Number(management)
+    applied.management = Number(management)
+  }
+  const running = route.query.running
+  if (typeof running === 'string' && Object.hasOwn(MODEL_RUNNING_STATUS_DISPLAY, running)) {
+    filter.running = running
+    applied.running = running
+  }
   void store.fetchList().catch((err) => message.error(displayMessage(err, t)))
 })
 

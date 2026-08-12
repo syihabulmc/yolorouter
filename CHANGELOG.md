@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe, or its own switch — in the order the operator has to fix them.
 - The model list can be filtered by provider, answering "which models route
   through this one" at a glance.
+- The dashboard and the analytics reports drill through. Every KPI card,
+  trend-chart day, upstream-status figure and top-caller row on the
+  dashboard now opens the page that explains it — destinations in the
+  request log carry the dashboard's selected window; the cost and token
+  cards open their pages on those pages' own default windows. Every row of
+  the four report tables opens the request log pre-filtered to that row's
+  model, provider, key or time bucket on top of the report's own filters.
+  Dashboard blocks are keyboard-operable; table rows follow the console's
+  existing pointer-click convention, and the trend chart is a canvas
+  (pointer only).
+- The request log gains a cost filter (priced / unknown cost) — the
+  dashboard's unknown-cost figure drills into exactly the rows it counts.
 - The provider report shows how many failovers each provider caused —
   charged to the provider that failed the request, not the one that rescued
   it, with key rotation within one provider not counted. A provider every

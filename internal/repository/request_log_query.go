@@ -57,10 +57,13 @@ type RequestLogFilter struct {
 	ProviderID  *uint
 	StatusClass string
 	IsStream    *bool
-	StartTime   *time.Time // inclusive
-	EndTime     *time.Time // exclusive
-	Page        int
-	PageSize    int
+	// CostKnown filters on whether the row could be priced. Deep-linked from
+	// the dashboard's unknown-cost figure, whose count this filter mirrors.
+	CostKnown *bool
+	StartTime *time.Time // inclusive
+	EndTime   *time.Time // exclusive
+	Page      int
+	PageSize  int
 }
 
 // applyFilter returns a scoped query with the filter's WHERE conditions
@@ -83,6 +86,9 @@ func (f *RequestLogFilter) applyFilter(db *gorm.DB) *gorm.DB {
 	}
 	if f.IsStream != nil {
 		q = q.Where("is_stream = ?", *f.IsStream)
+	}
+	if f.CostKnown != nil {
+		q = q.Where("cost_known = ?", *f.CostKnown)
 	}
 	if f.StartTime != nil {
 		q = q.Where("created_at >= ?", *f.StartTime)

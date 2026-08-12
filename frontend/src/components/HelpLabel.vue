@@ -20,7 +20,9 @@
     </NIcon>
     <NTooltip v-else trigger="hover" placement="top">
       <template #trigger>
-        <NIcon :size="13" style="cursor: help; opacity: 0.45" tabindex="0" role="img" :aria-label="tip">
+        <!-- Clicks stop here: a help icon inside a clickable card must not
+             trigger the card's navigation. -->
+        <NIcon :size="13" style="cursor: help; opacity: 0.45" tabindex="0" role="img" :aria-label="tip" @click.stop>
           <CircleHelp />
         </NIcon>
       </template>

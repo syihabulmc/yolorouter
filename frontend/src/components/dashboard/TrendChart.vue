@@ -15,6 +15,7 @@
       :option="option"
       :update-options="{ notMerge: false }"
       autoresize
+      @click="onChartClick"
     />
   </div>
 </template>
@@ -31,6 +32,16 @@ import { formatMicros } from '../../utils/money'
 import type { TrendPoint } from '../../api/analytics'
 
 const props = defineProps<{ points: TrendPoint[] }>()
+// point-click carries the clicked bucket's FULL date ("YYYY-MM-DD") — the
+// axis label is truncated to MM-DD, so the handler resolves through
+// dataIndex back to the source point instead of trusting the label.
+const emit = defineEmits<{ 'point-click': [date: string] }>()
+function onChartClick(params: { dataIndex?: number }) {
+  const idx = params?.dataIndex
+  if (typeof idx !== 'number') return
+  const point = props.points[idx]
+  if (point) emit('point-click', point.date)
+}
 const { t } = useI18n()
 
 // ECharts does NOT resolve CSS custom properties in itemStyle.color — the

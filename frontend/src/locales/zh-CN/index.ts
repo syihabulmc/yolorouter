@@ -877,6 +877,10 @@ export default {
     stream_all: '全部',
     stream_true: '流式',
     stream_false: '非流式',
+    filterCostKnown: '成本',
+    allFilterCostKnown: '全部成本',
+    costKnown_true: '已计价',
+    costKnown_false: '未知成本',
 
     // List columns. The "Attempts" column carries the total count
     // of every candidate try — the wire schema collapses key rotation and

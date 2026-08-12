@@ -53,6 +53,7 @@ type RequestLogListFilter struct {
 	ProviderID  *uint
 	StatusClass string
 	IsStream    *bool
+	CostKnown   *bool
 	StartTime   *time.Time // inclusive
 	EndTime     *time.Time // exclusive
 	Page        int
@@ -438,6 +439,7 @@ func toRepoFilterFromList(f RequestLogListFilter) *repository.RequestLogFilter {
 		ProviderID:  f.ProviderID,
 		StatusClass: f.StatusClass,
 		IsStream:    f.IsStream,
+		CostKnown:   f.CostKnown,
 		StartTime:   f.StartTime,
 		EndTime:     f.EndTime,
 		Page:        f.Page,

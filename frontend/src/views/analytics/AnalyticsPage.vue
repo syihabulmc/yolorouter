@@ -141,6 +141,7 @@
           <ResponsiveDataTable
             :columns="modelColumns"
             :data="displayedModelRows"
+            :row-props="(r: ModelReportRow) => drillRowProps(r.model_name ? { model_name: r.model_name } : null)"
             :loading="loading"
             :scroll-x="1330"
             :row-key="(r: ModelReportRow) => r.model_name"
@@ -165,6 +166,7 @@
           <ResponsiveDataTable
             :columns="providerColumns"
             :data="displayedProviderRows"
+            :row-props="(r: ProviderReportRow) => drillRowProps(r.provider_id != null ? { provider_id: r.provider_id } : null)"
             :loading="loading"
             :scroll-x="1030"
             :row-key="providerRowKey"
@@ -178,6 +180,7 @@
           <ResponsiveDataTable
             :columns="timeColumns"
             :data="timeRows"
+            :row-props="(r: TimeReportRow) => drillRowProps(bucketRange(r.bucket))"
             :loading="loading"
             :scroll-x="1330"
             :row-key="(r: TimeReportRow) => r.bucket"
@@ -200,6 +203,7 @@
           <ResponsiveDataTable
             :columns="callerColumns"
             :data="displayedCallerRows"
+            :row-props="(r: CallerReportRow) => drillRowProps(r.api_key_id != null ? { api_key_id: r.api_key_id } : null)"
             :loading="loading"
             :scroll-x="1330"
             :row-key="callerRowKey"
@@ -225,11 +229,13 @@ import HelpLabel from '../../components/HelpLabel.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import FilterSelectField from '../../components/common/FilterSelectField.vue'
 import { useIsMobile } from '../../composables/useIsMobile'
+import { useRouter } from 'vue-router'
+import { bucketRange, requestLogLocation, type RequestLogLinkQuery } from '../../utils/requestLogLink'
 import TimeRangeSelect, { type RangePreset, type TimeRange } from '../../components/analytics/TimeRangeSelect.vue'
 import { listProviders } from '../../api/providers'
 import { listModels } from '../../api/models'
 import { listAPIKeys, toAPIKeyOptions } from '../../api/apiKeys'
-import { initialLast7DaysRange } from '../../utils/timeRange'
+import { clampedRangeStart, initialLast7DaysRange } from '../../utils/timeRange'
 import { columnTitle } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
 import { formatNumber, formatRate } from '../../utils/format'
@@ -319,6 +325,40 @@ function mobileSorted<T extends { calls: number; cost_micros: number }>(rows: T[
   const key = mobileSort.value
   return [...rows].sort((a, b) => (key === 'cost' ? b.cost_micros - a.cost_micros : b.calls - a.calls))
 }
+// Row drill-down: every report row opens the request-log list scoped to the
+// page's active filter plus the clicked row's own dimension. Rows whose
+// dimension value is the NULL bucket have nothing to scope by and stay inert.
+const router = useRouter()
+function activeFilterFragment(): RequestLogLinkQuery {
+  // The report clamps aggregation to the 90-day day-bucket cap; the link
+  // must cover the same window or the log list shows rows the clicked
+  // aggregate never counted.
+  const start = filter.value.start ?? null
+  const end = filter.value.end ?? null
+  return {
+    start: start && end ? clampedRangeStart(start, end) : start,
+    end,
+    status: filter.value.status || null,
+    model_name: filter.value.model_name || null,
+    api_key_id: filter.value.api_key_id ?? null,
+    provider_id: filter.value.provider_id ?? null,
+  }
+}
+// Plain pointer rows, matching the repo's existing row-click convention
+// (models/providers/request-log lists): a button role on a <tr> would
+// override its table-row semantics for screen readers. A keyboard-reachable
+// form of row drill-down (a link cell) is a cross-page change tracked
+// separately.
+function drillRowProps(extra: RequestLogLinkQuery | null): Record<string, unknown> {
+  if (extra === null) return {}
+  return {
+    style: 'cursor: pointer',
+    onClick: () => {
+      void router.push(requestLogLocation({ ...activeFilterFragment(), ...extra }))
+    },
+  }
+}
+
 const displayedModelRows = computed(() => mobileSorted(modelRows.value))
 const displayedProviderRows = computed(() => mobileSorted(providerRows.value))
 const displayedCallerRows = computed(() => mobileSorted(callerRows.value))

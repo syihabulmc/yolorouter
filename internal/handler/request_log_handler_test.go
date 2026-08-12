@@ -728,3 +728,38 @@ func TestExportRequestLogsCSVRejectsBadStatusBeforeStream(t *testing.T) {
 func uintToStr(v uint) string {
 	return strconv.FormatUint(uint64(v), 10)
 }
+
+// cost_known=false narrows the list to rows that could not be priced — the
+// dashboard's unknown-cost figure deep-links here, so the count and the
+// list must agree on the dimension.
+func TestListRequestLogsFiltersByCostKnown(t *testing.T) {
+	r, db, _ := newRequestLogTestRouter(t)
+	now := time.Now().UTC()
+	seedRequestLog(t, db, "priced", now, func(rl *model.RequestLog) {
+		rl.StatusCode = 200
+		rl.CostKnown = true
+		rl.CostMicros = 10
+	})
+	seedRequestLog(t, db, "unpriced", now, func(rl *model.RequestLog) {
+		rl.StatusCode = 200
+		rl.CostKnown = false
+	})
+
+	w, _ := doJSON(t, r, http.MethodGet, "/api/admin/request-logs?cost_known=false", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data struct {
+			List []struct {
+				RequestID string `json:"request_id"`
+			} `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(env.Data.List) != 1 || env.Data.List[0].RequestID != "unpriced" {
+		t.Fatalf("list = %+v, want exactly the unpriced row", env.Data.List)
+	}
+}

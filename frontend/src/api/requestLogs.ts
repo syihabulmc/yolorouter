@@ -111,6 +111,7 @@ export interface RequestLogListParams {
   provider_id?: number
   status?: StatusClass
   is_stream?: boolean
+  cost_known?: boolean
   start?: string
   end?: string
   page: number
@@ -142,6 +143,7 @@ export function listRequestLogs(filter: RequestLogListParams): Promise<RequestLo
     provider_id: filter.provider_id,
     status: filter.status,
     is_stream: filter.is_stream,
+    cost_known: filter.cost_known,
     start: filter.start,
     end: filter.end,
   })
@@ -236,6 +238,7 @@ export async function exportRequestLogsCSV(filter: Omit<RequestLogListParams, 'p
     provider_id: filter.provider_id,
     status: filter.status,
     is_stream: filter.is_stream,
+    cost_known: filter.cost_known,
     start: filter.start,
     end: filter.end,
   })

@@ -41,7 +41,7 @@
 
     <!-- KPI cards row -->
     <div class="kpi-row">
-      <div class="kpi">
+      <div class="kpi" v-bind="drillLogs()">
         <div class="kpi__icon kpi__icon--accent">
           <Activity :size="18" />
         </div>
@@ -54,7 +54,7 @@
         </div>
       </div>
 
-      <div class="kpi">
+      <div class="kpi" v-bind="drillPath('/costs')">
         <div class="kpi__icon kpi__icon--success">
           <Coins :size="18" />
         </div>
@@ -67,7 +67,7 @@
         </div>
       </div>
 
-      <div class="kpi">
+      <div class="kpi" v-bind="drillLogs()">
         <div class="kpi__icon kpi__icon--purple">
           <TrendingUp :size="18" />
         </div>
@@ -80,7 +80,7 @@
         </div>
       </div>
 
-      <div class="kpi">
+      <div class="kpi" v-bind="drillLogs({ cost_known: false })">
         <div class="kpi__icon kpi__icon--warning">
           <AlertTriangle :size="18" />
         </div>
@@ -98,7 +98,7 @@
          the net prompt, cache reads/writes counted separately), so they sum to
          the period's true token total. -->
     <div class="kpi-row">
-      <div class="kpi">
+      <div class="kpi" v-bind="drillPath('/analytics')">
         <div class="kpi__icon kpi__icon--cyan">
           <ArrowDownToLine :size="18" />
         </div>
@@ -111,7 +111,7 @@
         </div>
       </div>
 
-      <div class="kpi">
+      <div class="kpi" v-bind="drillPath('/analytics')">
         <div class="kpi__icon kpi__icon--orange">
           <ArrowUpFromLine :size="18" />
         </div>
@@ -124,7 +124,7 @@
         </div>
       </div>
 
-      <div class="kpi">
+      <div class="kpi" v-bind="drillPath('/analytics')">
         <div class="kpi__icon kpi__icon--pink">
           <HardDriveUpload :size="18" />
         </div>
@@ -137,7 +137,7 @@
         </div>
       </div>
 
-      <div class="kpi">
+      <div class="kpi" v-bind="drillPath('/analytics')">
         <div class="kpi__icon kpi__icon--teal">
           <HardDriveDownload :size="18" />
         </div>
@@ -157,7 +157,7 @@
         <h2 class="section-title">{{ t('dashboard.trendTitle') }}</h2>
         <span class="section-sub">{{ t('dashboard.trendSub') }}</span>
       </header>
-      <TrendChart :points="data?.trend ?? []" />
+      <TrendChart :points="data?.trend ?? []" @point-click="onTrendPointClick" />
     </section>
 
     <!-- Two-column: top callers + recent failures -->
@@ -169,7 +169,12 @@
         </header>
         <EmptyState v-if="!data?.top_callers?.length" :icon="Activity" :title="t('dashboard.topCallersEmpty')" />
         <ul v-else class="caller-list">
-          <li v-for="(c, i) in data.top_callers" :key="c.api_key_id" class="caller-row">
+          <li
+            v-for="(c, i) in data.top_callers"
+            :key="c.api_key_id"
+            class="caller-row"
+            v-bind="c.api_key_id != null ? drillLogs({ api_key_id: c.api_key_id }) : {}"
+          >
             <span class="caller-rank">{{ i + 1 }}</span>
             <span class="caller-label">{{ c.owner_label || t('dashboard.unknownCaller') }}</span>
             <span class="caller-meta">{{ formatNumber(c.calls) }} {{ t('dashboard.callsUnit') }}</span>
@@ -212,13 +217,13 @@
         <h2 class="section-title">{{ t('dashboard.upstreamTitle') }}</h2>
       </header>
       <div class="upstream-row">
-        <div class="upstream-item">
+        <div class="upstream-item" v-bind="drillPath('/providers')">
           <span class="upstream-value upstream-value--success">{{ data?.upstream_status.available_providers ?? 0 }}</span>
           <span class="upstream-label">
             <HelpLabel :tip="t('dashboard.upstreamProviders_tip')">{{ t('dashboard.upstreamProviders') }}</HelpLabel>
           </span>
         </div>
-        <div class="upstream-item">
+        <div class="upstream-item" v-bind="drillPath('/providers')">
           <span class="upstream-value" :class="{ 'upstream-value--warning': (data?.upstream_status.abnormal_keys ?? 0) > 0 }">
             {{ data?.upstream_status.abnormal_keys ?? 0 }}
           </span>
@@ -226,7 +231,7 @@
             <HelpLabel :tip="t('dashboard.upstreamAbnormalKeys_tip')">{{ t('dashboard.upstreamAbnormalKeys') }}</HelpLabel>
           </span>
         </div>
-        <div class="upstream-item">
+        <div class="upstream-item" v-bind="drillPath({ path: '/models', query: { management: '2' } })">
           <span class="upstream-value" :class="{ 'upstream-value--danger': (data?.upstream_status.unavailable_models ?? 0) > 0 }">
             {{ data?.upstream_status.unavailable_models ?? 0 }}
           </span>
@@ -264,6 +269,9 @@ import HelpLabel from '../../components/HelpLabel.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import TimeRangeSelect, { type RangePreset, type TimeRange } from '../../components/analytics/TimeRangeSelect.vue'
 import TrendChart from '../../components/dashboard/TrendChart.vue'
+import { bucketRange, pressable, requestLogLocation, type RequestLogLinkQuery } from '../../utils/requestLogLink'
+import { clampedRangeStart, DASHBOARD_RANGE_CAP_DAYS } from '../../utils/timeRange'
+import type { RouteLocationRaw } from 'vue-router'
 import { getDashboard, type DashboardData } from '../../api/analytics'
 import { displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
@@ -414,6 +422,31 @@ function formatRelativeTime(rfc3339: string): string {
   if (hr < 24) return t('dashboard.hoursAgo', { n: hr })
   const day = Math.floor(hr / 24)
   return t('dashboard.daysAgo', { n: day })
+}
+
+// Drill-down targets for the display-only blocks. Each carries the
+// dashboard's selected window so the destination shows the numbers the
+// card summarized, not a default range.
+function windowFragment() {
+  const { start, end } = timeRange.value
+  if (!start || !end) return { start: null, end: null }
+  // The dashboard clamps aggregation to its range cap; a drill-down carrying
+  // the unclamped window would include rows the figures never counted.
+  return { start: clampedRangeStart(start, end, DASHBOARD_RANGE_CAP_DAYS), end }
+}
+function drillLogs(extra: RequestLogLinkQuery = {}) {
+  return pressable(() => {
+    void router.push(requestLogLocation({ ...windowFragment(), ...extra }))
+  })
+}
+function drillPath(to: RouteLocationRaw) {
+  return pressable(() => {
+    void router.push(to)
+  })
+}
+function onTrendPointClick(date: string) {
+  const range = bucketRange(date)
+  if (range) void router.push(requestLogLocation(range))
 }
 
 function goToRequestLog(requestId: string) {

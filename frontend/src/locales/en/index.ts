@@ -874,6 +874,10 @@ export default {
     stream_all: 'All',
     stream_true: 'Stream',
     stream_false: 'Non-stream',
+    filterCostKnown: 'Cost',
+    allFilterCostKnown: 'All Cost',
+    costKnown_true: 'Priced',
+    costKnown_false: 'Unknown cost',
 
     // List columns. The "Attempts" column carries the total count
     // of every candidate try — the wire schema collapses key rotation

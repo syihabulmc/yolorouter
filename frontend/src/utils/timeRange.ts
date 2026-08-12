@@ -62,11 +62,15 @@ export function withRangeQuery(
  * without it, a >90-day custom range would surface logs outside the window.
  */
 export const ANALYTICS_DAY_CAP_DAYS = 90
-export function clampedRangeStart(start: string, end: string): string {
+// DASHBOARD_RANGE_CAP_DAYS mirrors the dashboard service's
+// maxDashboardRangeDays: KPI and top-caller aggregation clamp to the final
+// 365 days of a wider custom range, and drill-down links must match.
+export const DASHBOARD_RANGE_CAP_DAYS = 365
+export function clampedRangeStart(start: string, end: string, capDays: number = ANALYTICS_DAY_CAP_DAYS): string {
   const s = new Date(start).getTime()
   const e = new Date(end).getTime()
   if (Number.isNaN(s) || Number.isNaN(e)) return start
-  const capMs = ANALYTICS_DAY_CAP_DAYS * 24 * 60 * 60 * 1000
+  const capMs = capDays * 24 * 60 * 60 * 1000
   if (e - s <= capMs) return start
   // The analytics backend clamps with end.AddDate(0, 0, -cap). Frontend
   // ranges serialize via toISOString (UTC "Z"), so Go parses end in UTC and

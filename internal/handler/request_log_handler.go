@@ -175,6 +175,7 @@ func applyRequestLogFilterParams(c *gin.Context, filter *service.RequestLogListF
 	return applyUintQueryParam(c, "api_key_id", func(v uint) { filter.APIKeyID = &v }) &&
 		applyUintQueryParam(c, "provider_id", func(v uint) { filter.ProviderID = &v }) &&
 		applyBoolQueryParam(c, "is_stream", func(v bool) { filter.IsStream = &v }) &&
+		applyBoolQueryParam(c, "cost_known", func(v bool) { filter.CostKnown = &v }) &&
 		applyTimeQueryParam(c, "start", func(v time.Time) { filter.StartTime = &v }) &&
 		applyTimeQueryParam(c, "end", func(v time.Time) { filter.EndTime = &v })
 }

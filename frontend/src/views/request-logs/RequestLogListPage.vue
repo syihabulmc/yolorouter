@@ -82,6 +82,14 @@
           width="100%"
           @update:value="onStreamChange"
         />
+        <FilterSelectField
+          :label="t('requestLogs.filterCostKnown')"
+          :value="costSelect"
+          :options="costOptions"
+          :placeholder="t('requestLogs.allFilterCostKnown')"
+          width="100%"
+          @update:value="onCostKnownChange"
+        />
         <div class="filter-item filter-item--range">
           <!-- Desktop: a single datetimerange picker. On mobile the range
                variant is too wide to fit, so it's split into two standalone
@@ -195,6 +203,7 @@ interface ListFilter {
   provider_id: number | null
   status: StatusClass | null
   is_stream: boolean | null
+  cost_known: boolean | null
 }
 const filter = reactive<ListFilter>({
   request_id: '',
@@ -203,6 +212,7 @@ const filter = reactive<ListFilter>({
   provider_id: null,
   status: null,
   is_stream: null,
+  cost_known: null,
 })
 // Stream filter UI value. null means "no filter" (cleared select, matches
 // the placeholder's "all streams" wording); 'stream' / 'non-stream' map to
@@ -210,6 +220,9 @@ const filter = reactive<ListFilter>({
 // than v-model so the null → is_stream=null mapping happens in one place
 // (onStreamChange).
 const streamSelect = ref<'stream' | 'non-stream' | null>(null)
+// Same controlled-input shape as streamSelect: the UI value decodes to
+// filter.cost_known = true / false / null in one place.
+const costSelect = ref<'known' | 'unknown' | null>(null)
 // Start / end are the source of truth for the time filter. Desktop binds a
 // single datetimerange picker through the `timeRange` computed below; mobile
 // binds these two refs directly to standalone datetime pickers. Keeping the
@@ -296,6 +309,11 @@ const streamOptions = computed<SelectOption[]>(() => ([
   { label: t('requestLogs.stream_false'), value: 'non-stream' },
 ]))
 
+const costOptions = computed<SelectOption[]>(() => ([
+  { label: t('requestLogs.costKnown_true'), value: 'known' },
+  { label: t('requestLogs.costKnown_false'), value: 'unknown' },
+]))
+
 // Preset shortcuts for the date-range picker: today / yesterday / last 7
 // days / last 30 days. End is set to "now" for the rolling windows so the
 // preset matches the admin's mental model ("last 7 days" includes today),
@@ -331,7 +349,7 @@ onBeforeUnmount(() => {
 // to decide whether mount should apply the query before the first load.
 const RELEVANT_QUERY_KEYS = [
   'request_id', 'model_name', 'api_key_id', 'provider_id',
-  'status', 'is_stream', 'start', 'end',
+  'status', 'is_stream', 'cost_known', 'start', 'end',
 ] as const
 
 function hasRelevantQuery(): boolean {
@@ -368,6 +386,14 @@ function applyQueryFilter() {
   }
   if (typeof q.status === 'string' && q.status) {
     filter.status = q.status as StatusClass
+  }
+  if (typeof q.cost_known === 'string') {
+    const v: 'known' | 'unknown' | null =
+      q.cost_known === 'true' ? 'known'
+        : q.cost_known === 'false' ? 'unknown'
+          : null
+    costSelect.value = v
+    filter.cost_known = v === 'known' ? true : v === 'unknown' ? false : null
   }
   if (typeof q.is_stream === 'string') {
     const v: 'stream' | 'non-stream' | null =
@@ -504,6 +530,8 @@ function onReset() {
   filter.status = null
   filter.is_stream = null
   streamSelect.value = null
+  filter.cost_known = null
+  costSelect.value = null
   startTime.value = null
   endTime.value = null
   // Drop the verbatim-no-trim override too, so post-reset typed searches
@@ -533,6 +561,12 @@ async function onExport() {
 function onStreamChange(v: 'stream' | 'non-stream' | null) {
   streamSelect.value = v
   filter.is_stream = v === 'stream' ? true : v === 'non-stream' ? false : null
+  void onSearch()
+}
+
+function onCostKnownChange(v: 'known' | 'unknown' | null) {
+  costSelect.value = v
+  filter.cost_known = v === 'known' ? true : v === 'unknown' ? false : null
   void onSearch()
 }
 
