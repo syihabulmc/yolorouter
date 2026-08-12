@@ -60,6 +60,10 @@ type RequestLogFilter struct {
 	// CostKnown filters on whether the row could be priced. Deep-linked from
 	// the dashboard's unknown-cost figure, whose count this filter mirrors.
 	CostKnown *bool
+	// KeyPrefix narrows to rows whose api key starts with this prefix — the
+	// searchable identity a key HAS (the plaintext is never stored), matched
+	// via a subquery on api_keys so this table needs no join or new column.
+	KeyPrefix string
 	StartTime *time.Time // inclusive
 	EndTime   *time.Time // exclusive
 	Page      int
@@ -89,6 +93,11 @@ func (f *RequestLogFilter) applyFilter(db *gorm.DB) *gorm.DB {
 	}
 	if f.CostKnown != nil {
 		q = q.Where("cost_known = ?", *f.CostKnown)
+	}
+	if f.KeyPrefix != "" {
+		// LOWER on both sides, like every other LIKE in this package: search
+		// must not depend on the driver, and prefixes mix case freely.
+		q = q.Where("api_key_id IN (SELECT id FROM api_keys WHERE LOWER(key_prefix) LIKE LOWER(?) ESCAPE '\\')", likePrefixPattern(f.KeyPrefix))
 	}
 	if f.StartTime != nil {
 		q = q.Where("created_at >= ?", *f.StartTime)

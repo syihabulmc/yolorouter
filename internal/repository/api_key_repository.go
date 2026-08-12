@@ -52,12 +52,21 @@ type APIKeyFilter struct {
 	Now    time.Time
 }
 
-// likeContainsPattern wraps q in a LIKE "contains" pattern, escaping the LIKE
-// metacharacters so a search for "100%" or "a_b" matches literally rather than
-// as wildcards. Backslash is the escape char on both SQLite and Postgres.
+// escapeLike escapes the LIKE metacharacters so a search for "100%" or "a_b"
+// matches literally rather than as wildcards. Backslash is the escape char on
+// both SQLite and Postgres. Shared by the two pattern wrappers below.
+func escapeLike(q string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
+}
+
+// likeContainsPattern wraps q in a LIKE "contains" pattern.
 func likeContainsPattern(q string) string {
-	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
-	return "%" + escaped + "%"
+	return "%" + escapeLike(q) + "%"
+}
+
+// likePrefixPattern is the starts-with sibling: anchored at the start.
+func likePrefixPattern(q string) string {
+	return escapeLike(q) + "%"
 }
 
 // applyAPIKeyFilters ANDs together the free-text search, the owner filter and

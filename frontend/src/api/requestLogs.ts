@@ -21,13 +21,15 @@ import { apiFetch } from './client'
 export type StatusClass = 'success' | 'failed' | 'partial' | 'cancelled' | 'rejected'
 
 // Mirrors service.RequestLogListItem. `attempts` is the total count of every
-// candidate try (key rotations + candidate failovers combined); the list row
-// does not break that down further — see attempts_detail on the detail DTO.
+// candidate try; key_switches / failovers break it down by kind, and the
+// full per-attempt sequence lives on the detail DTO's attempts_detail.
 export interface RequestLogRow {
   request_id: string
   api_key_id: number | null
   owner_label: string
   model_name: string
+  /** Endpoint the caller hit, e.g. /v1/chat/completions; '' for pre-relay rejects. */
+  request_path: string
   provider_id: number | null
   provider_name: string
   is_stream: boolean
@@ -41,6 +43,12 @@ export interface RequestLogRow {
   cost_known: boolean
   fail_reason: string | null
   attempts: number
+  /** Same-provider key rotations within this request's retries. */
+  key_switches: number
+  /** Provider-to-provider switches within this request's retries. */
+  failovers: number
+  /** Provider-side model name of the attempt that produced the outcome. */
+  final_provider_model: string
   duration_ms: number
   created_at: string
 }
@@ -79,11 +87,10 @@ export interface AttemptRecord {
 // lives on disk instead — see has_stream_body / stream_body_path below).
 export interface RequestLogDetail extends RequestLogRow {
   attempts_detail: AttemptRecord[]
-  // request_path is the caller's ingress path (e.g. /v1/chat/completions);
   // upstream_url is the full URL the gateway dispatched to for the final
-  // attempt (e.g. https://api.openai.com/v1/chat/completions). Both are ''
-  // when not recorded (pre-migration row or a request rejected pre-relay).
-  request_path: string
+  // attempt (e.g. https://api.openai.com/v1/chat/completions); '' when not
+  // recorded (pre-migration row or a request rejected pre-relay).
+  // request_path is inherited from the row shape.
   upstream_url: string
   // request_headers is the caller's headers as a JSON object string, with
   // sensitive headers masked server-side. Empty = not captured.
@@ -110,6 +117,7 @@ export interface RequestLogListParams {
   model_name?: string
   provider_id?: number
   status?: StatusClass
+  key_prefix?: string
   is_stream?: boolean
   cost_known?: boolean
   start?: string
@@ -142,6 +150,7 @@ export function listRequestLogs(filter: RequestLogListParams): Promise<RequestLo
     model_name: filter.model_name,
     provider_id: filter.provider_id,
     status: filter.status,
+    key_prefix: filter.key_prefix,
     is_stream: filter.is_stream,
     cost_known: filter.cost_known,
     start: filter.start,
@@ -237,6 +246,7 @@ export async function exportRequestLogsCSV(filter: Omit<RequestLogListParams, 'p
     model_name: filter.model_name,
     provider_id: filter.provider_id,
     status: filter.status,
+    key_prefix: filter.key_prefix,
     is_stream: filter.is_stream,
     cost_known: filter.cost_known,
     start: filter.start,

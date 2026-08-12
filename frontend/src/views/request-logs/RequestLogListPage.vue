@@ -1,15 +1,15 @@
 <!-- frontend/src/views/request-logs/RequestLogListPage.vue
-     Request-log list. Server-side paged with a filter set
-     matching what the backend handler actually accepts
-     (request_log_handler.go): request_id / model_name / provider_id /
-     status_class / is_stream / start / end. Owner_label and api_key prefix
-     filtering is not wired up yet, because the backend
-     exposes the filter as api_key_id (an admin-facing internal id, not a
-     user-typable string) — owner/free-text filtering lands with a later
-     backend add, not by silently wiring up a UI control that doesn't work.
+     Request-log list. Server-side paged with a filter set matching what the
+     backend handler accepts (request_log_handler.go): request_id /
+     model_name / key_prefix / api_key_id / provider_id / status_class /
+     is_stream / cost_known / start / end.
 
-     Click row → /request-logs/:requestId detail page. Export CSV streams
-     the current filter via the same params. -->
+     Rows expand for identity/routing detail (full request id, retry
+     breakdown, cache tokens); the View button opens the
+     /request-logs/:requestId detail page. Export CSV streams the current
+     filter via the same params. No scroll-x: several columns use ellipsis,
+     which puts the table in fixed layout, so columns compress to the
+     container instead of overflowing sideways. -->
 <template>
   <div class="common-page">
     <PageHeader :eyebrow="t('requestLogs.eyebrow')" :title="t('requestLogs.pageTitle')" :description="t('requestLogs.pageDescription')">
@@ -47,6 +47,16 @@
             size="small"
             @keyup.enter="onSearch"
             @update:value="onModelNameInput"
+          />
+        </div>
+        <div class="filter-item filter-item--search">
+          <NInput
+            v-model:value="filter.key_prefix"
+            :placeholder="t('requestLogs.filterKeyPrefix')"
+            clearable
+            size="small"
+            @keyup.enter="onSearch"
+            @update:value="onFilterChange"
           />
         </div>
         <FilterSelectField
@@ -139,9 +149,7 @@
         :columns="columns"
         :data="rows"
         :loading="loading"
-        :scroll-x="1630"
         :row-key="(row: RequestLogRow) => row.request_id"
-        :row-props="rowProps"
         :pagination="pagination"
         remote
       >
@@ -199,6 +207,7 @@ const message = useMessage()
 interface ListFilter {
   request_id: string
   model_name: string
+  key_prefix: string
   api_key_id: number | null
   provider_id: number | null
   status: StatusClass | null
@@ -208,6 +217,7 @@ interface ListFilter {
 const filter = reactive<ListFilter>({
   request_id: '',
   model_name: '',
+  key_prefix: '',
   api_key_id: null,
   provider_id: null,
   status: null,
@@ -348,7 +358,7 @@ onBeforeUnmount(() => {
 // URL query keys this page knows how to ingest. Used by hasRelevantQuery
 // to decide whether mount should apply the query before the first load.
 const RELEVANT_QUERY_KEYS = [
-  'request_id', 'model_name', 'api_key_id', 'provider_id',
+  'request_id', 'model_name', 'key_prefix', 'api_key_id', 'provider_id',
   'status', 'is_stream', 'cost_known', 'start', 'end',
 ] as const
 
@@ -375,6 +385,9 @@ function applyQueryFilter() {
   if (typeof q.model_name === 'string' && q.model_name) {
     filter.model_name = q.model_name
     querySourcedModelName.value = true
+  }
+  if (typeof q.key_prefix === 'string' && q.key_prefix) {
+    filter.key_prefix = q.key_prefix
   }
   if (typeof q.api_key_id === 'string' && q.api_key_id) {
     const n = Number(q.api_key_id)
@@ -459,7 +472,9 @@ function buildListParams(): RequestLogListParams {
   if (filter.api_key_id != null) params.api_key_id = filter.api_key_id
   if (filter.provider_id != null) params.provider_id = filter.provider_id
   if (filter.status) params.status = filter.status
+  if (filter.key_prefix.trim()) params.key_prefix = filter.key_prefix.trim()
   if (filter.is_stream != null) params.is_stream = filter.is_stream
+  if (filter.cost_known != null) params.cost_known = filter.cost_known
   // start / end are independent bounds — on mobile the user may set only one.
   if (startTime.value != null) params.start = new Date(startTime.value).toISOString()
   if (endTime.value != null) params.end = new Date(endTime.value).toISOString()
@@ -525,6 +540,7 @@ async function onSearch() {
 function onReset() {
   filter.request_id = ''
   filter.model_name = ''
+  filter.key_prefix = ''
   filter.api_key_id = null
   filter.provider_id = null
   filter.status = null
@@ -609,13 +625,6 @@ function goDetail(requestId: string) {
   router.push(`/request-logs/${encodeURIComponent(requestId)}`)
 }
 
-function rowProps(row: RequestLogRow) {
-  return {
-    style: 'cursor: pointer',
-    onClick: () => goDetail(row.request_id),
-  }
-}
-
 // ---------- Render helpers ----------
 
 function formatTime(iso: string): string {
@@ -638,114 +647,134 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(2)}s`
 }
 
-function streamCell(row: RequestLogRow) {
-  return h(
-    NTag,
-    { size: 'small', bordered: false, type: row.is_stream ? 'info' : 'default' },
-    { default: () => (row.is_stream ? t('requestLogs.stream_true') : t('requestLogs.stream_false')) },
-  )
+// expandField renders one label/value pair inside the expanded row. Inline
+// styles on purpose: scoped CSS does not apply to h()-rendered elements.
+function expandField(label: string, value: string) {
+  return h('div', { style: 'display:flex; align-items:baseline; gap:5px; min-width:170px;' }, [
+    h('span', { style: 'font-size:12px; color:var(--color-text-muted, #909399); white-space:nowrap; flex-shrink:0;' }, `${label}:`),
+    h('span', { style: `font-size:13px; ${value ? '' : 'color:#bbb;'} word-break:break-all;` }, value || '-'),
+  ])
 }
 
-function tokenCell(row: RequestLogRow) {
-  const main = h('span', { class: 'token-main' }, `${row.input_tokens} / ${row.output_tokens}`)
-  // Second line surfaces cache write / read tokens, but only when the request
-  // actually had cache activity — a bare "0 / 0" on every non-cached row would
-  // be noise. Keeps the common (no-cache) row visually identical to before.
-  if (row.cache_write_tokens === 0 && row.cache_read_tokens === 0) {
-    return h('div', { class: 'token-cell' }, [main])
+// The expanded row carries identity and routing detail that would crowd the
+// main columns: the full request id, the retry breakdown, and cache tokens.
+function renderRouteExpand(row: RequestLogRow) {
+  return h('div', { style: 'display:flex; flex-wrap:wrap; gap:8px 24px; padding:10px 16px;' }, [
+    expandField(t('requestLogs.col_requestId'), row.request_id),
+    expandField(t('requestLogs.col_attempts'), String(row.attempts)),
+    expandField(t('requestLogs.col_keySwitches'), String(row.key_switches)),
+    expandField(t('requestLogs.col_failovers'), String(row.failovers)),
+    expandField(t('requestLogs.cacheTokensLabel'), `${row.cache_write_tokens} / ${row.cache_read_tokens}`),
+  ])
+}
+
+// tokenRow is one labeled line of the vertical token breakdown; lines appear
+// only when their count is nonzero, so the common no-cache row stays short.
+function tokenRow(label: string, value: number) {
+  return h('div', { style: 'display:flex; gap:6px;' }, [
+    h('span', { style: 'color:var(--color-text-muted, #909399);' }, label),
+    h('span', { style: 'font-variant-numeric: tabular-nums;' }, String(value)),
+  ])
+}
+
+function tokensCell(row: RequestLogRow) {
+  const lines = []
+  if (row.input_tokens > 0) lines.push(tokenRow(t('requestLogs.tokenRowIn'), row.input_tokens))
+  if (row.output_tokens > 0) lines.push(tokenRow(t('requestLogs.tokenRowOut'), row.output_tokens))
+  if (row.cache_read_tokens > 0) lines.push(tokenRow(t('requestLogs.tokenRowCacheRead'), row.cache_read_tokens))
+  if (row.cache_write_tokens > 0) lines.push(tokenRow(t('requestLogs.tokenRowCacheWrite'), row.cache_write_tokens))
+  if (lines.length === 0) return h('span', { style: 'color:#bbb;' }, '-')
+  return h('div', { style: 'display:inline-flex; flex-direction:column; align-items:flex-start; font-size:12px; line-height:1.5;' }, lines)
+}
+
+// The provider cell is composite: who served (bold), under which provider-side
+// model name, with retry badges only when the router actually had to work.
+function providerCell(row: RequestLogRow) {
+  const children = [
+    h('div', { style: 'font-weight:600; font-size:12px;' }, row.provider_name || '-'),
+  ]
+  if (row.final_provider_model) {
+    children.push(h('div', { style: 'font-size:12px; color:var(--color-text-muted, #909399); margin-top:2px;' }, row.final_provider_model))
   }
-  const cache = h(
-    'span',
-    { class: 'token-cache' },
-    `${t('requestLogs.cacheTokensShort')} ${row.cache_write_tokens} / ${row.cache_read_tokens}`,
-  )
-  return h('div', { class: 'token-cell token-cell--stacked' }, [main, cache])
+  const badges = []
+  if (row.key_switches > 0) {
+    badges.push(h(NTag, { size: 'tiny', round: true, bordered: false, type: 'warning' }, { default: () => t('requestLogs.badgeKeySwitches', { n: row.key_switches }) }))
+  }
+  if (row.failovers > 0) {
+    badges.push(h(NTag, { size: 'tiny', round: true, bordered: false, type: 'warning' }, { default: () => t('requestLogs.badgeFailovers', { n: row.failovers }) }))
+  }
+  if (badges.length > 0) {
+    children.push(h('div', { style: 'display:flex; gap:4px; margin-top:2px;' }, badges))
+  }
+  return h('div', { style: 'line-height:1.5;' }, children)
 }
 
 function costCell(row: RequestLogRow) {
   if (!row.cost_known) {
     return h(NTag, { size: 'small', bordered: false, type: 'default' }, { default: () => t('requestLogs.costUnknown') })
   }
-  return h('span', { class: 'cost-cell' }, formatMicros(row.cost_micros))
+  return h('span', { style: 'font-variant-numeric: tabular-nums;' }, formatMicros(row.cost_micros))
 }
 
-function attemptsCell(row: RequestLogRow) {
-  // The backend list-row DTO exposes a single `attempts` count — total
-  // candidate tries, including both key rotations within a candidate and
-  // candidate failovers. "key rotation" and "failover" are conceptually two
-  // columns, but the wire schema collapses them into one number; the
-  // detail page's attempts_detail array shows the full sequence so the
-  // breakdown is still recoverable per-request. A zero-count badge helps
-  // spot pre-route rejects (no attempt ever fired).
-  if (row.attempts === 0) {
-    return h(NTag, { size: 'small', bordered: false, type: 'default' }, { default: () => '0' })
-  }
-  // >1 means a switch happened; tag amber so the admin's eye lands on
-  // failover chains. Exactly 1 = clean single-try success, no decoration.
-  if (row.attempts > 1) {
-    return h(NTag, { size: 'small', bordered: false, type: 'warning' }, { default: () => String(row.attempts) })
-  }
-  return h('span', { class: 'attempts-cell' }, String(row.attempts))
-}
-
-const columns = computed<DataTableColumns<RequestLogRow>>(() => [
+// The card layout on mobile treats the FIRST column as the card header and
+// has no expand mechanism, so the expand column exists only on desktop; on
+// mobile the same detail fields become ordinary labeled card rows instead.
+const sharedColumns = computed<DataTableColumns<RequestLogRow>>(() => [
   {
     title: columnTitle(t('requestLogs.col_created'), t('requestLogs.col_created_tip')),
     key: 'created_at',
-    width: 180,
-    render: (row) => h('span', { class: 'mono-cell' }, formatTime(row.created_at)),
-  },
-  {
-    title: columnTitle(t('requestLogs.col_requestId'), t('requestLogs.col_requestId_tip')),
-    key: 'request_id',
-    minWidth: 200,
-    render: (row) => h('span', { class: 'mono-cell request-id-cell' }, row.request_id),
+    width: 150,
+    render: (row) => h('span', { style: 'font-variant-numeric: tabular-nums; font-size:12px;' }, formatTime(row.created_at)),
   },
   {
     title: columnTitle(t('requestLogs.col_owner'), t('requestLogs.col_owner_tip')),
     key: 'owner_label',
-    minWidth: 120,
-    render: (row) => row.owner_label || '—',
+    width: 110,
+    ellipsis: { tooltip: true },
+    render: (row) => row.owner_label || '-',
   },
   {
     title: columnTitle(t('requestLogs.col_model'), t('requestLogs.col_model_tip')),
     key: 'model_name',
-    minWidth: 160,
-    render: (row) => h('span', { class: 'model-cell' }, row.model_name),
+    width: 150,
+    ellipsis: { tooltip: true },
+    render: (row) => h('span', { style: 'font-weight:600;' }, row.model_name),
+  },
+  {
+    title: columnTitle(t('requestLogs.col_endpoint'), t('requestLogs.col_endpoint_tip')),
+    key: 'request_path',
+    width: 170,
+    ellipsis: { tooltip: true },
+    render: (row) => h('span', { style: 'font-size:12px;' }, row.request_path || '-'),
   },
   {
     title: columnTitle(t('requestLogs.col_provider'), t('requestLogs.col_provider_tip')),
     key: 'provider_name',
-    minWidth: 140,
-    render: (row) => row.provider_name || '—',
+    width: 180,
+    render: (row) => providerCell(row),
   },
   {
     title: columnTitle(t('requestLogs.col_stream'), t('requestLogs.col_stream_tip')),
     key: 'is_stream',
-    width: 110,
+    width: 88,
     align: 'center',
-    render: (row) => streamCell(row),
+    render: (row) =>
+      row.is_stream
+        ? h(NTag, { size: 'small', round: true, bordered: false, type: 'info' }, { default: () => t('requestLogs.stream_true') })
+        : h(NTag, { size: 'small', round: true, bordered: false, type: 'default' }, { default: () => '-' }),
   },
   {
     title: columnTitle(t('requestLogs.col_status'), t('requestLogs.col_status_tip')),
     key: 'status_class',
-    width: 130,
+    width: 96,
     align: 'center',
     render: (row) => h(StatusClassTag, { status: row.status_class }),
   },
   {
-    title: columnTitle(t('requestLogs.col_attempts'), t('requestLogs.col_attempts_tip')),
-    key: 'attempts',
-    width: 110,
-    align: 'center',
-    render: (row) => attemptsCell(row),
-  },
-  {
     title: columnTitle(t('requestLogs.col_tokens'), t('requestLogs.col_tokens_tip')),
     key: 'tokens',
-    width: 170,
-    align: 'right',
-    render: (row) => tokenCell(row),
+    width: 112,
+    render: (row) => tokensCell(row),
   },
   {
     title: columnTitle(t('requestLogs.col_cost'), t('requestLogs.col_cost_tip')),
@@ -757,37 +786,33 @@ const columns = computed<DataTableColumns<RequestLogRow>>(() => [
   {
     title: columnTitle(t('requestLogs.col_duration'), t('requestLogs.col_duration_tip')),
     key: 'duration_ms',
-    width: 100,
+    width: 80,
     align: 'right',
-    render: (row) => h('span', { class: 'mono-cell' }, formatDuration(row.duration_ms)),
+    render: (row) => h('span', { style: 'font-variant-numeric: tabular-nums;' }, formatDuration(row.duration_ms)),
   },
   {
-    // Actions column — no tooltip. The row
-    // itself is already clickable end-to-end (rowProps), so this button is
-    // an explicit affordance, not the only entry point.
     title: t('common.actions'),
     key: 'actions',
-    width: 100,
+    width: 76,
     align: 'center',
     render: (row) =>
-      h(
-        'div',
-        { onClick: (e: MouseEvent) => e.stopPropagation() },
-        [
-          h(
-            NButton,
-            {
-              size: 'small',
-              text: true,
-              type: 'primary',
-              onClick: () => goDetail(row.request_id),
-            },
-            { default: () => t('requestLogs.viewDetail') },
-          ),
-        ],
-      ),
+      h(NButton, { size: 'tiny', secondary: true, onClick: () => goDetail(row.request_id) }, { default: () => t('requestLogs.viewDetail') }),
   },
 ])
+
+const mobileDetailColumns = computed<DataTableColumns<RequestLogRow>>(() => [
+  { title: columnTitle(t('requestLogs.col_requestId'), t('requestLogs.col_requestId_tip')), key: 'request_id', render: (row) => row.request_id },
+  { title: columnTitle(t('requestLogs.col_attempts'), t('requestLogs.col_attempts_tip')), key: 'attempts', render: (row) => String(row.attempts) },
+  { title: columnTitle(t('requestLogs.col_keySwitches'), t('requestLogs.col_keySwitches_tip')), key: 'key_switches', render: (row) => String(row.key_switches) },
+  { title: columnTitle(t('requestLogs.col_failovers'), t('requestLogs.col_failovers_tip')), key: 'failovers', render: (row) => String(row.failovers) },
+  { title: columnTitle(t('requestLogs.cacheTokensLabel'), t('requestLogs.cacheTokensLabel_tip')), key: 'cache', render: (row) => `${row.cache_write_tokens} / ${row.cache_read_tokens}` },
+])
+
+const columns = computed<DataTableColumns<RequestLogRow>>(() =>
+  isMobile.value
+    ? [...sharedColumns.value, ...mobileDetailColumns.value]
+    : [{ type: 'expand', expandable: () => true, renderExpand: renderRouteExpand }, ...sharedColumns.value],
+)
 </script>
 
 <style scoped>
@@ -806,44 +831,5 @@ const columns = computed<DataTableColumns<RequestLogRow>>(() => [
 
 .filter-range-split :deep(.n-date-picker) {
   width: 100%;
-}
-
-:deep(.mono-cell) {
-  font-family: var(--font-mono, monospace);
-  font-variant-numeric: tabular-nums;
-  font-size: var(--text-xs);
-  color: var(--color-text);
-}
-
-:deep(.request-id-cell) {
-  color: var(--color-text-secondary);
-}
-
-:deep(.model-cell) {
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-:deep(.token-cell),
-:deep(.cost-cell),
-:deep(.attempts-cell) {
-  font-variant-numeric: tabular-nums;
-  font-size: var(--text-xs);
-}
-
-:deep(.token-cell--stacked) {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  line-height: 1.3;
-}
-
-:deep(.token-cache) {
-  color: var(--color-text-muted, var(--color-text-secondary));
-  font-size: var(--text-2xs, 11px);
-}
-
-:deep(.cost-cell) {
-  font-weight: 600;
 }
 </style>

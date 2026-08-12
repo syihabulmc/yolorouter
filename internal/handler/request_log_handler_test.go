@@ -8,6 +8,7 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -466,8 +467,8 @@ func TestGetRequestLogDetailReturnsParsedAttempts(t *testing.T) {
 	now := time.Now().UTC()
 	// Two-attempt failover: first attempt 429 (rotate key), second 200 OK.
 	detail := `[` +
-		`{"candidate_id":1,"provider_id":` + uintToStr(provID) + `,"provider_name":"openai","provider_model_name":"gpt-4o-mini","key_id":` + uintToStr(keyID) + `,"key_label":"primary","status_code":429,"outcome":"rate_limited","fail_reason":"upstream rate limited"},` +
-		`{"candidate_id":1,"provider_id":` + uintToStr(provID) + `,"provider_name":"openai","provider_model_name":"gpt-4o-mini","key_id":` + uintToStr(keyID) + `,"key_label":"secondary","status_code":200,"outcome":"success","fail_reason":""}` +
+		`{"candidate_id":1,"provider_id":` + uintToStr(provID) + `,"provider_name":"openai","provider_model_name":"gpt-4o-mini","key_id":` + uintToStr(keyID) + `,"key_label":"primary","status_code":429,"outcome":"rate_limited","fail_reason":"upstream rate limited","upstream_url":"http://o"},` +
+		`{"candidate_id":1,"provider_id":` + uintToStr(provID) + `,"provider_name":"openai","provider_model_name":"gpt-4o-mini","key_id":` + uintToStr(keyID+1) + `,"key_label":"secondary","status_code":200,"outcome":"success","fail_reason":"","upstream_url":"http://o"}` +
 		`]`
 	seedRequestLog(t, db, "req-failover", now, func(r *model.RequestLog) {
 		r.APIKeyID = &keyID
@@ -487,6 +488,9 @@ func TestGetRequestLogDetailReturnsParsedAttempts(t *testing.T) {
 		StatusCode     int    `json:"status_code"`
 		StatusClass    string `json:"status_class"`
 		Attempts       int    `json:"attempts"`
+		KeySwitches    int    `json:"key_switches"`
+		Failovers      int    `json:"failovers"`
+		FinalModel     string `json:"final_provider_model"`
 		AttemptsDetail []struct {
 			KeyLabel   string `json:"key_label"`
 			StatusCode int    `json:"status_code"`
@@ -501,6 +505,11 @@ func TestGetRequestLogDetailReturnsParsedAttempts(t *testing.T) {
 	}
 	if len(d.AttemptsDetail) != 2 {
 		t.Fatalf("expected 2 attempts, got %d", len(d.AttemptsDetail))
+	}
+	// The detail carries the same derived split the list rows do — the shared
+	// frontend row type promises these fields on every fetch.
+	if d.KeySwitches != 1 || d.Failovers != 0 || d.FinalModel != "gpt-4o-mini" {
+		t.Errorf("breakdown = %d/%d/%q, want 1 key switch, 0 failovers, gpt-4o-mini", d.KeySwitches, d.Failovers, d.FinalModel)
 	}
 	if d.AttemptsDetail[0].KeyLabel != "primary" || d.AttemptsDetail[0].Outcome != "rate_limited" {
 		t.Errorf("attempt[0]: want primary/rate_limited, got %s/%s",
@@ -529,6 +538,37 @@ func TestGetRequestLogDetailReturnsEmptyAttemptsWhenAbsent(t *testing.T) {
 	}
 	if !bytes.Contains(env.Data, []byte(`"attempts_detail":[]`)) {
 		t.Fatalf("expected attempts_detail to be [], got: %s", env.Data)
+	}
+}
+
+// TestGetRequestLogDetailDegradesUnparseableAttempts pins the malformed-JSON
+// contract: a row whose stored attempts_detail does not parse must still serve
+// its detail page — attempts degrade to an empty array and the derived
+// breakdown to zeros, instead of the whole request failing.
+func TestGetRequestLogDetailDegradesUnparseableAttempts(t *testing.T) {
+	r, db, _ := newRequestLogTestRouter(t)
+	bad := `[{"provider_id": truncated`
+	seedRequestLog(t, db, "req-bad-json", time.Now().UTC(), func(r *model.RequestLog) {
+		r.Attempts = 2
+		r.AttemptsDetail = &bad
+	})
+
+	w, env := doJSON(t, r, http.MethodGet, "/api/admin/request-logs/req-bad-json", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(env.Data, []byte(`"attempts_detail":[]`)) {
+		t.Fatalf("expected attempts_detail to degrade to [], got: %s", env.Data)
+	}
+	var d struct {
+		KeySwitches int `json:"key_switches"`
+		Failovers   int `json:"failovers"`
+	}
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if d.KeySwitches != 0 || d.Failovers != 0 {
+		t.Errorf("breakdown = %d/%d, want zeros for an unparseable row", d.KeySwitches, d.Failovers)
 	}
 }
 
@@ -668,7 +708,7 @@ func TestExportRequestLogsCSVReturnsBOMAndHeaderAndRows(t *testing.T) {
 	if len(lines) < 3 {
 		t.Fatalf("expected at least 3 CSV lines (header + 2 rows), got %d: %q", len(lines), text)
 	}
-	if !strings.HasPrefix(lines[0], "request_id,created_at,status_class") {
+	if lines[0] != "request_id,created_at,status_class,status_code,owner_label,model_name,provider_name,is_stream,key_switches,failovers,final_provider_model,duration_ms,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,cost_micros,cost_known,fail_reason" {
 		t.Fatalf("unexpected CSV header: %q", lines[0])
 	}
 	// Both data rows should be present; the success row references req-exp-1.
@@ -761,5 +801,148 @@ func TestListRequestLogsFiltersByCostKnown(t *testing.T) {
 	}
 	if len(env.Data.List) != 1 || env.Data.List[0].RequestID != "unpriced" {
 		t.Fatalf("list = %+v, want exactly the unpriced row", env.Data.List)
+	}
+}
+
+// The list splits a row's retries into key switches (same provider,
+// different key) and failovers (a different provider), and names the final
+// attempt's provider-side model. Derived from the stored attempt detail:
+// one row with a rotation, one with a failover, one clean.
+func TestListRequestLogsSplitsKeySwitchesFromFailovers(t *testing.T) {
+	r, db, _ := newRequestLogTestRouter(t)
+	now := time.Now().UTC()
+	provA := &model.Provider{Name: "prov-a", BaseURL: "http://a", DestinationVersion: 1}
+	provB := &model.Provider{Name: "prov-b", BaseURL: "http://b", DestinationVersion: 1}
+	for _, pr := range []*model.Provider{provA, provB} {
+		if err := db.Create(pr).Error; err != nil {
+			t.Fatalf("seed provider: %v", err)
+		}
+	}
+	pA, pB := provA.ID, provB.ID
+	rotation := fmt.Sprintf(`[{"provider_id":%d,"key_id":10,"provider_model_name":"m-a","status_code":401,"outcome":"auth_failed"},{"provider_id":%d,"key_id":11,"provider_model_name":"m-a","status_code":200,"outcome":"success"}]`, pA, pA)
+	seedRequestLog(t, db, "rotated", now.Add(-2*time.Second), func(rl *model.RequestLog) {
+		rl.ProviderID = &pA
+		rl.StatusCode = 200
+		rl.Attempts = 2
+		rl.AttemptsDetail = &rotation
+	})
+	failover := fmt.Sprintf(`[{"provider_id":%d,"key_id":10,"provider_model_name":"m-a","status_code":502,"outcome":"server_error"},{"provider_id":%d,"key_id":20,"provider_model_name":"m-b","status_code":200,"outcome":"success"}]`, pA, pB)
+	seedRequestLog(t, db, "failed-over", now.Add(-time.Second), func(rl *model.RequestLog) {
+		rl.ProviderID = &pB
+		rl.StatusCode = 200
+		rl.Attempts = 2
+		rl.AttemptsDetail = &failover
+	})
+	seedRequestLog(t, db, "clean", now, func(rl *model.RequestLog) {
+		rl.StatusCode = 200
+		rl.Attempts = 1
+	})
+	// Provider A answered 502, then the final attempt on B died before any
+	// response, and the row is attributed to B: A's model must NOT be shown
+	// under B's name — the served-by stays empty because B never answered.
+	skipTail := fmt.Sprintf(`[{"provider_id":%d,"key_id":10,"provider_model_name":"m-a","status_code":502,"outcome":"server_error"},{"provider_id":%d,"key_id":20,"provider_model_name":"m-b","outcome":"bad_status","upstream_url":"http://b"}]`, pA, pB)
+	seedRequestLog(t, db, "skip-tail", now.Add(time.Second), func(rl *model.RequestLog) {
+		rl.ProviderID = &pB
+		rl.StatusCode = 502
+		rl.Attempts = 2
+		rl.AttemptsDetail = &skipTail
+	})
+
+	w, _ := doJSON(t, r, http.MethodGet, "/api/admin/request-logs", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data struct {
+			List []struct {
+				RequestID          string `json:"request_id"`
+				KeySwitches        int    `json:"key_switches"`
+				Failovers          int    `json:"failovers"`
+				FinalProviderModel string `json:"final_provider_model"`
+			} `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := map[string][3]any{}
+	for _, row := range env.Data.List {
+		got[row.RequestID] = [3]any{row.KeySwitches, row.Failovers, row.FinalProviderModel}
+	}
+	if got["rotated"] != [3]any{1, 0, "m-a"} {
+		t.Fatalf("rotated = %v, want 1 key switch / 0 failovers / m-a", got["rotated"])
+	}
+	if got["failed-over"] != [3]any{0, 1, "m-b"} {
+		t.Fatalf("failed-over = %v, want 0 key switches / 1 failover / m-b", got["failed-over"])
+	}
+	if got["clean"] != [3]any{0, 0, ""} {
+		t.Fatalf("clean = %v, want zeros and no final model (no detail stored)", got["clean"])
+	}
+	if got["skip-tail"] != [3]any{0, 1, ""} {
+		t.Fatalf("skip-tail = %v, want no served-by — the row's provider (B) never answered, and A's model must not appear under B's name", got["skip-tail"])
+	}
+}
+
+// key_prefix narrows by the searchable identity a key has. The pattern is
+// escaped: a literal underscore in the prefix must not act as a wildcard.
+func TestListRequestLogsFiltersByKeyPrefix(t *testing.T) {
+	r, db, _ := newRequestLogTestRouter(t)
+	now := time.Now().UTC()
+	alpha := &model.APIKey{OwnerLabel: "alpha", KeyHash: "h-a", KeyPrefix: "sk-yr-a1", Status: model.APIKeyStatusActive}
+	beta := &model.APIKey{OwnerLabel: "beta", KeyHash: "h-b", KeyPrefix: "skXyr-b2", Status: model.APIKeyStatusActive}
+	for _, k := range []*model.APIKey{alpha, beta} {
+		if err := db.Create(k).Error; err != nil {
+			t.Fatalf("seed key: %v", err)
+		}
+	}
+	seedRequestLog(t, db, "from-alpha", now, func(rl *model.RequestLog) {
+		rl.StatusCode = 200
+		rl.APIKeyID = &alpha.ID
+	})
+	seedRequestLog(t, db, "from-beta", now, func(rl *model.RequestLog) {
+		rl.StatusCode = 200
+		rl.APIKeyID = &beta.ID
+	})
+
+	// "sk_" is the trap: unescaped, the underscore is a single-char wildcard
+	// and matches "skXyr-b2". Escaped, it is a literal underscore neither key
+	// contains — the query must return nothing.
+	w0, _ := doJSON(t, r, http.MethodGet, "/api/admin/request-logs?key_prefix=sk_", nil, nil)
+	if w0.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w0.Code, w0.Body.String())
+	}
+	if !strings.Contains(w0.Body.String(), `"list":[]`) {
+		t.Fatalf("literal underscore must match nothing, body: %s", w0.Body.String())
+	}
+
+	w, _ := doJSON(t, r, http.MethodGet, "/api/admin/request-logs?key_prefix=sk-", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data struct {
+			List []struct {
+				RequestID string `json:"request_id"`
+			} `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(env.Data.List) != 1 || env.Data.List[0].RequestID != "from-alpha" {
+		t.Fatalf("list = %+v, want exactly from-alpha", env.Data.List)
+	}
+
+	// The CSV export must honor the same filter, or "export what I see"
+	// silently ships every key's rows.
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/request-logs/export?key_prefix=sk-", nil)
+	we := httptest.NewRecorder()
+	r.ServeHTTP(we, req)
+	if we.Code != http.StatusOK {
+		t.Fatalf("export: expected 200, got %d, body: %s", we.Code, we.Body.String())
+	}
+	csv := we.Body.String()
+	if !strings.Contains(csv, "from-alpha") || strings.Contains(csv, "from-beta") {
+		t.Fatalf("export must contain from-alpha only, got: %s", csv)
 	}
 }

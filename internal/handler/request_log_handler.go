@@ -43,6 +43,7 @@ func GetRequestLogs(svc *service.RequestLogService) gin.HandlerFunc {
 		filter := service.RequestLogListFilter{
 			RequestID:   c.Query("request_id"),
 			ModelName:   c.Query("model_name"),
+			KeyPrefix:   c.Query("key_prefix"),
 			StatusClass: statusClass,
 			Page:        page,
 			PageSize:    pageSize,
@@ -135,6 +136,7 @@ func ExportRequestLogsCSV(svc *service.RequestLogService) gin.HandlerFunc {
 		filter := service.RequestLogListFilter{
 			RequestID:   c.Query("request_id"),
 			ModelName:   c.Query("model_name"),
+			KeyPrefix:   c.Query("key_prefix"),
 			StatusClass: statusClass,
 		}
 		if !applyRequestLogFilterParams(c, &filter) {

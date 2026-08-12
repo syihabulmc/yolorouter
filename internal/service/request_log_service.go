@@ -54,6 +54,7 @@ type RequestLogListFilter struct {
 	StatusClass string
 	IsStream    *bool
 	CostKnown   *bool
+	KeyPrefix   string
 	StartTime   *time.Time // inclusive
 	EndTime     *time.Time // exclusive
 	Page        int
@@ -67,25 +68,37 @@ type RequestLogListFilter struct {
 // api_keys / providers at this layer. StatusClass mirrors the list-filter
 // buckets so a row and its filter use one definition of "success".
 type RequestLogListItem struct {
-	RequestID        string    `json:"request_id"`
-	APIKeyID         *uint     `json:"api_key_id"`
-	OwnerLabel       string    `json:"owner_label"`
-	ModelName        string    `json:"model_name"`
-	ProviderID       *uint     `json:"provider_id"`
-	ProviderName     string    `json:"provider_name"`
-	IsStream         bool      `json:"is_stream"`
-	StatusCode       int       `json:"status_code"`
-	StatusClass      string    `json:"status_class"`
-	InputTokens      int       `json:"input_tokens"`
-	OutputTokens     int       `json:"output_tokens"`
-	CacheWriteTokens int       `json:"cache_write_tokens"`
-	CacheReadTokens  int       `json:"cache_read_tokens"`
-	CostMicros       int64     `json:"cost_micros"`
-	CostKnown        bool      `json:"cost_known"`
-	FailReason       *string   `json:"fail_reason"`
-	Attempts         int       `json:"attempts"`
-	DurationMs       int64     `json:"duration_ms"`
-	CreatedAt        time.Time `json:"created_at"`
+	RequestID  string `json:"request_id"`
+	APIKeyID   *uint  `json:"api_key_id"`
+	OwnerLabel string `json:"owner_label"`
+	ModelName  string `json:"model_name"`
+	// RequestPath is the endpoint the caller hit (e.g. /v1/chat/completions);
+	// empty for rows rejected before relay and for rows predating the field.
+	RequestPath      string  `json:"request_path"`
+	ProviderID       *uint   `json:"provider_id"`
+	ProviderName     string  `json:"provider_name"`
+	IsStream         bool    `json:"is_stream"`
+	StatusCode       int     `json:"status_code"`
+	StatusClass      string  `json:"status_class"`
+	InputTokens      int     `json:"input_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	CacheWriteTokens int     `json:"cache_write_tokens"`
+	CacheReadTokens  int     `json:"cache_read_tokens"`
+	CostMicros       int64   `json:"cost_micros"`
+	CostKnown        bool    `json:"cost_known"`
+	FailReason       *string `json:"fail_reason"`
+	Attempts         int     `json:"attempts"`
+	// KeySwitches / Failovers split the row's retries into their two kinds —
+	// rotating keys within one provider versus moving to another provider —
+	// derived from the per-attempt detail with the same walk the provider
+	// report uses (attempts that never reached a provider are skipped).
+	KeySwitches int `json:"key_switches"`
+	Failovers   int `json:"failovers"`
+	// FinalProviderModel is the provider-side model name of the attempt that
+	// produced this row's outcome; empty when no attempt reached a provider.
+	FinalProviderModel string    `json:"final_provider_model"`
+	DurationMs         int64     `json:"duration_ms"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 // RequestLogDetail is the single-row detail DTO. AttemptsDetail is parsed
@@ -96,25 +109,30 @@ type RequestLogListItem struct {
 // (pre-migration rows or capture failure) they degrade to zero values and
 // the detail page shows "not recorded" rather than erroring.
 type RequestLogDetail struct {
-	RequestID            string                  `json:"request_id"`
-	APIKeyID             *uint                   `json:"api_key_id"`
-	OwnerLabel           string                  `json:"owner_label"`
-	ModelName            string                  `json:"model_name"`
-	RequestPath          string                  `json:"request_path"`
-	UpstreamURL          string                  `json:"upstream_url"`
-	ProviderID           *uint                   `json:"provider_id"`
-	ProviderName         string                  `json:"provider_name"`
-	IsStream             bool                    `json:"is_stream"`
-	StatusCode           int                     `json:"status_code"`
-	StatusClass          string                  `json:"status_class"`
-	InputTokens          int                     `json:"input_tokens"`
-	OutputTokens         int                     `json:"output_tokens"`
-	CacheWriteTokens     int                     `json:"cache_write_tokens"`
-	CacheReadTokens      int                     `json:"cache_read_tokens"`
-	CostMicros           int64                   `json:"cost_micros"`
-	CostKnown            bool                    `json:"cost_known"`
-	FailReason           *string                 `json:"fail_reason"`
-	Attempts             int                     `json:"attempts"`
+	RequestID        string  `json:"request_id"`
+	APIKeyID         *uint   `json:"api_key_id"`
+	OwnerLabel       string  `json:"owner_label"`
+	ModelName        string  `json:"model_name"`
+	RequestPath      string  `json:"request_path"`
+	UpstreamURL      string  `json:"upstream_url"`
+	ProviderID       *uint   `json:"provider_id"`
+	ProviderName     string  `json:"provider_name"`
+	IsStream         bool    `json:"is_stream"`
+	StatusCode       int     `json:"status_code"`
+	StatusClass      string  `json:"status_class"`
+	InputTokens      int     `json:"input_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	CacheWriteTokens int     `json:"cache_write_tokens"`
+	CacheReadTokens  int     `json:"cache_read_tokens"`
+	CostMicros       int64   `json:"cost_micros"`
+	CostKnown        bool    `json:"cost_known"`
+	FailReason       *string `json:"fail_reason"`
+	Attempts         int     `json:"attempts"`
+	// Same split the list rows carry — the detail must not narrow the type
+	// contract the shared frontend row shape promises.
+	KeySwitches          int                     `json:"key_switches"`
+	Failovers            int                     `json:"failovers"`
+	FinalProviderModel   string                  `json:"final_provider_model"`
 	AttemptsDetail       []gateway.AttemptRecord `json:"attempts_detail"`
 	DurationMs           int64                   `json:"duration_ms"`
 	CreatedAt            time.Time               `json:"created_at"`
@@ -191,29 +209,85 @@ func (s *RequestLogService) toListItems(rows []model.RequestLog) ([]RequestLogLi
 	items := make([]RequestLogListItem, 0, len(rows))
 	for i := range rows {
 		r := &rows[i]
+		keySwitches, failovers, finalModel := deriveAttemptBreakdown(r.AttemptsDetail, r.ProviderID)
 		items = append(items, RequestLogListItem{
-			RequestID:        r.RequestID,
-			APIKeyID:         r.APIKeyID,
-			OwnerLabel:       lookupName(r.APIKeyID, ownerLabels),
-			ModelName:        r.ModelName,
-			ProviderID:       r.ProviderID,
-			ProviderName:     lookupName(r.ProviderID, providerNames),
-			IsStream:         r.IsStream,
-			StatusCode:       r.StatusCode,
-			StatusClass:      DeriveStatusClass(r.StatusCode, r.FailReason),
-			InputTokens:      r.InputTokens,
-			OutputTokens:     r.OutputTokens,
-			CacheWriteTokens: r.CacheWriteTokens,
-			CacheReadTokens:  r.CacheReadTokens,
-			CostMicros:       r.CostMicros,
-			CostKnown:        r.CostKnown,
-			FailReason:       r.FailReason,
-			Attempts:         r.Attempts,
-			DurationMs:       r.DurationMs,
-			CreatedAt:        r.CreatedAt,
+			RequestID:          r.RequestID,
+			APIKeyID:           r.APIKeyID,
+			OwnerLabel:         lookupName(r.APIKeyID, ownerLabels),
+			ModelName:          r.ModelName,
+			RequestPath:        r.RequestPath,
+			ProviderID:         r.ProviderID,
+			ProviderName:       lookupName(r.ProviderID, providerNames),
+			IsStream:           r.IsStream,
+			StatusCode:         r.StatusCode,
+			StatusClass:        DeriveStatusClass(r.StatusCode, r.FailReason),
+			InputTokens:        r.InputTokens,
+			OutputTokens:       r.OutputTokens,
+			CacheWriteTokens:   r.CacheWriteTokens,
+			CacheReadTokens:    r.CacheReadTokens,
+			CostMicros:         r.CostMicros,
+			CostKnown:          r.CostKnown,
+			FailReason:         r.FailReason,
+			Attempts:           r.Attempts,
+			KeySwitches:        keySwitches,
+			Failovers:          failovers,
+			FinalProviderModel: finalModel,
+			DurationMs:         r.DurationMs,
+			CreatedAt:          r.CreatedAt,
 		})
 	}
 	return items, nil
+}
+
+// deriveAttemptBreakdown splits a row's retries into key switches (same
+// provider, different key) and failovers (a different provider), and names
+// the provider-side model the row's final provider answered with. Derived per page from the
+// stored per-attempt JSON rather than persisted: the walk is cheap at page
+// size, and a stored copy would be one more thing the write path can get
+// out of sync. Attempts that never reached a provider are skipped, matching
+// the provider report's failover accounting; a row whose detail this build
+// cannot parse reports zeros here, and the detail page degrades that row
+// to an empty attempts list.
+func deriveAttemptBreakdown(detail *string, finalProviderID *uint) (keySwitches, failovers int, finalProviderModel string) {
+	if detail == nil || *detail == "" {
+		return 0, 0, ""
+	}
+	var attempts []gateway.AttemptRecord
+	if err := json.Unmarshal([]byte(*detail), &attempts); err != nil {
+		return 0, 0, ""
+	}
+	return breakdownFromAttempts(attempts, finalProviderID)
+}
+
+// breakdownFromAttempts is the walk itself, shared by the list (which parses
+// the stored JSON first) and the detail (which already holds the parsed
+// slice).
+func breakdownFromAttempts(attempts []gateway.AttemptRecord, finalProviderID *uint) (keySwitches, failovers int, finalProviderModel string) {
+	var last *gateway.AttemptRecord
+	for i := range attempts {
+		a := &attempts[i]
+		if a.ProviderID == 0 {
+			continue
+		}
+		if last != nil {
+			if a.ProviderID != last.ProviderID {
+				failovers++
+			} else if a.KeyID != last.KeyID {
+				keySwitches++
+			}
+		}
+		last = a
+		// "Served by" means the provider actually answered, and the model
+		// shown must belong to the SAME provider the row is attributed to:
+		// records that never got a response carry status 0, and an earlier
+		// provider's answer must not be displayed under a later provider's
+		// name. A row without a provider (nothing was ever attributed) falls
+		// back to the last answer from anyone.
+		if a.StatusCode != 0 && (finalProviderID == nil || a.ProviderID == *finalProviderID) {
+			finalProviderModel = a.ProviderModelName
+		}
+	}
+	return keySwitches, failovers, finalProviderModel
 }
 
 // GetRequestLogDetail returns the single row for requestID
@@ -235,11 +309,14 @@ func (s *RequestLogService) GetRequestLogDetail(requestID string) (*RequestLogDe
 	// Always return a non-nil slice (never null) so the frontend's
 	// attempts-detail renderer doesn't need a separate nil-check — empty
 	// array reads as "no attempts recorded" (e.g. pre-check failure before
-	// any candidate was tried, see gateway/log.go).
+	// any candidate was tried, see gateway/log.go). A row whose stored
+	// detail does not parse degrades to the same empty array instead of
+	// failing the whole detail request — the rest of the row is still
+	// worth showing, matching how a missing body row is handled below.
 	attempts := []gateway.AttemptRecord{}
 	if row.AttemptsDetail != nil && *row.AttemptsDetail != "" {
 		if err := json.Unmarshal([]byte(*row.AttemptsDetail), &attempts); err != nil {
-			return nil, err
+			attempts = []gateway.AttemptRecord{}
 		}
 	}
 
@@ -252,29 +329,33 @@ func (s *RequestLogService) GetRequestLogDetail(requestID string) (*RequestLogDe
 			zap.String("request_id", requestID), zap.Error(bErr))
 	}
 
+	keySwitches, failovers, finalModel := breakdownFromAttempts(attempts, row.ProviderID)
 	detail := &RequestLogDetail{
-		RequestID:        row.RequestID,
-		APIKeyID:         row.APIKeyID,
-		OwnerLabel:       lookupName(row.APIKeyID, ownerLabels),
-		ModelName:        row.ModelName,
-		RequestPath:      row.RequestPath,
-		UpstreamURL:      row.UpstreamURL,
-		ProviderID:       row.ProviderID,
-		ProviderName:     lookupName(row.ProviderID, providerNames),
-		IsStream:         row.IsStream,
-		StatusCode:       row.StatusCode,
-		StatusClass:      DeriveStatusClass(row.StatusCode, row.FailReason),
-		InputTokens:      row.InputTokens,
-		OutputTokens:     row.OutputTokens,
-		CacheWriteTokens: row.CacheWriteTokens,
-		CacheReadTokens:  row.CacheReadTokens,
-		CostMicros:       row.CostMicros,
-		CostKnown:        row.CostKnown,
-		FailReason:       row.FailReason,
-		Attempts:         row.Attempts,
-		AttemptsDetail:   attempts,
-		DurationMs:       row.DurationMs,
-		CreatedAt:        row.CreatedAt,
+		RequestID:          row.RequestID,
+		APIKeyID:           row.APIKeyID,
+		OwnerLabel:         lookupName(row.APIKeyID, ownerLabels),
+		ModelName:          row.ModelName,
+		RequestPath:        row.RequestPath,
+		UpstreamURL:        row.UpstreamURL,
+		ProviderID:         row.ProviderID,
+		ProviderName:       lookupName(row.ProviderID, providerNames),
+		IsStream:           row.IsStream,
+		StatusCode:         row.StatusCode,
+		StatusClass:        DeriveStatusClass(row.StatusCode, row.FailReason),
+		InputTokens:        row.InputTokens,
+		OutputTokens:       row.OutputTokens,
+		CacheWriteTokens:   row.CacheWriteTokens,
+		CacheReadTokens:    row.CacheReadTokens,
+		CostMicros:         row.CostMicros,
+		CostKnown:          row.CostKnown,
+		FailReason:         row.FailReason,
+		Attempts:           row.Attempts,
+		KeySwitches:        keySwitches,
+		Failovers:          failovers,
+		FinalProviderModel: finalModel,
+		AttemptsDetail:     attempts,
+		DurationMs:         row.DurationMs,
+		CreatedAt:          row.CreatedAt,
 		// Compress audit fields from the request_logs row.
 		CompressEstimatedTokensSaved: row.CompressEstimatedTokensSaved,
 		CompressEstimatedCostMicros:  row.CompressEstimatedCostSavedMicros,
@@ -440,6 +521,7 @@ func toRepoFilterFromList(f RequestLogListFilter) *repository.RequestLogFilter {
 		StatusClass: f.StatusClass,
 		IsStream:    f.IsStream,
 		CostKnown:   f.CostKnown,
+		KeyPrefix:   f.KeyPrefix,
 		StartTime:   f.StartTime,
 		EndTime:     f.EndTime,
 		Page:        f.Page,
@@ -494,7 +576,7 @@ func csvHeaderRow() []string {
 	return []string{
 		"request_id", "created_at", "status_class", "status_code",
 		"owner_label", "model_name", "provider_name",
-		"is_stream", "attempts", "duration_ms",
+		"is_stream", "key_switches", "failovers", "final_provider_model", "duration_ms",
 		"input_tokens", "output_tokens",
 		"cache_write_tokens", "cache_read_tokens",
 		"cost_micros", "cost_known", "fail_reason",
@@ -519,7 +601,9 @@ func csvRowFromItem(it RequestLogListItem) []string {
 		it.ModelName,
 		it.ProviderName,
 		strconv.FormatBool(it.IsStream),
-		strconv.Itoa(it.Attempts),
+		strconv.Itoa(it.KeySwitches),
+		strconv.Itoa(it.Failovers),
+		it.FinalProviderModel,
 		strconv.FormatInt(it.DurationMs, 10),
 		strconv.Itoa(it.InputTokens),
 		strconv.Itoa(it.OutputTokens),

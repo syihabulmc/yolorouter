@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dashboard blocks are keyboard-operable; table rows follow the console's
   existing pointer-click convention, and the trend chart is a canvas
   (pointer only).
+- The request log's merged "attempts" count is split into what it was
+  hiding: key switches (rotating keys within one provider) and failovers
+  (moving to another provider) are different events with different fixes.
+  They surface as badges on the provider column — which now also names the
+  provider-side model that actually served the request — and in full in a
+  new per-row expansion alongside the complete request id and cache tokens.
+  The table itself was reworked to never scroll sideways. The list can also
+  be filtered by API key prefix, and the CSV export carries the split
+  columns in place of the merged count.
 - The request log gains a cost filter (priced / unknown cost) — the
   dashboard's unknown-cost figure drills into exactly the rows it counts.
 - The provider report shows how many failovers each provider caused —
