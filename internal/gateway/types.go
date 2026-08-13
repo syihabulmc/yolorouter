@@ -53,6 +53,18 @@ type Exchange struct {
 	// business, and everything that pass produces comes back as a record on
 	// the timeline rather than as fields here.
 	compressEnabled bool
+	// visionFallbackModel / visionFallbackPrompt are the resolved global
+	// vision-fallback configuration (empty model = feature off), resolved by
+	// the kernel for the same reason as compressEnabled. authCredential is
+	// the caller's presented API key, kept ONLY so a capability's loopback
+	// self-call can act as the same caller — it must never reach logs (the
+	// header capture is sanitized separately). visionFallbackSubCall marks a
+	// request the gateway made to itself (loopback token matched): the
+	// capability reads it as its recursion guard.
+	visionFallbackModel   string
+	visionFallbackPrompt  string
+	authCredential        string
+	visionFallbackSubCall bool
 	// pricingBasis is the per-million rates the pre-dispatch estimate is taken
 	// against: the FIRST routable candidate's, fixed once so everything asking
 	// that question reads one answer instead of each picking its own candidate.
@@ -289,6 +301,20 @@ func (rc *Exchange) ProviderID() *uint {
 
 // CompressEnabled is the resolved input-compression switch for this request.
 func (rc *Exchange) CompressEnabled() bool { return rc.compressEnabled }
+
+// VisionFallbackModel is the resolved global describe model ("" = feature off).
+func (rc *Exchange) VisionFallbackModel() string { return rc.visionFallbackModel }
+
+// VisionFallbackPrompt is the resolved describe prompt ("" = built-in default).
+func (rc *Exchange) VisionFallbackPrompt() string { return rc.visionFallbackPrompt }
+
+// AuthCredential is the caller's presented API key, for loopback self-calls
+// only — never for logging.
+func (rc *Exchange) AuthCredential() string { return rc.authCredential }
+
+// IsVisionFallbackSubCall reports whether this request is the gateway calling
+// itself (loopback token matched) — the describe capability's recursion guard.
+func (rc *Exchange) IsVisionFallbackSubCall() bool { return rc.visionFallbackSubCall }
 
 // IngressProtocol is the wire protocol of the caller's request path.
 func (rc *Exchange) IngressProtocol() protocols.ProtocolID { return rc.ingress }

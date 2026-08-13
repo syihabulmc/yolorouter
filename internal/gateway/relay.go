@@ -20,6 +20,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/decision"
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/gateway/circuit"
+	"github.com/yolorouter/yolorouter/internal/loopback"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
@@ -366,15 +367,31 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		}
 	}()
 
+	// The loopback marker resolves before any admission: a request bearing
+	// this process's own token is the gateway calling itself on behalf of a
+	// caller request that already holds the key's admission slots — running
+	// the child through concurrency/RPM/TPM again would make it compete
+	// with (and starve behind) its own parent. Key-state checks (revoked/
+	// expired/budget) still apply; they need no slot and cost nothing.
+	// Known tradeoff: skipping admission also skips the TPM/RPM debit, so
+	// describe-call tokens never enter the key's rate windows. The budget
+	// check still caps what a key can spend, and every sub-call bills and
+	// logs normally, so the volume is visible and paid for — accepted
+	// rather than teaching the limiter about ticketless debits.
+	rc.visionFallbackSubCall = c.GetHeader(loopback.HeaderInternal) == loopback.Token
+	rc.authCredential = GatewayCredential(c)
+
 	if !s.checkKeyStateAndLimits(c, rc, apiKey, start) {
 		return
 	}
-	verdict := s.admit(rc.requestCtx, rc, AdmitOnArrival, &held)
-	if verdict.Loop >= decision.LoopNextCandidate {
-		captureRejectedBody(c, rc)
-		status, errType := decision.AdmissionRejectionResponse(verdict)
-		s.rejectRequest(c, rc, status, errType, verdict.RejectDetail(), verdict.FailReason(), fact.FaultClient, start)
-		return
+	if !rc.visionFallbackSubCall {
+		verdict := s.admit(rc.requestCtx, rc, AdmitOnArrival, &held)
+		if verdict.Loop >= decision.LoopNextCandidate {
+			captureRejectedBody(c, rc)
+			status, errType := decision.AdmissionRejectionResponse(verdict)
+			s.rejectRequest(c, rc, status, errType, verdict.RejectDetail(), verdict.FailReason(), fact.FaultClient, start)
+			return
+		}
 	}
 
 	body, err := io.ReadAll(c.Request.Body)
@@ -422,6 +439,24 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 				zap.String("request_id", rc.requestID), zap.Error(err))
 		}
 		rc.compressEnabled = enabled
+	}
+
+	// Vision fallback configuration. (The loopback marker and the caller
+	// credential resolve earlier, before admissions — see the block above
+	// checkKeyStateAndLimits.)
+	if s.settingsProvider != nil {
+		vf, _, err := s.settingsProvider.GetVisionFallback(c.Request.Context())
+		if err != nil {
+			logger.Warn("gateway: vision fallback settings read failed",
+				zap.String("request_id", rc.requestID), zap.Error(err))
+		}
+		// Assigned even on a refresh error: the provider returns its
+		// last-known-good snapshot alongside the error, and a settings
+		// hiccup must not silently flip a configured feature off (which
+		// here would mean stripping images a configured model could have
+		// described) — same fail-open posture as compression above.
+		rc.visionFallbackModel = vf.Model
+		rc.visionFallbackPrompt = vf.Prompt
 	}
 
 	// The rewriters run before the request is admitted, not after it is
@@ -539,8 +574,12 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	}
 
 	// Step 5: allowlist. A key flagged allow_all_models skips the per-model
-	// check and may call any enabled model.
-	if !apiKey.AllowAllModels {
+	// check and may call any enabled model. A loopback sub-call skips it
+	// ONLY for the admin-configured describe model — the exemption exists
+	// because that target is the admin's choice, not the caller's, so the
+	// code checks exactly that instead of trusting the marker alone; the
+	// marker is process-token-gated on top.
+	if !apiKey.AllowAllModels && (!rc.visionFallbackSubCall || m.Name != rc.visionFallbackModel) {
 		allowed, err := repository.HasAPIKeyModelAccess(s.db.WithContext(requestCtx), apiKey.ID, m.ID)
 		if err != nil {
 			if isClientDisconnected(c) {

@@ -24,7 +24,7 @@ import (
 // that point on it is a real ordering check.
 func TestAdmissionRosterIsPinned(t *testing.T) {
 	svc := gateway.NewService(nil, nil, false, nil, config.GatewayConfig{})
-	registerCapabilities(svc, nil)
+	registerCapabilities(svc, nil, "")
 
 	want := []string{"ratelimit"}
 	got := svc.RegisteredAdmissions()

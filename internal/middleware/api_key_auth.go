@@ -68,6 +68,10 @@ func APIKeyAuth(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		gateway.SetGatewayAuth(c, key)
+		// The plaintext credential rides along for loopback self-calls only
+		// (the gateway re-presenting the caller's identity to itself); it is
+		// never logged — the header capture is sanitized separately.
+		gateway.SetGatewayCredential(c, raw)
 		c.Next()
 	}
 }

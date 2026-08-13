@@ -315,3 +315,39 @@ type AttemptsRecorded struct {
 }
 
 func (AttemptsRecorded) RecordName() string { return "attempts_recorded" }
+
+// VisionFallbackApplied reports that the request's images were rewritten
+// into text descriptions through the vision fallback model before dispatch.
+// Described counts the images that actually got a description; a shortfall
+// against Images means some fell back to a placeholder.
+type VisionFallbackApplied struct {
+	Base
+	Model     string
+	Images    int
+	Described int
+}
+
+func (VisionFallbackApplied) RecordName() string { return "vision_fallback_applied" }
+
+// VisionFallbackStripped reports that images were replaced with placeholders
+// WITHOUT any describe call — either no fallback model is configured, or
+// every image fell outside the describe limits. Stripping is what keeps an
+// upstream that rejects image parts from failing the whole request.
+type VisionFallbackStripped struct {
+	Base
+	Images int
+}
+
+func (VisionFallbackStripped) RecordName() string { return "vision_fallback_stripped" }
+
+// VisionFallbackSkipped reports that the capability looked at an
+// image-bearing request and left it alone, and why ("parse_failed",
+// "patch_failed", "describe_failed") — leaving the caller's bytes untouched
+// is the designed degrade, but an unexplained pass-through would be
+// indistinguishable from the capability never running.
+type VisionFallbackSkipped struct {
+	Base
+	Reason string
+}
+
+func (VisionFallbackSkipped) RecordName() string { return "vision_fallback_skipped" }

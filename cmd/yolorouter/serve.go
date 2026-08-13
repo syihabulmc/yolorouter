@@ -115,7 +115,11 @@ func runServe(ctx context.Context, args []string) error {
 		return fmt.Errorf("create bodies dir: %w", err)
 	}
 
-	r, err := router.New(app.DB, masterKey, bodiesDir, app.Config.Update, app.Config.Security.AllowPrivateUpstreams, app.Config.Gateway)
+	// The gateway's vision-fallback capability calls back into this server's
+	// own API; the loopback base is derived from the same port the server is
+	// about to listen on.
+	loopbackBase := fmt.Sprintf("http://localhost:%d", app.Config.Server.Port)
+	r, err := router.New(app.DB, masterKey, bodiesDir, app.Config.Update, app.Config.Security.AllowPrivateUpstreams, app.Config.Gateway, loopbackBase)
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}

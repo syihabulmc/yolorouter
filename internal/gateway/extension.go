@@ -127,6 +127,12 @@ const (
 	// counts or prices tokens: an estimate taken ahead of it would charge for
 	// bytes that never left.
 	StageCompress IngressStage = 10
+	// StageVisionFallback turns images into text (or placeholders) for
+	// models declared unable to read them. It runs after compression: the
+	// text it injects is derived content that compression has no business
+	// shrinking, and the images compression skipped are exactly what this
+	// stage consumes.
+	StageVisionFallback IngressStage = 20
 )
 
 // ingressRewriter is the kernel-side, view-erased form.

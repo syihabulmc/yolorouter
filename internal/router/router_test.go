@@ -23,7 +23,7 @@ import (
 func newTestRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	db := testutil.NewSQLiteDB(t)
-	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig())
+	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig(), "")
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestNewFailsFastWhenEmbeddedFrontendIsBroken(t *testing.T) {
 		"assets/app.js": &fstest.MapFile{Data: []byte("console.log(1)")},
 		// deliberately no index.html
 	}
-	_, err := newWithDistFS(broken, testutil.NewSQLiteDB(t), testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig())
+	_, err := newWithDistFS(broken, testutil.NewSQLiteDB(t), testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig(), "")
 	if err == nil {
 		t.Fatalf("expected New() to fail when distFS has files but no index.html")
 	}
@@ -98,7 +98,7 @@ func TestNewFailsFastWhenEmbeddedFrontendIsBroken(t *testing.T) {
 // must NOT be treated as broken; New() should succeed and fall back to the
 // placeholder at request time (see TestUnknownFrontendPathFallsBackToIndexHTML).
 func TestNewSucceedsWithEmptyDistFS(t *testing.T) {
-	if _, err := newWithDistFS(fstest.MapFS{}, testutil.NewSQLiteDB(t), testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig()); err != nil {
+	if _, err := newWithDistFS(fstest.MapFS{}, testutil.NewSQLiteDB(t), testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig(), ""); err != nil {
 		t.Fatalf("expected New() to succeed with an empty distFS, got: %v", err)
 	}
 }
@@ -115,7 +115,7 @@ func TestNewSucceedsWithCompleteFrontend(t *testing.T) {
 		)},
 		"assets/app.js": &fstest.MapFile{Data: []byte("console.log(1)")},
 	}
-	if _, err := newWithDistFS(complete, testutil.NewSQLiteDB(t), testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig()); err != nil {
+	if _, err := newWithDistFS(complete, testutil.NewSQLiteDB(t), testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig(), ""); err != nil {
 		t.Fatalf("expected New() to succeed with a complete frontend, got: %v", err)
 	}
 }
@@ -128,7 +128,7 @@ func TestNewFailsForEmptyIndexHTML(t *testing.T) {
 		"index.html":    &fstest.MapFile{Data: []byte("")},
 		"assets/app.js": &fstest.MapFile{Data: []byte("console.log(1)")},
 	}
-	if _, err := newWithDistFS(empty, testutil.NewSQLiteDB(t), testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig()); err == nil {
+	if _, err := newWithDistFS(empty, testutil.NewSQLiteDB(t), testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig(), ""); err == nil {
 		t.Fatalf("expected New() to fail for an empty index.html")
 	}
 }
@@ -143,7 +143,7 @@ func TestNewFailsWhenIndexHTMLReferencesMissingAsset(t *testing.T) {
 			`<html><head><script src="/assets/missing-CNWoupNg.js"></script></head></html>`,
 		)},
 	}
-	if _, err := newWithDistFS(partial, testutil.NewSQLiteDB(t), testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig()); err == nil {
+	if _, err := newWithDistFS(partial, testutil.NewSQLiteDB(t), testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig(), ""); err == nil {
 		t.Fatalf("expected New() to fail when index.html references a missing local asset")
 	}
 }
@@ -357,7 +357,7 @@ func seedAPIKey(t *testing.T, db *gorm.DB, rawKey string) *model.APIKey {
 func TestMessagesRouteReachesGatewayWithValidKey(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	seedAPIKey(t, db, "sk-yr-messages-route")
-	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig())
+	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig(), "")
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestMessagesRouteReachesGatewayWithValidKey(t *testing.T) {
 func TestResponsesRouteReachesGatewayWithValidKey(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	seedAPIKey(t, db, "sk-yr-responses-route")
-	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig())
+	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig(), "")
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestResponsesRouteReachesGatewayWithValidKey(t *testing.T) {
 func TestGeminiGenerateContentRouteReachesGatewayWithValidKey(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	seedAPIKey(t, db, "sk-yr-gemini-route")
-	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig())
+	r, err := New(db, testProviderMasterKey(), t.TempDir(), testUpdateConfig(), false, testGatewayConfig(), "")
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/capability/ratelimit"
 	"github.com/yolorouter/yolorouter/internal/capability/requestlog"
 	"github.com/yolorouter/yolorouter/internal/capability/systemprompt"
+	"github.com/yolorouter/yolorouter/internal/capability/visionfallback"
 	"github.com/yolorouter/yolorouter/internal/gateway"
 )
 
@@ -26,9 +27,11 @@ import (
 // below is something a test can execute and pin. Admission order is not
 // decoration — it is acquisition order, and therefore the reverse of
 // compensation order.
-func registerCapabilities(svc *gateway.Service, db *gorm.DB) {
+func registerCapabilities(svc *gateway.Service, db *gorm.DB, loopbackBase string) {
 	gateway.RegisterIngressRewriter(svc, compress.New(), gateway.StageCompress,
 		func(e *gateway.Exchange) compress.View { return e })
+	gateway.RegisterIngressRewriter(svc, visionfallback.New(db, loopbackBase), gateway.StageVisionFallback,
+		func(e *gateway.Exchange) visionfallback.View { return e })
 	gateway.RegisterUpstreamErrorObserver(svc, contentinspect.New(),
 		func(e *gateway.Exchange) contentinspect.View { return e })
 	gateway.RegisterEgressRewriter(svc, systemprompt.New(), gateway.StageCustomPrompt,

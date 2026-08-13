@@ -14,4 +14,5 @@ import (
 type SettingsProvider interface {
 	CustomSystemPrompt(ctx context.Context) (settings.CustomSystemPromptSetting, int64, error)
 	GetInputCompression(ctx context.Context) (bool, int64, error)
+	GetVisionFallback(ctx context.Context) (settings.VisionFallbackSetting, int64, error)
 }

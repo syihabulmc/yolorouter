@@ -18,6 +18,29 @@ func SetGatewayAuth(c *gin.Context, apiKey *model.APIKey) {
 	c.Set(gatewayAPIKeyKey, apiKey)
 }
 
+// gatewayCredentialKey is the gin.Context key under which APIKeyAuth stores
+// the caller's presented plaintext credential. Only Handle reads it, and only
+// so a capability's loopback self-call can act as the same caller; the value
+// never reaches the sanitized header capture or any log.
+const gatewayCredentialKey = "gateway_api_credential"
+
+// SetGatewayCredential stores the caller's presented credential — called by
+// middleware.APIKeyAuth alongside SetGatewayAuth.
+func SetGatewayCredential(c *gin.Context, credential string) {
+	c.Set(gatewayCredentialKey, credential)
+}
+
+// GatewayCredential returns the stored credential, or "" when the middleware
+// didn't record one.
+func GatewayCredential(c *gin.Context) string {
+	if v, ok := c.Get(gatewayCredentialKey); ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 // PostChatCompletions is the gin handler for both POST /v1/chat/completions
 // and POST /v1/messages (see router.go — both routes are bound to this same
 // handler). It pulls the APIKey the middleware already resolved and hands

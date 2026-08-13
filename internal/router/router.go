@@ -113,7 +113,7 @@ func validateEmbeddedFrontend(distFS fs.FS) error {
 // allowPrivateUpstreams (config.SecurityConfig.AllowPrivateUpstreams) is
 // forwarded to the provider-test and gateway-relay clients' SSRF transport,
 // letting a self-hosted operator reach a LAN/localhost model server.
-func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig) (*gin.Engine, error) {
+func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig, loopbackBase string) (*gin.Engine, error) {
 	// fs.Sub never actually errors here, in either build variant: it only
 	// validates that "dist" is a syntactically-valid path string, not that
 	// it exists in web.DistFS (confirmed against io/fs's Sub implementation
@@ -123,10 +123,10 @@ func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg conf
 	// fs.Stat call at each call site below, which correctly reports
 	// "not found" for every path against an empty embedded FS.
 	distFS, _ := fs.Sub(web.DistFS, "dist")
-	return newWithDistFS(distFS, db, providerMasterKey, bodiesDir, updateCfg, allowPrivateUpstreams, gatewayCfg)
+	return newWithDistFS(distFS, db, providerMasterKey, bodiesDir, updateCfg, allowPrivateUpstreams, gatewayCfg, loopbackBase)
 }
 
-func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig) (*gin.Engine, error) {
+func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig, loopbackBase string) (*gin.Engine, error) {
 	if err := validateEmbeddedFrontend(distFS); err != nil {
 		return nil, err
 	}
@@ -347,7 +347,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// protocol.
 	relaySvc := gateway.NewService(db, providerMasterKey, allowPrivateUpstreams, settingsSvc, gatewayCfg)
 
-	registerCapabilities(relaySvc, db)
+	registerCapabilities(relaySvc, db, loopbackBase)
 
 	v1 := gatewayGroup(r, "/v1", bodiesDir, db)
 	v1.POST("/chat/completions", gateway.PostChatCompletions(relaySvc))

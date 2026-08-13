@@ -26,8 +26,10 @@ import (
 	"github.com/yolorouter/yolorouter/internal/capability/ratelimit"
 	"github.com/yolorouter/yolorouter/internal/capability/requestlog"
 	"github.com/yolorouter/yolorouter/internal/capability/systemprompt"
+	"github.com/yolorouter/yolorouter/internal/capability/visionfallback"
 	"github.com/yolorouter/yolorouter/internal/config"
 	"github.com/yolorouter/yolorouter/internal/fact"
+	"github.com/yolorouter/yolorouter/internal/loopback"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/settings"
@@ -110,6 +112,10 @@ type stubSettingsProvider struct {
 	val             settings.CustomSystemPromptSetting
 	compressEnabled bool
 	compressErr     error
+	visionFallback  settings.VisionFallbackSetting
+	// visionFallbackErr simulates a cache-refresh failure delivered ALONGSIDE
+	// a last-known-good snapshot — the shape the real provider produces.
+	visionFallbackErr error
 }
 
 func (s stubSettingsProvider) CustomSystemPrompt(_ context.Context) (settings.CustomSystemPromptSetting, int64, error) {
@@ -118,6 +124,10 @@ func (s stubSettingsProvider) CustomSystemPrompt(_ context.Context) (settings.Cu
 
 func (s stubSettingsProvider) GetInputCompression(_ context.Context) (bool, int64, error) {
 	return s.compressEnabled, 1, s.compressErr
+}
+
+func (s stubSettingsProvider) GetVisionFallback(_ context.Context) (settings.VisionFallbackSetting, int64, error) {
+	return s.visionFallback, 1, s.visionFallbackErr
 }
 
 // newSvc builds a Service and swaps in a plain transport so the
@@ -2216,5 +2226,160 @@ func TestRelayModelUnavailableSaysWhy(t *testing.T) {
 				t.Fatalf("body = %s, want message %q", w.Body.String(), tc.wantMessage)
 			}
 		})
+	}
+}
+
+// TestLoopbackSubCallBypassesAdmissionAndAllowlist: a request bearing this
+// process's loopback token is the gateway calling itself — it must not
+// compete with its parent for the key's admission slots, and its target (the
+// admin-configured describe model) is exempt from the caller's allowlist.
+func TestLoopbackSubCallBypassesAdmissionAndAllowlist(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"seen"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	svc := newSvcWithSettings(t, db, stubSettingsProvider{visionFallback: settings.VisionFallbackSetting{Model: "eyes"}})
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	createModelAndCandidate(t, db, p, "eyes", "eyes-real", true, true, 1)
+	// Empty allowlist AND a fully-exhausted concurrency slot: either alone
+	// would reject a normal caller request. The allowlist exemption is
+	// scoped to the CONFIGURED describe model, so the stub configures "eyes".
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
+	limit := 1
+	apiKey.ConcurrencyLimit = &limit
+	limiterOf(t, svc).AcquireConcurrency(apiKey.ID, 1)
+
+	c, w := newCtx([]byte(`{"model":"eyes","messages":[{"role":"user","content":"hi"}]}`))
+	c.Request.Header.Set(loopback.HeaderInternal, loopback.Token)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("loopback sub-call status = %d, want 200 (bypasses limits + allowlist), body: %s", w.Code, w.Body.String())
+	}
+}
+
+// A forged marker (any value that is not this process's token) gets no
+// bypass at all.
+func TestForgedLoopbackTokenGetsNoBypass(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	svc := newSvc(t, db)
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	createModelAndCandidate(t, db, p, "eyes", "eyes-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil) // empty allowlist
+
+	c, w := newCtx([]byte(`{"model":"eyes","messages":[{"role":"user","content":"hi"}]}`))
+	c.Request.Header.Set(loopback.HeaderInternal, "forged-value")
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("forged token status = %d, want 403 (allowlist still applies)", w.Code)
+	}
+}
+
+// TestVisionFallbackSurvivesSettingsRefreshError: the settings provider can
+// fail a refresh while still returning its last-known-good snapshot; the
+// kernel must keep that snapshot rather than treating the feature as
+// switched off — which would strip images a configured model could have
+// described.
+func TestVisionFallbackSurvivesSettingsRefreshError(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	var upstreamBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+	loop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"a described picture"}}]}`))
+	}))
+	defer loop.Close()
+
+	svc := newSvcWithSettings(t, db, stubSettingsProvider{
+		visionFallback:    settings.VisionFallbackSetting{Model: "eyes"},
+		visionFallbackErr: errors.New("simulated refresh failure"),
+	})
+	RegisterIngressRewriter(svc, visionfallback.New(db, loop.URL), StageVisionFallback,
+		func(e *Exchange) visionfallback.View { return e })
+
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	m := createModelAndCandidate(t, db, p, "blind", "blind-real", true, true, 1)
+	if err := db.Model(m).Update("supports_image_input", false).Error; err != nil {
+		t.Fatalf("declare blind: %v", err)
+	}
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+	c, w := newCtx([]byte(`{"model":"blind","messages":[{"role":"user","content":[` +
+		`{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}]}`))
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(upstreamBody, []byte("a described picture")) {
+		t.Fatalf("upstream did not receive the description — settings error flipped the feature off; upstream got:\n%s", upstreamBody)
+	}
+}
+
+// The allowlist exemption is scoped: a sub-call whose target is NOT the
+// configured describe model gets no bypass — the exemption exists for the
+// admin's chosen model only.
+func TestLoopbackSubCallToUnconfiguredModelStillAllowlisted(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	svc := newSvcWithSettings(t, db, stubSettingsProvider{visionFallback: settings.VisionFallbackSetting{Model: "eyes"}})
+	p := createProvider(t, db, "p1", upstream.URL)
+	createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+	createModelAndCandidate(t, db, p, "other-model", "other-real", true, true, 1)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil) // empty allowlist
+
+	c, w := newCtx([]byte(`{"model":"other-model","messages":[{"role":"user","content":"hi"}]}`))
+	c.Request.Header.Set(loopback.HeaderInternal, loopback.Token)
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("sub-call to non-configured model status = %d, want 403", w.Code)
+	}
+}
+
+// TestForgedLoopbackTokenGetsNoAdmissionBypass: the admission half of the
+// forgery defense — a wrong token still queues behind the key's own limits.
+func TestForgedLoopbackTokenGetsNoAdmissionBypass(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	svc := newSvc(t, db)
+	apiKey := createAPIKey(t, db, model.APIKeyStatusActive, nil)
+	limit := 1
+	apiKey.ConcurrencyLimit = &limit
+	limiterOf(t, svc).AcquireConcurrency(apiKey.ID, 1)
+
+	c, w := newCtx([]byte(`{"model":"any","messages":[{"role":"user","content":"hi"}]}`))
+	c.Request.Header.Set(loopback.HeaderInternal, "forged-value")
+	svc.Handle(c, apiKey)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("forged token admission status = %d, want 429", w.Code)
+	}
+}
+
+// TestLoopbackTokenHeaderIsMasked binds the header's NAME to the sanitizer:
+// the loopback comment promises the "token" substring keeps the process
+// secret out of persisted header captures, and this is the test that goes
+// red if someone renames the header out from under that promise.
+func TestLoopbackTokenHeaderIsMasked(t *testing.T) {
+	if !isSensitiveHeader(strings.ToLower(loopback.HeaderInternal)) {
+		t.Fatalf("header %q is not masked by the sanitizer — the process token would persist in request_logs", loopback.HeaderInternal)
 	}
 }

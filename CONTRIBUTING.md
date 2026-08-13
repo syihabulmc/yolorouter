@@ -71,6 +71,9 @@ internal/           Backend: handler → service → repository, middleware
                     table must be exhaustive, comments must not name symbols
                     that no longer exist. A pull request that trips one fails
                     here rather than in review — run `make gates` locally.
+  loopback/         The process-level secret and header names for gateway
+                    self-calls; imported by both the kernel and the
+                    capability that calls back in, so neither imports the other.
   protocols/        Wire formats (OpenAI chat, Anthropic, Gemini, Responses)
                     and the intermediate form they convert through.
 pkg/                Reusable packages (crypto, database, response, ...)
