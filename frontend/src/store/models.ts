@@ -57,8 +57,8 @@ export const useModelsStore = defineStore('models', {
       await this.fetchList()
       return result
     },
-    async update(id: number, name: string): Promise<Model> {
-      return modelsApi.updateModel(id, name)
+    async update(id: number, name: string, imageInput?: modelsApi.ImageInputChoice): Promise<Model> {
+      return modelsApi.updateModel(id, name, imageInput)
     },
     async setStatus(id: number, enabled: boolean) {
       await modelsApi.setModelStatus(id, enabled)

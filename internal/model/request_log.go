@@ -48,12 +48,19 @@ type RequestLog struct {
 	// https://api.openai.com/v1/chat/completions). Both are empty when no
 	// upstream request was sent (pre-relay rejection) and for rows predating
 	// this column — the detail UI renders the placeholder for empty values.
-	RequestPath    string  `gorm:"column:request_path" json:"request_path"`
-	UpstreamURL    string  `gorm:"column:upstream_url" json:"upstream_url"`
-	FailReason     *string `gorm:"column:fail_reason" json:"fail_reason"`
-	Attempts       int     `gorm:"column:attempts" json:"attempts"`
-	AttemptsDetail *string `gorm:"column:attempts_detail" json:"attempts_detail"`
-	DurationMs     int64   `gorm:"column:duration_ms" json:"duration_ms"`
+	RequestPath string `gorm:"column:request_path" json:"request_path"`
+	UpstreamURL string `gorm:"column:upstream_url" json:"upstream_url"`
+	// Source marks who initiated the request: "" = a normal caller request,
+	// "vision_fallback" = an image-description sub-call the gateway made on
+	// behalf of the request named by ParentRequestID. Sub-calls are separate
+	// rows so each row's tokens describe exactly one model; the description
+	// cost reaches the key's totals through the sub-call's own row.
+	Source          string  `gorm:"column:source" json:"source"`
+	ParentRequestID string  `gorm:"column:parent_request_id" json:"parent_request_id"`
+	FailReason      *string `gorm:"column:fail_reason" json:"fail_reason"`
+	Attempts        int     `gorm:"column:attempts" json:"attempts"`
+	AttemptsDetail  *string `gorm:"column:attempts_detail" json:"attempts_detail"`
+	DurationMs      int64   `gorm:"column:duration_ms" json:"duration_ms"`
 	// FactsJSON holds observations that have no column of their own, verbatim,
 	// keyed by their stable names. Empty when everything reported was
 	// recognised. It exists so an observation from a capability this build has

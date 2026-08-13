@@ -37,6 +37,7 @@ const refreshFailureTTL = 5 * time.Second
 const (
 	cspCacheKey              = "csp"
 	inputCompressionCacheKey = "input_compression"
+	visionFallbackCacheKey   = "vision_fallback"
 )
 
 // settingEntry holds the cached state for one setting key. The cache is shared
@@ -100,6 +101,7 @@ func NewSystemSettingsService(db *gorm.DB) *SystemSettingsService {
 		entries: map[string]*settingEntry{
 			cspCacheKey:              {},
 			inputCompressionCacheKey: {},
+			visionFallbackCacheKey:   {},
 		},
 	}
 }
@@ -112,6 +114,11 @@ func (s *SystemSettingsService) cspEntry() *settingEntry { return s.entries[cspC
 // inputCompressionEntry returns the input-compression cache slot.
 func (s *SystemSettingsService) inputCompressionEntry() *settingEntry {
 	return s.entries[inputCompressionCacheKey]
+}
+
+// visionFallbackEntry returns the vision-fallback cache slot.
+func (s *SystemSettingsService) visionFallbackEntry() *settingEntry {
+	return s.entries[visionFallbackCacheKey]
 }
 
 // readCached is the shared hot-path read for any registered setting. It serves
@@ -312,5 +319,46 @@ func (s *SystemSettingsService) UpdateInputCompression(ctx context.Context, expe
 		return false, 0, err
 	}
 	s.publishIfNewer(s.inputCompressionEntry(), got, ver)
+	return got, ver, nil
+}
+
+// GetVisionFallback returns the cached vision-fallback snapshot
+// (non-blocking, fail-open to the disabled zero value) — the gateway hot path
+// read. An empty Model means the feature is off.
+func (s *SystemSettingsService) GetVisionFallback(ctx context.Context) (settings.VisionFallbackSetting, int64, error) {
+	v, ver, err := s.readCached(ctx, visionFallbackCacheKey, s.visionFallbackEntry(),
+		func(ctx context.Context) (any, int64, error) {
+			snap, v, e := repository.GetVisionFallback(s.db.WithContext(ctx))
+			return snap, v, e
+		},
+		settings.VisionFallbackSetting{})
+	return v.(settings.VisionFallbackSetting), ver, err
+}
+
+// GetVisionFallbackForHandler is the authoritative read for the handler GET:
+// straight from the DB, bound to the request ctx.
+func (s *SystemSettingsService) GetVisionFallbackForHandler(ctx context.Context) (settings.VisionFallbackSetting, int64, error) {
+	return repository.GetVisionFallback(s.db.WithContext(ctx))
+}
+
+// UpdateVisionFallback validates that a non-empty model name refers to a
+// model this gateway actually has (a typo would silently disable the feature
+// at describe time, the worst place to find out), CAS-updates the pair, and
+// publishes the committed snapshot to the cache.
+func (s *SystemSettingsService) UpdateVisionFallback(ctx context.Context, expectedVersion int64, modelName, prompt string) (settings.VisionFallbackSetting, int64, error) {
+	if modelName != "" {
+		var n int64
+		if err := s.db.WithContext(ctx).Table("models").Where("name = ?", modelName).Count(&n).Error; err != nil {
+			return settings.VisionFallbackSetting{}, 0, err
+		}
+		if n == 0 {
+			return settings.VisionFallbackSetting{}, 0, errcode.ErrVisionFallbackModelUnknown
+		}
+	}
+	got, ver, err := repository.UpdateVisionFallback(s.db.WithContext(ctx), expectedVersion, modelName, prompt)
+	if err != nil {
+		return settings.VisionFallbackSetting{}, 0, err
+	}
+	s.publishIfNewer(s.visionFallbackEntry(), got, ver)
 	return got, ver, nil
 }

@@ -85,8 +85,8 @@ func TestGetCurrentVersionOnFreshSQLiteDB(t *testing.T) {
 	// 00018_model_candidate_capability_tristate.sql +
 	// 00020_request_logs_facts_json.sql +
 	// 00021_api_keys_encrypted_key.sql).
-	if version != 21 {
-		t.Fatalf("expected version 21 after all migrations, got %d", version)
+	if version != 22 {
+		t.Fatalf("expected version 22 after all migrations, got %d", version)
 	}
 }
 
@@ -488,7 +488,79 @@ func TestMigration00018ModelCandidateCapabilityTristate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrentVersion failed: %v", err)
 	}
-	if version != 21 {
-		t.Fatalf("expected version 21 after re-apply, got %d", version)
+	if version != 22 {
+		t.Fatalf("expected version 22 after re-apply, got %d", version)
+	}
+}
+
+func TestMigration00022VisionFallback(t *testing.T) {
+	db := newMemoryDB(t)
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	// Both settings rows are seeded at the SAME version — the repository
+	// reader treats a version mismatch between the pair as corruption, so the
+	// seed itself must satisfy that invariant.
+	rows, err := db.Query("SELECT key, value, version FROM system_settings WHERE key IN ('vision_fallback_model','vision_fallback_prompt') ORDER BY key")
+	if err != nil {
+		t.Fatalf("query settings pair: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var keys []string
+	versions := map[string]int64{}
+	for rows.Next() {
+		var k, v string
+		var ver int64
+		if err := rows.Scan(&k, &v, &ver); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if v != "" {
+			t.Fatalf("seed %s = %q, want empty (feature off, built-in prompt)", k, v)
+		}
+		keys = append(keys, k)
+		versions[k] = ver
+	}
+	if len(keys) != 2 {
+		t.Fatalf("seeded %d vision_fallback rows, want 2 (%v)", len(keys), keys)
+	}
+	if versions["vision_fallback_model"] != versions["vision_fallback_prompt"] {
+		t.Fatalf("seed versions differ: %v", versions)
+	}
+
+	// models.supports_image_input round-trips all three states: absent (NULL),
+	// declared true, declared false.
+	if _, err := db.Exec(`INSERT INTO models (name, management_status, created_at, updated_at) VALUES ('tri', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`); err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	var got *bool
+	if err := db.QueryRow("SELECT supports_image_input FROM models WHERE name = 'tri'").Scan(&got); err != nil {
+		t.Fatalf("read declaration: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("fresh row declaration = %v, want NULL (undeclared)", *got)
+	}
+	for _, want := range []bool{true, false} {
+		if _, err := db.Exec("UPDATE models SET supports_image_input = ? WHERE name = 'tri'", want); err != nil {
+			t.Fatalf("set declaration %v: %v", want, err)
+		}
+		if err := db.QueryRow("SELECT supports_image_input FROM models WHERE name = 'tri'").Scan(&got); err != nil {
+			t.Fatalf("reread: %v", err)
+		}
+		if got == nil || *got != want {
+			t.Fatalf("declaration round-trip = %v, want %v", got, want)
+		}
+	}
+
+	// request_logs sub-call columns default to the normal-request markers.
+	if _, err := db.Exec(`INSERT INTO request_logs (request_id, model_name, status_code, created_at) VALUES ('req-vf', 'm', 200, '2026-01-01 00:00:00')`); err != nil {
+		t.Fatalf("create request log: %v", err)
+	}
+	var source, parent string
+	if err := db.QueryRow("SELECT source, parent_request_id FROM request_logs WHERE request_id = 'req-vf'").Scan(&source, &parent); err != nil {
+		t.Fatalf("read sub-call columns: %v", err)
+	}
+	if source != "" || parent != "" {
+		t.Fatalf("defaults = %q/%q, want empty/empty", source, parent)
 	}
 }

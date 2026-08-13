@@ -1380,7 +1380,7 @@ func TestUpdateModelNameStatusRenamesModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
 	}
-	updated, err := svc.UpdateModelNameStatus(modelView.ID, "smart-v2", now)
+	updated, err := svc.UpdateModelNameStatus(modelView.ID, "smart-v2", false, nil, now)
 	if err != nil {
 		t.Fatalf("UpdateModelNameStatus failed: %v", err)
 	}
@@ -1399,7 +1399,7 @@ func TestUpdateModelNameStatusRejectsDuplicateName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateModel(other) failed: %v", err)
 	}
-	_, err = svc.UpdateModelNameStatus(other.ID, "taken", now)
+	_, err = svc.UpdateModelNameStatus(other.ID, "taken", false, nil, now)
 	if !errors.Is(err, errcode.ErrModelNameTaken) {
 		t.Fatalf("expected ErrModelNameTaken, got %v", err)
 	}
@@ -1407,7 +1407,7 @@ func TestUpdateModelNameStatusRejectsDuplicateName(t *testing.T) {
 
 func TestUpdateModelNameStatusReturnsNotFoundForUnknownID(t *testing.T) {
 	svc, _, _ := newTestModelService(t)
-	_, err := svc.UpdateModelNameStatus(999999, "whatever", time.Now().UTC())
+	_, err := svc.UpdateModelNameStatus(999999, "whatever", false, nil, time.Now().UTC())
 	if !errors.Is(err, errcode.ErrModelNotFound) {
 		t.Fatalf("expected ErrModelNotFound, got %v", err)
 	}
@@ -1745,7 +1745,7 @@ func TestUpdateModelNameStatusRejectsInvalidCharacters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
 	}
-	if _, err := svc.UpdateModelNameStatus(modelView.ID, "bad name!", now); err == nil {
+	if _, err := svc.UpdateModelNameStatus(modelView.ID, "bad name!", false, nil, now); err == nil {
 		t.Fatalf("expected an error for an invalid model name")
 	}
 }
@@ -1758,7 +1758,7 @@ func TestUpdateModelNameStatusErrorsWhenUpdateFailsForNonUniqueReason(t *testing
 		t.Fatalf("CreateModel failed: %v", err)
 	}
 	blockTableWrites(t, db, "models", "UPDATE")
-	if _, err := svc.UpdateModelNameStatus(modelView.ID, "smart-v2", now); err == nil {
+	if _, err := svc.UpdateModelNameStatus(modelView.ID, "smart-v2", false, nil, now); err == nil {
 		t.Fatalf("expected an error when the UPDATE statement fails")
 	}
 }
@@ -2052,7 +2052,7 @@ func TestDeleteModelCandidateErrorsWhenLookupFailsForNonNotFoundReason(t *testin
 func TestUpdateModelNameStatusErrorsWhenLookupFailsForNonNotFoundReason(t *testing.T) {
 	svc, db, _ := newTestModelService(t)
 	dropTable(t, db, "models")
-	if _, err := svc.UpdateModelNameStatus(1, "smart", time.Now().UTC()); err == nil {
+	if _, err := svc.UpdateModelNameStatus(1, "smart", false, nil, time.Now().UTC()); err == nil {
 		t.Fatalf("expected an error when the models table is missing")
 	}
 }

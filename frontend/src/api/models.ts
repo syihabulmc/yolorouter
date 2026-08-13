@@ -32,6 +32,12 @@ export interface Model {
   name: string
   management_status: number
   running_status: string
+  /**
+   * Tri-state image-input declaration: null = undeclared (the gateway leaves
+   * images alone), true/false = the admin's statement of whether this model
+   * can read images (false enables vision fallback / image stripping).
+   */
+  supports_image_input: boolean | null
   candidates: ModelCandidate[]
   created_at: string
 }
@@ -112,8 +118,13 @@ export function getModel(id: number): Promise<Model> {
   return apiFetch(`/api/admin/models/${id}`)
 }
 
-export function updateModel(id: number, name: string): Promise<Model> {
-  return apiFetch(`/api/admin/models/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+/** The wire form of the tri-state declaration ("unknown" maps to null). */
+export type ImageInputChoice = 'unknown' | 'yes' | 'no'
+
+export function updateModel(id: number, name: string, imageInput?: ImageInputChoice): Promise<Model> {
+  const body: Record<string, unknown> = { name }
+  if (imageInput !== undefined) body.image_input = imageInput
+  return apiFetch(`/api/admin/models/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
 }
 
 export function setModelStatus(id: number, enabled: boolean): Promise<void> {

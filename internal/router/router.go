@@ -291,6 +291,8 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	protected.PUT("/system-settings/custom-system-prompt", handler.PutCustomSystemPrompt(settingsSvc))
 	protected.GET("/system-settings/input-compression", handler.GetInputCompression(settingsSvc))
 	protected.PUT("/system-settings/input-compression", handler.PutInputCompression(settingsSvc))
+	protected.GET("/system-settings/vision-fallback", handler.GetVisionFallback(settingsSvc))
+	protected.PUT("/system-settings/vision-fallback", handler.PutVisionFallback(settingsSvc))
 
 	// Dashboard / analytics / request logs.
 	// All three are read-only queries over request_logs (written by the

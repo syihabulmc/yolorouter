@@ -19,6 +19,11 @@ type batchCreateModelsRequest struct {
 
 type updateModelRequest struct {
 	Name string `json:"name" binding:"required,max=100"`
+	// ImageInput is the tri-state image-input declaration as a string enum —
+	// "yes" / "no" / "unknown" — so "set back to undeclared" (unknown) stays
+	// distinguishable from "field absent, don't touch" (nil), which a *bool
+	// cannot express through JSON.
+	ImageInput *string `json:"image_input" binding:"omitempty,oneof=yes no unknown"`
 }
 
 type setModelStatusRequest struct {
@@ -137,7 +142,21 @@ func PatchModel(svc *service.ModelService) gin.HandlerFunc {
 		if !bindJSON(c, &req) {
 			return
 		}
-		view, err := svc.UpdateModelNameStatus(id, req.Name, timeNow())
+		// Both fields go through ONE service call (one UPDATE statement), so
+		// a rejected rename persists nothing and concurrent PATCHes cannot
+		// interleave name and declaration into a row neither admin submitted.
+		var imageInput *bool
+		if req.ImageInput != nil {
+			switch *req.ImageInput {
+			case "yes":
+				t := true
+				imageInput = &t
+			case "no":
+				f := false
+				imageInput = &f
+			}
+		}
+		view, err := svc.UpdateModelNameStatus(id, req.Name, req.ImageInput != nil, imageInput, timeNow())
 		if err != nil {
 			writeServiceError(c, err)
 			return

@@ -78,7 +78,7 @@ func TestUpdateModelNameStatus(t *testing.T) {
 		t.Fatalf("CreateModel failed: %v", err)
 	}
 
-	if err := UpdateModelNameStatus(db, m.ID, "smart-v2", model.ModelStatusDisabled, now); err != nil {
+	if err := UpdateModelNameStatus(db, m.ID, "smart-v2", model.ModelStatusDisabled, false, nil, now); err != nil {
 		t.Fatalf("UpdateModelNameStatus failed: %v", err)
 	}
 	reloaded, err := FindModelByID(db, m.ID)

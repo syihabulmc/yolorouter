@@ -166,3 +166,104 @@ func UpdateCustomSystemPrompt(db *gorm.DB, expectedVersion int64, enabled bool, 
 	}
 	return settings.CustomSystemPromptSetting{Enabled: enabled, Text: text}, newVersion, nil
 }
+
+// The vision-fallback settings pair is seeded by migration 00022 and shares
+// one version, same contract as the custom-system-prompt pair above.
+const (
+	visionFallbackModelKey  = "vision_fallback_model"
+	visionFallbackPromptKey = "vision_fallback_prompt"
+)
+
+// GetVisionFallback reads both vision-fallback rows as one snapshot. Missing
+// rows (a database migrated before 00022 mid-rollout) degrade to the disabled
+// default rather than erroring — the gateway read path must never fail-closed
+// on configuration.
+func GetVisionFallback(db *gorm.DB) (settings.VisionFallbackSetting, int64, error) {
+	var rows []struct {
+		Key     string
+		Value   string
+		Version int64
+	}
+	if err := db.Table("system_settings").
+		Select("key, value, version").
+		Where("key IN ?", []string{visionFallbackModelKey, visionFallbackPromptKey}).
+		Find(&rows).Error; err != nil {
+		return settings.VisionFallbackSetting{}, 0, err
+	}
+	if len(rows) == 0 {
+		return settings.VisionFallbackSetting{}, 0, nil
+	}
+	if len(rows) != 2 {
+		return settings.VisionFallbackSetting{}, 0, fmt.Errorf("system_settings: expected 2 vision_fallback rows, got %d", len(rows))
+	}
+	var s settings.VisionFallbackSetting
+	ver := rows[0].Version
+	for _, r := range rows {
+		if r.Version != ver {
+			return settings.VisionFallbackSetting{}, 0, errors.New("system_settings: version mismatch between vision_fallback rows")
+		}
+		switch r.Key {
+		case visionFallbackModelKey:
+			s.Model = r.Value
+		case visionFallbackPromptKey:
+			s.Prompt = r.Value
+		}
+	}
+	return s, ver, nil
+}
+
+// UpdateVisionFallback CAS-updates both rows in one statement; RowsAffected
+// == 2 is the CAS witness (both rows share the version, enforced by the read
+// path). Returns the committed snapshot + new version.
+func UpdateVisionFallback(db *gorm.DB, expectedVersion int64, model, prompt string) (settings.VisionFallbackSetting, int64, error) {
+	var newVersion int64
+	err := db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Table("system_settings").
+			Where("key IN ? AND version = ?", []string{visionFallbackModelKey, visionFallbackPromptKey}, expectedVersion).
+			Updates(map[string]interface{}{
+				"value":   gorm.Expr("CASE key WHEN ? THEN ? WHEN ? THEN ? END", visionFallbackModelKey, model, visionFallbackPromptKey, prompt),
+				"version": gorm.Expr("version + 1"),
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 2 {
+			return errcode.ErrVisionFallbackConflict
+		}
+		newVersion = expectedVersion + 1
+		return nil
+	})
+	if err != nil {
+		return settings.VisionFallbackSetting{}, 0, err
+	}
+	return settings.VisionFallbackSetting{Model: model, Prompt: prompt}, newVersion, nil
+}
+
+// RenameVisionFallbackModel follows a model rename into the vision-fallback
+// setting: when the stored describe model is the renamed one, the reference
+// is rewritten and the pair's shared version advances so CAS writers and
+// cache refreshes see the change. A no-match is a clean no-op — most renames
+// aren't the fallback model.
+func RenameVisionFallbackModel(db *gorm.DB, oldName, newName string) error {
+	if oldName == "" || oldName == newName {
+		return nil
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Table("system_settings").
+			Where("key = ? AND value = ?", visionFallbackModelKey, oldName).
+			Update("value", newName)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		// The version bump must land on BOTH rows of the pair: the read path
+		// rejects a version mismatch as corruption, and the CAS save needs
+		// both rows at one version — bumping only the rewritten row would
+		// leave the setting unreadable and unsavable in the same stroke.
+		return tx.Table("system_settings").
+			Where("key IN ?", []string{visionFallbackModelKey, visionFallbackPromptKey}).
+			Update("version", gorm.Expr("version + 1")).Error
+	})
+}

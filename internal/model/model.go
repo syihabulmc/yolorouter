@@ -39,11 +39,16 @@ const (
 // Model is one externally-exposed model name. No delete —
 // only management_status toggles it off.
 type Model struct {
-	ID               uint      `gorm:"column:id;primaryKey" json:"id"`
-	Name             string    `gorm:"column:name" json:"name"`
-	ManagementStatus int       `gorm:"column:management_status" json:"management_status"`
-	CreatedAt        time.Time `gorm:"column:created_at" json:"created_at"`
-	UpdatedAt        time.Time `gorm:"column:updated_at" json:"updated_at"`
+	ID               uint   `gorm:"column:id;primaryKey" json:"id"`
+	Name             string `gorm:"column:name" json:"name"`
+	ManagementStatus int    `gorm:"column:management_status" json:"management_status"`
+	// SupportsImageInput is the admin's declaration of whether this model can
+	// read images. Tri-state: nil = undeclared, and the gateway must not
+	// touch images at all (neither describe nor strip) — a missing
+	// declaration must never degrade a vision-capable model.
+	SupportsImageInput *bool     `gorm:"column:supports_image_input" json:"supports_image_input"`
+	CreatedAt          time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt          time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 func (Model) TableName() string { return "models" }

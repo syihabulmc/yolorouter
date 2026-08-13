@@ -34,6 +34,8 @@ const (
 	InputCompressionConflict   = 11014 // optimistic-lock CAS miss on input_compression_enabled PUT (another writer committed first)
 	CompressEnabledRequired    = 11015 // compress_enabled_override is true but compress_enabled is not supplied
 	APIKeyPlaintextUnavailable = 11016 // the key predates the encrypted_key column (migration 00021), so its plaintext was never stored and cannot be revealed
+	VisionFallbackConflict     = 11017 // optimistic-lock CAS miss on the vision_fallback settings pair PUT (another writer committed first)
+	VisionFallbackModelUnknown = 11018 // vision_fallback_model names a model this gateway has no record of
 
 	// === Provider errors (12xxx) ===
 	ProviderNotFound         = 12001
@@ -131,6 +133,8 @@ var ErrorMessages = map[int]string{
 	InputCompressionConflict:   "input compression setting was modified concurrently, please refresh and retry",
 	CompressEnabledRequired:    "compress_enabled must be set when compress_enabled_override is true",
 	APIKeyPlaintextUnavailable: "this key was created before the reveal feature and its full value cannot be recovered, please create a new one",
+	VisionFallbackConflict:     "vision fallback settings were modified concurrently, please refresh and retry",
+	VisionFallbackModelUnknown: "vision fallback model is not a model configured on this gateway",
 
 	ProviderNotFound:         "provider not found",
 	ProviderNameTaken:        "provider name already taken",
@@ -202,6 +206,8 @@ var (
 	ErrInputCompressionConflict   = errors.New(ErrorMessages[InputCompressionConflict])
 	ErrCompressEnabledRequired    = errors.New(ErrorMessages[CompressEnabledRequired])
 	ErrAPIKeyPlaintextUnavailable = errors.New(ErrorMessages[APIKeyPlaintextUnavailable])
+	ErrVisionFallbackConflict     = errors.New(ErrorMessages[VisionFallbackConflict])
+	ErrVisionFallbackModelUnknown = errors.New(ErrorMessages[VisionFallbackModelUnknown])
 
 	ErrProviderNotFound         = errors.New(ErrorMessages[ProviderNotFound])
 	ErrProviderNameTaken        = errors.New(ErrorMessages[ProviderNameTaken])

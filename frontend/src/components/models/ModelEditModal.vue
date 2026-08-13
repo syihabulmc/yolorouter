@@ -1,7 +1,8 @@
 <!-- frontend/src/components/models/ModelEditModal.vue -->
-<!-- Edits an existing model's public name, prefilled from the `model` prop.
-     Structure (NModal card preset, v-model:show, @updated) mirrors
-     ProviderEditModal.vue's show/save/emit pattern. -->
+<!-- Edits an existing model's public name and image-input declaration,
+     prefilled from the `model` prop. Structure (NModal card preset,
+     v-model:show, @updated) mirrors ProviderEditModal.vue's
+     show/save/emit pattern. -->
 <template>
   <ModalDrawer
     v-model:show="showModel"
@@ -22,6 +23,12 @@
         </template>
         <n-input v-model:value="form.name" :placeholder="t('models.nameHint')" />
       </n-form-item>
+      <n-form-item path="imageInput">
+        <template #label>
+          <HelpLabel :tip="t('models.imageInput_tip')">{{ t('models.imageInput') }}</HelpLabel>
+        </template>
+        <n-select v-model:value="form.imageInput" :options="imageInputOptions" />
+      </n-form-item>
     </n-form>
   </ModalDrawer>
 </template>
@@ -29,12 +36,12 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useDialog, useMessage, type FormInst, type FormRules } from 'naive-ui'
+import { NSelect, useDialog, useMessage, type FormInst, type FormRules, type SelectOption } from 'naive-ui'
 import HelpLabel from '../HelpLabel.vue'
 import ModalDrawer from '../common/ModalDrawer.vue'
 import { useModelsStore } from '../../store/models'
 import { displayMessage } from '../../api/client'
-import type { Model } from '../../api/models'
+import type { ImageInputChoice, Model } from '../../api/models'
 import { modelNameRule } from '../../utils/modelValidators'
 import { modelRenameContent } from '../../utils/impactSummary'
 
@@ -55,14 +62,25 @@ const store = useModelsStore()
 
 const formRef = ref<FormInst | null>(null)
 const submitting = ref(false)
-const form = reactive({ name: '' })
+const form = reactive<{ name: string; imageInput: ImageInputChoice }>({ name: '', imageInput: 'unknown' })
 const rules: FormRules = { name: modelNameRule(t) }
+
+const imageInputOptions = computed<SelectOption[]>(() => [
+  { label: t('models.imageInputUnknown'), value: 'unknown' },
+  { label: t('models.imageInputYes'), value: 'yes' },
+  { label: t('models.imageInputNo'), value: 'no' },
+])
+
+function toImageInputChoice(v: boolean | null): ImageInputChoice {
+  return v === null ? 'unknown' : v ? 'yes' : 'no'
+}
 
 watch(
   [() => props.show, () => props.model],
   ([visible, model]) => {
     if (!visible || !model) return
     form.name = model.name
+    form.imageInput = toImageInputChoice(model.supports_image_input)
   },
 )
 
@@ -73,8 +91,14 @@ async function onSubmit() {
   } catch {
     return
   }
-  // An unchanged name is not a rename — close without a scare dialog.
+  // An unchanged name is not a rename. If only the image-input declaration
+  // changed, save it directly — the rename confirm (live-traffic warning)
+  // exists for renames alone and must not scare a declaration edit.
   if (form.name === props.model.name) {
+    if (form.imageInput !== toImageInputChoice(props.model.supports_image_input)) {
+      void doSave()
+      return
+    }
     showModel.value = false
     return
   }
@@ -101,16 +125,16 @@ async function onSubmit() {
     positiveText: t('models.save'),
     negativeText: t('models.cancel'),
     onPositiveClick: () => {
-      void doRename()
+      void doSave()
     },
   })
 }
 
-async function doRename() {
+async function doSave() {
   if (!props.model) return
   submitting.value = true
   try {
-    await store.update(props.model.id, form.name)
+    await store.update(props.model.id, form.name, form.imageInput)
     message.success(t('models.saveSuccess'))
     emit('updated')
     showModel.value = false

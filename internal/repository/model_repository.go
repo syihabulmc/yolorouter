@@ -38,9 +38,18 @@ func CreateModel(db *gorm.DB, m *model.Model) error {
 	return db.Create(m).Error
 }
 
-func UpdateModelNameStatus(db *gorm.DB, id uint, name string, status int, now time.Time) error {
-	return db.Model(&model.Model{}).Where("id = ?", id).
-		Updates(map[string]interface{}{"name": name, "management_status": status, "updated_at": now}).Error
+// UpdateModelNameStatus writes name/status — and, when imageInputSet is
+// true, the tri-state image-input declaration — in ONE statement, so a
+// concurrent PATCH can never interleave the fields into a row neither
+// caller submitted. imageInput nil with imageInputSet=true stores NULL
+// (clearing a previous declaration); imageInputSet=false leaves the column
+// untouched.
+func UpdateModelNameStatus(db *gorm.DB, id uint, name string, status int, imageInputSet bool, imageInput *bool, now time.Time) error {
+	updates := map[string]interface{}{"name": name, "management_status": status, "updated_at": now}
+	if imageInputSet {
+		updates["supports_image_input"] = imageInput
+	}
+	return db.Model(&model.Model{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func ListModelCandidatesByModelID(db *gorm.DB, modelID uint) ([]model.ModelCandidate, error) {

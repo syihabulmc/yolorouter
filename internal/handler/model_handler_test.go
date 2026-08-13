@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
@@ -797,5 +798,127 @@ func TestGetCandidateSuggestPriceReturnsProviderNotFound(t *testing.T) {
 	w, env := getSuggestPrice(t, r, "provider_id=999999&provider_model_name=gpt-4o")
 	if env.Code != errcode.ProviderNotFound {
 		t.Fatalf("expected ProviderNotFound, got code=%d body: %s", env.Code, w.Body.String())
+	}
+}
+
+// TestPatchModelImageInputTriState pins the declaration lifecycle: "no"
+// persists false, a PATCH without the field leaves the stored value alone,
+// and "unknown" clears back to undeclared (NULL) — three distinct states,
+// not two.
+func TestPatchModelImageInputTriState(t *testing.T) {
+	r, _ := newModelTestRouter(t)
+	id := createModelForTest(t, r, "text-only")
+	patch := func(body map[string]interface{}) modelImageInputResponse {
+		t.Helper()
+		w, env := doJSON(t, r, http.MethodPatch, fmt.Sprintf("/api/admin/models/%d", id), body, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("patch: expected 200, got %d, body: %s", w.Code, w.Body.String())
+		}
+		var m modelImageInputResponse
+		if err := json.Unmarshal(env.Data, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return m
+	}
+
+	if m := patch(map[string]interface{}{"name": "text-only", "image_input": "no"}); m.SupportsImageInput == nil || *m.SupportsImageInput {
+		t.Fatalf("after image_input=no: got %v, want false", m.SupportsImageInput)
+	}
+	// Field absent: the stored declaration must survive an unrelated rename.
+	if m := patch(map[string]interface{}{"name": "text-only-v2"}); m.SupportsImageInput == nil || *m.SupportsImageInput {
+		t.Fatalf("after rename without field: got %v, want false preserved", m.SupportsImageInput)
+	}
+	if m := patch(map[string]interface{}{"name": "text-only-v2", "image_input": "unknown"}); m.SupportsImageInput != nil {
+		t.Fatalf("after image_input=unknown: got %v, want nil (undeclared)", *m.SupportsImageInput)
+	}
+}
+
+type modelImageInputResponse struct {
+	Name               string `json:"name"`
+	SupportsImageInput *bool  `json:"supports_image_input"`
+}
+
+// TestPatchModelRejectedRenameDoesNotPersistImageInput pins the write order:
+// a PATCH whose rename half is rejected (name already taken) must not have
+// quietly persisted the image-input declaration first — the client sees an
+// error and the database must still agree with the pre-edit view.
+func TestPatchModelRejectedRenameDoesNotPersistImageInput(t *testing.T) {
+	r, _ := newModelTestRouter(t)
+	id := createModelForTest(t, r, "keep-me")
+	createModelForTest(t, r, "taken")
+
+	w, _ := doJSON(t, r, http.MethodPatch, fmt.Sprintf("/api/admin/models/%d", id),
+		map[string]interface{}{"name": "taken", "image_input": "no"}, nil)
+	if w.Code == http.StatusOK {
+		t.Fatalf("expected the duplicate rename to be rejected, got 200: %s", w.Body.String())
+	}
+
+	_, env := doJSON(t, r, http.MethodGet, fmt.Sprintf("/api/admin/models/%d", id), nil, nil)
+	var m modelImageInputResponse
+	if err := json.Unmarshal(env.Data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m.SupportsImageInput != nil {
+		t.Fatalf("declaration persisted despite rejected PATCH: got %v, want nil", *m.SupportsImageInput)
+	}
+}
+
+// TestPatchModelRenameFollowsVisionFallbackSetting pins the rename cascade:
+// when the renamed model is the configured vision-fallback describe model,
+// the setting follows the new public name (version bumped so cache refreshes
+// and CAS writers see it); renaming any other model leaves it untouched.
+func TestPatchModelRenameFollowsVisionFallbackSetting(t *testing.T) {
+	r, db := newModelTestRouter(t)
+	fallbackID := createModelForTest(t, r, "eyes-v1")
+	otherID := createModelForTest(t, r, "unrelated")
+	if err := db.Exec(`UPDATE system_settings SET value = 'eyes-v1' WHERE key = 'vision_fallback_model'`).Error; err != nil {
+		t.Fatalf("seed setting: %v", err)
+	}
+
+	readSetting := func() (string, int64) {
+		t.Helper()
+		var row struct {
+			Value   string
+			Version int64
+		}
+		if err := db.Table("system_settings").Select("value, version").
+			Where("key = 'vision_fallback_model'").Take(&row).Error; err != nil {
+			t.Fatalf("read setting: %v", err)
+		}
+		return row.Value, row.Version
+	}
+	_, verBefore := readSetting()
+
+	// Renaming an unrelated model must not touch the reference.
+	w, _ := doJSON(t, r, http.MethodPatch, fmt.Sprintf("/api/admin/models/%d", otherID), map[string]interface{}{"name": "unrelated-v2"}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unrelated rename: %d %s", w.Code, w.Body.String())
+	}
+	if v, ver := readSetting(); v != "eyes-v1" || ver != verBefore {
+		t.Fatalf("unrelated rename touched setting: %q v%d", v, ver)
+	}
+
+	// Renaming the fallback model itself must carry the reference along.
+	w, _ = doJSON(t, r, http.MethodPatch, fmt.Sprintf("/api/admin/models/%d", fallbackID), map[string]interface{}{"name": "eyes-v2"}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("fallback rename: %d %s", w.Code, w.Body.String())
+	}
+	if v, ver := readSetting(); v != "eyes-v2" || ver != verBefore+1 {
+		t.Fatalf("setting after rename = %q v%d, want eyes-v2 v%d", v, ver, verBefore+1)
+	}
+	// The cascade must leave the settings PAIR intact: the reader rejects a
+	// version mismatch between the two rows as corruption, and the CAS save
+	// needs both at one version — so the proof that the rename didn't brick
+	// the setting is a successful read through the real reader, followed by
+	// a successful CAS save at the version it returned.
+	snap, snapVer, err := repository.GetVisionFallback(db)
+	if err != nil {
+		t.Fatalf("GetVisionFallback after rename: %v", err)
+	}
+	if snap.Model != "eyes-v2" {
+		t.Fatalf("snapshot model = %q, want eyes-v2", snap.Model)
+	}
+	if _, _, err := repository.UpdateVisionFallback(db, snapVer, "eyes-v2", "still saveable"); err != nil {
+		t.Fatalf("CAS save after rename must succeed, got: %v", err)
 	}
 }

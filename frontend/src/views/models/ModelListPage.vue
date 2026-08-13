@@ -3,6 +3,9 @@
   <div class="common-page">
     <PageHeader :eyebrow="t('models.eyebrow')" :title="t('models.pageTitle')" :description="t('models.pageDescription')">
       <template #actions>
+        <n-button @click="showVisionFallback = true">
+          {{ t('models.visionFallbackButton') }}
+        </n-button>
         <n-button type="primary" @click="showCreate = true">
           <template #icon><Plus :size="16" /></template>
           {{ t('models.createButton') }}
@@ -81,6 +84,7 @@
 
     <NewModelModal v-model:show="showCreate" />
     <ModelEditModal v-model:show="showEditModel" :model="editingModel" @updated="onEdited" />
+    <VisionFallbackModal v-model:show="showVisionFallback" />
   </div>
 </template>
 
@@ -106,6 +110,7 @@ import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import NewModelModal from '../../components/models/NewModelModal.vue'
 import ModelEditModal from '../../components/models/ModelEditModal.vue'
+import VisionFallbackModal from '../../components/models/VisionFallbackModal.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import ResponsiveDropdown from '../../components/common/ResponsiveDropdown.vue'
 import FilterSelectField from '../../components/common/FilterSelectField.vue'
@@ -121,6 +126,7 @@ const message = useMessage()
 const store = useModelsStore()
 const { importToCCS } = useCCSwitchImport()
 const showCreate = ref(false)
+const showVisionFallback = ref(false)
 // Inline row edit: reuse the same edit modal the detail page uses, opened
 // straight from the list so a name change needs no navigation.
 const showEditModel = ref(false)

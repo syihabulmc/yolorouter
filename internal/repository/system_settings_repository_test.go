@@ -146,3 +146,65 @@ func TestUpdateInputCompressionCASConflict(t *testing.T) {
 		t.Fatalf("want ErrInputCompressionConflict, got %v", err)
 	}
 }
+
+func newVisionFallbackTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db := newSettingsTestDB(t)
+	db.Exec(`INSERT INTO system_settings (key, value) VALUES ('vision_fallback_model',''),('vision_fallback_prompt','')`)
+	return db
+}
+
+func TestGetVisionFallbackReadsBothRows(t *testing.T) {
+	db := newVisionFallbackTestDB(t)
+	db.Exec(`UPDATE system_settings SET value='glm-4v' WHERE key='vision_fallback_model'`)
+	s, ver, err := GetVisionFallback(db)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if s.Model != "glm-4v" || s.Prompt != "" {
+		t.Fatalf("snapshot = %+v, want model glm-4v with empty prompt", s)
+	}
+	if ver != 1 {
+		t.Fatalf("version = %d, want 1", ver)
+	}
+}
+
+// Missing rows (a pre-00022 database) must read as the disabled default, not
+// an error — the gateway read path fails open on configuration.
+func TestGetVisionFallbackMissingRowsReturnsDefault(t *testing.T) {
+	db := newSettingsTestDB(t)
+	s, ver, err := GetVisionFallback(db)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if s.Model != "" || s.Prompt != "" || ver != 0 {
+		t.Fatalf("want disabled default, got %+v ver %d", s, ver)
+	}
+}
+
+func TestUpdateVisionFallbackCASConflict(t *testing.T) {
+	db := newVisionFallbackTestDB(t)
+	if _, _, err := UpdateVisionFallback(db, 1, "glm-4v", "describe it"); err != nil {
+		t.Fatalf("first update: %v", err)
+	}
+	_, _, err := UpdateVisionFallback(db, 1, "", "")
+	if !errors.Is(err, errcode.ErrVisionFallbackConflict) {
+		t.Fatalf("want ErrVisionFallbackConflict, got %v", err)
+	}
+}
+
+func TestUpdateVisionFallbackReturnsNewSnapshot(t *testing.T) {
+	db := newVisionFallbackTestDB(t)
+	s, ver, err := UpdateVisionFallback(db, 1, "glm-4v", "custom prompt")
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if s.Model != "glm-4v" || s.Prompt != "custom prompt" || ver != 2 {
+		t.Fatalf("got %+v ver %d, want committed snapshot at version 2", s, ver)
+	}
+	// The DB agrees with the returned snapshot.
+	got, gotVer, err := GetVisionFallback(db)
+	if err != nil || got != s || gotVer != ver {
+		t.Fatalf("reread = %+v ver %d err %v, want %+v ver %d", got, gotVer, err, s, ver)
+	}
+}

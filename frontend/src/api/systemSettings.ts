@@ -52,3 +52,28 @@ export function updateInputCompression(payload: {
     body: JSON.stringify(payload),
   })
 }
+
+// Global vision-fallback configuration: which model describes images for
+// text-only targets (empty = feature off) and the describe prompt (empty =
+// built-in default). Same authoritative-read + CAS contract; a concurrent
+// edit surfaces as errcode 11017 (HTTP 409).
+export interface VisionFallbackSetting {
+  model: string
+  prompt: string
+  version: number
+}
+
+export function getVisionFallback(): Promise<VisionFallbackSetting> {
+  return apiFetch('/api/admin/system-settings/vision-fallback')
+}
+
+export function updateVisionFallback(payload: {
+  model: string
+  prompt: string
+  version: number
+}): Promise<VisionFallbackSetting> {
+  return apiFetch('/api/admin/system-settings/vision-fallback', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}

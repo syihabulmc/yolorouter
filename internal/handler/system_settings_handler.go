@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -131,5 +132,65 @@ func PutInputCompression(svc *service.SystemSettingsService) gin.HandlerFunc {
 			return
 		}
 		response.Success(c, inputCompressionResponse{Enabled: enabled, Version: ver})
+	}
+}
+
+type visionFallbackResponse struct {
+	Model   string `json:"model"`
+	Prompt  string `json:"prompt"`
+	Version int64  `json:"version"`
+}
+
+// putVisionFallbackRequest: pointers make absent fields distinguishable from
+// zero values, so a partial body cannot silently clear the model (= disable
+// the feature) or the prompt.
+type putVisionFallbackRequest struct {
+	Model   *string `json:"model"`
+	Prompt  *string `json:"prompt"`
+	Version *int64  `json:"version"`
+}
+
+// GetVisionFallback returns the authoritative global state (DB read,
+// bypassing the cache) so the admin always sees the committed value.
+func GetVisionFallback(svc *service.SystemSettingsService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		s, ver, err := svc.GetVisionFallbackForHandler(c.Request.Context())
+		if err != nil {
+			response.InternalError(c, err.Error())
+			return
+		}
+		response.Success(c, visionFallbackResponse{Model: s.Model, Prompt: s.Prompt, Version: ver})
+	}
+}
+
+// PutVisionFallback validates + CAS-updates the pair. version is required
+// (optimistic lock); model and prompt must both be present (pointers). A CAS
+// miss returns 409 with its own code so the frontend can route retries; an
+// unknown model name is a 400-class validation error.
+func PutVisionFallback(svc *service.SystemSettingsService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req putVisionFallbackRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.ParamError(c, err.Error())
+			return
+		}
+		if req.Model == nil || req.Prompt == nil || req.Version == nil || *req.Version < 1 {
+			response.ParamError(c, "model, prompt and version (>=1) are all required")
+			return
+		}
+		s, ver, err := svc.UpdateVisionFallback(c.Request.Context(), *req.Version, strings.TrimSpace(*req.Model), *req.Prompt)
+		if err != nil {
+			switch {
+			case errors.Is(err, errcode.ErrVisionFallbackConflict):
+				// 409 is not produced by httpStatusForCode's range mapping; set it explicitly.
+				response.ErrorStatus(c, http.StatusConflict, errcode.VisionFallbackConflict, errcode.GetMessage(errcode.VisionFallbackConflict))
+			case errors.Is(err, errcode.ErrVisionFallbackModelUnknown):
+				response.Error(c, errcode.VisionFallbackModelUnknown, errcode.GetMessage(errcode.VisionFallbackModelUnknown))
+			default:
+				response.InternalError(c, err.Error())
+			}
+			return
+		}
+		response.Success(c, visionFallbackResponse{Model: s.Model, Prompt: s.Prompt, Version: ver})
 	}
 }

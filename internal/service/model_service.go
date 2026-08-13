@@ -71,12 +71,16 @@ type CandidateView struct {
 }
 
 type ModelView struct {
-	ID               uint            `json:"id"`
-	Name             string          `json:"name"`
-	ManagementStatus int             `json:"management_status"`
-	RunningStatus    string          `json:"running_status"`
-	Candidates       []CandidateView `json:"candidates"`
-	CreatedAt        time.Time       `json:"created_at"`
+	ID               uint   `json:"id"`
+	Name             string `json:"name"`
+	ManagementStatus int    `json:"management_status"`
+	RunningStatus    string `json:"running_status"`
+	// SupportsImageInput mirrors the admin's tri-state declaration (nil =
+	// undeclared): whether this model can read images, driving the vision
+	// fallback and strip behaviors in the gateway.
+	SupportsImageInput *bool           `json:"supports_image_input"`
+	Candidates         []CandidateView `json:"candidates"`
+	CreatedAt          time.Time       `json:"created_at"`
 }
 
 // Why a candidate cannot be routed to. Each value names a different repair, and
@@ -198,7 +202,7 @@ func (s *ModelService) toModelView(m model.Model, candidates []model.ModelCandid
 		views = append(views, buildCandidateView(c, providerName, blockedBy))
 	}
 	return ModelView{
-		ID: m.ID, Name: m.Name, ManagementStatus: m.ManagementStatus,
+		ID: m.ID, Name: m.Name, ManagementStatus: m.ManagementStatus, SupportsImageInput: m.SupportsImageInput,
 		RunningStatus: computeModelRunningStatus(views), Candidates: views, CreatedAt: m.CreatedAt,
 	}
 }
@@ -1202,18 +1206,41 @@ func (s *ModelService) DeleteModelCandidate(id uint) error {
 	return repository.DeleteModelCandidate(s.db, id)
 }
 
-func (s *ModelService) UpdateModelNameStatus(id uint, name string, now time.Time) (*ModelView, error) {
+// UpdateModelNameStatus saves the model's name — and, when imageInputSet is
+// true, the tri-state image-input declaration in the same statement, so
+// concurrent PATCHes cannot interleave the two fields. A rename also follows
+// through to the vision-fallback setting when the renamed model is the
+// configured describe model: the setting stores the public name, and leaving
+// the old name behind would silently disable the feature at describe time.
+// The model row is re-read inside the same transaction that writes it, so a
+// concurrent status flip or rename cannot slip between read and write. The
+// gateway's settings cache picks the renamed reference up within its 30s
+// TTL; in that window a describe lookup misses and the image passes through
+// unconverted, which is the feature's normal degrade mode.
+func (s *ModelService) UpdateModelNameStatus(id uint, name string, imageInputSet bool, imageInput *bool, now time.Time) (*ModelView, error) {
 	if !isValidModelName(name) {
 		return nil, fmt.Errorf("%w: model name must contain only letters, digits, dots, hyphens, and underscores", errcode.ErrModelNameTaken)
 	}
-	m, err := repository.FindModelByID(s.db, id)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errcode.ErrModelNotFound
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		m, err := repository.FindModelByID(tx, id)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errcode.ErrModelNotFound
+			}
+			return err
 		}
-		return nil, err
-	}
-	if err := repository.UpdateModelNameStatus(s.db, id, name, m.ManagementStatus, now); err != nil {
+		if err := repository.UpdateModelNameStatus(tx, id, name, m.ManagementStatus, imageInputSet, imageInput, now); err != nil {
+			return err
+		}
+		if name != m.Name {
+			return repository.RenameVisionFallbackModel(tx, m.Name, name)
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errcode.ErrModelNotFound) {
+			return nil, err
+		}
 		if isUniqueViolation(err) {
 			return nil, errcode.ErrModelNameTaken
 		}
@@ -1234,7 +1261,7 @@ func (s *ModelService) SetModelStatus(id uint, enabled bool, now time.Time) erro
 	if enabled {
 		status = model.ModelStatusEnabled
 	}
-	return repository.UpdateModelNameStatus(s.db, id, m.Name, status, now)
+	return repository.UpdateModelNameStatus(s.db, id, m.Name, status, false, nil, now)
 }
 
 // modelImpactRecentWindow is how far back the impact preview counts live
