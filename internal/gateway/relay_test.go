@@ -2403,3 +2403,125 @@ func TestLoopbackTokenHeaderIsMasked(t *testing.T) {
 		t.Fatalf("header %q is not masked by the sanitizer — the process token would persist in request_logs", loopback.HeaderInternal)
 	}
 }
+
+// TestVisionFallbackDescribesAcrossAllIngressProtocols is the acceptance
+// sweep: on every ingress protocol, an image request to a declared-blind
+// model gets its image described through the loopback model and the
+// UPSTREAM receives the description as text — no image part survives.
+func TestVisionFallbackDescribesAcrossAllIngressProtocols(t *testing.T) {
+	const redPixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "openai chat",
+			path: "/v1/chat/completions",
+			body: `{"model":"blind","messages":[{"role":"user","content":[` +
+				`{"type":"text","text":"what is this"},` +
+				`{"type":"image_url","image_url":{"url":"data:image/png;base64,` + redPixel + `"}}]}]}`,
+		},
+		{
+			name: "anthropic messages",
+			path: "/v1/messages",
+			body: `{"model":"blind","max_tokens":128,"messages":[{"role":"user","content":[` +
+				`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + redPixel + `"}},` +
+				`{"type":"text","text":"what is this"}]}]}`,
+		},
+		{
+			name: "openai responses",
+			path: "/v1/responses",
+			body: `{"model":"blind","input":[{"role":"user","content":[` +
+				`{"type":"input_image","image_url":"data:image/png;base64,` + redPixel + `"},` +
+				`{"type":"input_text","text":"what is this"}]}]}`,
+		},
+		{
+			name: "gemini generateContent",
+			path: "/v1beta/models/blind:generateContent",
+			body: `{"contents":[{"role":"user","parts":[` +
+				`{"inline_data":{"mime_type":"image/png","data":"` + redPixel + `"}},` +
+				`{"text":"what is this"}]}]}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.NewSQLiteDB(t)
+			var upstreamBody []byte
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamBody, _ = io.ReadAll(r.Body)
+				_, _ = w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+			}))
+			defer upstream.Close()
+			var loopBody []byte
+			loop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				loopBody, _ = io.ReadAll(r.Body)
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"a single red pixel"}}]}`))
+			}))
+			defer loop.Close()
+
+			svc := newSvcWithSettings(t, db, stubSettingsProvider{
+				visionFallback: settings.VisionFallbackSetting{Model: "eyes"},
+			})
+			RegisterIngressRewriter(svc, visionfallback.New(db, loop.URL), StageVisionFallback,
+				func(e *Exchange) visionfallback.View { return e })
+
+			p := createProvider(t, db, "p1", upstream.URL)
+			createProviderKey(t, db, svc.masterKey, p.ID, "sk-1", "k1", 1, true)
+			m := createModelAndCandidate(t, db, p, "blind", "blind-real", true, true, 1)
+			if err := db.Model(m).Update("supports_image_input", false).Error; err != nil {
+				t.Fatalf("declare blind: %v", err)
+			}
+			apiKey := createAPIKey(t, db, model.APIKeyStatusActive, []uint{m.ID})
+
+			c, w := newCtxPath(tc.path, []byte(tc.body))
+			svc.Handle(c, apiKey)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+			}
+			// The vision model must have received THIS protocol's image
+			// payload — a broken per-protocol extractor that posts an empty
+			// or wrong URL would still get the canned description back.
+			if !bytes.Contains(loopBody, []byte(redPixel)) {
+				t.Fatalf("loopback describe call did not carry the image; got:\n%.400s", loopBody)
+			}
+			if !bytes.Contains(upstreamBody, []byte("a single red pixel")) {
+				t.Fatalf("upstream did not receive the description; got:\n%s", upstreamBody)
+			}
+			if bytes.Contains(upstreamBody, []byte(redPixel)) {
+				t.Fatalf("image survived into the upstream body:\n%.400s", upstreamBody)
+			}
+			// "No image part survives" means shape, not just bytes: an
+			// image_url part whose URL was swapped for the description would
+			// pass both checks above yet still present an image-shaped part
+			// to a blind provider. Decode the (OpenAI-protocol) upstream
+			// body and require every structured content part to be text.
+			var up struct {
+				Messages []struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(upstreamBody, &up); err != nil {
+				t.Fatalf("decode upstream body: %v\n%s", err, upstreamBody)
+			}
+			if len(up.Messages) == 0 {
+				t.Fatalf("upstream body has no messages:\n%s", upstreamBody)
+			}
+			for i, msg := range up.Messages {
+				var parts []struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(msg.Content, &parts) != nil {
+					continue // plain string content is text by definition
+				}
+				for j, part := range parts {
+					if part.Type != "text" {
+						t.Fatalf("message %d part %d is %q, want every upstream part to be text:\n%s",
+							i, j, part.Type, upstreamBody)
+					}
+				}
+			}
+		})
+	}
+}

@@ -467,3 +467,56 @@ func TestStripWorksOnResponsesBody(t *testing.T) {
 		t.Fatalf("records = %v, want [vision_fallback_stripped]", names)
 	}
 }
+
+// Gemini strip: an inline image in a parts array becomes the placeholder
+// text part, sibling parts and unmodeled fields survive — the one positive
+// gemini coverage below the acceptance sweep, and the only exercise of the
+// gemini text-part shape on the strip path.
+func TestStripWorksOnGeminiBody(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedModel(t, db, "blind-gem", boolPtr(false))
+	f := New(db, "http://localhost:0")
+	body := []byte(`{"generationConfig":{"temperature":0.2},"contents":[{"role":"user","parts":[` +
+		`{"inline_data":{"mime_type":"image/png","data":"aGVsbG8="}},` +
+		`{"text":"describe"}]}]}`)
+	sink := &fakeSink{}
+
+	out, err := f.RewriteIngress(context.Background(),
+		fakeView{proto: protocols.ProtocolGemini, path: "/v1beta/models/blind-gem:generateContent", chat: true}, body, sink)
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if strings.Contains(string(out), "aGVsbG8=") || strings.Contains(string(out), "inline_data") {
+		t.Fatalf("gemini image survived the strip:\n%s", out)
+	}
+	// The placeholder must be a well-formed gemini TEXT part — a substring
+	// match would also pass if the renderer nested the text field under
+	// another object or truncated the value. Decode and require the first
+	// part (where the image was) to carry the full placeholder in a direct
+	// text field.
+	var gem struct {
+		Contents []struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(out, &gem); err != nil {
+		t.Fatalf("decode gemini output: %v\n%s", err, out)
+	}
+	if len(gem.Contents) == 0 || len(gem.Contents[0].Parts) == 0 {
+		t.Fatalf("gemini output lost its contents/parts:\n%s", out)
+	}
+	if got := gem.Contents[0].Parts[0].Text; got != strippedPlaceholder {
+		t.Fatalf("first part text = %q, want the full placeholder %q", got, strippedPlaceholder)
+	}
+	for _, want := range []string{`"temperature":0.2`, `"text":"describe"`} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("field lost in gemini strip: want %s in\n%s", want, out)
+		}
+	}
+	names := sink.recordNames()
+	if len(names) != 1 || names[0] != "vision_fallback_stripped" {
+		t.Fatalf("records = %v, want [vision_fallback_stripped]", names)
+	}
+}
