@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-08-12",
+  "updated_at": "2026-08-13",
   "currency": "CNY",
   "unit": "per_million_tokens",
   "prices": {
@@ -641,6 +641,12 @@
       "qwen-deep-research": {
         "input": 54,
         "output": 163,
+        "cacheWrite": null,
+        "cacheRead": null
+      },
+      "qwen3.8-2.4t-a95b": {
+        "input": 12,
+        "output": 36,
         "cacheWrite": null,
         "cacheRead": null
       },
