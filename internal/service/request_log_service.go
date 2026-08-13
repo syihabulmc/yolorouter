@@ -55,6 +55,9 @@ type RequestLogListFilter struct {
 	IsStream    *bool
 	CostKnown   *bool
 	KeyPrefix   string
+	// Source narrows on who initiated the request; values are "" (all) and
+	// the two model.RequestLogSource* constants.
+	Source string
 	// RequestPath narrows on the caller-side request path. Exact match,
 	// except a trailing "/" selects the whole subtree — covering the
 	// model-bearing Gemini path family with one value.
@@ -78,7 +81,11 @@ type RequestLogListItem struct {
 	ModelName  string `json:"model_name"`
 	// RequestPath is the endpoint the caller hit (e.g. /v1/chat/completions);
 	// empty for rows rejected before relay and for rows predating the field.
-	RequestPath      string  `json:"request_path"`
+	RequestPath string `json:"request_path"`
+	// Source is "" for a caller request, "vision_fallback" for a describe
+	// sub-call working for ParentRequestID.
+	Source           string  `json:"source"`
+	ParentRequestID  string  `json:"parent_request_id"`
 	ProviderID       *uint   `json:"provider_id"`
 	ProviderName     string  `json:"provider_name"`
 	IsStream         bool    `json:"is_stream"`
@@ -118,6 +125,8 @@ type RequestLogDetail struct {
 	OwnerLabel       string  `json:"owner_label"`
 	ModelName        string  `json:"model_name"`
 	RequestPath      string  `json:"request_path"`
+	Source           string  `json:"source"`
+	ParentRequestID  string  `json:"parent_request_id"`
 	UpstreamURL      string  `json:"upstream_url"`
 	ProviderID       *uint   `json:"provider_id"`
 	ProviderName     string  `json:"provider_name"`
@@ -220,6 +229,8 @@ func (s *RequestLogService) toListItems(rows []model.RequestLog) ([]RequestLogLi
 			OwnerLabel:         lookupName(r.APIKeyID, ownerLabels),
 			ModelName:          r.ModelName,
 			RequestPath:        r.RequestPath,
+			Source:             r.Source,
+			ParentRequestID:    r.ParentRequestID,
 			ProviderID:         r.ProviderID,
 			ProviderName:       lookupName(r.ProviderID, providerNames),
 			IsStream:           r.IsStream,
@@ -340,6 +351,8 @@ func (s *RequestLogService) GetRequestLogDetail(requestID string) (*RequestLogDe
 		OwnerLabel:         lookupName(row.APIKeyID, ownerLabels),
 		ModelName:          row.ModelName,
 		RequestPath:        row.RequestPath,
+		Source:             row.Source,
+		ParentRequestID:    row.ParentRequestID,
 		UpstreamURL:        row.UpstreamURL,
 		ProviderID:         row.ProviderID,
 		ProviderName:       lookupName(row.ProviderID, providerNames),
@@ -526,6 +539,7 @@ func toRepoFilterFromList(f RequestLogListFilter) *repository.RequestLogFilter {
 		IsStream:    f.IsStream,
 		CostKnown:   f.CostKnown,
 		KeyPrefix:   f.KeyPrefix,
+		Source:      f.Source,
 		RequestPath: f.RequestPath,
 		StartTime:   f.StartTime,
 		EndTime:     f.EndTime,
@@ -573,10 +587,11 @@ func DeriveStatusClass(statusCode int, failReason *string) string {
 	return repository.StatusFailed
 }
 
-// csvHeaderRow is the column order for the CSV export. Mirrors the
-// list-row DTO field order so the exported file matches what the UI table
-// shows — same column selection, just renamed to snake_case for spreadsheet
-// readability.
+// csvHeaderRow is the column order for the CSV export: a curated subset of
+// the list-row DTO in that DTO's field order (request_path, source and
+// parent_request_id stay out — the export targets spreadsheet analysis of
+// traffic and cost, and rows are filterable by those dimensions before
+// exporting).
 func csvHeaderRow() []string {
 	return []string{
 		"request_id", "created_at", "status_class", "status_code",

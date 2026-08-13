@@ -379,6 +379,12 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// logs normally, so the volume is visible and paid for — accepted
 	// rather than teaching the limiter about ticketless debits.
 	rc.visionFallbackSubCall = c.GetHeader(loopback.HeaderInternal) == loopback.Token
+	if rc.visionFallbackSubCall {
+		// The parent linkage is only trusted alongside a valid token — an
+		// outside caller must not be able to attach itself to someone
+		// else's request row.
+		rc.parentRequestID = c.GetHeader(loopback.HeaderParent)
+	}
 	rc.authCredential = GatewayCredential(c)
 
 	if !s.checkKeyStateAndLimits(c, rc, apiKey, start) {

@@ -61,6 +61,14 @@
           <NDescriptionsItem :label="t('requestLogs.fieldRequestEndpoint')" :span="2">
             <div class="mono-cell">{{ detail.request_path || '—' }}</div>
           </NDescriptionsItem>
+          <NDescriptionsItem v-if="detail.source" :label="t('requestLogs.fieldSource')">
+            <NTag size="small" round :bordered="false" type="info">{{ t('requestLogs.sourceBadge') }}</NTag>
+          </NDescriptionsItem>
+          <NDescriptionsItem v-if="detail.parent_request_id" :label="t('requestLogs.fieldParentRequest')">
+            <RouterLink class="parent-link mono-cell" :to="`/request-logs/${encodeURIComponent(detail.parent_request_id)}`">
+              {{ detail.parent_request_id }}
+            </RouterLink>
+          </NDescriptionsItem>
            <NDescriptionsItem :label="t('requestLogs.fieldUpstreamEndpoint')" :span="2">
             <div class="mono-cell">{{ detail.upstream_url || '—' }}</div>
           </NDescriptionsItem>
@@ -314,11 +322,10 @@ const loading = ref(false)
 const notFound = ref(false)
 const isMobile = useIsMobile()
 
-// requestId comes from the URL. Computed (not const) so a future in-place
-// navigation between detail pages re-runs the loader via watch — kept
-// minimal here because the router currently does full remounts on path
-// change, but the computed is still cheaper than threading `route.params`
-// through the lifecycle manually.
+// requestId comes from the URL. Navigation between detail pages (e.g. the
+// parent-request link) reloads because the layout keys its router-view by
+// the full path, remounting this component; the computed just keeps the
+// param read in one place.
 const requestId = computed(() => decodeURIComponent(String(route.params.requestId ?? '')))
 
 onMounted(() => {
@@ -544,6 +551,13 @@ const attemptColumns = computed<DataTableColumns<AttemptRecord>>(() => [
   color: var(--color-text);
 }
 
+.parent-link {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+.parent-link:hover {
+  text-decoration: underline;
+}
 :deep(.mono-cell) {
   font-family: var(--font-mono, monospace);
   font-size: var(--text-xs);

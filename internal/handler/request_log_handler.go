@@ -18,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
@@ -40,10 +41,16 @@ func GetRequestLogs(svc *service.RequestLogService) gin.HandlerFunc {
 			response.ParamError(c, "status must be one of: success, failed, partial, cancelled, rejected")
 			return
 		}
+		source := c.Query("source")
+		if source != "" && source != model.RequestLogSourceVisionFallback && source != model.RequestLogSourceCallerFilter {
+			response.ParamError(c, "source must be one of: caller, vision_fallback")
+			return
+		}
 		filter := service.RequestLogListFilter{
 			RequestID:   c.Query("request_id"),
 			ModelName:   c.Query("model_name"),
 			KeyPrefix:   c.Query("key_prefix"),
+			Source:      source,
 			RequestPath: c.Query("request_path"),
 			StatusClass: statusClass,
 			Page:        page,
@@ -134,10 +141,16 @@ func ExportRequestLogsCSV(svc *service.RequestLogService) gin.HandlerFunc {
 			response.ParamError(c, "status must be one of: success, failed, partial, cancelled, rejected")
 			return
 		}
+		source := c.Query("source")
+		if source != "" && source != model.RequestLogSourceVisionFallback && source != model.RequestLogSourceCallerFilter {
+			response.ParamError(c, "source must be one of: caller, vision_fallback")
+			return
+		}
 		filter := service.RequestLogListFilter{
 			RequestID:   c.Query("request_id"),
 			ModelName:   c.Query("model_name"),
 			KeyPrefix:   c.Query("key_prefix"),
+			Source:      source,
 			RequestPath: c.Query("request_path"),
 			StatusClass: statusClass,
 		}

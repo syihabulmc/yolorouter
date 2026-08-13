@@ -71,3 +71,14 @@ type RequestLog struct {
 }
 
 func (RequestLog) TableName() string { return "request_logs" }
+
+// RequestLogSourceVisionFallback marks a request_logs row created by the
+// gateway describing images on behalf of another request (vision fallback
+// loopback sub-call). The empty string marks a normal caller request.
+const RequestLogSourceVisionFallback = "vision_fallback"
+
+// RequestLogSourceCallerFilter is the FILTER-ONLY sentinel meaning "normal
+// caller rows" (stored source = ”). It is never stored: the stored value
+// for a caller request is the empty string, but a query param needs a
+// non-empty way to say "only those" since "" already means "no constraint".
+const RequestLogSourceCallerFilter = "caller"

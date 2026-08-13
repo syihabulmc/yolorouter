@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/yolorouter/yolorouter/internal/loopback"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/testutil"
@@ -576,6 +577,49 @@ func TestAPIKeyAuth_AuditBodyMatchesSentBody(t *testing.T) {
 			}
 			if bodyRow.ResponseBody != w.Body.String() {
 				t.Errorf("audit response_body = %q, want it to equal the sent body %q", bodyRow.ResponseBody, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestAuthRejectedSubCallCarriesSourceMarking: the auth gate is the second
+// request_logs writer, and a rejected loopback sub-call must carry the same
+// source/parent marking the gateway recorder would give it — otherwise it
+// reads as a caller request in the log. A forged token gets nothing.
+func TestAuthRejectedSubCallCarriesSourceMarking(t *testing.T) {
+	cases := []struct {
+		name       string
+		token      string
+		wantSource string
+		wantParent string
+	}{
+		{"valid token", loopback.Token, model.RequestLogSourceVisionFallback, "parent-abc"},
+		{"forged token", "forged-value", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			db := testutil.NewSQLiteDB(t)
+			r := gin.New()
+			r.Use(RequestID())
+			r.POST("/v1/chat/completions", APIKeyAuth(db), func(c *gin.Context) { c.Status(http.StatusOK) })
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{}`)))
+			// No API key at all: rejected at the gate, exercising this writer.
+			req.Header.Set(loopback.HeaderInternal, tc.token)
+			req.Header.Set(loopback.HeaderParent, "parent-abc")
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", w.Code)
+			}
+			var row model.RequestLog
+			if err := db.Where("request_id = ?", w.Header().Get("X-Request-Id")).First(&row).Error; err != nil {
+				t.Fatalf("audit row: %v", err)
+			}
+			if row.Source != tc.wantSource || row.ParentRequestID != tc.wantParent {
+				t.Fatalf("source/parent = %q/%q, want %q/%q", row.Source, row.ParentRequestID, tc.wantSource, tc.wantParent)
 			}
 		})
 	}

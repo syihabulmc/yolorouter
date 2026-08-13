@@ -1022,3 +1022,63 @@ func TestListRequestLogsFiltersByRequestPath(t *testing.T) {
 		t.Fatalf("export must contain via-chat only, got: %s", csv)
 	}
 }
+
+// TestListRequestLogsFiltersBySource pins the source filter's three states:
+// absent = all rows, "vision_fallback" = describe sub-calls only, and the
+// "caller" sentinel = normal rows only (the empty string can't mean both
+// "any" and "normal" in one query param).
+func TestListRequestLogsFiltersBySource(t *testing.T) {
+	r, db, _ := newRequestLogTestRouter(t)
+	now := time.Now().UTC()
+	seedRequestLog(t, db, "normal-req", now, func(rl *model.RequestLog) { rl.StatusCode = 200 })
+	seedRequestLog(t, db, "sub-req", now, func(rl *model.RequestLog) {
+		rl.StatusCode = 200
+		rl.Source = model.RequestLogSourceVisionFallback
+		rl.ParentRequestID = "normal-req"
+	})
+
+	listIDs := func(query string) []string {
+		t.Helper()
+		w, _ := doJSON(t, r, http.MethodGet, "/api/admin/request-logs"+query, nil, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+		}
+		var env struct {
+			Data struct {
+				List []struct {
+					RequestID       string `json:"request_id"`
+					Source          string `json:"source"`
+					ParentRequestID string `json:"parent_request_id"`
+				} `json:"list"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		ids := make([]string, 0, len(env.Data.List))
+		for _, it := range env.Data.List {
+			ids = append(ids, it.RequestID)
+			if it.RequestID == "sub-req" && (it.Source != model.RequestLogSourceVisionFallback || it.ParentRequestID != "normal-req") {
+				t.Fatalf("sub-req row missing source/parent: %+v", it)
+			}
+		}
+		return ids
+	}
+
+	if got := listIDs(""); len(got) != 2 {
+		t.Fatalf("unfiltered = %v, want both rows", got)
+	}
+	if got := listIDs("?source=vision_fallback"); len(got) != 1 || got[0] != "sub-req" {
+		t.Fatalf("source=vision_fallback = %v, want [sub-req]", got)
+	}
+	if got := listIDs("?source=caller"); len(got) != 1 || got[0] != "normal-req" {
+		t.Fatalf("source=caller = %v, want [normal-req]", got)
+	}
+
+	// An unknown source value is a caller mistake, answered with 400 like an
+	// unknown status — not a silently empty list.
+	w, _ := doJSON(t, r, http.MethodGet, "/api/admin/request-logs?source=garbage", nil, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("source=garbage status = %d, want 400", w.Code)
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/gateway"
+	"github.com/yolorouter/yolorouter/internal/loopback"
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/repository"
@@ -155,6 +156,15 @@ func logAuthRejection(c *gin.Context, db *gorm.DB, ingress protocols.ProtocolID,
 		APIKeyID:   nil,
 		StatusCode: status,
 		FailReason: &reason,
+	}
+	// This is the second request_logs writer (gateway.Handle's recorder is
+	// the first) — a rejected loopback sub-call must carry the same source
+	// marking here, or it would read as a caller request in the log. The
+	// same trust rule applies: the parent linkage is only honored alongside
+	// a valid process token.
+	if c.GetHeader(loopback.HeaderInternal) == loopback.Token {
+		row.Source = model.RequestLogSourceVisionFallback
+		row.ParentRequestID = c.GetHeader(loopback.HeaderParent)
 	}
 	if err := repository.CreateRequestLog(db, row); err != nil {
 		logger.Warn("middleware: write auth-rejection audit row failed",

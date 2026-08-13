@@ -65,6 +65,11 @@ type RequestLogFilter struct {
 	// searchable identity a key HAS (the plaintext is never stored), matched
 	// via a subquery on api_keys so this table needs no join or new column.
 	KeyPrefix string
+	// Source narrows on who initiated the request: "" = no constraint,
+	// model.RequestLogSourceVisionFallback = describe sub-calls only,
+	// model.RequestLogSourceCallerFilter = normal requests only (see that
+	// constant for why the sentinel exists).
+	Source string
 	// RequestPath narrows on the caller-side request path. Matched exactly,
 	// except a value ending in "/" selects the whole subtree — needed for the
 	// Gemini-compatible ingress, whose paths embed the model name
@@ -106,6 +111,13 @@ func (f *RequestLogFilter) applyFilter(db *gorm.DB) *gorm.DB {
 		// LOWER on both sides, like every other LIKE in this package: search
 		// must not depend on the driver, and prefixes mix case freely.
 		q = q.Where("api_key_id IN (SELECT id FROM api_keys WHERE LOWER(key_prefix) LIKE LOWER(?) ESCAPE '\\')", likePrefixPattern(f.KeyPrefix))
+	}
+	switch f.Source {
+	case "":
+	case model.RequestLogSourceCallerFilter:
+		q = q.Where("source = ''")
+	default:
+		q = q.Where("source = ?", f.Source)
 	}
 	if f.RequestPath != "" {
 		if strings.HasSuffix(f.RequestPath, "/") {

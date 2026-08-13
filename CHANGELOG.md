@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Models that cannot see images can now answer image requests. Declare a
+  model unable to read images and pick a vision fallback model in the
+  console: the gateway describes each incoming image through that model
+  (billed to the calling key as its own logged request, linked to the
+  parent) and forwards the description as text — the answer still comes
+  from the model the caller asked for. With no fallback model configured,
+  images become explanatory placeholders instead of failing the request
+  upstream. Undeclared models are never touched. The request log shows
+  describe sub-calls with a badge, links them to their parent request, and
+  can filter by source.
+
 ## [0.1.4] - 2026-08-12
 
 ### Added

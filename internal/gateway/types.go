@@ -20,6 +20,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/fact"
 	"github.com/yolorouter/yolorouter/internal/gateway/attempt"
 	"github.com/yolorouter/yolorouter/internal/gateway/capture"
+	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 )
 
@@ -65,6 +66,10 @@ type Exchange struct {
 	visionFallbackPrompt  string
 	authCredential        string
 	visionFallbackSubCall bool
+	// parentRequestID names the caller request a loopback sub-call works
+	// for; empty on normal requests. Captured from the loopback parent
+	// header only when the internal token matched.
+	parentRequestID string
 	// pricingBasis is the per-million rates the pre-dispatch estimate is taken
 	// against: the FIRST routable candidate's, fixed once so everything asking
 	// that question reads one answer instead of each picking its own candidate.
@@ -315,6 +320,20 @@ func (rc *Exchange) AuthCredential() string { return rc.authCredential }
 // IsVisionFallbackSubCall reports whether this request is the gateway calling
 // itself (loopback token matched) — the describe capability's recursion guard.
 func (rc *Exchange) IsVisionFallbackSubCall() bool { return rc.visionFallbackSubCall }
+
+// CallSource is what the audit row's source column records: who initiated
+// this request ("" = the caller, or the vision-fallback marker for a
+// loopback sub-call).
+func (rc *Exchange) CallSource() string {
+	if rc.visionFallbackSubCall {
+		return model.RequestLogSourceVisionFallback
+	}
+	return ""
+}
+
+// ParentRequestID names the caller request a loopback sub-call works for
+// ("" on normal requests).
+func (rc *Exchange) ParentRequestID() string { return rc.parentRequestID }
 
 // IngressProtocol is the wire protocol of the caller's request path.
 func (rc *Exchange) IngressProtocol() protocols.ProtocolID { return rc.ingress }

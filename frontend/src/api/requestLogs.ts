@@ -30,6 +30,9 @@ export interface RequestLogRow {
   model_name: string
   /** Endpoint the caller hit, e.g. /v1/chat/completions; '' for pre-relay rejects. */
   request_path: string
+  /** "" for a caller request, "vision_fallback" for a describe sub-call working for parent_request_id. */
+  source: string
+  parent_request_id: string
   provider_id: number | null
   provider_name: string
   is_stream: boolean
@@ -120,6 +123,8 @@ export interface RequestLogListParams {
   key_prefix?: string
   /** Caller-side request path, matched exactly; a trailing "/" selects the whole subtree. */
   request_path?: string
+  /** "" = all rows, "vision_fallback" = describe sub-calls, "caller" = normal requests. */
+  source?: string
   is_stream?: boolean
   cost_known?: boolean
   start?: string
@@ -154,6 +159,7 @@ export function listRequestLogs(filter: RequestLogListParams): Promise<RequestLo
     status: filter.status,
     key_prefix: filter.key_prefix,
     request_path: filter.request_path,
+    source: filter.source,
     is_stream: filter.is_stream,
     cost_known: filter.cost_known,
     start: filter.start,
@@ -251,6 +257,7 @@ export async function exportRequestLogsCSV(filter: Omit<RequestLogListParams, 'p
     status: filter.status,
     key_prefix: filter.key_prefix,
     request_path: filter.request_path,
+    source: filter.source,
     is_stream: filter.is_stream,
     cost_known: filter.cost_known,
     start: filter.start,

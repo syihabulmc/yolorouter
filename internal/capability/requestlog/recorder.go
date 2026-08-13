@@ -41,6 +41,8 @@ type View interface {
 	ProviderID() *uint
 	IsStream() bool
 	IngressPath() string
+	CallSource() string
+	ParentRequestID() string
 	UpstreamURL() string
 
 	RequestHeaders() []byte
@@ -110,6 +112,8 @@ func (r *Recorder) Record(ctx context.Context, view View, out fact.Outcome, tl f
 		CompressorsApplied:               compressors,
 		RequestPath:                      view.IngressPath(),
 		UpstreamURL:                      view.UpstreamURL(),
+		Source:                           view.CallSource(),
+		ParentRequestID:                  view.ParentRequestID(),
 		FailReason:                       failPtr,
 		Attempts:                         s.attempts,
 		DurationMs:                       out.Duration.Milliseconds(),

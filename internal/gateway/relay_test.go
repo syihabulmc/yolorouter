@@ -2254,10 +2254,19 @@ func TestLoopbackSubCallBypassesAdmissionAndAllowlist(t *testing.T) {
 
 	c, w := newCtx([]byte(`{"model":"eyes","messages":[{"role":"user","content":"hi"}]}`))
 	c.Request.Header.Set(loopback.HeaderInternal, loopback.Token)
+	c.Request.Header.Set(loopback.HeaderParent, "req-parent-1")
 	svc.Handle(c, apiKey)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("loopback sub-call status = %d, want 200 (bypasses limits + allowlist), body: %s", w.Code, w.Body.String())
+	}
+	// The sub-call's own audit row is marked and linked to its parent.
+	var row model.RequestLog
+	if err := db.Where("source = ?", model.RequestLogSourceVisionFallback).First(&row).Error; err != nil {
+		t.Fatalf("no sub-call-marked request_logs row: %v", err)
+	}
+	if row.ParentRequestID != "req-parent-1" {
+		t.Fatalf("parent_request_id = %q, want req-parent-1", row.ParentRequestID)
 	}
 }
 
@@ -2278,10 +2287,21 @@ func TestForgedLoopbackTokenGetsNoBypass(t *testing.T) {
 
 	c, w := newCtx([]byte(`{"model":"eyes","messages":[{"role":"user","content":"hi"}]}`))
 	c.Request.Header.Set(loopback.HeaderInternal, "forged-value")
+	c.Request.Header.Set(loopback.HeaderParent, "someone-elses-request")
 	svc.Handle(c, apiKey)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("forged token status = %d, want 403 (allowlist still applies)", w.Code)
+	}
+	// The forged marker must not leak into the audit row either: no source
+	// marking, and — critically — no parent linkage to a request this caller
+	// does not own.
+	var row model.RequestLog
+	if err := db.Order("id DESC").First(&row).Error; err != nil {
+		t.Fatalf("read audit row: %v", err)
+	}
+	if row.Source != "" || row.ParentRequestID != "" {
+		t.Fatalf("forged marker leaked into audit row: source=%q parent=%q", row.Source, row.ParentRequestID)
 	}
 }
 

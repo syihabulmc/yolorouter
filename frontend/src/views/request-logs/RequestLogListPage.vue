@@ -108,6 +108,14 @@
           width="100%"
           @update:value="onEndpointChange"
         />
+        <FilterSelectField
+          :label="t('requestLogs.filterSource')"
+          :value="filter.source"
+          :options="sourceOptions"
+          :placeholder="t('requestLogs.allFilterSource')"
+          width="100%"
+          @update:value="onSourceChange"
+        />
         <div class="filter-item filter-item--range">
           <!-- Desktop: a single datetimerange picker. On mobile the range
                variant is too wide to fit, so it's split into two standalone
@@ -224,6 +232,9 @@ interface ListFilter {
   // The selected endpoint option's value. The backend matches it exactly,
   // except a trailing "/" selects the whole subtree (the Gemini option).
   request_path: string | null
+  // "" would double as "all" and "normal", so the wire values are explicit:
+  // null = all, 'caller' = normal requests, 'vision_fallback' = sub-calls.
+  source: 'caller' | 'vision_fallback' | null
 }
 const filter = reactive<ListFilter>({
   request_id: '',
@@ -235,6 +246,7 @@ const filter = reactive<ListFilter>({
   is_stream: null,
   cost_known: null,
   request_path: null,
+  source: null,
 })
 // Stream filter UI value. null means "no filter" (cleared select, matches
 // the placeholder's "all streams" wording); 'stream' / 'non-stream' map to
@@ -340,6 +352,11 @@ const costOptions = computed<SelectOption[]>(() => ([
 // backend matches the value exactly, except a trailing "/" selects the whole
 // subtree — the Gemini-compatible ingress embeds the model name in its path
 // (/v1beta/models/{model}:{action}), so its option is the family prefix.
+const sourceOptions = computed<SelectOption[]>(() => ([
+  { label: t('requestLogs.sourceCaller'), value: 'caller' },
+  { label: t('requestLogs.sourceVisionFallback'), value: 'vision_fallback' },
+]))
+
 const endpointOptions = computed<SelectOption[]>(() => ([
   { label: '/v1/chat/completions', value: '/v1/chat/completions' },
   { label: '/v1/messages', value: '/v1/messages' },
@@ -381,7 +398,7 @@ onBeforeUnmount(() => {
 // URL query keys this page knows how to ingest. Used by hasRelevantQuery
 // to decide whether mount should apply the query before the first load.
 const RELEVANT_QUERY_KEYS = [
-  'request_id', 'model_name', 'key_prefix', 'request_path', 'api_key_id',
+  'request_id', 'model_name', 'key_prefix', 'request_path', 'source', 'api_key_id',
   'provider_id', 'status', 'is_stream', 'cost_known', 'start', 'end',
 ] as const
 
@@ -414,6 +431,9 @@ function applyQueryFilter() {
   }
   if (typeof q.request_path === 'string' && q.request_path) {
     filter.request_path = q.request_path
+  }
+  if (q.source === 'caller' || q.source === 'vision_fallback') {
+    filter.source = q.source
   }
   if (typeof q.api_key_id === 'string' && q.api_key_id) {
     const n = Number(q.api_key_id)
@@ -500,6 +520,7 @@ function buildListParams(): RequestLogListParams {
   if (filter.status) params.status = filter.status
   if (filter.key_prefix.trim()) params.key_prefix = filter.key_prefix.trim()
   if (filter.request_path) params.request_path = filter.request_path
+  if (filter.source) params.source = filter.source
   if (filter.is_stream != null) params.is_stream = filter.is_stream
   if (filter.cost_known != null) params.cost_known = filter.cost_known
   // start / end are independent bounds — on mobile the user may set only one.
@@ -576,6 +597,7 @@ function onReset() {
   filter.cost_known = null
   costSelect.value = null
   filter.request_path = null
+  filter.source = null
   startTime.value = null
   endTime.value = null
   // Drop the verbatim-no-trim override too, so post-reset typed searches
@@ -616,6 +638,11 @@ function onCostKnownChange(v: 'known' | 'unknown' | null) {
 
 function onEndpointChange(v: string | null) {
   filter.request_path = v
+  void onSearch()
+}
+
+function onSourceChange(v: 'caller' | 'vision_fallback' | null) {
+  filter.source = v
   void onSearch()
 }
 
@@ -770,8 +797,27 @@ const sharedColumns = computed<DataTableColumns<RequestLogRow>>(() => [
     title: columnTitle(t('requestLogs.col_model'), t('requestLogs.col_model_tip')),
     key: 'model_name',
     width: 150,
-    ellipsis: { tooltip: true },
-    render: (row) => h('span', { style: 'font-weight:600;' }, row.model_name),
+    // No naive ellipsis config here: NEllipsis wraps the whole rendered
+    // cell in a nowrap clip, which would swallow the sub-call badge exactly
+    // when the model name is long. Truncation is done by hand instead — the
+    // badge is shrink-proof and leads, the name clips with its own
+    // ellipsis, and the title attribute keeps the full name reachable.
+    // Fixed table layout is still engaged by the other ellipsis columns.
+    render: (row) => {
+      const name = h(
+        'span',
+        {
+          style: 'font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;',
+          title: row.model_name,
+        },
+        row.model_name,
+      )
+      if (row.source !== 'vision_fallback') return h('div', { style: 'display:flex; min-width:0;' }, [name])
+      return h('div', { style: 'display:flex; align-items:center; gap:6px; min-width:0;' }, [
+        h(NTag, { size: 'small', round: true, bordered: false, type: 'info', style: 'flex-shrink:0;' }, { default: () => t('requestLogs.sourceBadge') }),
+        name,
+      ])
+    },
   },
   {
     title: columnTitle(t('requestLogs.col_endpoint'), t('requestLogs.col_endpoint_tip')),
