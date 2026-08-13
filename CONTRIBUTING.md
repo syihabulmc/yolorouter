@@ -31,6 +31,31 @@ Useful flags: `--backend`, `--frontend`, `--migrate`, `--restart` (`-Backend`,
 (`-Help`) for the full list; output language follows your locale and can be
 forced with `YOLO_LANG=zh|en`.
 
+### Local development and debugging
+
+`./scripts/dev.sh` leaves a server running on `http://localhost:8080` and writes
+its log to `logs/server.log` — that log is the first place to look when
+something misbehaves. Configuration lives in `configs/config.yaml` and the
+SQLite database in `data/yolorouter.db`, both generated on first run; delete the
+database file to start over from a clean slate.
+
+The tightest loops per side of the codebase:
+
+- **Backend** — edit Go code, then `./scripts/dev.sh --backend` (rebuild +
+  restart, skips the frontend). To run under a debugger or with extra flags,
+  the same entry point works directly: `go run ./cmd/yolorouter serve`.
+- **Frontend** — don't rebuild at all. `cd frontend && npm run dev` serves the
+  console with hot reload on port 5173 and proxies `/healthz`, `/api`, and
+  `/v1` to the backend (override the target with `VITE_BACKEND_TARGET`). The
+  dev server listens on all interfaces so you can open it from a phone to test
+  the mobile layout.
+
+For request-level debugging — protocol conversion, provider failover, billing —
+open the request log's detail page in the console: every relay stores the full
+client request body, the upstream request body, and the upstream response body,
+alongside the per-attempt routing chain (which provider and key each attempt
+hit, and why it moved on).
+
 ### Building and testing
 
 ```bash

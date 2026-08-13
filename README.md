@@ -21,39 +21,40 @@ English · [简体中文](README_zh.md)
 ---
 
 Point your application at **one** endpoint and **one** API key. Yolorouter sits
-between your apps and your upstream providers, so the messy parts — juggling
-provider accounts, rotating rate-limited keys, failing over when an account
-breaks, enforcing per-key budgets, and knowing what everything costs — live in
-one place instead of scattered across every codebase.
+between your apps and your upstream providers, so the messy parts live in one
+place instead of scattered across every codebase: juggling provider accounts,
+rotating rate-limited keys, failing over when an account breaks, enforcing
+per-key budgets, and knowing what everything costs.
 
-It accepts **four wire protocols** — OpenAI Chat Completions, OpenAI Responses,
-Anthropic Messages, and Gemini `generateContent` — and can translate any of
+It accepts **four wire protocols** (OpenAI Chat Completions, OpenAI Responses,
+Anthropic Messages, and Gemini `generateContent`) and can translate any of
 them to any other on the way out. An OpenAI-only provider can serve Claude
 Code; an Anthropic-only provider can serve the OpenAI SDK. Streaming, tool
 calling, and reasoning/thinking blocks all survive the trip, as does image
 content on every ingress except Responses (see [Protocols](#protocols)).
 
-Everything ships as a **single binary** with the web console embedded. No Node
-runtime, no separate frontend deploy, no external services required — SQLite
-works out of the box, PostgreSQL when you want it.
+Everything ships as a **single binary** with the web console embedded. There is
+no Node runtime to install and no separate frontend deploy. SQLite works out of
+the box; switch to PostgreSQL when you want it.
 
 ## Why Yolorouter
 
 **Routing**
 
-- **Multi-provider failover** — map one public model name (e.g. `smart`) to an ordered list of provider candidates. When one is down, requests fail over to the next — transparently, without the caller ever seeing a different model name.
-- **Upstream key rotation** — give each provider a pool of upstream keys. Rate-limited, unauthorized, or quota-exhausted keys are skipped automatically.
-- **Model aliasing** — callers request a stable public name; each provider candidate maps it to whatever model id that provider actually expects. Candidate mappings are probed against the real upstream when you save them, so a typo is caught at configuration time, not at 3 a.m.
-- **Streaming done right** — key rotation and failover happen *before* the first byte reaches the client; once streaming starts, the provider is locked in. Content from two providers is never stitched into one response.
-- **Timeouts tuned for reasoning models** — seven independent, configurable phases instead of one wall clock, so a model that thinks for eight minutes before emitting a token isn't killed mid-thought.
+- **Multi-provider failover.** Map one public model name (e.g. `smart`) to an ordered list of provider candidates. When one is down, requests fail over to the next; the caller never sees a different model name.
+- **Upstream key rotation.** Give each provider a pool of upstream keys. Rate-limited, unauthorized, or quota-exhausted keys are skipped automatically.
+- **Model aliasing.** Callers request a stable public name; each provider candidate maps it to whatever model id that provider actually expects. Candidate mappings are probed against the real upstream when you save them, so a typo is caught at configuration time, not at 3 a.m.
+- **Vision fallback.** Let text-only models "see". Mark a model as unable to read images and pick a vision model in the console; images in incoming requests are described by the vision model and forwarded as text, transparently to the caller, on every ingress protocol. With no vision model configured, images degrade to a clear placeholder instead of an upstream error.
+- **Streaming done right.** Key rotation and failover happen *before* the first byte reaches the client; once streaming starts, the provider is locked in. Content from two providers is never stitched into one response.
+- **Timeouts tuned for reasoning models.** Seven independent, configurable phases instead of one wall clock, so a model that thinks for eight minutes before emitting a token isn't killed mid-thought.
 
 **Control & cost**
 
-- **Per-key access control** — model allowlists, rate and concurrency limits, cumulative budget caps, optional expiry, instant revocation.
-- **Cost optimization** — inject a custom system prompt globally or per key; compress bulky tool output before it reaches the upstream. The console reports what each actually saved.
-- **Built-in observability** — token and cost KPIs, usage by model / provider / time / caller, and request logs with the full per-attempt routing chain. Any view exports to CSV.
-- **Bilingual console** — English and 简体中文, switchable anywhere; timezone follows the browser.
-- **Self-update** — the binary can check for and apply new releases.
+- **Per-key access control.** Model allowlists, rate and concurrency limits, cumulative budget caps, optional expiry, instant revocation.
+- **Cost optimization.** Inject a custom system prompt globally or per key; compress bulky tool output before it reaches the upstream. The console reports what each actually saved.
+- **Built-in observability.** Token and cost KPIs, usage by model / provider / time / caller, and request logs with the full per-attempt routing chain. Any view exports to CSV.
+- **Bilingual console.** English and 简体中文, switchable anywhere; timezone follows the browser.
+- **Self-update.** The binary can check for and apply new releases.
 
 ## Screenshots
 
@@ -64,8 +65,8 @@ works out of the box, PostgreSQL when you want it.
 
 ## Quick start
 
-Install as a background service that starts on boot — systemd on Linux, launchd on
-macOS, a scheduled task on Windows:
+Install as a background service that starts on boot: systemd on Linux, launchd on
+macOS, a scheduled task on Windows.
 
 ```bash
 # Linux / macOS
@@ -81,7 +82,7 @@ On Windows, an elevated PowerShell installs a system-wide service that starts at
 boot; a normal one installs under your account and starts at logon.
 
 > **🇨🇳 China mirror**: if GitHub is slow or unreachable from your network, swap
-> `get.yolorouter.com` for `gh.yolorouter.com` — same installers, routed through a
+> `get.yolorouter.com` for `gh.yolorouter.com`. Same installers, routed through a
 > Cloudflare proxy, and auto-updates keep using the mirror afterwards.
 
 Re-run the same command to upgrade; configuration and database are preserved and
@@ -100,7 +101,7 @@ issue API keys.
 ## Protocols
 
 Every ingress below authenticates with the **same** Yolorouter API key, supports
-streaming, and can be served by **any** configured provider — no matter which
+streaming, and can be served by **any** configured provider, no matter which
 protocol that provider natively speaks.
 
 | Ingress route | Protocol | Accepted auth headers |
@@ -158,9 +159,9 @@ shape and is deterministic, so repeated requests produce byte-identical system
 content and still hit upstream prompt caches.
 
 **Input compression.** Coding agents send back huge, highly redundant tool output.
-Yolorouter recognizes what each content block is — `go test` output, git diffs,
-grep results, plain logs — and strips the noise while keeping every signal: failures,
-stack traces, and each distinct match are preserved. It never touches the active edit
+Yolorouter recognizes what each content block is (`go test` output, git diffs,
+grep results, plain logs) and strips the noise while keeping the signal: failures,
+stack traces, and each distinct match all survive. It never touches the active edit
 region at the tail of the conversation, and only replaces a block when the compressed
 form is actually shorter.
 
@@ -182,7 +183,7 @@ dashboard, so prompt-cache savings are a number you can see rather than a feelin
 
 Self-hosting means bringing your own upstream API keys. If you would rather not sign
 up with every provider separately, **YoloRouter Cloud** ships in the console's provider
-preset list as one more upstream you can select — see
+preset list as one more upstream you can select; see
 [the hosted option](https://yolorouter.com/pricing?utm_source=oss-readme&utm_medium=repo).
 
 ## Build from source
@@ -194,8 +195,32 @@ make build          # backend only -> ./bin/yolorouter
 make build-embed    # full binary with the console embedded
 ```
 
-Cross-compilation targets, the test commands and the local development workflow
-are documented in [CONTRIBUTING.md](CONTRIBUTING.md#building-and-testing).
+### Develop and debug
+
+One script rebuilds everything, runs migrations, and restarts a local server:
+
+```bash
+./scripts/dev.sh          # full rebuild + restart on http://localhost:8080
+./scripts/dev.sh --backend    # Go changes only; --frontend for console changes
+tail -f logs/server.log   # server log — the first place to look when debugging
+```
+
+Configuration lives in `configs/config.yaml` and the SQLite database in
+`data/yolorouter.db`, both created on first run. For request-level debugging,
+the console's request-log detail page shows every relay's full client and
+upstream bodies plus the per-attempt routing chain.
+
+For frontend work, skip the rebuild loop entirely. Vite serves the console
+with hot reload on port 5173 and proxies `/api` and `/v1` to the backend:
+
+```bash
+cd frontend && npm run dev
+```
+
+`make test` runs the Go tests, `make gates` the structural checks that CI
+enforces. Windows scripts (`scripts/dev.ps1`), lint, and cross-compilation
+targets are documented in
+[CONTRIBUTING.md](CONTRIBUTING.md#local-development-and-debugging).
 
 ## Contributing
 
