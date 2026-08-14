@@ -29,9 +29,9 @@ func newAuthTestRouter(t *testing.T, db *gorm.DB) *gin.Engine {
 	admin.GET("/auth/state", GetAuthState(db))
 	admin.POST("/auth/setup", PostSetup(db))
 	admin.POST("/auth/login", PostLogin(db, middleware.NewSemaphore(8)))
-	admin.POST("/auth/logout", middleware.RequireAdminSession(db), PostLogout(db))
-	admin.GET("/auth/me", middleware.RequireAdminSession(db), GetMe(db))
-	admin.PUT("/auth/password", middleware.RequireAdminSession(db), PutPassword(db))
+	admin.POST("/auth/logout", middleware.RequireSession(db), PostLogout(db))
+	admin.GET("/auth/me", middleware.RequireSession(db), GetMe(db))
+	admin.PUT("/auth/password", middleware.RequireSession(db), PutPassword(db))
 	return r
 }
 
@@ -123,12 +123,18 @@ func TestSetupLoginLogoutFullFlow(t *testing.T) {
 	}
 	var me struct {
 		Username string `json:"username"`
+		Role     string `json:"role"`
 	}
 	if err := json.Unmarshal(env.Data, &me); err != nil {
 		t.Fatalf("unmarshal data: %v", err)
 	}
 	if me.Username != "admin" {
 		t.Fatalf("expected username=admin, got %q", me.Username)
+	}
+	// The first-run account must present as an admin — the frontend picks
+	// its navigation from this field.
+	if me.Role != "admin" {
+		t.Fatalf("expected role=admin, got %q", me.Role)
 	}
 
 	// Logout, then /auth/me must fail.
@@ -353,28 +359,41 @@ func TestAuthRoutesRequireLoginExceptStateSetupLogin(t *testing.T) {
 	}
 }
 
-// dropAdminsTable forces every subsequent admins-table query to fail with a
-// generic (non-gorm.ErrRecordNotFound) error, without touching the
-// admin_sessions table — used to reach a handler's "DB error other than not
-// found" branch for calls made through a route whose own
-// middleware.RequireAdminSession(db) check must still succeed (it only
-// queries admin_sessions). admin_sessions.admin_id is a foreign key into
-// admins, so the drop must disable FK enforcement first or SQLite refuses
+// dropUsersTable forces every subsequent users-table query to fail with a
+// generic (non-gorm.ErrRecordNotFound) error — used to reach a handler's
+// "DB error other than not found" branch on routes that don't run
+// RequireSession (which itself joins users and would fail first).
+// Handlers behind RequireSession get the same failure injected via
+// stubIdentity instead. user_sessions.user_id is a foreign key into
+// users, so the drop must disable FK enforcement first or SQLite refuses
 // it outright ("FOREIGN KEY constraint failed").
-func dropAdminsTable(t *testing.T, db *gorm.DB) {
+func dropUsersTable(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	if err := db.Exec("PRAGMA foreign_keys = OFF").Error; err != nil {
 		t.Fatalf("disable foreign keys: %v", err)
 	}
-	if err := db.Exec("DROP TABLE admins").Error; err != nil {
-		t.Fatalf("drop admins table: %v", err)
+	if err := db.Exec("DROP TABLE users").Error; err != nil {
+		t.Fatalf("drop users table: %v", err)
 	}
 }
 
-func TestGetAuthStateReturns500WhenCountAdminsFails(t *testing.T) {
+// stubIdentity stands in for RequireSession on routes where a test needs
+// the handler's own DB access to fail: it plants the resolved-identity
+// context keys without touching the database, so the users table can be
+// dropped and the first query to hit it is the handler's, not the
+// middleware's.
+func stubIdentity(userID uint, role string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, userID)
+		c.Set(middleware.UserRoleKey, role)
+		c.Next()
+	}
+}
+
+func TestGetAuthStateReturns500WhenCountLocalUsersFails(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	r := newAuthTestRouter(t, db)
-	dropAdminsTable(t, db)
+	dropUsersTable(t, db)
 
 	w, env := doJSON(t, r, http.MethodGet, "/api/admin/auth/state", nil, nil)
 	if w.Code != http.StatusInternalServerError {
@@ -385,10 +404,10 @@ func TestGetAuthStateReturns500WhenCountAdminsFails(t *testing.T) {
 	}
 }
 
-func TestPostSetupReturns500WhenCountAdminsFails(t *testing.T) {
+func TestPostSetupReturns500WhenCountLocalUsersFails(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	r := newAuthTestRouter(t, db)
-	dropAdminsTable(t, db)
+	dropUsersTable(t, db)
 
 	w, env := doJSON(t, r, http.MethodPost, "/api/admin/auth/setup",
 		map[string]string{"username": "admin", "password": "password123"}, nil)
@@ -446,7 +465,7 @@ func TestPostLoginReturns500OnGenericDBError(t *testing.T) {
 
 	doJSON(t, r, http.MethodPost, "/api/admin/auth/setup",
 		map[string]string{"username": "admin", "password": "password123"}, nil)
-	dropAdminsTable(t, db)
+	dropUsersTable(t, db)
 
 	w, env := doJSON(t, r, http.MethodPost, "/api/admin/auth/login",
 		map[string]string{"username": "admin", "password": "password123"}, nil)
@@ -458,16 +477,14 @@ func TestPostLoginReturns500OnGenericDBError(t *testing.T) {
 	}
 }
 
-func TestGetMeReturns500WhenAdminLookupFails(t *testing.T) {
+func TestGetMeReturns500WhenUserLookupFails(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	r := newAuthTestRouter(t, db)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/admin/auth/me", stubIdentity(1, "admin"), GetMe(db))
+	dropUsersTable(t, db)
 
-	w, _ := doJSON(t, r, http.MethodPost, "/api/admin/auth/setup",
-		map[string]string{"username": "admin", "password": "password123"}, nil)
-	sessionCookie := w.Result().Cookies()[0]
-	dropAdminsTable(t, db)
-
-	w, env := doJSON(t, r, http.MethodGet, "/api/admin/auth/me", nil, sessionCookie)
+	w, env := doJSON(t, r, http.MethodGet, "/api/admin/auth/me", nil, nil)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d, body: %s", w.Code, w.Body.String())
 	}
@@ -514,19 +531,20 @@ func TestPutPasswordReturns401WhenCurrentPasswordWrong(t *testing.T) {
 	}
 }
 
-func TestPutPasswordReturns500WhenAdminLookupFails(t *testing.T) {
+func TestPutPasswordReturns500WhenUserLookupFails(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	r := newAuthTestRouter(t, db)
-
-	w, _ := doJSON(t, r, http.MethodPost, "/api/admin/auth/setup",
-		map[string]string{"username": "admin", "password": "password123"}, nil)
-	sessionCookie := w.Result().Cookies()[0]
-	dropAdminsTable(t, db)
+	gin.SetMode(gin.TestMode)
+	if err := RegisterValidators(); err != nil {
+		t.Fatalf("RegisterValidators failed: %v", err)
+	}
+	r := gin.New()
+	r.PUT("/api/admin/auth/password", stubIdentity(1, "admin"), PutPassword(db))
+	dropUsersTable(t, db)
 
 	w, env := doJSON(t, r, http.MethodPut, "/api/admin/auth/password", map[string]string{
 		"current_password": "password123",
 		"new_password":     "newpassword456",
-	}, sessionCookie)
+	}, nil)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d, body: %s", w.Code, w.Body.String())
 	}

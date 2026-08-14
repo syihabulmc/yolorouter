@@ -1,7 +1,7 @@
 -- migrations/sqlite/00003_add_admin_sessions_expires_at_index.sql
 -- admin_sessions has the same unbounded-growth issue as login_attempts in
 -- other projects: every login inserts a row, but nothing ever deletes an
--- expired one — FindValidSessionByID's expires_at > ? filter just hides
+-- expired one — the session lookup's expires_at > ? filter just hides
 -- them from queries, the rows themselves stay forever. This index
 -- supports the cleanup query (repository.DeleteExpiredSessions, called
 -- from service.Login's transaction) so the DELETE isn't a full table scan.

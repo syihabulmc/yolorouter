@@ -126,7 +126,7 @@ func PostSetup(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		admin, sessionID, err := service.Setup(db, req.Username, req.Password, time.Now().UTC())
+		user, sessionID, err := service.Setup(db, req.Username, req.Password, time.Now().UTC())
 		if errors.Is(err, errcode.ErrAccountSetupAlreadyDone) {
 			middleware.WriteAdminError(c, http.StatusConflict, errcode.AccountSetupAlreadyDone)
 			return
@@ -137,7 +137,7 @@ func PostSetup(db *gorm.DB) gin.HandlerFunc {
 		}
 
 		writeSessionCookie(c, sessionID, int(service.SessionTTL.Seconds()))
-		writeMeResponse(c, admin)
+		writeMeResponse(c, user)
 	}
 }
 
@@ -159,7 +159,7 @@ func PostLogin(db *gorm.DB, limiter *middleware.Semaphore) gin.HandlerFunc {
 		}
 		defer limiter.Release()
 
-		admin, sessionID, err := service.Login(db, req.Username, req.Password, time.Now().UTC())
+		user, sessionID, err := service.Login(db, req.Username, req.Password, time.Now().UTC())
 		var lockedErr *service.LockedError
 		switch {
 		case errors.As(err, &lockedErr):
@@ -171,13 +171,16 @@ func PostLogin(db *gorm.DB, limiter *middleware.Semaphore) gin.HandlerFunc {
 		case errors.Is(err, errcode.ErrAccountInvalidCredentials):
 			middleware.WriteAdminError(c, http.StatusUnauthorized, errcode.AccountInvalidCredentials)
 			return
+		case errors.Is(err, errcode.ErrAccountDisabled):
+			middleware.WriteAdminError(c, http.StatusForbidden, errcode.AccountDisabled)
+			return
 		case err != nil:
 			middleware.WriteAdminError(c, http.StatusInternalServerError, errcode.DatabaseError)
 			return
 		}
 
 		writeSessionCookie(c, sessionID, int(service.SessionTTL.Seconds()))
-		writeMeResponse(c, admin)
+		writeMeResponse(c, user)
 	}
 }
 
@@ -196,27 +199,30 @@ func PostLogout(db *gorm.DB) gin.HandlerFunc {
 	}
 }
 
-// GetMe returns the currently logged-in admin's username. The browser sends
-// its own IANA timezone via the ?timezone= param on dashboard/analytics, so
-// the server no longer needs to expose its local offset here.
+// GetMe returns the currently logged-in user's username and role. The
+// browser sends its own IANA timezone via the ?timezone= param on
+// dashboard/analytics, so the server no longer needs to expose its local
+// offset here.
 func GetMe(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		adminID := c.MustGet(middleware.AdminIDKey).(uint)
-		admin, err := service.Me(db, adminID)
+		userID := c.MustGet(middleware.UserIDKey).(uint)
+		user, err := service.Me(db, userID)
 		if err != nil {
 			middleware.WriteAdminError(c, http.StatusInternalServerError, errcode.DatabaseError)
 			return
 		}
-		writeMeResponse(c, admin)
+		writeMeResponse(c, user)
 	}
 }
 
 // writeMeResponse emits the shared me-shape used by PostSetup, PostLogin, and
 // GetMe. Centralizing it keeps the three "you are now logged in" responses
-// identical.
-func writeMeResponse(c *gin.Context, admin *model.Admin) {
+// identical. Role is included so the frontend can decide which navigation
+// to render without a second request.
+func writeMeResponse(c *gin.Context, user *model.User) {
 	response.Success(c, gin.H{
-		"username": admin.Username,
+		"username": user.Username,
+		"role":     user.Role,
 	})
 }
 
@@ -228,8 +234,8 @@ func PutPassword(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 
-		adminID := c.MustGet(middleware.AdminIDKey).(uint)
-		err := service.ChangePassword(db, adminID, req.CurrentPassword, req.NewPassword, time.Now().UTC())
+		userID := c.MustGet(middleware.UserIDKey).(uint)
+		err := service.ChangePassword(db, userID, req.CurrentPassword, req.NewPassword, time.Now().UTC())
 		if errors.Is(err, errcode.ErrAccountInvalidCredentials) {
 			middleware.WriteAdminError(c, http.StatusUnauthorized, errcode.AccountInvalidCredentials)
 			return

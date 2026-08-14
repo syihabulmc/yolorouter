@@ -214,7 +214,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// Public auth routes — the only /api/admin endpoints that don't require
 	// a session. Every other route on this group, including every future
 	// module's, registers on the protected subgroup below instead of
-	// directly on admin, so a route missing RequireAdminSession is a
+	// directly on admin, so a route missing RequireSession is a
 	// deliberate exception the reviewer has to notice, not a silent
 	// default that a forgotten middleware call slips through.
 	//
@@ -234,8 +234,13 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	admin.POST("/auth/setup", handler.PostSetup(db))
 	admin.POST("/auth/login", handler.PostLogin(db, loginLimiter))
 
+	// Every route below requires a valid session AND the admin role. When
+	// member-visible routes arrive they will register on a separate
+	// session-only subgroup — the admin requirement stays the default so
+	// that forgetting to classify a new route locks it down rather than
+	// opening it up.
 	protected := admin.Group("")
-	protected.Use(middleware.RequireAdminSession(db))
+	protected.Use(middleware.RequireSession(db), middleware.RequireAdmin())
 	protected.POST("/auth/logout", handler.PostLogout(db))
 	protected.GET("/auth/me", handler.GetMe(db))
 	protected.PUT("/auth/password", handler.PutPassword(db))

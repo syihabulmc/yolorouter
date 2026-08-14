@@ -81,7 +81,7 @@ router.beforeEach(async (to) => {
       // page was requested without ever having confirmed an admin
       // identity, breaking the "anonymous users can't reach admin pages"
       // invariant at the frontend layer (the backend's own
-      // RequireAdminSession middleware still protects the actual data,
+      // RequireSession middleware still protects the actual data,
       // but every future admin page would silently inherit this same
       // fail-open shell). Send unconfirmed requests to /login instead —
       // don't set stateChecked, so the next navigation (including a

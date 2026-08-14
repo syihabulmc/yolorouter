@@ -7,6 +7,8 @@ interface AuthStoreState {
   /** null = /auth/state hasn't been queried yet; cached after the first query so we don't hit it on every route change. */
   initialized: boolean | null
   username: string | null
+  /** Account role ('admin' | 'member') as reported by the backend; null while logged out. */
+  role: string | null
   /**
    * Set whenever handleSessionExpired fires (a genuinely mid-use session
    * expiry, caught by withSessionInvalidHandling on some later
@@ -25,6 +27,7 @@ export const useAuthStore = defineStore('auth', {
   state: (): AuthStoreState => ({
     initialized: null,
     username: null,
+    role: null,
     sessionExpiredNotice: false,
   }),
   getters: {
@@ -65,9 +68,10 @@ export const useAuthStore = defineStore('auth', {
         try {
           const me = await authApi.getMe()
           this.username = me.username
+          this.role = me.role
         } catch (err) {
           if (err instanceof APIError && err.code === ACCOUNT_SESSION_INVALID) {
-            this.username = null
+            this.clearIdentity()
             return
           }
           throw err
@@ -78,25 +82,32 @@ export const useAuthStore = defineStore('auth', {
       const admin = await authApi.setup(username, password)
       this.initialized = true
       this.username = admin.username
+      this.role = admin.role
     },
     async login(username: string, password: string) {
       const admin = await authApi.login(username, password)
       this.username = admin.username
+      this.role = admin.role
     },
     async logout() {
       await authApi.logout()
-      this.username = null
+      this.clearIdentity()
     },
     async changePassword(currentPassword: string, newPassword: string) {
       await authApi.changePassword(currentPassword, newPassword)
       // The backend already deleted every session issued before this
       // change (including the current one).
-      this.username = null
+      this.clearIdentity()
     },
     /** Called whenever any request catches AccountSessionInvalid — clears local state; the caller navigates to /login. */
     handleSessionExpired() {
-      this.username = null
+      this.clearIdentity()
       this.sessionExpiredNotice = true
+    },
+    /** Single place that resets the logged-in identity, so username and role can never drift apart across the logout/expiry paths. */
+    clearIdentity() {
+      this.username = null
+      this.role = null
     },
     /** Reads and clears the pending notice in one step, so it's shown at most once per expiry. */
     consumeSessionExpiredNotice(): boolean {

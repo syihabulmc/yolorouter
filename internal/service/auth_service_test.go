@@ -9,6 +9,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
@@ -49,7 +50,7 @@ func dropTable(t *testing.T, db *gorm.DB, table string) {
 	}
 }
 
-func TestCheckStateReflectsAdminCount(t *testing.T) {
+func TestCheckStateReflectsLocalUserPresence(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	now := time.Now().UTC()
 
@@ -88,15 +89,15 @@ func TestSetupRejectsSecondCall(t *testing.T) {
 	}
 }
 
-// TestConcurrentSetupOnlyCreatesOneAdmin exercises the actual race the
-// sequential TestSetupRejectsSecondCall can't: many goroutines calling
-// Setup with DIFFERENT usernames at the same time, before any of them has
-// observed the others' CountAdmins result. Without the
-// admins.singleton_guard UNIQUE constraint (migration
-// 00002_create_admin_auth.sql) and Setup's re-check-after-failure logic,
-// this used to be able to create more than one admin row — a direct
-// violation of the single-admin invariant.
-func TestConcurrentSetupOnlyCreatesOneAdmin(t *testing.T) {
+// TestConcurrentSetupOnlyCreatesOneLocalUser exercises the actual race
+// the sequential TestSetupRejectsSecondCall can't: many goroutines
+// calling Setup with DIFFERENT usernames at the same time, before any of
+// them has observed the others' CountLocalUsers result. Without the
+// partial unique index on users.is_local (migration
+// 00023_users_multi_account.sql) and Setup's re-check-after-failure
+// logic, this could create more than one local password account — a
+// direct violation of the single-local-account invariant.
+func TestConcurrentSetupOnlyCreatesOneLocalUser(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	now := time.Now().UTC()
 
@@ -130,12 +131,12 @@ func TestConcurrentSetupOnlyCreatesOneAdmin(t *testing.T) {
 		t.Fatalf("expected the other %d attempts to see ErrAccountSetupAlreadyDone, got %d", attempts-1, alreadyDone)
 	}
 
-	count, err := repository.CountAdmins(db)
+	count, err := repository.CountLocalUsers(db)
 	if err != nil {
-		t.Fatalf("CountAdmins failed: %v", err)
+		t.Fatalf("CountLocalUsers failed: %v", err)
 	}
 	if count != 1 {
-		t.Fatalf("expected exactly 1 admin row to exist after the race, got %d", count)
+		t.Fatalf("expected exactly 1 local user row to exist after the race, got %d", count)
 	}
 }
 
@@ -149,6 +150,11 @@ func TestSetupIssuesAWorkingSession(t *testing.T) {
 	}
 	if admin.Username != "admin" {
 		t.Fatalf("expected username=admin, got %q", admin.Username)
+	}
+	// Setup must create the account as the local admin, or the whole
+	// role/escape-hatch model collapses on first run.
+	if admin.Role != model.RoleAdmin || !admin.IsLocal || admin.Status != model.UserStatusEnabled {
+		t.Fatalf("expected an enabled local admin, got role=%q is_local=%v status=%d", admin.Role, admin.IsLocal, admin.Status)
 	}
 	if sessionID == "" {
 		t.Fatalf("expected a non-empty session id")
@@ -285,12 +291,12 @@ func TestLockedErrorMessageIsAccountLoginLocked(t *testing.T) {
 	}
 }
 
-func TestCheckStateErrorsWhenAdminsTableMissing(t *testing.T) {
+func TestCheckStateErrorsWhenUsersTableMissing(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	dropTable(t, db, "admins")
+	dropTable(t, db, "users")
 
 	if _, err := CheckState(db); err == nil {
-		t.Fatalf("expected an error when the admins table is missing")
+		t.Fatalf("expected an error when the users table is missing")
 	}
 }
 
@@ -309,13 +315,13 @@ func TestSetupErrorsWhenPasswordTooLongToHash(t *testing.T) {
 
 // TestSetupRollsBackAndReturnsRawErrorWhenSessionCreationFails exercises
 // Setup's txErr path where the transaction genuinely fails (as opposed to
-// losing the singleton_guard race) — the admin insert must be rolled back
-// (leaving CountAdmins at 0) so the raw error is returned instead of
-// ErrAccountSetupAlreadyDone.
+// losing the single-local-user race) — the user insert must be rolled
+// back (leaving CountLocalUsers at 0) so the raw error is returned
+// instead of ErrAccountSetupAlreadyDone.
 func TestSetupRollsBackAndReturnsRawErrorWhenSessionCreationFails(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	now := time.Now().UTC()
-	blockTableWrites(t, db, "admin_sessions", "INSERT")
+	blockTableWrites(t, db, "user_sessions", "INSERT")
 
 	_, _, err := Setup(db, "admin", "password123", now)
 	if err == nil {
@@ -325,21 +331,21 @@ func TestSetupRollsBackAndReturnsRawErrorWhenSessionCreationFails(t *testing.T) 
 		t.Fatalf("expected the raw transaction error, not ErrAccountSetupAlreadyDone, got %v", err)
 	}
 
-	count, countErr := repository.CountAdmins(db)
+	count, countErr := repository.CountLocalUsers(db)
 	if countErr != nil {
-		t.Fatalf("CountAdmins failed: %v", countErr)
+		t.Fatalf("CountLocalUsers failed: %v", countErr)
 	}
 	if count != 0 {
-		t.Fatalf("expected the failed transaction to roll back the admin insert, found %d admins", count)
+		t.Fatalf("expected the failed transaction to roll back the user insert, found %d local users", count)
 	}
 }
 
-func TestLoginErrorsWhenAdminsTableMissing(t *testing.T) {
+func TestLoginErrorsWhenUsersTableMissing(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	dropTable(t, db, "admins")
+	dropTable(t, db, "users")
 
 	if _, _, err := Login(db, "admin", "password123", time.Now().UTC()); err == nil {
-		t.Fatalf("expected an error when the admins table is missing")
+		t.Fatalf("expected an error when the users table is missing")
 	}
 }
 
@@ -349,7 +355,7 @@ func TestLoginErrorsWhenRecordLoginFailureFails(t *testing.T) {
 	if _, _, err := Setup(db, "admin", "password123", now); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
-	blockTableWrites(t, db, "admins", "UPDATE")
+	blockTableWrites(t, db, "users", "UPDATE")
 
 	_, _, err := Login(db, "admin", "wrong-password", now)
 	if err == nil {
@@ -375,7 +381,7 @@ func TestLoginErrorsWhenDeleteExpiredSessionsFails(t *testing.T) {
 	if err := repository.CreateSession(db, "already-expired", admin.ID, now.Add(-time.Hour), now.Add(-2*time.Hour)); err != nil {
 		t.Fatalf("seed expired session failed: %v", err)
 	}
-	blockTableWrites(t, db, "admin_sessions", "DELETE")
+	blockTableWrites(t, db, "user_sessions", "DELETE")
 
 	if _, _, err := Login(db, "admin", "password123", now); err == nil {
 		t.Fatalf("expected an error when DeleteExpiredSessions fails inside Login's transaction")
@@ -388,17 +394,17 @@ func TestLoginErrorsWhenRecordLoginSuccessFails(t *testing.T) {
 	if _, _, err := Setup(db, "admin", "password123", now); err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
-	blockTableWrites(t, db, "admins", "UPDATE")
+	blockTableWrites(t, db, "users", "UPDATE")
 
 	if _, _, err := Login(db, "admin", "password123", now); err == nil {
 		t.Fatalf("expected an error when RecordLoginSuccess's UPDATE fails inside Login's transaction")
 	}
 }
 
-func TestChangePasswordErrorsWhenAdminNotFound(t *testing.T) {
+func TestChangePasswordErrorsWhenUserNotFound(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	if err := ChangePassword(db, 9999, "whatever", "newpassword456", time.Now().UTC()); err == nil {
-		t.Fatalf("expected an error for a non-existent admin id")
+		t.Fatalf("expected an error for a non-existent user id")
 	}
 }
 
@@ -423,7 +429,7 @@ func TestChangePasswordErrorsWhenPasswordHashUpdateFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
-	blockTableWrites(t, db, "admins", "UPDATE")
+	blockTableWrites(t, db, "users", "UPDATE")
 
 	if err := ChangePassword(db, admin.ID, "password123", "newpassword456", now); err == nil {
 		t.Fatalf("expected an error when the password_hash UPDATE fails")
@@ -442,9 +448,53 @@ func TestCreateSessionErrorsWhenInsertFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setup failed: %v", err)
 	}
-	blockTableWrites(t, db, "admin_sessions", "INSERT")
+	blockTableWrites(t, db, "user_sessions", "INSERT")
 
 	if _, err := createSession(db, admin.ID, now); err == nil {
-		t.Fatalf("expected an error when the admin_sessions INSERT fails")
+		t.Fatalf("expected an error when the user_sessions INSERT fails")
+	}
+}
+
+// TestLoginRejectsDisabledLocalAccount pins Login's status gate — and its
+// ordering: the disabled answer only comes after the password check
+// passes, so someone without the password still sees the generic
+// invalid-credentials error and learns nothing about the account.
+func TestLoginRejectsDisabledLocalAccount(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	now := time.Now().UTC()
+	admin, _, err := Setup(db, "admin", "password123", now)
+	if err != nil {
+		t.Fatalf("Setup failed: %v", err)
+	}
+	if err := db.Model(&model.User{}).Where("id = ?", admin.ID).
+		Update("status", model.UserStatusDisabled).Error; err != nil {
+		t.Fatalf("disable user failed: %v", err)
+	}
+
+	_, _, err = Login(db, "admin", "password123", now)
+	if !errors.Is(err, errcode.ErrAccountDisabled) {
+		t.Fatalf("expected ErrAccountDisabled with the correct password, got: %v", err)
+	}
+
+	_, _, err = Login(db, "admin", "wrong-password", now)
+	if errors.Is(err, errcode.ErrAccountDisabled) {
+		t.Fatalf("wrong password must not reveal the disabled state, got ErrAccountDisabled")
+	}
+}
+
+// TestLoginNeverMatchesNonLocalAccounts pins the password form's scope:
+// an externally-provisioned account (no password, not local) must be
+// indistinguishable from a nonexistent account through this path.
+func TestLoginNeverMatchesNonLocalAccounts(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	now := time.Now().UTC()
+	member := &model.User{Username: "ext-user", Role: model.RoleMember, Status: model.UserStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	if err := repository.CreateUser(db, member); err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	_, _, err := Login(db, "ext-user", "", now)
+	if !errors.Is(err, errcode.ErrAccountInvalidCredentials) {
+		t.Fatalf("expected ErrAccountInvalidCredentials for a non-local account, got: %v", err)
 	}
 }

@@ -30,29 +30,33 @@ type LockedError struct {
 func (e *LockedError) Error() string { return errcode.ErrorMessages[errcode.AccountLoginLocked] }
 
 // CheckState reports whether first-run setup has already been completed.
+// "Completed" means the local password account exists — accounts
+// provisioned through external identity providers don't count, because
+// an instance without its local admin still needs the setup page.
 func CheckState(db *gorm.DB) (bool, error) {
-	count, err := repository.CountAdmins(db)
+	count, err := repository.CountLocalUsers(db)
 	if err != nil {
 		return false, err
 	}
 	return count > 0, nil
 }
 
-// Setup creates the first (and, in v0.1, only) admin and immediately signs
+// Setup creates the local admin account and immediately signs
 // them in — creation success lands on the empty-state
-// overview. Returns the new admin and a freshly issued session id.
+// overview. Returns the new user and a freshly issued session id.
 //
-// The CountAdmins check below is only a fast-path optimization (skip
+// The CountLocalUsers check below is only a fast-path optimization (skip
 // hashing/inserting when setup is obviously already done) — it does NOT by
 // itself prevent two concurrent first-run requests from both observing
 // count==0 and both attempting to insert. The real guarantee is the
-// admins.singleton_guard UNIQUE constraint (migration
-// 00002_create_admin_auth.sql): at most one of any concurrent CreateAdmin
-// calls can ever succeed, and admin creation + session issuance run in one
-// transaction so a losing/failed attempt never leaves a half-initialized
-// state (an admin row with no session, or vice versa).
-func Setup(db *gorm.DB, username, password string, now time.Time) (*model.Admin, string, error) {
-	count, err := repository.CountAdmins(db)
+// partial unique index on users.is_local (migration
+// 00023_users_multi_account.sql): at most one of any concurrent
+// CreateUser(is_local=true) calls can ever succeed, and user creation +
+// session issuance run in one transaction so a losing/failed attempt
+// never leaves a half-initialized state (a user row with no session, or
+// vice versa).
+func Setup(db *gorm.DB, username, password string, now time.Time) (*model.User, string, error) {
+	count, err := repository.CountLocalUsers(db)
 	if err != nil {
 		return nil, "", err
 	}
@@ -65,27 +69,35 @@ func Setup(db *gorm.DB, username, password string, now time.Time) (*model.Admin,
 		return nil, "", err
 	}
 
-	admin := &model.Admin{Username: username, PasswordHash: hash, CreatedAt: now, UpdatedAt: now}
+	user := &model.User{
+		Username:     username,
+		PasswordHash: hash,
+		Role:         model.RoleAdmin,
+		Status:       model.UserStatusEnabled,
+		IsLocal:      true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
 	var sessionID string
 	txErr := db.Transaction(func(tx *gorm.DB) error {
-		if err := repository.CreateAdmin(tx, admin); err != nil {
+		if err := repository.CreateUser(tx, user); err != nil {
 			return err
 		}
 		var sessErr error
-		sessionID, sessErr = createSession(tx, admin.ID, now)
+		sessionID, sessErr = createSession(tx, user.ID, now)
 		return sessErr
 	})
 	if txErr != nil {
-		// A concurrent request may have already won the singleton_guard
-		// race — if an admin now exists, report the same
+		// A concurrent request may have already won the single-local-user
+		// race — if a local account now exists, report the same
 		// AccountSetupAlreadyDone a sequential retry would see, rather
 		// than leaking the raw constraint-violation error.
-		if recount, recountErr := repository.CountAdmins(db); recountErr == nil && recount > 0 {
+		if recount, recountErr := repository.CountLocalUsers(db); recountErr == nil && recount > 0 {
 			return nil, "", errcode.ErrAccountSetupAlreadyDone
 		}
 		return nil, "", txErr
 	}
-	return admin, sessionID, nil
+	return user, sessionID, nil
 }
 
 // dummyPasswordHashForTiming is a fixed, valid bcrypt hash (of an arbitrary
@@ -100,13 +112,18 @@ func Setup(db *gorm.DB, username, password string, now time.Time) (*model.Admin,
 // dominant one.
 const dummyPasswordHashForTiming = "$2a$10$vpIoHknMZAeHODNlCkCaIOQl4f3oxTgUd1mR3rKuDld2LOwsXakbu"
 
-// Login verifies username+password, applies the lockout state machine,
-// and on success issues a new session. A wrong password
-// and an unknown username return the exact same
-// errcode.ErrAccountInvalidCredentials — never reveal whether
-// an account exists.
-func Login(db *gorm.DB, username, password string, now time.Time) (*model.Admin, string, error) {
-	admin, err := repository.FindAdminByUsername(db, username)
+// Login verifies username+password against the local account, applies
+// the lockout state machine, and on success issues a new session. A
+// wrong password, an unknown username, and a non-local username all
+// return the exact same errcode.ErrAccountInvalidCredentials — never
+// reveal whether an account exists or how it authenticates.
+//
+// A disabled local account is rejected with an explicit
+// account-disabled error only AFTER the password check succeeds:
+// reporting it on username match alone would confirm the account exists
+// to someone who doesn't hold the password.
+func Login(db *gorm.DB, username, password string, now time.Time) (*model.User, string, error) {
+	user, err := repository.FindLocalUserByUsername(db, username)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		CheckPassword(dummyPasswordHashForTiming, password)
 		return nil, "", errcode.ErrAccountInvalidCredentials
@@ -115,12 +132,12 @@ func Login(db *gorm.DB, username, password string, now time.Time) (*model.Admin,
 		return nil, "", err
 	}
 
-	if admin.LockedUntil != nil && admin.LockedUntil.After(now) {
-		return nil, "", &LockedError{LockedUntil: *admin.LockedUntil}
+	if user.LockedUntil != nil && user.LockedUntil.After(now) {
+		return nil, "", &LockedError{LockedUntil: *user.LockedUntil}
 	}
 
-	if !CheckPassword(admin.PasswordHash, password) {
-		newLockedUntil, err := repository.RecordLoginFailure(db, admin.ID, now, LoginLockThreshold, LoginLockDuration)
+	if !CheckPassword(user.PasswordHash, password) {
+		newLockedUntil, err := repository.RecordLoginFailure(db, user.ID, now, LoginLockThreshold, LoginLockDuration)
 		if err != nil {
 			return nil, "", err
 		}
@@ -130,11 +147,15 @@ func Login(db *gorm.DB, username, password string, now time.Time) (*model.Admin,
 		return nil, "", errcode.ErrAccountInvalidCredentials
 	}
 
+	if user.Status != model.UserStatusEnabled {
+		return nil, "", errcode.ErrAccountDisabled
+	}
+
 	// RecordLoginSuccess (clearing the lockout state) and createSession
 	// (issuing the new session) run in one transaction — same reasoning as
 	// Setup/ChangePassword: a partial failure here must not leave the
 	// lockout cleared with no session actually issued. DeleteExpiredSessions
-	// piggybacks on the same transaction, amortizing admin_sessions's
+	// piggybacks on the same transaction, amortizing user_sessions's
 	// unbounded-growth cleanup across every successful login instead of
 	// needing a separate cleanup worker/cron.
 	var sessionID string
@@ -142,16 +163,16 @@ func Login(db *gorm.DB, username, password string, now time.Time) (*model.Admin,
 		if err := repository.DeleteExpiredSessions(tx, now); err != nil {
 			return err
 		}
-		if err := repository.RecordLoginSuccess(tx, admin.ID, now); err != nil {
+		if err := repository.RecordLoginSuccess(tx, user.ID, now); err != nil {
 			return err
 		}
 		var sessErr error
-		sessionID, sessErr = createSession(tx, admin.ID, now)
+		sessionID, sessErr = createSession(tx, user.ID, now)
 		return sessErr
 	}); err != nil {
 		return nil, "", err
 	}
-	return admin, sessionID, nil
+	return user, sessionID, nil
 }
 
 // Logout deletes a single session. Deleting an id that's already gone is
@@ -160,28 +181,33 @@ func Logout(db *gorm.DB, sessionID string) error {
 	return repository.DeleteSession(db, sessionID)
 }
 
-// Me returns the admin identified by id (set into gin.Context by
-// RequireAdminSession).
-func Me(db *gorm.DB, adminID uint) (*model.Admin, error) {
-	return repository.FindAdminByID(db, adminID)
+// Me returns the user identified by id (set into gin.Context by
+// RequireSession).
+func Me(db *gorm.DB, userID uint) (*model.User, error) {
+	return repository.FindUserByID(db, userID)
 }
 
 // ChangePassword verifies the caller's current password, stores the new
-// hash, and deletes every session belonging to this admin — including the
+// hash, and deletes every session belonging to this user — including the
 // caller's own — changing the password invalidates the
 // current login and returns to the login page.
+//
+// Only the local account can ever pass the current-password check:
+// externally-provisioned accounts have an empty stored hash, which
+// CheckPassword rejects for any input, so they fall out as
+// invalid-credentials without needing an explicit is_local branch.
 //
 // The password update and session deletion run inside one transaction: if
 // the caller ended up "changed but still logged in on the old sessions"
 // because the second write failed after the first committed, that would
 // directly violate that invariant — a partial failure here must undo the
 // password change too, not leave it half-applied.
-func ChangePassword(db *gorm.DB, adminID uint, currentPassword, newPassword string, now time.Time) error {
-	admin, err := repository.FindAdminByID(db, adminID)
+func ChangePassword(db *gorm.DB, userID uint, currentPassword, newPassword string, now time.Time) error {
+	user, err := repository.FindUserByID(db, userID)
 	if err != nil {
 		return err
 	}
-	if !CheckPassword(admin.PasswordHash, currentPassword) {
+	if !CheckPassword(user.PasswordHash, currentPassword) {
 		return errcode.ErrAccountInvalidCredentials
 	}
 
@@ -190,22 +216,22 @@ func ChangePassword(db *gorm.DB, adminID uint, currentPassword, newPassword stri
 		return err
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
-		if err := repository.UpdateAdminPasswordHash(tx, adminID, newHash, now); err != nil {
+		if err := repository.UpdateUserPasswordHash(tx, userID, newHash, now); err != nil {
 			return err
 		}
-		return repository.DeleteAllSessionsForAdmin(tx, adminID)
+		return repository.DeleteAllSessionsForUser(tx, userID)
 	})
 }
 
 // createSession generates a fresh opaque token and persists it with a
 // SessionTTL expiry. The raw token is the exact value stored as both
-// admin_sessions.id (hashed) and the session cookie's value.
-func createSession(db *gorm.DB, adminID uint, now time.Time) (string, error) {
+// user_sessions.id (hashed) and the session cookie's value.
+func createSession(db *gorm.DB, userID uint, now time.Time) (string, error) {
 	sessionID, err := generateRandomToken(32, "")
 	if err != nil {
 		return "", err
 	}
-	if err := repository.CreateSession(db, sessionID, adminID, now.Add(SessionTTL), now); err != nil {
+	if err := repository.CreateSession(db, sessionID, userID, now.Add(SessionTTL), now); err != nil {
 		return "", err
 	}
 	return sessionID, nil

@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"os"
+	"strings"
 	"testing"
 
 	_ "github.com/lib/pq"
@@ -48,9 +49,15 @@ func TestPostgresMigrationsApplyRollBackAndReapply(t *testing.T) {
 		t.Fatalf("GetCurrentVersion failed: %v", err)
 	}
 	// Kept in step with the SQLite assertion in TestGetCurrentVersionOnFreshSQLiteDB
-	// — the two trees are mirrors and must not drift apart in length.
-	if version != 21 {
-		t.Fatalf("expected version 21 after all migrations, got %d", version)
+	// — the two trees are mirrors and must not drift apart in length. The
+	// expected value is derived from the embedded filenames so this can
+	// never go stale when a migration is added.
+	want := maxEmbeddedMigrationVersion(t, migrations.PostgresFS, "postgres")
+	if version != want {
+		t.Fatalf("expected version %d after all migrations, got %d", want, version)
+	}
+	if sqliteMax := maxEmbeddedMigrationVersion(t, migrations.SQLiteFS, "sqlite"); sqliteMax != want {
+		t.Fatalf("migration trees drifted apart: sqlite max %d vs postgres max %d", sqliteMax, want)
 	}
 
 	// Rolling all the way back exercises every Down. An operator who has to
@@ -61,6 +68,98 @@ func TestPostgresMigrationsApplyRollBackAndReapply(t *testing.T) {
 	}
 	if err := RunMigrations(db, "postgres", migrations.PostgresFS, "postgres"); err != nil {
 		t.Fatalf("re-applying migrations after rollback failed: %v", err)
+	}
+}
+
+// TestPostgresMigration00023CarriesAdminAndSessionsOverToUsers is the
+// Postgres twin of the SQLite upgrade-replay test: the multi-account
+// migration's data carry-over AND its Postgres-only sequence handling
+// (an INSERT with an explicit id does not advance a BIGSERIAL sequence,
+// so the migration must setval past the copied ids) both need to run on
+// the real backend at least once — the empty-tree up/down test above
+// never inserts a row, so it cannot catch a broken setval.
+func TestPostgresMigration00023CarriesAdminAndSessionsOverToUsers(t *testing.T) {
+	db := newTestPostgresDB(t)
+	if err := RunMigrations(db, "postgres", migrations.PostgresFS, "postgres"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	if err := RollbackTo(db, "postgres", migrations.PostgresFS, "postgres", 22); err != nil {
+		t.Fatalf("RollbackTo(22) failed: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO admins (id, username, password_hash, failed_login_count, created_at, updated_at)
+		VALUES (7, 'boss', 'bcrypt-hash', 2, now(), now())`); err != nil {
+		t.Fatalf("seed admin: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO admin_sessions (id, admin_id, expires_at, created_at)
+		VALUES ('session-hash-value', 7, now() + interval '1 year', now())`); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	if err := RunMigrations(db, "postgres", migrations.PostgresFS, "postgres"); err != nil {
+		t.Fatalf("re-running migrations failed: %v", err)
+	}
+
+	var (
+		username, passwordHash, role string
+		status, failedCount          int
+		isLocal                      bool
+	)
+	row := db.QueryRow(`SELECT username, password_hash, role, status, is_local, failed_login_count FROM users WHERE id = 7`)
+	if err := row.Scan(&username, &passwordHash, &role, &status, &isLocal, &failedCount); err != nil {
+		t.Fatalf("migrated user row not found: %v", err)
+	}
+	if username != "boss" || passwordHash != "bcrypt-hash" || failedCount != 2 {
+		t.Fatalf("carried-over fields wrong: username=%q hash=%q failed=%d", username, passwordHash, failedCount)
+	}
+	if role != "admin" || status != 1 || !isLocal {
+		t.Fatalf("expected enabled local admin, got role=%q status=%d is_local=%v", role, status, isLocal)
+	}
+
+	var sessionUserID int64
+	if err := db.QueryRow(`SELECT user_id FROM user_sessions WHERE id = 'session-hash-value'`).Scan(&sessionUserID); err != nil {
+		t.Fatalf("migrated session row not found: %v", err)
+	}
+	if sessionUserID != 7 {
+		t.Fatalf("expected session to stay attached to user 7, got %d", sessionUserID)
+	}
+
+	// The sequence must have been advanced past the copied explicit id —
+	// without the migration's setval, this INSERT would generate id 1 and
+	// eventually collide with copied rows.
+	var nextID int64
+	if err := db.QueryRow(`INSERT INTO users (username, role, status, created_at, updated_at)
+		VALUES ('next-user', 'member', 1, now(), now()) RETURNING id`).Scan(&nextID); err != nil {
+		t.Fatalf("insert after migration failed: %v", err)
+	}
+	if nextID <= 7 {
+		t.Fatalf("expected the next generated id to be > 7, got %d", nextID)
+	}
+
+	// The runtime binds is_local as a Go bool (model.User.IsLocal), so the
+	// column must be a real BOOLEAN — an integer-typed column would make
+	// every `is_local = $1` predicate fail with a type error on this
+	// backend only. This probe uses the exact parameter shape the
+	// repository layer produces.
+	var localCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE is_local = $1`, true).Scan(&localCount); err != nil {
+		t.Fatalf("boolean-bound is_local predicate failed (column type mismatch?): %v", err)
+	}
+	if localCount != 1 {
+		t.Fatalf("expected 1 local user via boolean predicate, got %d", localCount)
+	}
+
+	// The partial unique index must survive the trip through goose on this
+	// backend too: a second local account is impossible. The error must be
+	// the unique violation itself — asserting a bare non-nil error here
+	// once let a column-type error impersonate the constraint.
+	_, err := db.Exec(`INSERT INTO users (username, password_hash, role, status, is_local, created_at, updated_at)
+		VALUES ('local-two', 'hash', 'admin', 1, true, now(), now())`)
+	if err == nil {
+		t.Fatalf("expected the second local user to violate the partial unique index")
+	}
+	if !strings.Contains(err.Error(), "idx_users_single_local") {
+		t.Fatalf("expected a unique violation on idx_users_single_local, got: %v", err)
 	}
 }
 

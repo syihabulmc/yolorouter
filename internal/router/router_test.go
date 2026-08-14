@@ -59,7 +59,7 @@ func TestProviderRoutesAreRegisteredUnderProtectedGroup(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/providers", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	// No session cookie: RequireAdminSession must reject this before it
+	// No session cookie: RequireSession must reject this before it
 	// ever reaches the provider handler — proves providers routes are on
 	// the `protected` subgroup, not directly on `admin`.
 	if w.Code != http.StatusUnauthorized {

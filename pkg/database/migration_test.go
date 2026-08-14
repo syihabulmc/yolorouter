@@ -2,6 +2,9 @@ package database
 
 import (
 	"database/sql"
+	"io/fs"
+	"strconv"
+	"strings"
 	"testing"
 
 	// database.go (same package) imports github.com/glebarez/sqlite, which
@@ -26,6 +29,43 @@ func newMemoryDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+// maxEmbeddedMigrationVersion derives the highest migration version from
+// the embedded filenames themselves. The "did RunMigrations apply
+// everything?" assertions used to hardcode this number and it was left
+// stale twice across releases (once at 19, once at 21) — a literal that
+// must be bumped by hand in two test files whenever a migration is added
+// is exactly the kind of guard that silently stops guarding. Deriving it
+// from the FS keeps the assertion honest by construction.
+func maxEmbeddedMigrationVersion(t *testing.T, migrationsFS fs.FS, dir string) int64 {
+	t.Helper()
+	entries, err := fs.ReadDir(migrationsFS, dir)
+	if err != nil {
+		t.Fatalf("read embedded migrations dir %q: %v", dir, err)
+	}
+	var maxVersion int64
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		prefix, _, ok := strings.Cut(name, "_")
+		if !ok {
+			continue
+		}
+		v, err := strconv.ParseInt(prefix, 10, 64)
+		if err != nil {
+			continue
+		}
+		if v > maxVersion {
+			maxVersion = v
+		}
+	}
+	if maxVersion == 0 {
+		t.Fatalf("no numbered .sql migrations found in %q", dir)
+	}
+	return maxVersion
 }
 
 func TestRunMigrationsAppliesBaselineOnSQLite(t *testing.T) {
@@ -70,46 +110,186 @@ func TestGetCurrentVersionOnFreshSQLiteDB(t *testing.T) {
 		t.Fatalf("GetCurrentVersion failed: %v", err)
 	}
 	// This asserts the current highest migration version, not just the
-	// baseline migration — it must be bumped whenever a new migration file
-	// is added to migrations/sqlite (currently 00001_baseline.sql +
-	// 00002_create_admin_auth.sql + 00003_add_admin_sessions_expires_at_index.sql +
-	// 00004_create_providers.sql + 00005_create_models.sql +
-	// 00006_create_api_keys.sql + 00007_create_request_logs.sql +
-	// 00008_request_logs_status_index.sql + 00009_request_logs_request_id_index.sql +
-	// 00010_request_logs_cache_tokens.sql + 00011_create_request_log_bodies.sql +
-	// 00012_provider_protocol_endpoints.sql + 00013_request_logs_cache_savings.sql +
-	// 00014_api_keys_allow_all_models.sql +
-	// 00015_system_settings_and_custom_system_prompt.sql +
-	// 00016_input_compression.sql +
-	// 00017_request_endpoints.sql +
-	// 00018_model_candidate_capability_tristate.sql +
-	// 00020_request_logs_facts_json.sql +
-	// 00021_api_keys_encrypted_key.sql).
-	if version != 22 {
-		t.Fatalf("expected version 22 after all migrations, got %d", version)
+	// baseline migration. The expected value is derived from the embedded
+	// filenames (see maxEmbeddedMigrationVersion) so it can never go stale
+	// when a migration is added.
+	want := maxEmbeddedMigrationVersion(t, migrations.SQLiteFS, "sqlite")
+	if version != want {
+		t.Fatalf("expected version %d after all migrations, got %d", want, version)
 	}
 }
 
-func TestRunMigrationsAppliesAdminAuthTablesOnSQLite(t *testing.T) {
+func TestRunMigrationsAppliesUserAuthTablesOnSQLite(t *testing.T) {
 	db := newMemoryDB(t)
 
 	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
 		t.Fatalf("RunMigrations failed: %v", err)
 	}
 
-	version, err := GetCurrentVersion(db, "sqlite")
-	if err != nil {
-		t.Fatalf("GetCurrentVersion failed: %v", err)
-	}
-	if version < 2 {
-		t.Fatalf("expected version >= 2 after admin_auth migration, got %d", version)
-	}
-
-	for _, table := range []string{"admins", "admin_sessions"} {
+	for _, table := range []string{"users", "user_sessions"} {
 		var name string
 		row := db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table)
 		if err := row.Scan(&name); err != nil {
 			t.Fatalf("table %q not found after migration: %v", table, err)
+		}
+	}
+	// The single-admin tables must be gone after the multi-account
+	// migration — code binding to them would only fail at runtime.
+	for _, table := range []string{"admins", "admin_sessions"} {
+		var name string
+		row := db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table)
+		if err := row.Scan(&name); err == nil {
+			t.Fatalf("table %q should have been dropped by the multi-account migration", table)
+		}
+	}
+}
+
+// TestMigration00023CarriesAdminAndSessionsOverToUsers replays a real
+// upgrade: a database at the pre-multi-account version with an admin row
+// and a live session must come out of the migration with that account as
+// an enabled local admin user (same id, same password hash) and the
+// session still attached — an upgrade must not log the administrator out
+// or, worse, orphan the account.
+func TestMigration00023CarriesAdminAndSessionsOverToUsers(t *testing.T) {
+	db := newMemoryDB(t)
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	if err := RollbackTo(db, "sqlite", migrations.SQLiteFS, "sqlite", 22); err != nil {
+		t.Fatalf("RollbackTo(22) failed: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO admins (id, username, password_hash, failed_login_count, created_at, updated_at)
+		VALUES (7, 'boss', 'bcrypt-hash', 2, '2026-01-01 00:00:00', '2026-01-02 00:00:00')`); err != nil {
+		t.Fatalf("seed admin: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO admin_sessions (id, admin_id, expires_at, created_at)
+		VALUES ('session-hash-value', 7, '2027-01-01 00:00:00', '2026-01-01 00:00:00')`); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("re-running migrations failed: %v", err)
+	}
+
+	var (
+		username, passwordHash, role string
+		status, failedCount          int
+		isLocal                      bool
+	)
+	row := db.QueryRow(`SELECT username, password_hash, role, status, is_local, failed_login_count FROM users WHERE id = 7`)
+	if err := row.Scan(&username, &passwordHash, &role, &status, &isLocal, &failedCount); err != nil {
+		t.Fatalf("migrated user row not found: %v", err)
+	}
+	if username != "boss" || passwordHash != "bcrypt-hash" || failedCount != 2 {
+		t.Fatalf("carried-over fields wrong: username=%q hash=%q failed=%d", username, passwordHash, failedCount)
+	}
+	if role != "admin" || status != 1 || !isLocal {
+		t.Fatalf("expected enabled local admin, got role=%q status=%d is_local=%v", role, status, isLocal)
+	}
+
+	var sessionUserID int64
+	row = db.QueryRow(`SELECT user_id FROM user_sessions WHERE id = 'session-hash-value'`)
+	if err := row.Scan(&sessionUserID); err != nil {
+		t.Fatalf("migrated session row not found: %v", err)
+	}
+	if sessionUserID != 7 {
+		t.Fatalf("expected session to stay attached to user 7, got %d", sessionUserID)
+	}
+
+	// The copied explicit id must not collide with the next generated one.
+	res, err := db.Exec(`INSERT INTO users (username, role, status, created_at, updated_at)
+		VALUES ('next-user', 'member', 1, '2026-01-03 00:00:00', '2026-01-03 00:00:00')`)
+	if err != nil {
+		t.Fatalf("insert after migration failed: %v", err)
+	}
+	nextID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId: %v", err)
+	}
+	if nextID <= 7 {
+		t.Fatalf("expected the next generated id to be > 7, got %d", nextID)
+	}
+}
+
+// TestMigration00023DownRestoresSingleAdminSchema proves the rollback is
+// a real inverse with data in place: the local account and its session
+// come back as the admins/admin_sessions rows they once were, while
+// non-local users (unrepresentable in the single-admin schema) are
+// dropped rather than corrupting the singleton constraint.
+func TestMigration00023DownRestoresSingleAdminSchema(t *testing.T) {
+	db := newMemoryDB(t)
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO users (id, username, password_hash, role, status, is_local, created_at, updated_at)
+		VALUES (3, 'boss', 'bcrypt-hash', 'admin', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'),
+		       (4, 'ext-member', '', 'member', 1, 0, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`); err != nil {
+		t.Fatalf("seed users: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO user_sessions (id, user_id, expires_at, created_at)
+		VALUES ('local-session', 3, '2027-01-01 00:00:00', '2026-01-01 00:00:00'),
+		       ('member-session', 4, '2027-01-01 00:00:00', '2026-01-01 00:00:00')`); err != nil {
+		t.Fatalf("seed sessions: %v", err)
+	}
+
+	if err := RollbackTo(db, "sqlite", migrations.SQLiteFS, "sqlite", 22); err != nil {
+		t.Fatalf("RollbackTo(22) failed: %v", err)
+	}
+
+	var username, passwordHash string
+	row := db.QueryRow(`SELECT username, password_hash FROM admins WHERE id = 3`)
+	if err := row.Scan(&username, &passwordHash); err != nil {
+		t.Fatalf("rolled-back admin row not found: %v", err)
+	}
+	if username != "boss" || passwordHash != "bcrypt-hash" {
+		t.Fatalf("unexpected rolled-back admin: username=%q hash=%q", username, passwordHash)
+	}
+
+	var adminCount, sessionCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM admins`).Scan(&adminCount); err != nil {
+		t.Fatalf("count admins: %v", err)
+	}
+	if adminCount != 1 {
+		t.Fatalf("expected exactly the local account to survive rollback, got %d admins", adminCount)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM admin_sessions`).Scan(&sessionCount); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessionCount != 1 {
+		t.Fatalf("expected only the local account's session to survive rollback, got %d", sessionCount)
+	}
+	var sessionAdminID int64
+	if err := db.QueryRow(`SELECT admin_id FROM admin_sessions WHERE id = 'local-session'`).Scan(&sessionAdminID); err != nil {
+		t.Fatalf("local session not found after rollback: %v", err)
+	}
+	if sessionAdminID != 3 {
+		t.Fatalf("expected local session attached to admin 3, got %d", sessionAdminID)
+	}
+}
+
+// TestMigration00023EnforcesSingleLocalUser proves the partial unique
+// index survives the round trip through goose: two enabled local rows
+// must be impossible, while any number of non-local rows is fine.
+func TestMigration00023EnforcesSingleLocalUser(t *testing.T) {
+	db := newMemoryDB(t)
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO users (username, role, status, is_local, created_at, updated_at)
+		VALUES ('local-one', 'admin', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`); err != nil {
+		t.Fatalf("first local insert failed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO users (username, role, status, is_local, created_at, updated_at)
+		VALUES ('local-two', 'admin', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`); err == nil {
+		t.Fatalf("expected the second local user to violate the partial unique index")
+	}
+	for _, name := range []string{"member-a", "member-b"} {
+		if _, err := db.Exec(`INSERT INTO users (username, role, status, is_local, created_at, updated_at)
+			VALUES (?, 'member', 1, 0, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`, name); err != nil {
+			t.Fatalf("non-local insert %q should be allowed: %v", name, err)
 		}
 	}
 }
@@ -488,8 +668,8 @@ func TestMigration00018ModelCandidateCapabilityTristate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrentVersion failed: %v", err)
 	}
-	if version != 22 {
-		t.Fatalf("expected version 22 after re-apply, got %d", version)
+	if version != 23 {
+		t.Fatalf("expected version 23 after re-apply, got %d", version)
 	}
 }
 

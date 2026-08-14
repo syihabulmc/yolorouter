@@ -9,6 +9,8 @@ export interface AuthState {
 
 export interface AdminInfo {
   username: string
+  /** Account role: 'admin' | 'member'. Drives which navigation the frontend renders. */
+  role: string
 }
 
 export interface LoginLockedData {
