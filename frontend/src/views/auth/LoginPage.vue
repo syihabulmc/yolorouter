@@ -34,12 +34,30 @@
         {{ lockedSecondsLeft > 0 ? t('auth.lockedCountdown', { seconds: lockedSecondsLeft }) : t('auth.loginButton') }}
       </n-button>
     </n-form>
+
+    <template v-if="oauthProviders.length > 0">
+      <n-divider class="oauth-divider">{{ t('auth.oauthDivider') }}</n-divider>
+      <div class="oauth-buttons">
+        <n-button
+          v-for="p in oauthProviders"
+          :key="p.slug"
+          block
+          size="large"
+          :loading="oauthStartingSlug === p.slug"
+          :disabled="oauthStartingSlug !== null && oauthStartingSlug !== p.slug"
+          @click="startOAuth(p.slug)"
+        >
+          <img v-if="p.icon" :src="p.icon" class="oauth-icon" alt="" />
+          {{ t('auth.oauthButton', { name: p.name }) }}
+        </n-button>
+      </div>
+    </template>
   </AuthCard>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import type { FormInst, FormRules } from 'naive-ui'
 import { useAuthStore } from '../../store/auth'
@@ -47,6 +65,7 @@ import { APIError, displayMessage } from '../../api/client'
 import { ACCOUNT_LOGIN_LOCKED, ACCOUNT_SESSION_INVALID } from '../../api/errcodes'
 import { errcodeMessage } from '../../i18n'
 import type { LoginLockedData } from '../../api/auth'
+import { beginOAuthLogin, listPublicOAuthProviders, type PublicOAuthProvider } from '../../api/oauth'
 import AuthCard from '../../components/AuthCard.vue'
 
 const { t } = useI18n()
@@ -71,6 +90,49 @@ const displayedMessage = computed(() =>
 const form = reactive({ username: '', password: '' })
 const lockedSecondsLeft = ref(0)
 let countdownTimer: ReturnType<typeof setInterval> | undefined
+
+// === External login =======================================================
+
+const route = useRoute()
+const oauthProviders = ref<PublicOAuthProvider[]>([])
+// Slug of the provider whose authorize URL is being fetched; doubles as a
+// "navigation in progress" latch so double-clicks can't mint two states.
+const oauthStartingSlug = ref<string | null>(null)
+
+onMounted(() => {
+  // A failed callback lands back here with ?oauth_error=<code>; translate
+  // it through the shared errcode dictionary and strip it from the URL so
+  // a refresh doesn't re-show a stale error.
+  const rawErr = route.query.oauth_error
+  if (typeof rawErr === 'string' && rawErr) {
+    const code = Number(rawErr)
+    if (!Number.isNaN(code)) errorMessage.value = errcodeMessage(code)
+    void router.replace({ path: '/login' })
+  }
+  // Button list is best-effort: password login must work even when this
+  // fetch fails, so errors stay silent here.
+  listPublicOAuthProviders()
+    .then((res) => {
+      oauthProviders.value = res.providers
+    })
+    .catch(() => {})
+})
+
+async function startOAuth(slug: string) {
+  if (oauthStartingSlug.value !== null) return
+  oauthStartingSlug.value = slug
+  errorMessage.value = ''
+  sessionExpiredNoticeShown.value = false
+  try {
+    const { authorize_url } = await beginOAuthLogin(slug)
+    // Full-page navigation to the identity provider; the server-side
+    // callback finishes the flow and redirects back into the app.
+    window.location.assign(authorize_url)
+  } catch (err) {
+    oauthStartingSlug.value = null
+    errorMessage.value = displayMessage(err, t)
+  }
+}
 
 // computed rather than a plain object so validation messages stay in the
 // current locale if the user switches language while this page is open —
@@ -159,5 +221,23 @@ async function onSubmit() {
 
 .auth-error {
   margin-bottom: 12px;
+}
+
+.oauth-divider {
+  margin: 18px 0 12px;
+  font-size: 12px;
+}
+
+.oauth-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.oauth-icon {
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  vertical-align: -3px;
 }
 </style>

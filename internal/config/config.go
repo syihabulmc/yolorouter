@@ -29,6 +29,14 @@ type Config struct {
 
 type ServerConfig struct {
 	Port int `yaml:"port"`
+	// ExternalURL is the origin this deployment is reached at from a
+	// browser (e.g. "https://router.example.com"). When set, external-login
+	// callback URLs are built from it verbatim; when empty they are derived
+	// from each request's Host header, which is the right zero-config
+	// default for single-host setups but trusts the client-controlled Host
+	// on deployments whose proxy does not pin it. Set this on any
+	// internet-exposed instance.
+	ExternalURL string `yaml:"external_url"`
 }
 
 // GatewayConfig holds gateway (upstream relay) timeouts. All fields default

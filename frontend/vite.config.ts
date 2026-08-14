@@ -15,6 +15,12 @@ export default defineConfig({
       '/healthz': backendTarget,
       '/api': backendTarget,
       '/v1': backendTarget,
+      // External-login callback must flow through the dev server too: the
+      // backend derives the OAuth redirect URI from the request's Host
+      // header (which this proxy preserves), and the state-binding cookie
+      // lives on the dev-server origin — a callback that bypassed the
+      // proxy would arrive without it and be rejected.
+      '/oauth/callback': backendTarget,
     },
   },
   css: {

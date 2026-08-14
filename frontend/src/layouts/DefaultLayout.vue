@@ -176,6 +176,7 @@ import {
   Key,
   KeyRound,
   Languages,
+  LogIn,
   LayoutGrid,
   Menu,
   Receipt,
@@ -256,6 +257,7 @@ const navItems = computed<NavItem[]>(() => [
   { key: 'cost-optimization', label: t('nav.costOptimization'), icon: TrendingDown, to: '/cost-optimization', tag: t('nav.saveBadge') },
 
   { key: 'group-system', label: t('nav.groupSystem'), group: true },
+  { key: 'oauth-providers', label: t('nav.oauthProviders'), icon: LogIn, to: '/oauth-providers' },
   { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
   { key: 'change-password', label: t('auth.changePasswordTitle'), icon: KeyRound, onClick: () => (showChangePassword.value = true) },
   // New-release indicator: the text chip (same superscript style as the

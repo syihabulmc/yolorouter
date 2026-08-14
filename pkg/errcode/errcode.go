@@ -17,6 +17,16 @@ const (
 	AccountSetupTokenInvalid  = 10008 // first-run setup wizard token missing or incorrect
 	AccountPageForbidden      = 10009 // page-level RBAC: the user's group has no access to this admin page
 
+	// External-login (OAuth) errors, same 10xxx family — they are auth
+	// failures from the account model's point of view.
+	OAuthProviderNotFound      = 10010 // provider slug unknown or provider disabled
+	OAuthStateInvalid          = 10011 // state missing, expired, already consumed, or issued for another provider
+	OAuthExchangeFailed        = 10012 // authorization-code -> token exchange with the identity provider failed
+	OAuthUserinfoFailed        = 10013 // userinfo fetch failed or the mapped user id field was empty
+	OAuthProviderSlugTaken     = 10014 // another provider already uses this slug
+	OAuthProviderConfigInvalid = 10015 // provider configuration rejected: required field blank, or an endpoint is not an absolute http(s) URL
+	OAuthDiscoveryFailed       = 10016 // OIDC well-known discovery document fetch/parse failed
+
 	// === API Key errors (11xxx) — "API Key security model" ===
 	APIKeyNotFound             = 11001
 	APIKeyInvalid              = 11002
@@ -112,15 +122,22 @@ const (
 var ErrorMessages = map[int]string{
 	Success: "success",
 
-	AccountInvalidCredentials: "invalid username or password",
-	AccountDisabled:           "account is disabled",
-	AccountSessionInvalid:     "session invalid or expired",
-	AccountCSRFInvalid:        "csrf check failed",
-	AccountLoginLocked:        "account temporarily locked due to repeated login failures",
-	AccountLastAdminProtected: "operation refused: would leave no active administrator",
-	AccountSetupAlreadyDone:   "first-run setup already completed",
-	AccountSetupTokenInvalid:  "setup token invalid or missing",
-	AccountPageForbidden:      "your user group does not have access to this page",
+	AccountInvalidCredentials:  "invalid username or password",
+	AccountDisabled:            "account is disabled",
+	AccountSessionInvalid:      "session invalid or expired",
+	AccountCSRFInvalid:         "csrf check failed",
+	AccountLoginLocked:         "account temporarily locked due to repeated login failures",
+	AccountLastAdminProtected:  "operation refused: would leave no active administrator",
+	AccountSetupAlreadyDone:    "first-run setup already completed",
+	AccountSetupTokenInvalid:   "setup token invalid or missing",
+	AccountPageForbidden:       "your user group does not have access to this page",
+	OAuthProviderNotFound:      "login provider not found or disabled",
+	OAuthStateInvalid:          "login state invalid or expired, please retry",
+	OAuthExchangeFailed:        "identity provider token exchange failed",
+	OAuthUserinfoFailed:        "identity provider did not return a usable user identity",
+	OAuthProviderSlugTaken:     "another login provider already uses this slug",
+	OAuthProviderConfigInvalid: "provider configuration invalid: required field blank or endpoint not an absolute http(s) URL",
+	OAuthDiscoveryFailed:       "OIDC discovery document fetch failed",
 
 	APIKeyNotFound:             "api key not found",
 	APIKeyInvalid:              "api key invalid",
@@ -192,12 +209,19 @@ var ErrorMessages = map[int]string{
 // Sentinel errors for service layer comparisons. Text is derived from
 // ErrorMessages so each message string has exactly one source of truth.
 var (
-	ErrAccountInvalidCredentials = errors.New(ErrorMessages[AccountInvalidCredentials])
-	ErrAccountDisabled           = errors.New(ErrorMessages[AccountDisabled])
-	ErrAccountSessionInvalid     = errors.New(ErrorMessages[AccountSessionInvalid])
-	ErrAccountLoginLocked        = errors.New(ErrorMessages[AccountLoginLocked])
-	ErrAccountLastAdminProtected = errors.New(ErrorMessages[AccountLastAdminProtected])
-	ErrAccountSetupAlreadyDone   = errors.New(ErrorMessages[AccountSetupAlreadyDone])
+	ErrAccountInvalidCredentials  = errors.New(ErrorMessages[AccountInvalidCredentials])
+	ErrAccountDisabled            = errors.New(ErrorMessages[AccountDisabled])
+	ErrAccountSessionInvalid      = errors.New(ErrorMessages[AccountSessionInvalid])
+	ErrAccountLoginLocked         = errors.New(ErrorMessages[AccountLoginLocked])
+	ErrAccountLastAdminProtected  = errors.New(ErrorMessages[AccountLastAdminProtected])
+	ErrAccountSetupAlreadyDone    = errors.New(ErrorMessages[AccountSetupAlreadyDone])
+	ErrOAuthProviderNotFound      = errors.New(ErrorMessages[OAuthProviderNotFound])
+	ErrOAuthStateInvalid          = errors.New(ErrorMessages[OAuthStateInvalid])
+	ErrOAuthExchangeFailed        = errors.New(ErrorMessages[OAuthExchangeFailed])
+	ErrOAuthUserinfoFailed        = errors.New(ErrorMessages[OAuthUserinfoFailed])
+	ErrOAuthProviderSlugTaken     = errors.New(ErrorMessages[OAuthProviderSlugTaken])
+	ErrOAuthProviderConfigInvalid = errors.New(ErrorMessages[OAuthProviderConfigInvalid])
+	ErrOAuthDiscoveryFailed       = errors.New(ErrorMessages[OAuthDiscoveryFailed])
 
 	ErrAPIKeyNotFound             = errors.New(ErrorMessages[APIKeyNotFound])
 	ErrAPIKeyInvalid              = errors.New(ErrorMessages[APIKeyInvalid])

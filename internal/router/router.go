@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -115,7 +116,7 @@ func validateEmbeddedFrontend(distFS fs.FS) error {
 // allowPrivateUpstreams (config.SecurityConfig.AllowPrivateUpstreams) is
 // forwarded to the provider-test and gateway-relay clients' SSRF transport,
 // letting a self-hosted operator reach a LAN/localhost model server.
-func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig, loopbackBase string) (*gin.Engine, error) {
+func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig, loopbackBase, externalURL string) (*gin.Engine, error) {
 	// fs.Sub never actually errors here, in either build variant: it only
 	// validates that "dist" is a syntactically-valid path string, not that
 	// it exists in web.DistFS (confirmed against io/fs's Sub implementation
@@ -125,10 +126,10 @@ func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg conf
 	// fs.Stat call at each call site below, which correctly reports
 	// "not found" for every path against an empty embedded FS.
 	distFS, _ := fs.Sub(web.DistFS, "dist")
-	return newWithDistFS(distFS, db, providerMasterKey, bodiesDir, updateCfg, allowPrivateUpstreams, gatewayCfg, loopbackBase)
+	return newWithDistFS(distFS, db, providerMasterKey, bodiesDir, updateCfg, allowPrivateUpstreams, gatewayCfg, loopbackBase, externalURL)
 }
 
-func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig, loopbackBase string) (*gin.Engine, error) {
+func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig, loopbackBase, externalURL string) (*gin.Engine, error) {
 	if err := validateEmbeddedFrontend(distFS); err != nil {
 		return nil, err
 	}
@@ -234,16 +235,39 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	admin.POST("/auth/setup", handler.PostSetup(db))
 	admin.POST("/auth/login", handler.PostLogin(db, loginLimiter))
 
+	// External-login flow. The provider list and state issuance are public
+	// by necessity (the login page shows them before any session exists);
+	// both expose nothing beyond what the login page must render, and the
+	// browser-facing callback lives at the root (it is a navigation target
+	// the identity provider redirects to, not an API call).
+	oauthLoginSvc := service.NewOAuthLoginService(db, providerMasterKey)
+	admin.GET("/auth/oauth/providers", handler.GetPublicOAuthProviders(oauthLoginSvc))
+	// Rate shape: a generous global ceiling (600/min) so the endpoint can
+	// never grow auth_states unboundedly, plus a per-client budget
+	// (20/min) so one caller exhausting its budget cannot starve everyone
+	// else's login window.
+	admin.POST("/auth/oauth/state", handler.PostOAuthState(oauthLoginSvc,
+		middleware.NewSemaphore(loginConcurrencyLimit),
+		middleware.NewRateWindow(600, time.Minute),
+		middleware.NewPerClientRateWindow(20, time.Minute), externalURL))
+	r.GET("/oauth/callback/:slug", handler.GetOAuthCallback(oauthLoginSvc, middleware.NewSemaphore(loginConcurrencyLimit)))
+
+	// Self-scoped routes: any signed-in account (admin or member) may read
+	// its own identity, end its own session, and change its own password —
+	// these carry no cross-account reach by construction.
+	sessionOnly := admin.Group("")
+	sessionOnly.Use(middleware.RequireSession(db))
+	sessionOnly.POST("/auth/logout", handler.PostLogout(db))
+	sessionOnly.GET("/auth/me", handler.GetMe(db))
+	sessionOnly.PUT("/auth/password", handler.PutPassword(db))
+
 	// Every route below requires a valid session AND the admin role. When
-	// member-visible routes arrive they will register on a separate
-	// session-only subgroup — the admin requirement stays the default so
-	// that forgetting to classify a new route locks it down rather than
+	// more member-visible routes arrive they will register on the
+	// session-only subgroup above — the admin requirement stays the default
+	// so that forgetting to classify a new route locks it down rather than
 	// opening it up.
 	protected := admin.Group("")
 	protected.Use(middleware.RequireSession(db), middleware.RequireAdmin())
-	protected.POST("/auth/logout", handler.PostLogout(db))
-	protected.GET("/auth/me", handler.GetMe(db))
-	protected.PUT("/auth/password", handler.PutPassword(db))
 	protected.GET("/users", handler.GetUsers(db))
 
 	providerSvc := service.NewProviderService(db, providerMasterKey, service.NewHTTPProviderClient(allowPrivateUpstreams))
@@ -295,6 +319,13 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// DB state; PUT uses CAS on version. Registered alongside the other admin
 	// resources under the session-protected group.
 	settingsSvc := service.NewSystemSettingsService(db)
+	oauthProviderSvc := service.NewOAuthProviderService(db, providerMasterKey)
+	protected.GET("/oauth-providers", handler.GetOAuthProviders(oauthProviderSvc))
+	protected.POST("/oauth-providers", handler.PostOAuthProvider(oauthProviderSvc))
+	protected.PATCH("/oauth-providers/:id", handler.PatchOAuthProvider(oauthProviderSvc))
+	protected.DELETE("/oauth-providers/:id", handler.DeleteOAuthProvider(oauthProviderSvc))
+	protected.POST("/oauth-providers/discover", handler.PostOAuthDiscover(oauthProviderSvc))
+
 	protected.GET("/system-settings/custom-system-prompt", handler.GetCustomSystemPrompt(settingsSvc))
 	protected.PUT("/system-settings/custom-system-prompt", handler.PutCustomSystemPrompt(settingsSvc))
 	protected.GET("/system-settings/input-compression", handler.GetInputCompression(settingsSvc))

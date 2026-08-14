@@ -9,6 +9,10 @@
 # 值会直接报错，不会静默补全。
 server:
   port: 8080
+  # external_url: "https://router.example.com"
+  # 浏览器访问本实例的外部地址。设置后，外部登录（OAuth）的回调地址
+  # 以它为准；留空则按每个请求的 Host 头推导（单机/内网零配置够用，
+  # 但 Host 头是客户端可控的——凡是暴露到公网的部署都应显式设置）。
 database:
   driver: sqlite       # sqlite | postgres
   # 相对路径按这个配置文件自身所在目录解析，不是进程 cwd —— "../data" 落在
