@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Official Docker deployment. Every release now also publishes a multi-arch
+  (amd64/arm64) image to `ghcr.io/yolorouter/yolorouter` (`latest` plus the
+  exact version tag), and the repository gained a standalone multi-stage
+  `Dockerfile` — `docker build .` works from a plain checkout — plus a
+  one-file `docker-compose.yml`: single service, one bind mount holding all
+  state (generated config and SQLite database), health-checked, restart on
+  failure. Inside a container the version check keeps working while
+  in-place self-update is disabled in favor of pulling the newer image.
+
 - The console can now update Yolorouter in place. The sidebar gained an
   About entry (with a new-version indicator when a release is out) whose
   page shows the version, checks for updates on demand, and offers a

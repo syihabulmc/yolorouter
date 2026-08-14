@@ -1,0 +1,39 @@
+# Keep the build context to what the image build actually reads: Go
+# sources, migrations, the frontend sources, and the module files. Anything
+# else — VCS history, editor state, local runtime state, previous build
+# outputs — only slows the context upload and risks leaking into layers.
+# configs/ matters most: a developer's local configs/config.yaml carries the
+# generated encryption master key, and the build never reads the directory.
+.git
+.github
+.claude
+.playwright-mcp
+.wrangler
+.zcode
+.scratch
+.out-of-scope
+bin/
+configs/
+data/
+logs/
+docs/
+scripts/
+deploy/
+gui-test-screenshots/
+web/dist/
+frontend/dist/
+frontend/node_modules/
+frontend/e2e/
+frontend/e2e-results/
+yolorouter/
+Dockerfile
+docker-compose.yml
+.dockerignore
+.goreleaser.yaml
+.golangci.yml
+.editorconfig
+Makefile
+.DS_Store
+*.md
+LICENSE
+NOTICE

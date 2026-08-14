@@ -48,9 +48,13 @@ jobs:
           # v1.2-rc1 (missing patch), v01.1.1 (leading zeros), or v1.2.3-rc1
           # (prerelease) — but currentUpdatable rejects every prerelease, so
           # users of such a release could never reach stable via the built-in
-          # updater. Fail the build before goreleaser runs (Codex review P2).
-          if ! printf '%s' "$TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
-            echo "ERROR: tag '$TAG' must be an exact canonical release (v1.2.3, no leading zeros, no prerelease suffix)" >&2
+          # updater. Build metadata (v1.2.3+hotfix) is rejected too: Docker
+          # image tags cannot contain '+' (the container publish job would
+          # fail after the binaries shipped), and semver comparison ignores
+          # metadata anyway, making two such releases indistinguishable to
+          # the updater. Fail the build before goreleaser runs.
+          if ! printf '%s' "$TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "ERROR: tag '$TAG' must be an exact canonical release (v1.2.3 — no leading zeros, no prerelease suffix, no build metadata)" >&2
             exit 1
           fi
 
@@ -95,3 +99,95 @@ jobs:
           # release without it, because binaries built with it empty cannot
           # update themselves and nothing else would report that.
           DEFAULT_GITHUB_REPO: ${{ vars.DEFAULT_GITHUB_REPO }}
+
+  # Publishes the container image for the same tag. Runs only after the
+  # binary release succeeded, so an image can never exist for a tag whose
+  # archives (which in-place updaters download) were not published. The
+  # Dockerfile cross-compiles inside the build stage, so multi-arch needs
+  # buildx but no QEMU emulation.
+  docker:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # GITHUB_TOKEN pushes the image to this repository's GHCR namespace.
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # BuildTime mirrors goreleaser's RFC3339 stamp so both artifact kinds
+      # report the same shape on the About page. The image tag list is
+      # computed here because `latest` is conditional: publishing a
+      # maintenance release for an older line (v1.2.4 after v2.0.0) must not
+      # move `latest` backwards — compose deployments following the
+      # documented `docker compose pull` would silently downgrade.
+      - name: Build metadata and image tags
+        id: meta
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          echo "buildtime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          # Highest canonical release tag across the repo, by version order.
+          # ls-remote sees every tag regardless of the shallow checkout.
+          HIGHEST=$(git ls-remote --tags --refs origin 'v*' \
+            | awk -F/ '{print $NF}' \
+            | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+            | sort -V | tail -1)
+          TAGS="ghcr.io/yolorouter/yolorouter:${TAG}"
+          if [ "$HIGHEST" = "$TAG" ]; then
+            TAGS="${TAGS}"$'\n'"ghcr.io/yolorouter/yolorouter:latest"
+            echo "latest included (this tag is the highest release: ${HIGHEST})"
+          else
+            echo "latest NOT moved: highest release is ${HIGHEST}, this tag is ${TAG}"
+          fi
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # The exact tag always publishes; latest joins it only when this
+          # tag is the highest release (see the step above) — the only two
+          # tags ever published, by design.
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILDTIME=${{ steps.meta.outputs.buildtime }}
+            DEFAULT_GITHUB_REPO=${{ vars.DEFAULT_GITHUB_REPO }}
+
+      # GHCR creates a brand-new package as PRIVATE, and `packages: write`
+      # only covers pushing — anonymous `docker pull` (what the compose file
+      # and the README rely on) stays forbidden until an owner flips the
+      # package visibility. That is a one-time manual action the GITHUB_TOKEN
+      # cannot perform, so verify it here and fail loudly with the fix
+      # instead of letting the first release ship an image nobody can pull.
+      - name: Verify the image is anonymously pullable
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          TOKEN=$(curl -sf "https://ghcr.io/token?scope=repository:yolorouter/yolorouter:pull" | jq -r .token)
+          if curl -sf -o /dev/null \
+               -H "Authorization: Bearer $TOKEN" \
+               -H "Accept: application/vnd.oci.image.index.v1+json" \
+               "https://ghcr.io/v2/yolorouter/yolorouter/manifests/${TAG}"; then
+            echo "image is publicly pullable"
+          else
+            echo "::error::ghcr.io/yolorouter/yolorouter:${TAG} was pushed but cannot be pulled anonymously — the GHCR package is still private."
+            echo "Fix (one-time): GitHub → the yolorouter/yolorouter package → Package settings → Change visibility → Public, then re-run this job."
+            exit 1
+          fi

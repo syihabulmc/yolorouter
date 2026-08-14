@@ -1,5 +1,5 @@
 # goreleaser config for yolorouter. Push a `v*` tag to trigger a release
-# via .github/workflows/release.yml. See design doc §4.3.
+# via .github/workflows/release.yml.
 version: 2
 
 project_name: yolorouter

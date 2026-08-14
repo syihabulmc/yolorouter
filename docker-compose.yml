@@ -1,0 +1,26 @@
+# One-service deployment: the whole gateway (API + admin console) is a
+# single container. All mutable state — configs/config.yaml (generated on
+# first start, holds the encryption master key) and data/yolorouter.db —
+# lives under /yolorouter, so the one bind mount below is everything there
+# is to back up. Edit ./yolorouter/configs/config.yaml on the host and
+# restart to change configuration.
+#
+# Upgrade: docker compose pull && docker compose up -d
+# (In-place self-update is disabled inside the container by design.)
+#
+# The image's port expectations (this port mapping and its built-in
+# healthcheck) assume the generated default server.port of 8080 — if you
+# change that in config.yaml, update the mapping below and override the
+# healthcheck here too, or the container will report unhealthy while
+# serving fine.
+services:
+  yolorouter:
+    image: ghcr.io/yolorouter/yolorouter:latest
+    container_name: yolorouter
+    restart: unless-stopped
+    ports:
+      # Reachable from the whole LAN; use "127.0.0.1:8080:8080" to restrict
+      # access to this host only.
+      - "8080:8080"
+    volumes:
+      - ./yolorouter:/yolorouter

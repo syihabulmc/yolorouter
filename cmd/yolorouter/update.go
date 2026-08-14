@@ -38,18 +38,12 @@ func runUpdate(ctx context.Context, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	repo := version.ResolveRepo(cfg.Update.Enabled, cfg.Update.GitHubRepo)
-	if repo == "" {
-		return fmt.Errorf("update is disabled: set update.enabled=true and/or update.github_repo, or rebuild with DEFAULT_GITHUB_REPO")
-	}
-	// When set, route the release lookup and both asset downloads through the
-	// configured mirror (deployments where GitHub is slow or blocked).
-	proxy := cfg.Update.GitHubProxy
-
 	// Inside a container the image is immutable: a replaced binary vanishes
 	// on the next container recreate, and the running container would report
 	// a version its image tag no longer matches. Point at the image-based
-	// upgrade path instead of attempting a replacement.
+	// upgrade path instead of attempting a replacement — checked before the
+	// repo resolution because the answer is "pull the image" regardless of
+	// whether a release source is configured.
 	if selfupdate.InContainer() {
 		fmt.Println("in-place update is disabled inside a container")
 		fmt.Println("upgrade by pulling the newer image and recreating the container, e.g.:")
@@ -57,19 +51,35 @@ func runUpdate(ctx context.Context, args []string) error {
 		return nil
 	}
 
+	repo := version.ResolveRepo(cfg.Update.Enabled, cfg.Update.GitHubRepo)
+	// When set, route the release lookup and both asset downloads through the
+	// configured mirror (deployments where GitHub is slow or blocked).
+	proxy := cfg.Update.GitHubProxy
+
 	// Windows can't atomically replace a running .exe (the file is locked),
 	// so automatic update is unsupported there — point the user at the
 	// release page instead of attempting a replacement that would fail
-	// mid-way and leave no binary behind.
+	// mid-way and leave no binary behind. Like the container branch above,
+	// this outranks the disabled-repo error (matching selfupdate.Mode's
+	// precedence): a configured repo only upgrades the message with the
+	// latest tag + URL, it never changes the answer.
 	if runtime.GOOS == "windows" {
+		fmt.Printf("automatic update is unsupported on windows\n")
+		if repo == "" {
+			fmt.Printf("download the latest release manually and replace the binary\n")
+			return nil
+		}
 		client := &http.Client{Timeout: latestLookupTimeout}
 		rel, err := selfupdate.FetchLatestRelease(ctx, client, repo, proxy)
 		if err != nil {
-			return fmt.Errorf("automatic update is unsupported on windows, and the latest-release lookup also failed: %w", err)
+			return fmt.Errorf("the latest-release lookup also failed: %w", err)
 		}
-		fmt.Printf("automatic update is unsupported on windows\n")
 		fmt.Printf("download the latest release (%s) manually from: %s\n", rel.TagName, rel.HTMLURL)
 		return nil
+	}
+
+	if repo == "" {
+		return fmt.Errorf("update is disabled: set update.enabled=true and/or update.github_repo, or rebuild with DEFAULT_GITHUB_REPO")
 	}
 
 	res, err := selfupdate.Apply(ctx, selfupdate.Options{
