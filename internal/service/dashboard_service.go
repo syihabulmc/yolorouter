@@ -85,7 +85,12 @@ type RecentFailureView struct {
 // now is the caller's clock reading; "today" and the trend window are both
 // derived from it, so a request that straddles local midnight still sees one
 // consistent day, and tests can pin the boundary exactly.
-func (s *DashboardService) GetDashboard(loc *time.Location, rangeStart, rangeEnd *time.Time, now time.Time) (*DashboardData, error) {
+//
+// userID narrows every request_logs-backed section (KPI cards, trend, top
+// callers, recent failures) to one account's rows; nil = all accounts. The
+// upstream/setup status sections stay global — they describe the
+// deployment, not anyone's traffic.
+func (s *DashboardService) GetDashboard(loc *time.Location, rangeStart, rangeEnd *time.Time, userID *uint, now time.Time) (*DashboardData, error) {
 	if loc == nil {
 		loc = time.Local
 	}
@@ -103,29 +108,29 @@ func (s *DashboardService) GetDashboard(loc *time.Location, rangeStart, rangeEnd
 		if kpiEnd.Sub(kpiStart) > time.Duration(maxDashboardRangeDays)*24*time.Hour {
 			kpiStart = kpiEnd.In(loc).AddDate(0, 0, -maxDashboardRangeDays)
 		}
-		trend, err = repository.GetTrendRange(s.db, kpiStart, kpiEnd, loc)
+		trend, err = repository.GetTrendRange(s.db, kpiStart, kpiEnd, loc, userID)
 	} else {
 		kpiStart, kpiEnd = repository.DayBoundsAt(loc, now)
 		// Trend window: DashboardTrendDays calendar days ending today,
 		// today inclusive. Day arithmetic happens in loc so the window
 		// lands on local midnights across DST transitions.
 		trendStart, _ := repository.DayBoundsAt(loc, now.In(loc).AddDate(0, 0, -(DashboardTrendDays-1)))
-		trend, err = repository.GetTrendRange(s.db, trendStart, kpiEnd, loc)
+		trend, err = repository.GetTrendRange(s.db, trendStart, kpiEnd, loc, userID)
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	metrics, err := repository.GetRangeMetrics(s.db, kpiStart, kpiEnd)
+	metrics, err := repository.GetRangeMetrics(s.db, kpiStart, kpiEnd, userID)
 	if err != nil {
 		return nil, err
 	}
-	topCallers, err := repository.GetTopCallers(s.db, kpiStart, kpiEnd, DashboardTopCallersLimit)
+	topCallers, err := repository.GetTopCallers(s.db, kpiStart, kpiEnd, DashboardTopCallersLimit, userID)
 	if err != nil {
 		return nil, err
 	}
 
-	failures, err := repository.GetRecentFailures(s.db, DashboardRecentFailuresLim)
+	failures, err := repository.GetRecentFailures(s.db, DashboardRecentFailuresLim, userID)
 	if err != nil {
 		return nil, err
 	}

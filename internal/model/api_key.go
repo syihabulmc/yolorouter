@@ -26,6 +26,10 @@ const (
 type APIKey struct {
 	ID      uint   `gorm:"column:id;primaryKey" json:"id"`
 	KeyHash string `gorm:"column:key_hash" json:"-"`
+	// UserID is the owning account (migration 00024). Every key belongs to
+	// exactly one user; 0 is never a valid owner (see the migration's
+	// rationale) and the create path refuses to persist it.
+	UserID uint `gorm:"column:user_id" json:"user_id"`
 	// EncryptedKey is the AES-GCM ciphertext (base64, nonce prepended) of the
 	// full plaintext key, persisted so it can be revealed again. Empty for
 	// pre-00021 keys. Read only on the reveal path; never used for auth.

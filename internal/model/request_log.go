@@ -13,9 +13,16 @@ import "time"
 // CostKnown=false means price or token info was missing for this request —
 // CostMicros is 0 but must NOT be displayed as "free".
 type RequestLog struct {
-	ID               uint   `gorm:"column:id;primaryKey" json:"id"`
-	RequestID        string `gorm:"column:request_id" json:"request_id"`
-	APIKeyID         *uint  `gorm:"column:api_key_id" json:"api_key_id"`
+	ID        uint   `gorm:"column:id;primaryKey" json:"id"`
+	RequestID string `gorm:"column:request_id" json:"request_id"`
+	APIKeyID  *uint  `gorm:"column:api_key_id" json:"api_key_id"`
+	// UserID is the owner of the API key that made the request, denormalized
+	// at write time so per-user statistics never need a JOIN through
+	// api_keys. New unauthenticated audit rows (APIKeyID NULL) carry NULL —
+	// they have no owner. Rows that predate ownership were backfilled to
+	// the local admin wholesale (migration 00024), audit rows included, so
+	// NULL-ness is not a reliable pre/post-auth signal on historical data.
+	UserID           *uint  `gorm:"column:user_id" json:"user_id"`
 	ModelName        string `gorm:"column:model_name" json:"model_name"`
 	ProviderID       *uint  `gorm:"column:provider_id" json:"provider_id"`
 	IsStream         bool   `gorm:"column:is_stream" json:"is_stream"`

@@ -2,7 +2,9 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,7 +37,7 @@ func TestCreateAPIKeySucceeds(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "gpt-4o")
 
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		OwnerLabel: "alice", Remark: "test key", ModelIDs: []uint{mid},
 	}, time.Now().UTC())
 	if err != nil {
@@ -74,7 +76,7 @@ func TestCreateAPIKeyTreatsZeroLimitAsUnlimited(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
 	zero := 0
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		ModelIDs: []uint{mid}, RPMLimit: &zero,
 	}, time.Now().UTC())
 	if err != nil {
@@ -92,8 +94,8 @@ func TestCreateAPIKeyTreatsZeroLimitAsUnlimited(t *testing.T) {
 }
 
 func TestCreateAPIKeyRejectsNonexistentModel(t *testing.T) {
-	svc, _ := newAPIKeyServiceForTest(t)
-	_, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	svc, db := newAPIKeyServiceForTest(t)
+	_, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		ModelIDs: []uint{999999},
 	}, time.Now().UTC())
 	if !errors.Is(err, errcode.ErrModelNotFound) {
@@ -107,7 +109,7 @@ func TestCreateAPIKeyAllowAllModels(t *testing.T) {
 
 	// AllowAllModels wins even if the caller also sends ids — the service owns
 	// the invariant, so the join table stays empty regardless of the frontend.
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		OwnerLabel: "wide", AllowAllModels: true, ModelIDs: []uint{mid},
 	}, time.Now().UTC())
 	if err != nil {
@@ -131,7 +133,7 @@ func TestCreateAPIKeyAllowAllModels(t *testing.T) {
 func TestUpdateAPIKeyTogglesAllowAllModels(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	created, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{mid}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -169,8 +171,8 @@ func TestUpdateAPIKeyTogglesAllowAllModels(t *testing.T) {
 }
 
 func TestCreateAPIKeyRejectsEmptyCustomAllowlist(t *testing.T) {
-	svc, _ := newAPIKeyServiceForTest(t)
-	_, err := svc.CreateAPIKey(CreateAPIKeyInput{AllowAllModels: false, ModelIDs: nil}, time.Now().UTC())
+	svc, db := newAPIKeyServiceForTest(t)
+	_, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), AllowAllModels: false, ModelIDs: nil}, time.Now().UTC())
 	if !errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist) {
 		t.Fatalf("expected ErrAPIKeyEmptyAllowlist, got %v", err)
 	}
@@ -179,7 +181,7 @@ func TestCreateAPIKeyRejectsEmptyCustomAllowlist(t *testing.T) {
 func TestUpdateAPIKeyRejectsEmptyCustomAllowlist(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	created, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{mid}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -203,8 +205,8 @@ func TestUpdateAPIKeyRejectsEmptyCustomAllowlist(t *testing.T) {
 }
 
 func TestUpdateAPIKeyRejectsAllToCustomWithoutModels(t *testing.T) {
-	svc, _ := newAPIKeyServiceForTest(t)
-	created, err := svc.CreateAPIKey(CreateAPIKeyInput{AllowAllModels: true}, time.Now().UTC())
+	svc, db := newAPIKeyServiceForTest(t)
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), AllowAllModels: true}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -231,7 +233,7 @@ func TestUpdateAPIKeyRejectsAllToCustomWithoutModels(t *testing.T) {
 func TestUpdateAPIKeyScopeOmittedLeavesAllowlist(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	created, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{mid}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -255,7 +257,7 @@ func TestGetAPIKeyReturnsWhitelist(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	m1 := seedModelForAPIKeyTest(t, db, "m1")
 	m2 := seedModelForAPIKeyTest(t, db, "m2")
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{m1, m2}}, time.Now().UTC())
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{m1, m2}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
@@ -283,7 +285,7 @@ func TestGetAPIKeyNotFound(t *testing.T) {
 func TestGetAPIKeyPlaintextRoundTripsTheCreatePlaintext(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{mid}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
@@ -335,7 +337,7 @@ func TestGetAPIKeyPlaintextFailsWithDifferentMasterKey(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
 	encryptSvc := NewAPIKeyService(db, testMasterKey())
-	result, err := encryptSvc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	result, err := encryptSvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{mid}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
@@ -357,7 +359,7 @@ func TestUpdateAPIKeySparsePatchLeavesOtherLimits(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
 	rpm, tpm := 100, 200
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		ModelIDs: []uint{mid}, RPMLimit: &rpm, TPMLimit: &tpm,
 	}, time.Now().UTC())
 	if err != nil {
@@ -380,7 +382,7 @@ func TestUpdateAPIKeyClearsLimitWithZeroSentinel(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
 	rpm := 100
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}, RPMLimit: &rpm}, time.Now().UTC())
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{mid}, RPMLimit: &rpm}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
@@ -398,7 +400,7 @@ func TestUpdateAPIKeyReplacesWhitelist(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	m1 := seedModelForAPIKeyTest(t, db, "m1")
 	m2 := seedModelForAPIKeyTest(t, db, "m2")
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{m1}}, time.Now().UTC())
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{m1}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
@@ -414,7 +416,7 @@ func TestUpdateAPIKeyReplacesWhitelist(t *testing.T) {
 func TestRevokeAPIKeyIdempotent(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{ModelIDs: []uint{mid}}, time.Now().UTC())
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{mid}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
@@ -445,13 +447,13 @@ func TestRevokeAPIKeyNotFound(t *testing.T) {
 func TestListAPIKeysSearchesByOwnerLabel(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "alice", ModelIDs: []uint{mid}}, time.Now().UTC()); err != nil {
+	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "alice", ModelIDs: []uint{mid}}, time.Now().UTC()); err != nil {
 		t.Fatalf("CreateAPIKey alice: %v", err)
 	}
-	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "bob", ModelIDs: []uint{mid}}, time.Now().UTC()); err != nil {
+	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "bob", ModelIDs: []uint{mid}}, time.Now().UTC()); err != nil {
 		t.Fatalf("CreateAPIKey bob: %v", err)
 	}
-	list, total, err := svc.ListAPIKeys("", "alice", "", 1, 20)
+	list, total, err := svc.ListAPIKeys("", "alice", "", 0, 1, 20)
 	if err != nil {
 		t.Fatalf("ListAPIKeys: %v", err)
 	}
@@ -500,7 +502,7 @@ func TestListAPIKeysFiltersByDisplayStatus(t *testing.T) {
 	limit := int64(1000)
 
 	// Active (created via the service so it goes through the normal path).
-	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{OwnerLabel: "live", ModelIDs: []uint{mid}}, now); err != nil {
+	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "live", ModelIDs: []uint{mid}}, now); err != nil {
 		t.Fatalf("CreateAPIKey live: %v", err)
 	}
 	// The other statuses seed rows directly (the service create path won't
@@ -531,7 +533,7 @@ func TestListAPIKeysFiltersByDisplayStatus(t *testing.T) {
 		APIKeyDisplayBudgetHit: 1,
 	}
 	for status, want := range wantCount {
-		list, total, err := svc.ListAPIKeys("", "", status, 1, 20)
+		list, total, err := svc.ListAPIKeys("", "", status, 0, 1, 20)
 		if err != nil {
 			t.Fatalf("ListAPIKeys %s: %v", status, err)
 		}
@@ -557,7 +559,7 @@ func TestCreateAPIKeyPersistsCompressFields(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
 
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		ModelIDs:                []uint{mid},
 		CompressEnabledOverride: true,
 		CompressEnabled:         true,
@@ -586,7 +588,7 @@ func TestCreateAPIKeyCompressDefaultsToFalse(t *testing.T) {
 	svc, _ := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, svc.db, "m1")
 
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, svc.db),
 		ModelIDs: []uint{mid},
 	}, time.Now().UTC())
 	if err != nil {
@@ -606,7 +608,7 @@ func TestCreateAPIKeyCompressDefaultsToFalse(t *testing.T) {
 func TestUpdateAPIKeyCompressOverrideFalseZeroesEnabled(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	created, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		ModelIDs:                []uint{mid},
 		CompressEnabledOverride: true,
 		CompressEnabled:         true,
@@ -647,7 +649,7 @@ func TestUpdateAPIKeyCompressOverrideFalseZeroesEnabled(t *testing.T) {
 func TestUpdateAPIKeyCompressOverrideTrueRequiresEnabled(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	created, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		ModelIDs: []uint{mid},
 	}, time.Now().UTC())
 	if err != nil {
@@ -668,7 +670,7 @@ func TestUpdateAPIKeyCompressOverrideTrueRequiresEnabled(t *testing.T) {
 func TestUpdateAPIKeyCompressOverrideTrueWithEnabled(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	created, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		ModelIDs: []uint{mid},
 	}, time.Now().UTC())
 	if err != nil {
@@ -696,7 +698,7 @@ func TestUpdateAPIKeyCompressOverrideTrueWithEnabled(t *testing.T) {
 func TestUpdateAPIKeyCompressSparsePatchLeavesOverride(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	created, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	created, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		ModelIDs:                []uint{mid},
 		CompressEnabledOverride: true,
 		CompressEnabled:         false,
@@ -726,7 +728,7 @@ func TestUpdateAPIKeyCompressSparsePatchLeavesOverride(t *testing.T) {
 func TestListAndGetAPIKeySurfacesCompressFields(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
 		ModelIDs:                []uint{mid},
 		CompressEnabledOverride: true,
 		CompressEnabled:         true,
@@ -746,7 +748,7 @@ func TestListAndGetAPIKeySurfacesCompressFields(t *testing.T) {
 	}
 
 	// List view.
-	list, _, err := svc.ListAPIKeys("", "", "", 1, 20)
+	list, _, err := svc.ListAPIKeys("", "", "", 0, 1, 20)
 	if err != nil {
 		t.Fatalf("ListAPIKeys: %v", err)
 	}
@@ -763,4 +765,27 @@ func TestListAndGetAPIKeySurfacesCompressFields(t *testing.T) {
 	if !found {
 		t.Fatalf("created key not found in list")
 	}
+}
+
+// ownerSeq feeds seedKeyOwner with unique usernames — several keys created
+// in one test each get their own owner without username collisions.
+var ownerSeq uint64
+
+// seedKeyOwner inserts a user to own a test key. CreateAPIKey refuses an
+// ownerless key, so every create call in this file names an owner
+// explicitly through this helper.
+func seedKeyOwner(t *testing.T, db *gorm.DB) uint {
+	t.Helper()
+	now := time.Now().UTC()
+	u := &model.User{
+		Username:  fmt.Sprintf("key-owner-%d", atomic.AddUint64(&ownerSeq, 1)),
+		Role:      model.RoleAdmin,
+		Status:    model.UserStatusEnabled,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Create(u).Error; err != nil {
+		t.Fatalf("seed key owner: %v", err)
+	}
+	return u.ID
 }

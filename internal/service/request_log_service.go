@@ -47,8 +47,10 @@ func NewRequestLogService(db *gorm.DB) *RequestLogService {
 // internally. Kept as a separate type so the handler never imports
 // repository — same layering convention as APIKeyService's input structs.
 type RequestLogListFilter struct {
-	RequestID   string
-	APIKeyID    *uint
+	RequestID string
+	APIKeyID  *uint
+	// UserID narrows to rows owned by one account (the key owner).
+	UserID      *uint
 	ModelName   string
 	ProviderID  *uint
 	StatusClass string
@@ -533,6 +535,7 @@ func toRepoFilterFromList(f RequestLogListFilter) *repository.RequestLogFilter {
 	return &repository.RequestLogFilter{
 		RequestID:   f.RequestID,
 		APIKeyID:    f.APIKeyID,
+		UserID:      f.UserID,
 		ModelName:   f.ModelName,
 		ProviderID:  f.ProviderID,
 		StatusClass: f.StatusClass,

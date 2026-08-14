@@ -269,6 +269,54 @@ func TestMigration00023DownRestoresSingleAdminSchema(t *testing.T) {
 	}
 }
 
+// TestMigration00024BackfillsOwnershipToLocalAdmin replays the ownership
+// upgrade: keys and logs created under the single-admin model must come
+// out owned by the local account, so the admin's per-user view of history
+// equals the pre-upgrade global view. Unauthenticated audit rows (NULL
+// api_key_id) also backfill to the local account — all history predates
+// multi-account, so it is all the admin's.
+func TestMigration00024BackfillsOwnershipToLocalAdmin(t *testing.T) {
+	db := newMemoryDB(t)
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	if err := RollbackTo(db, "sqlite", migrations.SQLiteFS, "sqlite", 23); err != nil {
+		t.Fatalf("RollbackTo(23) failed: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO users (id, username, password_hash, role, status, is_local, created_at, updated_at)
+		VALUES (5, 'boss', 'hash', 'admin', 1, 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`); err != nil {
+		t.Fatalf("seed local admin: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO api_keys (id, key_hash, key_prefix, status, created_at, updated_at)
+		VALUES (11, 'kh-1', 'sk-yr-a', 1, '2026-01-02 00:00:00', '2026-01-02 00:00:00')`); err != nil {
+		t.Fatalf("seed api key: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO request_logs (request_id, api_key_id, model_name, status_code, created_at)
+		VALUES ('req-1', 11, 'm', 200, '2026-01-03 00:00:00')`); err != nil {
+		t.Fatalf("seed request log: %v", err)
+	}
+
+	if err := RunMigrations(db, "sqlite", migrations.SQLiteFS, "sqlite"); err != nil {
+		t.Fatalf("re-running migrations failed: %v", err)
+	}
+
+	var keyOwner int64
+	if err := db.QueryRow(`SELECT user_id FROM api_keys WHERE id = 11`).Scan(&keyOwner); err != nil {
+		t.Fatalf("read backfilled key owner: %v", err)
+	}
+	if keyOwner != 5 {
+		t.Fatalf("expected key backfilled to local admin 5, got %d", keyOwner)
+	}
+	var logOwner int64
+	if err := db.QueryRow(`SELECT user_id FROM request_logs WHERE request_id = 'req-1'`).Scan(&logOwner); err != nil {
+		t.Fatalf("read backfilled log owner: %v", err)
+	}
+	if logOwner != 5 {
+		t.Fatalf("expected log backfilled to local admin 5, got %d", logOwner)
+	}
+}
+
 // TestMigration00023EnforcesSingleLocalUser proves the partial unique
 // index survives the round trip through goose: two enabled local rows
 // must be impossible, while any number of non-local rows is fine.
@@ -668,8 +716,8 @@ func TestMigration00018ModelCandidateCapabilityTristate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrentVersion failed: %v", err)
 	}
-	if version != 23 {
-		t.Fatalf("expected version 23 after re-apply, got %d", version)
+	if want := maxEmbeddedMigrationVersion(t, migrations.SQLiteFS, "sqlite"); version != want {
+		t.Fatalf("expected version %d after re-apply, got %d", want, version)
 	}
 }
 

@@ -21,6 +21,13 @@ import (
 // caller-facing errcode; this package stays storage-only.
 var ErrEmptyCustomAllowlist = errors.New("custom scope requires at least one model")
 
+// ErrAPIKeyOwnerMissing is returned by CreateAPIKey when the key carries no
+// owning user. The column's DEFAULT 0 exists only so the migration could add
+// it NOT NULL; the application must never persist an ownerless key — GORM
+// writes every mapped column, so a caller that forgot to set UserID would
+// otherwise insert 0 silently and the key would belong to no one's view.
+var ErrAPIKeyOwnerMissing = errors.New("api key requires an owning user")
+
 // validateCSPInvariants is the per-key custom-system-prompt resulting-state
 // rule: when the override is on and CSP is enabled, the key must carry its own
 // non-empty prompt text — otherwise it toggles CSP on with nothing to send.
@@ -49,6 +56,9 @@ type APIKeyFilter struct {
 	Query  string
 	Owner  string
 	Status string
+	// UserID narrows to keys owned by one account; 0 = no constraint (0 is
+	// never a valid owner, see migration 00024).
+	UserID uint
 	Now    time.Time
 }
 
@@ -82,6 +92,9 @@ func applyAPIKeyFilters(tx *gorm.DB, f APIKeyFilter) *gorm.DB {
 	}
 	if f.Owner != "" {
 		tx = tx.Where("LOWER(owner_label) LIKE LOWER(?) ESCAPE '\\'", likeContainsPattern(f.Owner))
+	}
+	if f.UserID != 0 {
+		tx = tx.Where("user_id = ?", f.UserID)
 	}
 	// Status filter mirrors computeAPIKeyDisplayStatus exactly, including its
 	// precedence: revoked > expired > budget-exhausted > active.
@@ -128,6 +141,9 @@ func SearchAPIKeys(db *gorm.DB, f APIKeyFilter, offset, limit int) ([]model.APIK
 // guard runs before the insert: override && enabled with empty text would
 // produce a key that toggles CSP on but has nothing to send.
 func CreateAPIKey(db *gorm.DB, key *model.APIKey, modelIDs []uint, now time.Time) error {
+	if key.UserID == 0 {
+		return ErrAPIKeyOwnerMissing
+	}
 	if err := validateCSPInvariants(key.CustomSystemPromptEnabledOverride, key.CustomSystemPromptEnabled, key.CustomSystemPrompt); err != nil {
 		return err
 	}

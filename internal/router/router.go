@@ -244,6 +244,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	protected.POST("/auth/logout", handler.PostLogout(db))
 	protected.GET("/auth/me", handler.GetMe(db))
 	protected.PUT("/auth/password", handler.PutPassword(db))
+	protected.GET("/users", handler.GetUsers(db))
 
 	providerSvc := service.NewProviderService(db, providerMasterKey, service.NewHTTPProviderClient(allowPrivateUpstreams))
 	protected.GET("/providers", handler.GetProviders(providerSvc))

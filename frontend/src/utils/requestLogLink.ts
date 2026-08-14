@@ -8,6 +8,9 @@ import type { RouteLocationRaw } from 'vue-router'
 export interface RequestLogLinkQuery {
   model_name?: string | null
   api_key_id?: number | null
+  /** Account scope active on the source page — carried through so the
+   *  drill-down shows exactly the rows the clicked aggregate counted. */
+  user_id?: number | null
   provider_id?: number | null
   status?: string | null
   cost_known?: boolean | null
@@ -21,6 +24,7 @@ export function requestLogLocation(q: RequestLogLinkQuery): RouteLocationRaw {
   const query: Record<string, string> = {}
   if (q.model_name) query.model_name = q.model_name
   if (q.api_key_id != null) query.api_key_id = String(q.api_key_id)
+  if (q.user_id != null) query.user_id = String(q.user_id)
   if (q.provider_id != null) query.provider_id = String(q.provider_id)
   if (q.status) query.status = q.status
   if (q.cost_known != null) query.cost_known = String(q.cost_known)

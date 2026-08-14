@@ -163,6 +163,47 @@ func TestPostgresMigration00023CarriesAdminAndSessionsOverToUsers(t *testing.T) 
 	}
 }
 
+// TestPostgresMigration00024BackfillsOwnership is the Postgres twin of the
+// SQLite ownership-backfill replay — the UPDATE ... (SELECT id FROM users
+// WHERE is_local) shape must resolve the same way on this backend.
+func TestPostgresMigration00024BackfillsOwnership(t *testing.T) {
+	db := newTestPostgresDB(t)
+	if err := RunMigrations(db, "postgres", migrations.PostgresFS, "postgres"); err != nil {
+		t.Fatalf("RunMigrations failed: %v", err)
+	}
+	if err := RollbackTo(db, "postgres", migrations.PostgresFS, "postgres", 23); err != nil {
+		t.Fatalf("RollbackTo(23) failed: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO users (id, username, password_hash, role, status, is_local, created_at, updated_at)
+		VALUES (5, 'boss', 'hash', 'admin', 1, TRUE, now(), now())`); err != nil {
+		t.Fatalf("seed local admin: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO api_keys (id, key_hash, key_prefix, status, created_at, updated_at)
+		VALUES (11, 'kh-1', 'sk-yr-a', 1, now(), now())`); err != nil {
+		t.Fatalf("seed api key: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO request_logs (request_id, api_key_id, model_name, status_code, created_at)
+		VALUES ('req-1', 11, 'm', 200, now())`); err != nil {
+		t.Fatalf("seed request log: %v", err)
+	}
+
+	if err := RunMigrations(db, "postgres", migrations.PostgresFS, "postgres"); err != nil {
+		t.Fatalf("re-running migrations failed: %v", err)
+	}
+
+	var keyOwner, logOwner int64
+	if err := db.QueryRow(`SELECT user_id FROM api_keys WHERE id = 11`).Scan(&keyOwner); err != nil {
+		t.Fatalf("read backfilled key owner: %v", err)
+	}
+	if err := db.QueryRow(`SELECT user_id FROM request_logs WHERE request_id = 'req-1'`).Scan(&logOwner); err != nil {
+		t.Fatalf("read backfilled log owner: %v", err)
+	}
+	if keyOwner != 5 || logOwner != 5 {
+		t.Fatalf("expected ownership backfilled to local admin 5, got key=%d log=%d", keyOwner, logOwner)
+	}
+}
+
 // The price clock, the folded name and their index carry the auto-suggest
 // look-up, and their Postgres definitions differ from the SQLite ones
 // (TIMESTAMPTZ, now() as the default, a backfill against existing rows). This

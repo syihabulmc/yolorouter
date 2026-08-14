@@ -377,6 +377,12 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
       ]),
   },
   {
+    title: columnTitle(t('apiKeys.ownerUserColumn'), t('apiKeys.ownerUserColumn_tip')),
+    key: 'owner_username',
+    minWidth: 110,
+    render: (row) => row.owner_username || '—',
+  },
+  {
     title: columnTitle(t('apiKeys.ownerColumn'), t('apiKeys.ownerColumn_tip')),
     key: 'owner_label',
     minWidth: 120,

@@ -89,6 +89,10 @@ type Exchange struct {
 	// actually does, and adds the accessor then.
 	pricingBasis PricingView
 	apiKeyID     uint
+	// userID is the key owner's account id, resolved once from the key at
+	// Handle entry so the request-log row can carry ownership without a
+	// join at write time.
+	userID uint
 	// concurrencyLimit / rpmLimit are the caller's allowance, resolved once
 	// from the key. Zero means unlimited, which is also what an absent limit
 	// means — the distinction has no consumer, so it is not preserved.
@@ -230,6 +234,9 @@ func (rc *Exchange) markFirstByteSent() bool {
 
 // APIKeyID identifies the caller's key.
 func (rc *Exchange) APIKeyID() uint { return rc.apiKeyID }
+
+// UserID identifies the account that owns the caller's key.
+func (rc *Exchange) UserID() uint { return rc.userID }
 
 // ConcurrencyLimit is how many of this key's requests may be in flight at once.
 // Zero means unlimited.

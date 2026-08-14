@@ -4,6 +4,9 @@ import { apiFetch } from './client'
 export interface APIKey {
   id: number
   key_prefix: string
+  // Owning account (user id + username), plus the legacy free-text label.
+  user_id: number
+  owner_username: string
   owner_label: string
   remark: string
   status: number
@@ -105,6 +108,8 @@ export interface APIKeyListParams {
   q: string
   owner: string
   status: string
+  // Narrow to keys owned by one account; omit/null = all.
+  userId?: number | null
   page: number
   pageSize: number
 }
@@ -117,6 +122,7 @@ export function listAPIKeys(p: APIKeyListParams): Promise<APIKeyPage> {
     page: String(p.page),
     page_size: String(p.pageSize),
   })
+  if (p.userId != null) params.set('user_id', String(p.userId))
   return apiFetch(`/api/admin/api-keys?${params.toString()}`)
 }
 

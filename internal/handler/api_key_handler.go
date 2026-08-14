@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yolorouter/yolorouter/internal/middleware"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/pkg/response"
 )
@@ -126,7 +127,11 @@ func GetAPIKeys(svc *service.APIKeyService) gin.HandlerFunc {
 			response.ParamError(c, "status must be one of: active, expired, revoked, budget_exhausted")
 			return
 		}
-		list, total, err := svc.ListAPIKeys(c.Query("q"), c.Query("owner"), status, page, pageSize)
+		var filterUserID uint
+		if !applyUintQueryParam(c, "user_id", func(v uint) { filterUserID = v }) {
+			return
+		}
+		list, total, err := svc.ListAPIKeys(c.Query("q"), c.Query("owner"), status, filterUserID, page, pageSize)
 		if err != nil {
 			writeServiceError(c, err)
 			return
@@ -148,6 +153,9 @@ func PostAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			return
 		}
 		result, err := svc.CreateAPIKey(service.CreateAPIKeyInput{
+			// The session user owns the key they create. RequireSession has
+			// already resolved the identity or this handler is unreachable.
+			UserID:     c.MustGet(middleware.UserIDKey).(uint),
 			OwnerLabel: req.OwnerLabel, Remark: req.Remark,
 			AllowAllModels: req.AllowAllModels, ModelIDs: req.ModelIDs,
 			ExpiresAt: req.ExpiresAt, RPMLimit: req.RPMLimit, TPMLimit: req.TPMLimit,

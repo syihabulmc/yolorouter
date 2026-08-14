@@ -102,6 +102,8 @@ export interface AnalyticsFilter {
   start?: string | null // RFC3339, inclusive
   end?: string | null // RFC3339, exclusive
   api_key_id?: number | null
+  // Narrow every aggregate to one account's rows (key owner).
+  user_id?: number | null
   model_name?: string | null
   provider_id?: number | null
   // status class: '' (any) | 'success' | 'failed' | 'partial' | 'cancelled' | 'rejected'
@@ -254,6 +256,7 @@ export function buildAnalyticsQuery(filter: AnalyticsFilter): URLSearchParams {
   if (filter.start) params.set('start', filter.start)
   if (filter.end) params.set('end', filter.end)
   if (filter.api_key_id != null) params.set('api_key_id', String(filter.api_key_id))
+  if (filter.user_id != null) params.set('user_id', String(filter.user_id))
   if (filter.model_name) params.set('model_name', filter.model_name)
   if (filter.provider_id != null) params.set('provider_id', String(filter.provider_id))
   if (filter.status) params.set('status', filter.status)

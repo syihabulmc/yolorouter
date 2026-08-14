@@ -187,6 +187,9 @@ func parseAnalyticsFilter(c *gin.Context) (service.AnalyticsFilter, bool) {
 	if !applyUintQueryParam(c, "api_key_id", func(v uint) { filter.APIKeyID = &v }) {
 		return service.AnalyticsFilter{}, false
 	}
+	if !applyUintQueryParam(c, "user_id", func(v uint) { filter.UserID = &v }) {
+		return service.AnalyticsFilter{}, false
+	}
 	if !applyUintQueryParam(c, "provider_id", func(v uint) { filter.ProviderID = &v }) {
 		return service.AnalyticsFilter{}, false
 	}

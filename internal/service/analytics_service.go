@@ -60,8 +60,10 @@ var ErrInvalidDimension = errors.New("invalid dimension; must be one of: model, 
 // the handler doesn't take a repository import. The conversion is a flat
 // field copy in toRepoFilter.
 type AnalyticsFilter struct {
-	RequestID   string
-	APIKeyID    *uint
+	RequestID string
+	APIKeyID  *uint
+	// UserID narrows every aggregate to rows owned by one account.
+	UserID      *uint
 	ModelName   string
 	ProviderID  *uint
 	StatusClass string
@@ -267,6 +269,7 @@ func toRepoFilter(f AnalyticsFilter) *repository.RequestLogFilter {
 	return &repository.RequestLogFilter{
 		RequestID:   f.RequestID,
 		APIKeyID:    f.APIKeyID,
+		UserID:      f.UserID,
 		ModelName:   f.ModelName,
 		ProviderID:  f.ProviderID,
 		StatusClass: f.StatusClass,

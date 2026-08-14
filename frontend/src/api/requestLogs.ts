@@ -117,6 +117,8 @@ export interface RequestLogDetail extends RequestLogRow {
 export interface RequestLogListParams {
   request_id?: string
   api_key_id?: number
+  /** Narrow to rows owned by one account (key owner). */
+  user_id?: number
   model_name?: string
   provider_id?: number
   status?: StatusClass
@@ -154,6 +156,7 @@ export function listRequestLogs(filter: RequestLogListParams): Promise<RequestLo
     page_size: filter.page_size,
     request_id: filter.request_id,
     api_key_id: filter.api_key_id,
+    user_id: filter.user_id,
     model_name: filter.model_name,
     provider_id: filter.provider_id,
     status: filter.status,
@@ -252,6 +255,7 @@ export async function exportRequestLogsCSV(filter: Omit<RequestLogListParams, 'p
   const sp = buildQuery({
     request_id: filter.request_id,
     api_key_id: filter.api_key_id,
+    user_id: filter.user_id,
     model_name: filter.model_name,
     provider_id: filter.provider_id,
     status: filter.status,

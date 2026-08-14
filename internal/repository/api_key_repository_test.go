@@ -26,9 +26,11 @@ func seedCustomScopeKeyForCSPTest(t *testing.T) (*gorm.DB, *model.APIKey) {
 	if err := db.Create(m).Error; err != nil {
 		t.Fatalf("seed model: %v", err)
 	}
+	owner := seedUser(t, db, "csp-key-owner")
 	key := &model.APIKey{
 		KeyHash:   "test-hash-csp",
 		KeyPrefix: "sk-yr-csptest000",
+		UserID:    owner.ID,
 		Status:    model.APIKeyStatusActive,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -147,9 +149,11 @@ func TestCreateAPIKeyRejectsOverrideEnabledEmptyText(t *testing.T) {
 	if err := db.Create(m).Error; err != nil {
 		t.Fatalf("seed model: %v", err)
 	}
+	owner := seedUser(t, db, "csp-create-owner")
 	key := &model.APIKey{
 		KeyHash:                           "test-hash-csp-create",
 		KeyPrefix:                         "sk-yr-cspcreate0",
+		UserID:                            owner.ID,
 		Status:                            model.APIKeyStatusActive,
 		CustomSystemPromptEnabledOverride: true,
 		CustomSystemPromptEnabled:         true,
@@ -160,6 +164,25 @@ func TestCreateAPIKeyRejectsOverrideEnabledEmptyText(t *testing.T) {
 	err := CreateAPIKey(db, key, []uint{m.ID}, now)
 	if !errors.Is(err, errcode.ErrCustomSystemPromptEmpty) {
 		t.Fatalf("want ErrCustomSystemPromptEmpty, got %v", err)
+	}
+}
+
+// TestCreateAPIKeyRejectsMissingOwner pins the ownerless-key guard: GORM
+// writes every mapped column, so a caller that forgot to set UserID would
+// otherwise insert 0 silently and the key would belong to no one's view.
+func TestCreateAPIKeyRejectsMissingOwner(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	key := &model.APIKey{
+		KeyHash:   "test-hash-no-owner",
+		KeyPrefix: "sk-yr-noowner000",
+		Status:    model.APIKeyStatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	err := CreateAPIKey(db, key, nil, now)
+	if !errors.Is(err, ErrAPIKeyOwnerMissing) {
+		t.Fatalf("want ErrAPIKeyOwnerMissing, got %v", err)
 	}
 }
 

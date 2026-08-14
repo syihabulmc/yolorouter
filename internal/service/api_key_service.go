@@ -49,8 +49,13 @@ func NewAPIKeyService(db *gorm.DB, masterKey []byte) *APIKeyService {
 // value; DisplayStatus is the runtime-computed value the UI shows. ModelIDs
 // is the key's allowlist (never nil — empty array means "no models").
 type APIKeyView struct {
-	ID                uint       `json:"id"`
-	KeyPrefix         string     `json:"key_prefix"`
+	ID        uint   `json:"id"`
+	KeyPrefix string `json:"key_prefix"`
+	// UserID / OwnerUsername identify the owning account. OwnerUsername is
+	// resolved from the users table for display (empty when the owner row
+	// is missing); OwnerLabel remains the free-text tag it always was.
+	UserID            uint       `json:"user_id"`
+	OwnerUsername     string     `json:"owner_username"`
 	OwnerLabel        string     `json:"owner_label"`
 	Remark            string     `json:"remark"`
 	Status            int        `json:"status"`
@@ -80,6 +85,9 @@ type APIKeyView struct {
 }
 
 type CreateAPIKeyInput struct {
+	// UserID is the owning account — required; repository.CreateAPIKey
+	// rejects 0. The handler fills it from the authenticated session.
+	UserID            uint
 	OwnerLabel        string
 	Remark            string
 	AllowAllModels    bool
@@ -145,12 +153,12 @@ type UpdateAPIKeyInput struct {
 	ExpectedUpdatedAt *time.Time
 }
 
-func (s *APIKeyService) ListAPIKeys(q, owner, status string, page, pageSize int) ([]APIKeyView, int64, error) {
+func (s *APIKeyService) ListAPIKeys(q, owner, status string, userID uint, page, pageSize int) ([]APIKeyView, int64, error) {
 	// Anchor the status filter's expiry check AND the rendered display status
 	// to one clock, so a key expiring mid-request can't be filtered as active
 	// while being rendered as expired.
 	now := time.Now().UTC()
-	filter := repository.APIKeyFilter{Query: q, Owner: owner, Status: status, Now: now}
+	filter := repository.APIKeyFilter{Query: q, Owner: owner, Status: status, UserID: userID, Now: now}
 	total, err := repository.CountAPIKeys(s.db, filter)
 	if err != nil {
 		return nil, 0, err
@@ -164,10 +172,16 @@ func (s *APIKeyService) ListAPIKeys(q, owner, status string, page, pageSize int)
 		return nil, 0, err
 	}
 	ids := make([]uint, len(keys))
+	userIDs := make([]uint, 0, len(keys))
 	for i, k := range keys {
 		ids[i] = k.ID
+		userIDs = append(userIDs, k.UserID)
 	}
 	allAllow, err := repository.FindAPIKeyModelsByAPIKeyIDs(s.db, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	usernames, err := repository.FindUsernamesByIDs(s.db, userIDs)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -177,7 +191,9 @@ func (s *APIKeyService) ListAPIKeys(q, owner, status string, page, pageSize int)
 	}
 	views := make([]APIKeyView, 0, len(keys))
 	for _, k := range keys {
-		views = append(views, toAPIKeyView(k, allowByKey[k.ID], now))
+		v := toAPIKeyView(k, allowByKey[k.ID], now)
+		v.OwnerUsername = usernames[k.UserID]
+		views = append(views, v)
 	}
 	return views, total, nil
 }
@@ -229,6 +245,7 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 		KeyHash:                           hashToken(rawKey),
 		EncryptedKey:                      encryptedKey,
 		KeyPrefix:                         truncatePrefix(rawKey),
+		UserID:                            input.UserID,
 		OwnerLabel:                        input.OwnerLabel,
 		Remark:                            input.Remark,
 		Status:                            model.APIKeyStatusActive,
@@ -264,6 +281,11 @@ func (s *APIKeyService) GetAPIKey(id uint) (*APIKeyView, error) {
 		return nil, err
 	}
 	view := toAPIKeyView(*key, modelIDs, time.Now().UTC())
+	usernames, err := repository.FindUsernamesByIDs(s.db, []uint{key.UserID})
+	if err != nil {
+		return nil, err
+	}
+	view.OwnerUsername = usernames[key.UserID]
 	return &view, nil
 }
 
@@ -427,7 +449,7 @@ func toAPIKeyView(k model.APIKey, modelIDs []uint, now time.Time) APIKeyView {
 		modelIDs = []uint{}
 	}
 	return APIKeyView{
-		ID: k.ID, KeyPrefix: k.KeyPrefix, OwnerLabel: k.OwnerLabel, Remark: k.Remark,
+		ID: k.ID, KeyPrefix: k.KeyPrefix, UserID: k.UserID, OwnerLabel: k.OwnerLabel, Remark: k.Remark,
 		Status: k.Status, DisplayStatus: computeAPIKeyDisplayStatus(k, now),
 		ExpiresAt: k.ExpiresAt, RPMLimit: k.RPMLimit, TPMLimit: k.TPMLimit,
 		ConcurrencyLimit: k.ConcurrencyLimit, BudgetLimitMicros: k.BudgetLimitMicros,

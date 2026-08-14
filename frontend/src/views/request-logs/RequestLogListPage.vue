@@ -60,6 +60,15 @@
           />
         </div>
         <FilterSelectField
+          :label="t('requestLogs.filterUser')"
+          :value="filter.user_id"
+          :options="userOptions"
+          :placeholder="t('requestLogs.allFilterUser')"
+          filterable
+          width="100%"
+          @update:value="onUserChange"
+        />
+        <FilterSelectField
           :label="t('requestLogs.filterCaller')"
           :value="filter.api_key_id"
           :options="callerOptions"
@@ -201,6 +210,7 @@ import {
 } from '../../api/requestLogs'
 import { listProviders, type Provider } from '../../api/providers'
 import { listAPIKeys, toAPIKeyOptions, type APIKey } from '../../api/apiKeys'
+import { listUsers, toUserOptions } from '../../api/users'
 import { displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
 import { columnTitle } from '../../utils/columnTitle'
@@ -225,6 +235,7 @@ interface ListFilter {
   model_name: string
   key_prefix: string
   api_key_id: number | null
+  user_id: number | null
   provider_id: number | null
   status: StatusClass | null
   is_stream: boolean | null
@@ -241,6 +252,7 @@ const filter = reactive<ListFilter>({
   model_name: '',
   key_prefix: '',
   api_key_id: null,
+  user_id: null,
   provider_id: null,
   status: null,
   is_stream: null,
@@ -329,6 +341,7 @@ const providerOptions = computed<SelectOption[]>(() =>
 // realistic v0.1 key count without a remote-search handshake.
 const apiKeys = ref<APIKey[]>([])
 const callerOptions = computed<SelectOption[]>(() => toAPIKeyOptions(apiKeys.value))
+const userOptions = ref<SelectOption[]>([])
 
 const statusOptions = computed<SelectOption[]>(() => ([
   { label: t('requestLogs.status_success'), value: 'success' },
@@ -399,7 +412,7 @@ onBeforeUnmount(() => {
 // to decide whether mount should apply the query before the first load.
 const RELEVANT_QUERY_KEYS = [
   'request_id', 'model_name', 'key_prefix', 'request_path', 'source', 'api_key_id',
-  'provider_id', 'status', 'is_stream', 'cost_known', 'start', 'end',
+  'user_id', 'provider_id', 'status', 'is_stream', 'cost_known', 'start', 'end',
 ] as const
 
 function hasRelevantQuery(): boolean {
@@ -438,6 +451,10 @@ function applyQueryFilter() {
   if (typeof q.api_key_id === 'string' && q.api_key_id) {
     const n = Number(q.api_key_id)
     if (!Number.isNaN(n)) filter.api_key_id = n
+  }
+  if (typeof q.user_id === 'string' && q.user_id) {
+    const n = Number(q.user_id)
+    if (!Number.isNaN(n)) filter.user_id = n
   }
   if (typeof q.provider_id === 'string' && q.provider_id) {
     const n = Number(q.provider_id)
@@ -484,6 +501,7 @@ onMounted(() => {
   void reload().catch((err) => message.error(displayMessage(err, t)))
   void loadProviders().catch((err) => message.error(displayMessage(err, t)))
   void loadCallers().catch((err) => message.error(displayMessage(err, t)))
+  void loadUsers().catch((err) => message.error(displayMessage(err, t)))
 })
 
 async function loadProviders() {
@@ -494,6 +512,11 @@ async function loadProviders() {
 async function loadCallers() {
   const { list } = await listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: 200 })
   apiKeys.value = list
+}
+
+async function loadUsers() {
+  const page = await listUsers()
+  userOptions.value = toUserOptions(page.users)
 }
 
 function buildListParams(): RequestLogListParams {
@@ -516,6 +539,7 @@ function buildListParams(): RequestLogListParams {
     params.model_name = filter.model_name.trim()
   }
   if (filter.api_key_id != null) params.api_key_id = filter.api_key_id
+  if (filter.user_id != null) params.user_id = filter.user_id
   if (filter.provider_id != null) params.provider_id = filter.provider_id
   if (filter.status) params.status = filter.status
   if (filter.key_prefix.trim()) params.key_prefix = filter.key_prefix.trim()
@@ -649,6 +673,11 @@ function onSourceChange(v: 'caller' | 'vision_fallback' | null) {
 // FilterSelectField is a controlled input (no v-model), so each select's
 // handler writes the reactive filter field and then searches — mirroring the
 // old NSelect `@update:value="onSearch"` after v-model wrote the value.
+function onUserChange(v: number | null) {
+  filter.user_id = v
+  void onSearch()
+}
+
 function onCallerChange(v: number | null) {
   filter.api_key_id = v
   void onSearch()

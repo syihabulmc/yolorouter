@@ -13,6 +13,16 @@
   <div class="common-page">
     <PageHeader :eyebrow="t('costs.eyebrow')" :title="t('costs.pageTitle')" :description="t('costs.pageDescription')">
       <template #actions>
+        <NSelect
+          :value="selectedUserId"
+          :options="userOptions"
+          :placeholder="t('costs.allUser')"
+          clearable
+          filterable
+          size="small"
+          style="width: 180px"
+          @update:value="onUserChange"
+        />
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPresetChange" />
       </template>
     </PageHeader>
@@ -105,7 +115,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { useMessage } from 'naive-ui'
+import { NSelect, useMessage, type SelectOption } from 'naive-ui'
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import TimeRangeSelect, {
@@ -120,6 +130,7 @@ import { formatMicros, isNegativeMicros, netCacheSavedMicros } from '../../utils
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import { initialLast7DaysRange, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage } from '../../api/client'
+import { listUsers, toUserOptions } from '../../api/users'
 import { getBudgetRows, getCostStats, type BudgetRow, type CostStats } from '../../api/costs'
 import type { AnalyticsFilter } from '../../api/analytics'
 
@@ -163,7 +174,11 @@ let reloadSeq = 0
 
 async function loadStats() {
   const mySeq = ++reloadSeq
-  const filter: AnalyticsFilter = { start: timeRange.value.start, end: timeRange.value.end }
+  const filter: AnalyticsFilter = {
+    start: timeRange.value.start,
+    end: timeRange.value.end,
+    user_id: selectedUserId.value,
+  }
   // Clear immediately so a failed reload under a new range can't leave stale
   // money on screen.
   stats.value = null
@@ -184,14 +199,50 @@ const netCacheSaved = computed(() => netCacheSavedMicros(stats.value?.overview))
 const budgetRows = ref<BudgetRow[]>([])
 const budgetLoading = ref(false)
 
+// budgetSeq mirrors reloadSeq for the budget table: loadBudget used to run
+// only once on mount, but the user scope now retriggers it, so a slow
+// earlier response must not overwrite a newer scope's rows.
+let budgetSeq = 0
+
 async function loadBudget() {
+  const mySeq = ++budgetSeq
   budgetLoading.value = true
+  // Clear immediately: the previous scope's rows must not stay on screen
+  // while the new scope loads (or indefinitely if it fails) — the budget
+  // cards derive from these rows with no loading guard of their own.
+  budgetRows.value = []
   try {
-    budgetRows.value = await getBudgetRows()
+    const rows = await getBudgetRows(selectedUserId.value)
+    if (mySeq !== budgetSeq) return
+    budgetRows.value = rows
   } catch (err) {
+    if (mySeq !== budgetSeq) return
     message.error(displayMessage(err, t))
   } finally {
-    budgetLoading.value = false
+    if (mySeq === budgetSeq) budgetLoading.value = false
+  }
+}
+
+// === User filter ==========================================================
+//
+// One account's view of the same page: window stats and the budget table
+// both re-scope; the option list loads once on mount like the other
+// admin-configured catalogs.
+const selectedUserId = ref<number | null>(null)
+const userOptions = ref<SelectOption[]>([])
+
+function onUserChange(v: number | null) {
+  selectedUserId.value = v
+  void loadStats()
+  void loadBudget()
+}
+
+async function loadUserOptions() {
+  try {
+    const page = await listUsers()
+    userOptions.value = toUserOptions(page.users)
+  } catch (err) {
+    message.error(displayMessage(err, t))
   }
 }
 
@@ -220,6 +271,7 @@ const cappedKeyCount = computed(
 // loadBudget handles its own errors, so no outer .catch is needed.
 onMounted(() => {
   void loadBudget()
+  void loadUserOptions()
 })
 
 // The window-scoped stats load whenever the range changes — including the

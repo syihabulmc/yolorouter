@@ -52,8 +52,12 @@ var ValidStatusClasses = map[string]struct{}{
 // need either JSON inspection of attempts_detail or new columns. The
 // dashboard/analytics endpoints simply don't expose those filters yet.
 type RequestLogFilter struct {
-	RequestID   string
-	APIKeyID    *uint
+	RequestID string
+	APIKeyID  *uint
+	// UserID narrows to rows owned by one account (the key owner,
+	// denormalized onto request_logs at write time). Unauthenticated audit
+	// rows carry NULL and therefore never match a user filter.
+	UserID      *uint
 	ModelName   string
 	ProviderID  *uint
 	StatusClass string
@@ -94,6 +98,9 @@ func (f *RequestLogFilter) applyFilter(db *gorm.DB) *gorm.DB {
 	}
 	if f.APIKeyID != nil {
 		q = q.Where("api_key_id = ?", *f.APIKeyID)
+	}
+	if f.UserID != nil {
+		q = q.Where("user_id = ?", *f.UserID)
 	}
 	if f.ModelName != "" {
 		q = q.Where("model_name = ?", f.ModelName)

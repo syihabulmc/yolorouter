@@ -38,7 +38,10 @@ func newAPIKeyTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	db := testutil.NewSQLiteDB(t)
 	svc := service.NewAPIKeyService(db, apiKeyTestMasterKey())
 	r := gin.New()
-	r.POST("/api/admin/api-keys", PostAPIKey(svc))
+	// PostAPIKey reads the session identity from the context (the created
+	// key's owner); stubIdentity stands in for RequireSession here, exactly
+	// like the auth handler tests do.
+	r.POST("/api/admin/api-keys", stubIdentity(1, "admin"), PostAPIKey(svc))
 	r.GET("/api/admin/api-keys/:id/plaintext", GetAPIKeyPlaintext(svc))
 	return r, db
 }
@@ -106,7 +109,7 @@ func newAPIKeyPatchTestRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	db := testutil.NewSQLiteDB(t)
 	svc := service.NewAPIKeyService(db, apiKeyTestMasterKey())
 	r := gin.New()
-	r.POST("/api/admin/api-keys", PostAPIKey(svc))
+	r.POST("/api/admin/api-keys", stubIdentity(1, "admin"), PostAPIKey(svc))
 	r.GET("/api/admin/api-keys/:id", GetAPIKey(svc))
 	r.PATCH("/api/admin/api-keys/:id", PatchAPIKey(svc))
 	return r, db

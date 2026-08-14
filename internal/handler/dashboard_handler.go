@@ -49,7 +49,12 @@ func GetDashboard(svc *service.DashboardService) gin.HandlerFunc {
 			response.ParamError(c, "start must be before end")
 			return
 		}
-		data, err := svc.GetDashboard(loc, rangeStart, rangeEnd, timeNow())
+		// Optional per-account scope for the traffic-backed sections.
+		var userID *uint
+		if !applyUintQueryParam(c, "user_id", func(v uint) { userID = &v }) {
+			return
+		}
+		data, err := svc.GetDashboard(loc, rangeStart, rangeEnd, userID, timeNow())
 		if err != nil {
 			response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
 			return

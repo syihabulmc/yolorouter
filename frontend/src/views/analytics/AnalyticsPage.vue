@@ -35,6 +35,16 @@
         </div>
 
         <FilterSelectField
+          :label="t('analytics.user')"
+          :value="filter.user_id ?? null"
+          :options="userOptions"
+          :placeholder="t('analytics.allUser')"
+          filterable
+          width="100%"
+          @update:value="(v) => update('user_id', v)"
+        />
+
+        <FilterSelectField
           :label="t('analytics.apiKey')"
           :value="filter.api_key_id ?? null"
           :options="apiKeyOptions"
@@ -235,6 +245,7 @@ import TimeRangeSelect, { type RangePreset, type TimeRange } from '../../compone
 import { listProviders } from '../../api/providers'
 import { listModels } from '../../api/models'
 import { listAPIKeys, toAPIKeyOptions } from '../../api/apiKeys'
+import { listUsers, toUserOptions } from '../../api/users'
 import { clampedRangeStart, initialLast7DaysRange } from '../../utils/timeRange'
 import { columnTitle } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
@@ -291,6 +302,7 @@ const bucketOptions = computed<SelectOption[]>(() => [
 const apiKeyOptions = ref<SelectOption[]>([])
 const providerOptions = ref<SelectOption[]>([])
 const modelOptions = ref<SelectOption[]>([])
+const userOptions = ref<SelectOption[]>([])
 
 const statusOptions = computed<SelectOption[]>(() => [
   { label: t('analytics.statusSuccess'), value: 'success' },
@@ -341,6 +353,7 @@ function activeFilterFragment(): RequestLogLinkQuery {
     status: filter.value.status || null,
     model_name: filter.value.model_name || null,
     api_key_id: filter.value.api_key_id ?? null,
+    user_id: filter.value.user_id ?? null,
     provider_id: filter.value.provider_id ?? null,
   }
 }
@@ -454,14 +467,16 @@ onMounted(() => {
 // don't block the page.
 async function loadFilterOptions() {
   try {
-    const [providerPage, modelPage, apiKeyPage] = await Promise.all([
+    const [providerPage, modelPage, apiKeyPage, userPage] = await Promise.all([
       listProviders(),
       listModels(),
       listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: 200 }),
+      listUsers(),
     ])
     providerOptions.value = providerPage.list.map((p) => ({ label: p.name, value: p.id }))
     modelOptions.value = modelPage.list.map((m) => ({ label: m.name, value: m.name }))
     apiKeyOptions.value = toAPIKeyOptions(apiKeyPage.list)
+    userOptions.value = toUserOptions(userPage.users)
   } catch (err) {
     message.error(displayMessage(err, t))
   }

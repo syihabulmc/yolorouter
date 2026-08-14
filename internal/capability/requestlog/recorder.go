@@ -37,6 +37,7 @@ import (
 type View interface {
 	RequestID() string
 	APIKeyID() uint
+	UserID() uint
 	OriginalModel() string
 	ProviderID() *uint
 	IsStream() bool
@@ -75,6 +76,14 @@ func (r *Recorder) Record(ctx context.Context, view View, out fact.Outcome, tl f
 	s := summarise(tl)
 
 	apiKeyID := view.APIKeyID()
+	// Ownership is denormalized onto the row so per-user statistics never
+	// join through api_keys. 0 (a key that predates ownership and somehow
+	// escaped the migration backfill) is stored as NULL rather than as a
+	// dangling id that matches no account.
+	var userIDPtr *uint
+	if uid := view.UserID(); uid != 0 {
+		userIDPtr = &uid
+	}
 	var failPtr *string
 	if out.FailReason != "" {
 		fr := out.FailReason
@@ -94,6 +103,7 @@ func (r *Recorder) Record(ctx context.Context, view View, out fact.Outcome, tl f
 	row := &model.RequestLog{
 		RequestID:                        view.RequestID(),
 		APIKeyID:                         &apiKeyID,
+		UserID:                           userIDPtr,
 		ModelName:                        view.OriginalModel(),
 		ProviderID:                       view.ProviderID(),
 		IsStream:                         view.IsStream(),

@@ -44,8 +44,9 @@ type TodayMetricsDTO struct {
 // GetRangeMetrics returns calls / total known cost / success rate / unknown-
 // cost count for an arbitrary [start, end) window. The dashboard uses it for
 // both the default "today" window (via TodayBounds) and user-selected ranges.
-func GetRangeMetrics(db *gorm.DB, start, end time.Time) (*TodayMetricsDTO, error) {
-	m, err := AggregateRequestLogMetrics(db, &RequestLogFilter{StartTime: &start, EndTime: &end})
+// userID narrows to one account's rows; nil = all accounts.
+func GetRangeMetrics(db *gorm.DB, start, end time.Time, userID *uint) (*TodayMetricsDTO, error) {
+	m, err := AggregateRequestLogMetrics(db, &RequestLogFilter{StartTime: &start, EndTime: &end, UserID: userID})
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +73,7 @@ type TrendPoint struct {
 // window in a single GROUP BY query, then gap-fills missing days with zeros
 // so the frontend chart x-axis is continuous. Uses dayBucketExpr for
 // DST-aware day truncation on Postgres and fixed-offset on SQLite.
-func GetTrendRange(db *gorm.DB, rangeStart, rangeEnd time.Time, loc *time.Location) ([]TrendPoint, error) {
+func GetTrendRange(db *gorm.DB, rangeStart, rangeEnd time.Time, loc *time.Location, userID *uint) ([]TrendPoint, error) {
 	_, offsetSec := rangeStart.In(loc).Zone()
 	bucketExpr := dayBucketExpr(db, loc, offsetSec)
 
@@ -81,8 +82,12 @@ func GetTrendRange(db *gorm.DB, rangeStart, rangeEnd time.Time, loc *time.Locati
 		Calls      int64  `gorm:"column:calls"`
 		CostMicros int64  `gorm:"column:cost_micros"`
 	}
-	err := db.Model(&model.RequestLog{}).
-		Where("created_at >= ? AND created_at < ?", rangeStart, rangeEnd).
+	q := db.Model(&model.RequestLog{}).
+		Where("created_at >= ? AND created_at < ?", rangeStart, rangeEnd)
+	if userID != nil {
+		q = q.Where("user_id = ?", *userID)
+	}
+	err := q.
 		Select(bucketExpr + ` AS day,
 			COUNT(*) AS calls,
 			COALESCE(SUM(cost_micros), 0) AS cost_micros
@@ -138,17 +143,21 @@ type TopCaller struct {
 // "non-aggregated SELECT column must appear in GROUP BY" rule; because each
 // api_key_id maps to exactly one owner_label through the INNER JOIN, this
 // produces the same groups as grouping by api_key_id alone.
-func GetTopCallers(db *gorm.DB, start, end time.Time, limit int) ([]TopCaller, error) {
+func GetTopCallers(db *gorm.DB, start, end time.Time, limit int, userID *uint) ([]TopCaller, error) {
 	if limit < 1 {
 		limit = 1
 	}
-	var rows []TopCaller
-	err := db.Table("request_logs AS rl").
+	q := db.Table("request_logs AS rl").
 		Select("rl.api_key_id AS api_key_id, COALESCE(ak.owner_label, '') AS owner_label, "+
 			"COUNT(*) AS calls, COALESCE(SUM(rl.cost_micros), 0) AS cost_micros").
 		Joins("INNER JOIN api_keys ak ON ak.id = rl.api_key_id").
 		Where("rl.created_at >= ? AND rl.created_at < ?", start, end).
-		Where("rl.api_key_id IS NOT NULL").
+		Where("rl.api_key_id IS NOT NULL")
+	if userID != nil {
+		q = q.Where("rl.user_id = ?", *userID)
+	}
+	var rows []TopCaller
+	err := q.
 		Group("rl.api_key_id, ak.owner_label").
 		Order("cost_micros DESC, rl.api_key_id ASC").
 		Limit(limit).
@@ -175,15 +184,19 @@ func GetTopCallers(db *gorm.DB, start, end time.Time, limit int) ([]TopCaller, e
 // No time window — "recent" means most-recent-overall, not most-recent-
 // today. A failure from 11pm yesterday is still useful on this morning's
 // dashboard.
-func GetRecentFailures(db *gorm.DB, limit int) ([]model.RequestLog, error) {
+func GetRecentFailures(db *gorm.DB, limit int, userID *uint) ([]model.RequestLog, error) {
 	if limit < 1 {
 		limit = 1
 	}
-	var rows []model.RequestLog
-	err := db.Model(&model.RequestLog{}).
+	q := db.Model(&model.RequestLog{}).
 		Where(`(status_code >= 200 AND status_code < 300 AND fail_reason IS NOT NULL AND fail_reason != '')
 			OR status_code IN (401, 403, 429)
-			OR (status_code >= 400 AND status_code NOT IN (401, 403, 429, 499))`).
+			OR (status_code >= 400 AND status_code NOT IN (401, 403, 429, 499))`)
+	if userID != nil {
+		q = q.Where("user_id = ?", *userID)
+	}
+	var rows []model.RequestLog
+	err := q.
 		Order("created_at DESC, id DESC").
 		Limit(limit).
 		Find(&rows).Error

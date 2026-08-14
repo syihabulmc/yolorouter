@@ -259,6 +259,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	rc := &Exchange{
 		requestID:        requestIDFor(c),
 		apiKeyID:         apiKey.ID,
+		userID:           apiKey.UserID,
 		concurrencyLimit: derefLimit(apiKey.ConcurrencyLimit),
 		rpmLimit:         derefLimit(apiKey.RPMLimit),
 		tpmLimit:         derefLimit(apiKey.TPMLimit),

@@ -78,13 +78,13 @@ const BUDGET_KEYS_PAGE_SIZE = 200
 // to learn the total, then fetches the remaining pages concurrently. Keeping
 // the summary complete matters more than the request count here — the overview
 // cards present these as authoritative totals.
-async function getAllAPIKeys(): Promise<APIKey[]> {
-  const first = await listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: BUDGET_KEYS_PAGE_SIZE })
+async function getAllAPIKeys(userId?: number | null): Promise<APIKey[]> {
+  const first = await listAPIKeys({ q: '', owner: '', status: '', userId, page: 1, pageSize: BUDGET_KEYS_PAGE_SIZE })
   if (first.total <= first.list.length) return first.list
   const pageCount = Math.ceil(first.total / BUDGET_KEYS_PAGE_SIZE)
   const rest = await Promise.all(
     Array.from({ length: pageCount - 1 }, (_, i) =>
-      listAPIKeys({ q: '', owner: '', status: '', page: i + 2, pageSize: BUDGET_KEYS_PAGE_SIZE }),
+      listAPIKeys({ q: '', owner: '', status: '', userId, page: i + 2, pageSize: BUDGET_KEYS_PAGE_SIZE }),
     ),
   )
   return rest.reduce((acc, page) => acc.concat(page.list), first.list)
@@ -110,7 +110,7 @@ function toBudgetRow(key: APIKey, dailyAvgMicros: number): BudgetRow {
 // daily burn rate. The burn rate comes from a caller report over a fixed
 // BURN_RATE_WINDOW_DAYS window ending now — deliberately NOT the page filter,
 // so the "days to exhaust" figure tracks current spend velocity.
-export async function getBudgetRows(): Promise<BudgetRow[]> {
+export async function getBudgetRows(userId?: number | null): Promise<BudgetRow[]> {
   // A now-anchored rolling window: exactly BURN_RATE_WINDOW_DAYS × 24h ending
   // at the current instant, so dividing the window's spend by the day count
   // gives a true daily rate. Anchoring the end at tomorrow's midnight would put
@@ -120,10 +120,10 @@ export async function getBudgetRows(): Promise<BudgetRow[]> {
   const end = new Date()
   const start = new Date(end)
   start.setDate(start.getDate() - BURN_RATE_WINDOW_DAYS)
-  const burnFilter: AnalyticsFilter = { start: start.toISOString(), end: end.toISOString() }
+  const burnFilter: AnalyticsFilter = { start: start.toISOString(), end: end.toISOString(), user_id: userId ?? null }
 
   const [keys, callerReport] = await Promise.all([
-    getAllAPIKeys(),
+    getAllAPIKeys(userId),
     getAnalyticsReport('caller', 'day', burnFilter),
   ])
 
