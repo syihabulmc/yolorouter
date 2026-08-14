@@ -256,10 +256,21 @@ const navItems = computed<NavItem[]>(() => [
   { key: 'cost-optimization', label: t('nav.costOptimization'), icon: TrendingDown, to: '/cost-optimization', tag: t('nav.saveBadge') },
 
   { key: 'group-system', label: t('nav.groupSystem'), group: true },
-  // Hidden from the sidebar for now; the /system route and page code stay wired up.
-  { key: 'system-info', label: t('nav.systemInfo'), icon: Info, to: '/system', badge: updateStore.hasUpdate, hidden: true },
   { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
   { key: 'change-password', label: t('auth.changePasswordTitle'), icon: KeyRound, onClick: () => (showChangePassword.value = true) },
+  // New-release indicator: the text chip (same superscript style as the
+  // cost-optimization tag) renders in the expanded sidebar; SidebarNav
+  // itself falls back to the badge dot whenever the chip isn't visible, so
+  // each rendering instance (collapsed sider, mobile drawer) shows exactly
+  // one signal.
+  {
+    key: 'about',
+    label: t('nav.about'),
+    icon: Info,
+    to: '/about',
+    tag: updateStore.hasUpdate ? t('nav.newVersionBadge') : undefined,
+    badge: updateStore.hasUpdate,
+  },
   // Hidden from the sidebar for now (feature not built yet).
   { key: 'model-pricing', label: t('nav.modelPricing'), icon: Tags, disabled: true, hidden: true },
 ])

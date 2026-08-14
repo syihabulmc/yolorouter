@@ -21,6 +21,10 @@ interface UpdateStoreState {
   goos: string
   goarch: string
   dbDriver: string
+  // How this deployment can be upgraded (mirrors the backend's update_mode:
+  // in_place / container / windows / disabled / dev). Drives whether the
+  // About page shows the one-click update button or a per-runtime hint.
+  updateMode: string
   uptimeSeconds: number
   // Update status.
   latest: string
@@ -42,6 +46,7 @@ export const useUpdateStore = defineStore('update', {
     goos: '',
     goarch: '',
     dbDriver: '',
+    updateMode: '',
     uptimeSeconds: 0,
     latest: '',
     hasUpdate: false,
@@ -59,10 +64,10 @@ export const useUpdateStore = defineStore('update', {
      * (e.g. from a /system page load racing a DefaultLayout mount) from
      * overwriting a newer one.
      */
-    async checkForUpdates() {
+    async checkForUpdates(force = false) {
       const fetchId = ++this.lastFetchId
       try {
-        const info: SystemVersion = await getSystemVersion()
+        const info: SystemVersion = await getSystemVersion(force)
         // A newer checkForUpdates() started while this one was in flight —
         // its result is authoritative, leave state untouched.
         if (fetchId !== this.lastFetchId) return
@@ -73,6 +78,7 @@ export const useUpdateStore = defineStore('update', {
         this.goos = info.goos
         this.goarch = info.goarch
         this.dbDriver = info.db_driver
+        this.updateMode = info.update_mode
         this.uptimeSeconds = info.uptime_seconds
         this.latest = info.latest
         this.hasUpdate = info.has_update

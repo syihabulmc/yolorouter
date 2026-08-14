@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The console can now update Yolorouter in place. The sidebar gained an
+  About entry (with a new-version indicator when a release is out) whose
+  page shows the version, checks for updates on demand, and offers a
+  one-click update: the server downloads and verifies the release, swaps
+  the binary, and restarts itself so the service manager brings the new
+  version up. Runtimes where an in-place swap would be wrong — containers,
+  Windows, binaries carrying Linux file capabilities, non-release builds —
+  get a matching upgrade hint instead of the button, and `yolorouter
+  update` inside a container now points at pulling the newer image.
+
 - Models that cannot see images can now answer image requests. Declare a
   model unable to read images and pick a vision fallback model in the
   console: the gateway describes each incoming image through that model

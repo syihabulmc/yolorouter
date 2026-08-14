@@ -13,14 +13,23 @@ import (
 )
 
 // fakeVersionChecker is a test double for the handler's VersionChecker
-// dependency: returns a fixed status and records that Check was called.
+// dependency: returns a fixed status and records which entry point ran.
 type fakeVersionChecker struct {
-	status service.VersionStatus
-	called bool
+	status      service.VersionStatus
+	called      bool
+	freshCalls  int
+	cachedCalls int
 }
 
 func (f *fakeVersionChecker) Check(_ context.Context) service.VersionStatus {
 	f.called = true
+	f.cachedCalls++
+	return f.status
+}
+
+func (f *fakeVersionChecker) CheckFresh(_ context.Context) service.VersionStatus {
+	f.called = true
+	f.freshCalls++
 	return f.status
 }
 
@@ -35,6 +44,7 @@ func TestGetSystemVersionReportsBuildInfo(t *testing.T) {
 	info := SystemInfo{
 		Version: "v0.1.0", Commit: "abc1234", BuildTime: "2026-07-20T00:00:00Z",
 		GoVersion: "go1.26.2", GOOS: "linux", GOARCH: "amd64", DBDriver: "sqlite",
+		UpdateMode: "in_place",
 	}
 	fake := &fakeVersionChecker{}
 
@@ -58,6 +68,10 @@ func TestGetSystemVersionReportsBuildInfo(t *testing.T) {
 	assertField(t, data, "goos", "linux")
 	assertField(t, data, "goarch", "amd64")
 	assertField(t, data, "db_driver", "sqlite")
+	// update_mode drives whether the console renders the one-click update
+	// button or a per-runtime hint; dropping it would silently hide the
+	// button everywhere.
+	assertField(t, data, "update_mode", "in_place")
 }
 
 func TestGetSystemVersionMergesUpdateStatus(t *testing.T) {
@@ -96,6 +110,26 @@ func TestGetSystemVersionSurfacesCheckFailed(t *testing.T) {
 	data := decodeEnvelopeData(t, w.Body.Bytes())
 	assertField(t, data, "check_failed", true)
 	assertField(t, data, "has_update", false)
+}
+
+// TestGetSystemVersionForceBypassesCache pins the ?force=1 contract: an
+// operator-initiated check must hit the cache-bypassing entry point, and a
+// plain load must not.
+func TestGetSystemVersionForceBypassesCache(t *testing.T) {
+	fake := &fakeVersionChecker{}
+	r := newSystemTestRouter(SystemInfo{Version: "v0.1.0"}, fake)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/admin/system/version?force=1", nil))
+	if fake.freshCalls != 1 || fake.cachedCalls != 0 {
+		t.Fatalf("force=1 must call CheckFresh exactly once (fresh=%d cached=%d)", fake.freshCalls, fake.cachedCalls)
+	}
+
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/admin/system/version", nil))
+	if fake.freshCalls != 1 || fake.cachedCalls != 1 {
+		t.Fatalf("a plain load must use the cached Check (fresh=%d cached=%d)", fake.freshCalls, fake.cachedCalls)
+	}
 }
 
 func TestGetSystemVersionReportsNonNegativeUptime(t *testing.T) {

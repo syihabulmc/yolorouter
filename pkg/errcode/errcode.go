@@ -86,6 +86,11 @@ const (
 	// directly), were dead code, and have been removed.
 	RequestLogNotFound = 14005 // request log detail query, id does not exist
 
+	// === Self-update errors (15xxx) ===
+	SystemUpdateUnsupported = 15001 // in-place update is not available in this runtime (container / windows / disabled / non-release build / capability-bearing binary); the version endpoint's update_mode says which
+	SystemUpdateFailed      = 15002 // the update run itself failed (download, checksum, or binary replacement); the server log carries the specific cause
+	SystemUpdateInProgress  = 15003 // an update is already running, or one was applied and the process is restarting; a second run before the restart would overwrite the rollback backup with the new binary
+
 	// === System internal errors (50001-50099) ===
 	InternalError      = 50001
 	DatabaseError      = 50002
@@ -168,6 +173,10 @@ var ErrorMessages = map[int]string{
 	UserDisabled:            "target user is disabled",
 
 	RequestLogNotFound: "request log not found",
+
+	SystemUpdateUnsupported: "in-place update is not available in this runtime",
+	SystemUpdateFailed:      "update failed; check the server log for details",
+	SystemUpdateInProgress:  "an update is already in progress or applied; the service is about to restart",
 
 	InternalError:      "internal error",
 	DatabaseError:      "database error",

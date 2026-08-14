@@ -3,6 +3,7 @@
 package router
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/gateway"
 	"github.com/yolorouter/yolorouter/internal/handler"
 	"github.com/yolorouter/yolorouter/internal/middleware"
+	"github.com/yolorouter/yolorouter/internal/selfupdate"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/internal/version"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
@@ -319,16 +321,34 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// resolves its repo from updateCfg + the compiled-in default (see
 	// version.ResolveRepo); an empty resolved repo disables the check and is
 	// surfaced as check_failed, not an error.
-	versionSvc := service.NewVersionService(version.ResolveRepo(updateCfg.Enabled, updateCfg.GitHubRepo), updateCfg.GitHubProxy)
+	resolvedRepo := version.ResolveRepo(updateCfg.Enabled, updateCfg.GitHubRepo)
+	updateMode := selfupdate.Mode(resolvedRepo, version.Version)
+	versionSvc := service.NewVersionService(resolvedRepo, updateCfg.GitHubProxy)
 	protected.GET("/system/version", handler.GetSystemVersion(handler.SystemInfo{
-		Version:   version.Version,
-		Commit:    version.Commit,
-		BuildTime: version.BuildTime,
-		GoVersion: runtime.Version(),
-		GOOS:      runtime.GOOS,
-		GOARCH:    runtime.GOARCH,
-		DBDriver:  db.Dialector.Name(), //nolint:staticcheck // QF1008 false-positive — gorm.DB exposes the driver name only via Dialector.Name(); there is no db.Name()
+		Version:    version.Version,
+		Commit:     version.Commit,
+		BuildTime:  version.BuildTime,
+		GoVersion:  runtime.Version(),
+		GOOS:       runtime.GOOS,
+		GOARCH:     runtime.GOARCH,
+		DBDriver:   db.Dialector.Name(), //nolint:staticcheck // QF1008 false-positive — gorm.DB exposes the driver name only via Dialector.Name(); there is no db.Name()
+		UpdateMode: updateMode,
 	}, versionSvc))
+
+	// One-click update (POST /api/admin/system/update): download + verify +
+	// replace the binary via the same selfupdate mechanics the CLI uses,
+	// then schedule a graceful restart so the service manager brings the new
+	// binary up. Session-protected like every other admin endpoint; the
+	// updateMode gate inside the handler refuses every runtime where an
+	// in-place replacement would be wrong (container, windows, dev build,
+	// updates disabled).
+	protected.POST("/system/update", handler.PostSystemUpdate(updateMode, func(ctx context.Context) (selfupdate.Result, error) {
+		return selfupdate.Apply(ctx, selfupdate.Options{
+			Repo:    resolvedRepo,
+			Proxy:   updateCfg.GitHubProxy,
+			Current: version.Version,
+		})
+	}, selfupdate.ScheduleRestart))
 
 	// Gateway: POST /v1/chat/completions (OpenAI-compatible),
 	// POST /v1/messages (Anthropic-compatible), POST /v1/responses

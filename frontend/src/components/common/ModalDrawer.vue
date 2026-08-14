@@ -20,15 +20,15 @@
     preset="card"
     :title="title"
     :style="{ maxWidth }"
-    :mask-closable="maskClosable"
-    :close-on-esc="closeOnEsc"
+    :mask-closable="maskClosable && dismissable"
+    :close-on-esc="closeOnEsc && dismissable"
     @after-leave="emit('after-leave')"
   >
     <slot />
     <template #footer>
       <slot name="footer">
         <div class="modal-drawer__actions">
-          <NButton @click="onCancel">{{
+          <NButton v-if="dismissable" @click="onCancel">{{
             cancelText || t("common.cancel")
           }}</NButton>
           <NButton type="primary" :loading="loading" @click="emit('confirm')">
@@ -48,6 +48,8 @@
     placement="right"
     width="100%"
     class="modal-drawer"
+    :mask-closable="maskClosable && dismissable"
+    :close-on-esc="closeOnEsc && dismissable"
     @after-leave="emit('after-leave')"
   >
     <NDrawerContent :native-scrollbar="false" body-content-style="padding: 0;">
@@ -57,6 +59,7 @@
             type="button"
             class="modal-drawer__back"
             :aria-label="backLabel"
+            :disabled="!dismissable"
             @click="onCancel"
           >
             <NIcon :size="22"><ArrowLeft /></NIcon>
@@ -92,7 +95,7 @@ import { ArrowLeft } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { useIsMobile } from "../../composables/useIsMobile";
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     title: string;
     confirmText?: string;
@@ -100,10 +103,16 @@ withDefaults(
     loading?: boolean;
     backLabel?: string;
     maxWidth?: string;
-    // Desktop modal only — the mobile drawer's back arrow is always the sole
-    // dismiss affordance, so these don't apply there.
+    // Apply to both renderings: the desktop modal's mask/Esc, and the
+    // mobile drawer's mask/Esc (naive-ui defaults both to true there too —
+    // the back arrow is the visible affordance, not the only one).
     maskClosable?: boolean;
     closeOnEsc?: boolean;
+    // When false, every dismiss affordance is withheld (desktop Cancel
+    // button hidden, mobile back arrow disabled) — for flows that have
+    // passed their point of no return, where closing the dialog would only
+    // hide an operation that keeps running.
+    dismissable?: boolean;
   }>(),
   {
     confirmText: "",
@@ -113,6 +122,7 @@ withDefaults(
     maxWidth: "400px",
     maskClosable: true,
     closeOnEsc: true,
+    dismissable: true,
   },
 );
 
@@ -128,9 +138,11 @@ const show = defineModel<boolean>("show", { required: true });
 
 // Close the dialog if the viewport crosses the breakpoint, so a modal opened on
 // desktop doesn't strand as a half-rendered drawer (or vice versa) after a
-// resize/rotate.
+// resize/rotate — but never while the dialog is locked (`dismissable=false`):
+// a rotate mid-operation must not hide progress the user cannot reopen. The
+// dialog then re-renders in the other branch with its state intact.
 const isMobile = useIsMobile(() => {
-  show.value = false;
+  if (props.dismissable) show.value = false;
 });
 
 // Cancel (desktop button or mobile back arrow) closes the dialog for the caller
@@ -185,6 +197,11 @@ function onCancel() {
 
 .modal-drawer__back:active {
   background: var(--color-surface-hover);
+}
+
+.modal-drawer__back:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .modal-drawer__title {

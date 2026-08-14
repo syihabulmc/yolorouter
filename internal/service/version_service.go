@@ -82,6 +82,19 @@ func NewVersionService(repo, proxy string) *VersionService {
 // client.Timeout bounds the fetch so a stalled GitHub can never hang an admin
 // request.
 func (s *VersionService) Check(ctx context.Context) VersionStatus {
+	return s.check(ctx, false)
+}
+
+// CheckFresh is Check minus the cache read: an operator who explicitly
+// clicks "check for updates" must get GitHub's current answer, not a result
+// cached up to posTTL ago (a release published inside that window would
+// otherwise read as "up to date"). The fresh result still lands in the
+// cache, so background checks benefit from it.
+func (s *VersionService) CheckFresh(ctx context.Context) VersionStatus {
+	return s.check(ctx, true)
+}
+
+func (s *VersionService) check(ctx context.Context, force bool) VersionStatus {
 	current := version.Version
 
 	// Disabled: don't touch the network or the cache.
@@ -92,8 +105,10 @@ func (s *VersionService) Check(ctx context.Context) VersionStatus {
 	// Serve a fresh-enough cached entry without re-fetching. Success and
 	// failure entries age out on independent clocks (posTTL vs negTTL) so a
 	// transient GitHub blip is retried sooner than a stable "no update".
-	if entry := s.readCache(); entry != nil {
-		return s.buildStatus(current, entry)
+	if !force {
+		if entry := s.readCache(); entry != nil {
+			return s.buildStatus(current, entry)
+		}
 	}
 
 	// singleflight (DoChan): concurrent Check callers for the same repo share

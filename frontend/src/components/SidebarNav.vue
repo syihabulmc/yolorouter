@@ -27,8 +27,9 @@ export interface NavItem {
   // badge lights a small indicator dot (e.g. "new version available") at the
   // item's top-right. Optional; absent means no badge.
   badge?: boolean
-  // A short green "money-saving" chip pinned to the row's right edge, marking
-  // the entry as a cost-related feature. Optional.
+  // A short superscript text chip pinned to the row's right edge (the
+  // cost-saving tag, the new-version indicator). Only rendered in the
+  // expanded sidebar — pair with `badge` for a collapsed-state signal.
   tag?: string
   // When true the entry is kept in the source list (route and code intact) but
   // never rendered in the sidebar — used to hide a menu item without deleting
@@ -115,9 +116,12 @@ const resolvedItems = computed(() =>
         </span>
         <span v-if="!collapsed" class="sidebar-nav-item__label">{{ item.label }}</span>
         <div style="position: relative;">
-          <div v-if="!collapsed && item.tag" class="sidebar-nav-item__save">{{ item.tag }}</div>
+          <div v-if="!collapsed && item.tag" class="sidebar-nav-item__tag">{{ item.tag }}</div>
         </div>
-        <span v-if="item.badge" class="sidebar-nav-item__dot" :title="item.label" />
+        <!-- The dot is the collapsed-state (or chip-less) attention signal; when
+             the expanded sidebar already shows this item's text chip, adding
+             the dot would double the same message. -->
+        <span v-if="item.badge && (collapsed || !item.tag)" class="sidebar-nav-item__dot" :title="item.label" />
       </RouterLink>
     </template>
   </nav>
@@ -276,7 +280,7 @@ const resolvedItems = computed(() =>
    the label text (not the row edge), so it reads as an annotation on the menu
    name itself. align-self:flex-start + the negative top margin lift it above
    the label baseline into a superscript position. */
-.sidebar-nav-item__save {
+.sidebar-nav-item__tag {
   position: absolute;
   top: -16px;
   left: -6px;

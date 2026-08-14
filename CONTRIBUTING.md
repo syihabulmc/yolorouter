@@ -101,6 +101,9 @@ internal/           Backend: handler → service → repository, middleware
                     capability that calls back in, so neither imports the other.
   protocols/        Wire formats (OpenAI chat, Anthropic, Gemini, Responses)
                     and the intermediate form they convert through.
+  selfupdate/       In-place binary upgrade mechanics (release lookup,
+                    checksum verification, atomic replacement), shared by the
+                    `update` CLI command and the admin update endpoint.
 pkg/                Reusable packages (crypto, database, response, ...)
 migrations/         goose migrations (sqlite/ and postgres/)
 web/                go:embed of the built frontend

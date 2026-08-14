@@ -312,3 +312,45 @@ func TestCheckSingleflightCollapsesConcurrentCalls(t *testing.T) {
 		t.Fatalf("concurrent Checks must collapse to 1 GitHub hit via singleflight, got %d", got)
 	}
 }
+
+// TestCheckFreshBypassesPositiveCache pins the manual-check contract: an
+// operator's explicit "check now" must reach GitHub even while a fresh
+// positive cache entry exists, and its result must refresh that cache.
+func TestCheckFreshBypassesPositiveCache(t *testing.T) {
+	withVersion(t, "v0.1.0")
+	svc, hits, closeFn := newTestService(t, http.StatusOK, map[string]any{
+		"tag_name": "v0.2.0", "html_url": "https://example/rel",
+	})
+	defer closeFn()
+
+	if st := svc.Check(context.Background()); !st.HasUpdate {
+		t.Fatalf("first check should see the newer release")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("first check should fetch once, got %d", got)
+	}
+
+	// Within posTTL a plain Check serves the cache…
+	if st := svc.Check(context.Background()); !st.HasUpdate {
+		t.Fatalf("cached check should still report the update")
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("cached check must not refetch, got %d hits", got)
+	}
+
+	// …but CheckFresh must refetch despite the fresh cache.
+	if st := svc.CheckFresh(context.Background()); !st.HasUpdate {
+		t.Fatalf("fresh check should report the update")
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("CheckFresh must bypass the cache and refetch, got %d hits", got)
+	}
+
+	// The forced fetch refreshed the cache for later plain Checks.
+	if st := svc.Check(context.Background()); !st.HasUpdate {
+		t.Fatalf("post-fresh cached check should still report the update")
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("the fresh result must land in the cache (got %d hits)", got)
+	}
+}

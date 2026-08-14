@@ -46,7 +46,7 @@ export const router = createRouter({
         { path: 'models', component: ModelListPage },
         { path: 'models/:id', component: ModelDetailPage },
         { path: 'api-keys', component: ApiKeyListPage },
-        { path: 'system', component: SystemInfoPage },
+        { path: 'about', component: SystemInfoPage },
       ],
     },
   ],

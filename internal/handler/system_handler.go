@@ -19,6 +19,10 @@ import (
 // of standing up a real VersionService against a httptest server.
 type VersionChecker interface {
 	Check(ctx context.Context) service.VersionStatus
+	// CheckFresh bypasses the service's result cache — used when the
+	// operator explicitly asks for a check (?force=1) rather than a page
+	// passively showing the last known state.
+	CheckFresh(ctx context.Context) service.VersionStatus
 }
 
 // SystemInfo is the static, build/runtime-known metadata the system info
@@ -34,6 +38,12 @@ type SystemInfo struct {
 	GOOS      string
 	GOARCH    string
 	DBDriver  string
+	// UpdateMode says how this process can be upgraded (one of the
+	// selfupdate.Mode* values). The console uses it to render either the
+	// one-click update button (in_place) or the matching guidance (pull a
+	// newer image, download manually, ...). Resolved once at assembly — it
+	// depends only on process-lifetime facts.
+	UpdateMode string
 }
 
 // GetSystemVersion handles GET /api/admin/system/version. It merges the
@@ -44,7 +54,14 @@ type SystemInfo struct {
 // has no error branch.
 func GetSystemVersion(info SystemInfo, svc VersionChecker) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		upd := svc.Check(c.Request.Context())
+		// ?force=1 marks an operator-initiated "check now": skip the result
+		// cache so a release published minutes ago is actually seen.
+		var upd service.VersionStatus
+		if c.Query("force") == "1" {
+			upd = svc.CheckFresh(c.Request.Context())
+		} else {
+			upd = svc.Check(c.Request.Context())
+		}
 		response.Success(c, gin.H{
 			"version":        info.Version,
 			"commit":         info.Commit,
@@ -53,6 +70,7 @@ func GetSystemVersion(info SystemInfo, svc VersionChecker) gin.HandlerFunc {
 			"goos":           info.GOOS,
 			"goarch":         info.GOARCH,
 			"db_driver":      info.DBDriver,
+			"update_mode":    info.UpdateMode,
 			"uptime_seconds": int(time.Since(version.StartTime).Seconds()),
 			"latest":         upd.Latest,
 			"has_update":     upd.HasUpdate,
