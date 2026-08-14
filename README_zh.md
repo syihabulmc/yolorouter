@@ -61,8 +61,36 @@
 
 ## 快速开始
 
-把 yolorouter 安装成开机自启的后台服务——Linux 用 systemd，macOS 用 launchd，
-Windows 用计划任务：
+### Docker
+
+```bash
+docker run -d --name yolorouter --restart unless-stopped \
+  -p 8080:8080 -v "$PWD/yolorouter:/yolorouter" \
+  ghcr.io/yolorouter/yolorouter:latest
+```
+
+或者下载 [docker-compose.yml](docker-compose.yml) 后执行 `docker compose up -d`。
+每次发版都会发布 amd64 和 arm64 双架构镜像。
+
+容器写的所有东西都在挂载的这一个目录里：自动生成的 `configs/config.yaml`
+（含加密上游 Key 的主密钥）和 SQLite 数据库。备份这个目录就是备份整个部署。
+升级执行 `docker compose pull && docker compose up -d`；直接 `docker run` 的话，
+拉新镜像、删掉容器、再跑同一条命令即可——状态都在挂载目录里，不随容器丢失。
+
+> **🇨🇳 国内拉取镜像**：`ghcr.io` 在大陆直连不畅时，可用 GHCR 镜像加速站拉取后改名，
+> 例如南京大学镜像站：
+>
+> ```bash
+> docker pull ghcr.nju.edu.cn/yolorouter/yolorouter:latest
+> docker tag ghcr.nju.edu.cn/yolorouter/yolorouter:latest ghcr.io/yolorouter/yolorouter:latest
+> ```
+>
+> 也可以直接把 compose 里的 `image` 换成加速站地址。第三方镜像站的可用性以其自身公告为准。
+
+### 安装成系统服务
+
+不用 Docker、或想要内置的在线自更新能力，就装成开机自启的后台服务——Linux 用
+systemd，macOS 用 launchd，Windows 用计划任务：
 
 ```bash
 # Linux / macOS
@@ -85,8 +113,11 @@ Windows 上，用管理员身份运行 PowerShell 会装成开机自启的系统
 从[发布页](https://github.com/yolorouter/yolorouter/releases)下载后执行 `./yolorouter serve`
 （Windows 上是 `.\yolorouter.exe serve`）。
 
-首次运行会生成 `configs/config.yaml`、执行数据库迁移，并在 8080 端口启动后台。创建首个
-管理员账号后按引导操作：添加供应商和上游 Key，创建模型及其供应商候选，然后签发 API Key。
+### 首次运行
+
+无论用哪种方式启动，首次运行都会生成 `configs/config.yaml`、执行数据库迁移，并在 8080
+端口启动后台。创建首个管理员账号后按引导操作：添加供应商和上游 Key，创建模型及其供应商
+候选，然后签发 API Key。
 
 → **完整安装说明（全平台，含从源码构建）：**
 [yolorouter.com/help?p=self-hosted/installation](https://yolorouter.com/help?p=self-hosted/installation&utm_source=oss-readme&utm_medium=repo)

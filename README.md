@@ -65,8 +65,29 @@ the box; switch to PostgreSQL when you want it.
 
 ## Quick start
 
-Install as a background service that starts on boot: systemd on Linux, launchd on
-macOS, a scheduled task on Windows.
+### Docker
+
+```bash
+docker run -d --name yolorouter --restart unless-stopped \
+  -p 8080:8080 -v "$PWD/yolorouter:/yolorouter" \
+  ghcr.io/yolorouter/yolorouter:latest
+```
+
+Or grab [docker-compose.yml](docker-compose.yml) and run `docker compose up -d`.
+Images are published for amd64 and arm64 with every release.
+
+Everything the container writes lives in the one mounted folder: the generated
+`configs/config.yaml` (including the key that encrypts your upstream keys) and
+the SQLite database. Back up that folder and you have backed up the deployment.
+Upgrade with `docker compose pull && docker compose up -d`; with plain
+`docker run`, pull the image, remove the container, and run the same command
+again — the mounted folder carries everything over.
+
+### Install as a system service
+
+No Docker, or want the built-in self-updater? Install as a background service
+that starts on boot: systemd on Linux, launchd on macOS, a scheduled task on
+Windows.
 
 ```bash
 # Linux / macOS
@@ -90,10 +111,12 @@ the database is backed up first. Prefer a plain binary? Grab a
 [release](https://github.com/yolorouter/yolorouter/releases) and run
 `./yolorouter serve` (`.\yolorouter.exe serve` on Windows).
 
-The first run generates `configs/config.yaml`, applies migrations and starts the
-console on port 8080. Create the first admin account, then follow the guided flow:
-add providers and upstream keys, create models with their provider candidates, and
-issue API keys.
+### First run
+
+Whichever way you start it, the first run generates `configs/config.yaml`,
+applies migrations and starts the console on port 8080. Create the first admin
+account, then follow the guided flow: add providers and upstream keys, create
+models with their provider candidates, and issue API keys.
 
 → **Full installation guide for every platform, including building from source:**
 [yolorouter.com/help?p=self-hosted/installation](https://yolorouter.com/help?p=self-hosted/installation&utm_source=oss-readme&utm_medium=repo)
