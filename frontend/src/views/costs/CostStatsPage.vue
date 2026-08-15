@@ -116,7 +116,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { NSelect, useMessage, type SelectOption } from 'naive-ui'
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
@@ -233,7 +233,12 @@ async function loadBudget() {
 // admin-configured catalogs.
 const authStore = useAuthStore()
 
-const selectedUserId = ref<number | null>(null)
+// Seeded from ?user_id= so dashboard drill-downs keep the active account
+// scope; the backend pins member sessions to themselves regardless.
+const route = useRoute()
+const seededUserID = Number(route.query.user_id)
+
+const selectedUserId = ref<number | null>(Number.isInteger(seededUserID) && seededUserID > 0 ? seededUserID : null)
 const userOptions = ref<SelectOption[]>([])
 
 function onUserChange(v: number | null) {

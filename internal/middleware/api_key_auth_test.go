@@ -147,8 +147,16 @@ func seedAPIKey(t *testing.T, db *gorm.DB, rawKey string) *model.APIKey {
 	if prefixLen > 12 {
 		prefixLen = 12
 	}
+	// Every key needs an enabled owning account: APIKeyAuth checks the
+	// owner's status before admitting the credential, so an ownerless key
+	// would 500 on the status lookup rather than authenticate.
+	owner := &model.User{Username: "key-owner-" + rawKey[:prefixLen], Role: model.RoleMember,
+		Status: model.UserStatusEnabled, PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(owner).Error; err != nil {
+		t.Fatalf("seed key owner: %v", err)
+	}
 	k := &model.APIKey{
-		KeyHash: crypto.HashToken(rawKey), KeyPrefix: rawKey[:prefixLen],
+		KeyHash: crypto.HashToken(rawKey), KeyPrefix: rawKey[:prefixLen], UserID: owner.ID,
 		OwnerLabel: "tester", Status: model.APIKeyStatusActive, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := db.Create(k).Error; err != nil {

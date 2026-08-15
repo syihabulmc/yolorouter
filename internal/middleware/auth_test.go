@@ -17,10 +17,14 @@ import (
 func seedUserWithSession(t *testing.T, db *gorm.DB, username, role, token string, status int) *model.User {
 	t.Helper()
 	now := time.Now().UTC()
+	// Always created enabled: repository.CreateSession refuses to mint a
+	// session for a disabled account. A test that wants a disabled user
+	// WITH a live session (the mid-session-disable scenario) gets it the
+	// way real life produces it — session first, status flip after.
 	user := &model.User{
 		Username:  username,
 		Role:      role,
-		Status:    status,
+		Status:    model.UserStatusEnabled,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -29,6 +33,13 @@ func seedUserWithSession(t *testing.T, db *gorm.DB, username, role, token string
 	}
 	if err := repository.CreateSession(db, token, user.ID, now.Add(time.Hour), now); err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
+	}
+	if status != model.UserStatusEnabled {
+		if err := db.Model(&model.User{}).Where("id = ?", user.ID).
+			Update("status", status).Error; err != nil {
+			t.Fatalf("flip status: %v", err)
+		}
+		user.Status = status
 	}
 	return user
 }

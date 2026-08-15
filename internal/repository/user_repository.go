@@ -145,3 +145,92 @@ func RecordLoginSuccess(db *gorm.DB, userID uint, now time.Time) error {
 		WHERE id = ?
 	`, now, now, userID).Error
 }
+
+// UpdateUserStatus flips one account's enabled/disabled flag inside tx.
+// The last-admin guard lives in the service layer (it needs the whole
+// decision context); this writer only performs the mutation.
+func UpdateUserStatus(tx *gorm.DB, id uint, status int, now time.Time) error {
+	return tx.Model(&model.User{}).Where("id = ?", id).
+		Updates(map[string]any{"status": status, "updated_at": now}).Error
+}
+
+// UpdateUserRole rewrites one account's role inside tx.
+func UpdateUserRole(tx *gorm.DB, id uint, role string, now time.Time) error {
+	return tx.Model(&model.User{}).Where("id = ?", id).
+		Updates(map[string]any{"role": role, "updated_at": now}).Error
+}
+
+// CountEnabledAdminsExcluding counts enabled administrators other than
+// excludeID — the input to the "never leave zero active administrators"
+// guard. Run inside the same transaction as the mutation it protects, so
+// two concurrent demotions cannot both observe each other as the
+// remaining admin.
+func CountEnabledAdminsExcluding(tx *gorm.DB, excludeID uint) (int64, error) {
+	var count int64
+	err := tx.Model(&model.User{}).
+		Where("role = ? AND status = ? AND id <> ?", model.RoleAdmin, model.UserStatusEnabled, excludeID).
+		Count(&count).Error
+	return count, err
+}
+
+// UserDirectoryAggregates carries the per-user figures the admin's user
+// directory shows next to each account: how many API keys the account
+// owns, its lifetime known spend, and which login providers it arrived
+// through. All three are keyed by user id and fetched in one grouped
+// query each — never per-row.
+type UserDirectoryAggregates struct {
+	KeyCounts     map[uint]int64
+	SpendMicros   map[uint]int64
+	ProviderNames map[uint][]string
+}
+
+// LoadUserDirectoryAggregates fetches the directory aggregates for every
+// account in three grouped queries.
+func LoadUserDirectoryAggregates(db *gorm.DB) (*UserDirectoryAggregates, error) {
+	agg := &UserDirectoryAggregates{
+		KeyCounts:     map[uint]int64{},
+		SpendMicros:   map[uint]int64{},
+		ProviderNames: map[uint][]string{},
+	}
+
+	var keyRows []struct {
+		UserID uint  `gorm:"column:user_id"`
+		N      int64 `gorm:"column:n"`
+	}
+	if err := db.Model(&model.APIKey{}).
+		Select("user_id, COUNT(*) AS n").Group("user_id").Scan(&keyRows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range keyRows {
+		agg.KeyCounts[r.UserID] = r.N
+	}
+
+	var spendRows []struct {
+		UserID uint  `gorm:"column:user_id"`
+		Spend  int64 `gorm:"column:spend"`
+	}
+	if err := db.Model(&model.RequestLog{}).
+		Select("user_id, COALESCE(SUM(cost_micros), 0) AS spend").
+		Where("user_id IS NOT NULL").Group("user_id").Scan(&spendRows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range spendRows {
+		agg.SpendMicros[r.UserID] = r.Spend
+	}
+
+	var identityRows []struct {
+		UserID uint   `gorm:"column:user_id"`
+		Name   string `gorm:"column:name"`
+	}
+	if err := db.Table("user_identities").
+		Select("user_identities.user_id, oauth_providers.name").
+		Joins("JOIN oauth_providers ON oauth_providers.id = user_identities.oauth_provider_id").
+		Order("user_identities.user_id, oauth_providers.name").
+		Scan(&identityRows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range identityRows {
+		agg.ProviderNames[r.UserID] = append(agg.ProviderNames[r.UserID], r.Name)
+	}
+	return agg, nil
+}

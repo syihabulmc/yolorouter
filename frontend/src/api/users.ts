@@ -1,5 +1,12 @@
 import { apiFetch } from './client'
 
+/**
+ * Account status codes as stored by the backend (users.status). Reads
+ * expose the numeric form; writes use the string enum ('enabled' |
+ * 'disabled') — see updateUserStatus.
+ */
+export const USER_STATUS_ENABLED = 1
+
 // Mirrors service.UserSummaryView. Backend wraps the array as
 // { users: [...] }.
 export interface UserSummary {
@@ -12,6 +19,10 @@ export interface UserSummary {
   is_local: boolean
   last_login_at: string | null
   created_at: string
+  /** Login providers the account arrived through; empty for the local password account. */
+  providers: string[]
+  key_count: number
+  spend_micros: number
 }
 
 export function listUsers(): Promise<{ users: UserSummary[] }> {
@@ -26,4 +37,18 @@ export function toUserOptions(users: UserSummary[]): Array<{ label: string; valu
     label: u.display_name ? `${u.username} (${u.display_name})` : u.username,
     value: u.id,
   }))
+}
+
+export function updateUserStatus(id: number, status: 'enabled' | 'disabled'): Promise<null> {
+  return apiFetch<null>(`/api/admin/users/${id}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  })
+}
+
+export function updateUserRole(id: number, role: 'admin' | 'member'): Promise<null> {
+  return apiFetch<null>(`/api/admin/users/${id}/role`, {
+    method: 'PATCH',
+    body: JSON.stringify({ role }),
+  })
 }

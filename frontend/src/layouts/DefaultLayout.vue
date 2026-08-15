@@ -181,6 +181,7 @@ import {
   Menu,
   Receipt,
   ScrollText,
+  UsersRound,
   Server,
   Tags,
   TrendingDown,
@@ -281,6 +282,7 @@ const navItems = computed<NavItem[]>(() => {
     { key: 'cost-optimization', label: t('nav.costOptimization'), icon: TrendingDown, to: '/cost-optimization', tag: t('nav.saveBadge') },
 
     { key: 'group-system', label: t('nav.groupSystem'), group: true },
+    { key: 'users', label: t('nav.users'), icon: UsersRound, to: '/users' },
     { key: 'oauth-providers', label: t('nav.oauthProviders'), icon: LogIn, to: '/oauth-providers' },
     { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
     // An admin promoted from an OAuth account has no password to change —

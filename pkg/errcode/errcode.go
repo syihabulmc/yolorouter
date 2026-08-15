@@ -27,6 +27,10 @@ const (
 	OAuthProviderConfigInvalid = 10015 // provider configuration rejected: required field blank, or an endpoint is not an absolute http(s) URL
 	OAuthDiscoveryFailed       = 10016 // OIDC well-known discovery document fetch/parse failed
 
+	AccountSelfOperation  = 10017 // admins cannot change their own status or role — another admin must do it
+	AccountUserNotFound   = 10018 // target user id does not exist
+	AccountLocalProtected = 10019 // the local password account is the OAuth-failure escape hatch — it cannot be disabled or demoted
+
 	// === API Key errors (11xxx) — "API Key security model" ===
 	APIKeyNotFound             = 11001
 	APIKeyInvalid              = 11002
@@ -138,6 +142,9 @@ var ErrorMessages = map[int]string{
 	OAuthProviderSlugTaken:     "another login provider already uses this slug",
 	OAuthProviderConfigInvalid: "provider configuration invalid: required field blank or endpoint not an absolute http(s) URL",
 	OAuthDiscoveryFailed:       "OIDC discovery document fetch failed",
+	AccountSelfOperation:       "operation refused: you cannot change your own status or role",
+	AccountUserNotFound:        "user not found",
+	AccountLocalProtected:      "operation refused: the local recovery account cannot be disabled or demoted",
 
 	APIKeyNotFound:             "api key not found",
 	APIKeyInvalid:              "api key invalid",
@@ -214,6 +221,9 @@ var (
 	ErrAccountSessionInvalid      = errors.New(ErrorMessages[AccountSessionInvalid])
 	ErrAccountLoginLocked         = errors.New(ErrorMessages[AccountLoginLocked])
 	ErrAccountLastAdminProtected  = errors.New(ErrorMessages[AccountLastAdminProtected])
+	ErrAccountSelfOperation       = errors.New(ErrorMessages[AccountSelfOperation])
+	ErrAccountUserNotFound        = errors.New(ErrorMessages[AccountUserNotFound])
+	ErrAccountLocalProtected      = errors.New(ErrorMessages[AccountLocalProtected])
 	ErrAccountSetupAlreadyDone    = errors.New(ErrorMessages[AccountSetupAlreadyDone])
 	ErrOAuthProviderNotFound      = errors.New(ErrorMessages[OAuthProviderNotFound])
 	ErrOAuthStateInvalid          = errors.New(ErrorMessages[OAuthStateInvalid])

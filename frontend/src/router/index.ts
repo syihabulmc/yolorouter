@@ -17,6 +17,7 @@ import ModelListPage from '../views/models/ModelListPage.vue'
 import ModelDetailPage from '../views/models/ModelDetailPage.vue'
 import ApiKeyListPage from '../views/apikeys/ApiKeyListPage.vue'
 import OAuthProviderListPage from '../views/oauth/OAuthProviderListPage.vue'
+import UserListPage from '../views/users/UserListPage.vue'
 import SystemInfoPage from '../views/system/SystemInfoPage.vue'
 import { useAuthStore } from '../store/auth'
 
@@ -52,6 +53,7 @@ export const router = createRouter({
         { path: 'models/:id', component: ModelDetailPage },
         { path: 'api-keys', component: ApiKeyListPage, meta: { memberAllowed: true } },
         { path: 'oauth-providers', component: OAuthProviderListPage },
+        { path: 'users', component: UserListPage },
         { path: 'about', component: SystemInfoPage },
       ],
     },

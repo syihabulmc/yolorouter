@@ -11,6 +11,17 @@
   <div class="common-page">
     <PageHeader :eyebrow="t('dashboard.eyebrow')" :title="t('dashboard.pageTitle')" :description="t('dashboard.pageDescription')">
       <template #actions>
+        <NSelect
+          v-if="authStore.isAdmin"
+          :value="selectedUserId"
+          :options="userOptions"
+          :placeholder="t('dashboard.allUser')"
+          clearable
+          filterable
+          size="small"
+          style="width: 180px"
+          @update:value="onUserChange"
+        />
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPresetChange" />
       </template>
     </PageHeader>
@@ -54,7 +65,7 @@
         </div>
       </div>
 
-      <div class="kpi" v-bind="drillPath('/costs')">
+      <div class="kpi" v-bind="drillScopedPath('/costs')">
         <div class="kpi__icon kpi__icon--success">
           <Coins :size="18" />
         </div>
@@ -98,7 +109,7 @@
          the net prompt, cache reads/writes counted separately), so they sum to
          the period's true token total. -->
     <div class="kpi-row">
-      <div class="kpi" v-bind="drillPath('/analytics')">
+      <div class="kpi" v-bind="drillScopedPath('/analytics')">
         <div class="kpi__icon kpi__icon--cyan">
           <ArrowDownToLine :size="18" />
         </div>
@@ -111,7 +122,7 @@
         </div>
       </div>
 
-      <div class="kpi" v-bind="drillPath('/analytics')">
+      <div class="kpi" v-bind="drillScopedPath('/analytics')">
         <div class="kpi__icon kpi__icon--orange">
           <ArrowUpFromLine :size="18" />
         </div>
@@ -124,7 +135,7 @@
         </div>
       </div>
 
-      <div class="kpi" v-bind="drillPath('/analytics')">
+      <div class="kpi" v-bind="drillScopedPath('/analytics')">
         <div class="kpi__icon kpi__icon--pink">
           <HardDriveUpload :size="18" />
         </div>
@@ -137,7 +148,7 @@
         </div>
       </div>
 
-      <div class="kpi" v-bind="drillPath('/analytics')">
+      <div class="kpi" v-bind="drillScopedPath('/analytics')">
         <div class="kpi__icon kpi__icon--teal">
           <HardDriveDownload :size="18" />
         </div>
@@ -247,10 +258,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, useMessage } from 'naive-ui'
+import { NButton, NSelect, useMessage, type SelectOption } from 'naive-ui'
 import type { Component } from 'vue'
 import {
   Activity,
@@ -275,6 +286,7 @@ import { bucketRange, pressable, requestLogLocation, type RequestLogLinkQuery } 
 import { clampedRangeStart, DASHBOARD_RANGE_CAP_DAYS } from '../../utils/timeRange'
 import type { RouteLocationRaw } from 'vue-router'
 import { getDashboard, type DashboardData } from '../../api/analytics'
+import { listUsers, toUserOptions } from '../../api/users'
 import { useAuthStore } from '../../store/auth'
 import { displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
@@ -289,6 +301,26 @@ const authStore = useAuthStore()
 
 const data = ref<DashboardData | null>(null)
 const loading = ref(true)
+
+// Admin-only account scope. Loaded once on mount from the same user
+// directory the analytics filters use; members never see the control and
+// the backend pins them to themselves anyway.
+const selectedUserId = ref<number | null>(null)
+const userOptions = ref<SelectOption[]>([])
+
+function onUserChange(v: number | null) {
+  selectedUserId.value = v
+  void reload()
+}
+
+async function loadUserOptions() {
+  try {
+    const page = await listUsers()
+    userOptions.value = toUserOptions(page.users)
+  } catch (err) {
+    message.error(displayMessage(err, t))
+  }
+}
 
 const preset = ref<RangePreset>('last7d')
 const timeRange = ref<TimeRange>({ start: null, end: null })
@@ -368,7 +400,7 @@ async function reload() {
     const filter = timeRange.value.start && timeRange.value.end
       ? { start: timeRange.value.start, end: timeRange.value.end }
       : undefined
-    const result = await getDashboard(filter)
+    const result = await getDashboard(filter, selectedUserId.value)
     if (mySeq !== reloadSeq) return
     data.value = result
   } catch (err) {
@@ -382,6 +414,14 @@ async function reload() {
     if (mySeq === reloadSeq) loading.value = false
   }
 }
+
+// The user directory (admin-only account filter) loads once on mount; the
+// dashboard data itself first loads via the timeRange watch below.
+onMounted(() => {
+  if (authStore.isAdmin) {
+    void loadUserOptions()
+  }
+})
 
 // TimeRangeSelect emits its resolved initial window synchronously on mount
 // via its own immediate watch, which sets timeRange and fires this watch —
@@ -449,7 +489,7 @@ function drillLogs(extra: RequestLogLinkQuery = {}) {
   // here.
   if (!authStore.isAdmin) return {}
   return pressable(() => {
-    void router.push(requestLogLocation({ ...windowFragment(), ...extra }))
+    void router.push(requestLogLocation({ ...windowFragment(), user_id: selectedUserId.value, ...extra }))
   })
 }
 function drillPath(to: RouteLocationRaw) {
@@ -457,10 +497,20 @@ function drillPath(to: RouteLocationRaw) {
     void router.push(to)
   })
 }
+
+// drillScopedPath is drillPath plus the active account scope, for
+// destinations that ingest ?user_id= on mount (costs, analytics) — a
+// filtered aggregate must not drill into deployment-wide numbers.
+function drillScopedPath(to: '/costs' | '/analytics') {
+  return pressable(() => {
+    const query = selectedUserId.value != null ? { user_id: String(selectedUserId.value) } : undefined
+    void router.push({ path: to, query })
+  })
+}
 function onTrendPointClick(date: string) {
   if (!authStore.isAdmin) return
   const range = bucketRange(date)
-  if (range) void router.push(requestLogLocation(range))
+  if (range) void router.push(requestLogLocation({ ...range, user_id: selectedUserId.value }))
 }
 
 function goToRequestLog(requestId: string) {

@@ -278,6 +278,8 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	protected := admin.Group("")
 	protected.Use(middleware.RequireSession(db), middleware.RequireAdmin())
 	protected.GET("/users", handler.GetUsers(db))
+	protected.PATCH("/users/:id/status", handler.PatchUserStatus(db))
+	protected.PATCH("/users/:id/role", handler.PatchUserRole(db))
 
 	providerSvc := service.NewProviderService(db, providerMasterKey, service.NewHTTPProviderClient(allowPrivateUpstreams))
 	protected.GET("/providers", handler.GetProviders(providerSvc))

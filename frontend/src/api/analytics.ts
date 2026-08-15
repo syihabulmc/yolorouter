@@ -78,11 +78,16 @@ export interface DashboardData {
   setup: SetupStatus
 }
 
-export function getDashboard(filter?: { start: string; end: string }): Promise<DashboardData> {
+export function getDashboard(filter?: { start: string; end: string }, userId?: number | null): Promise<DashboardData> {
   const params = new URLSearchParams()
   if (filter) {
     params.set('start', filter.start)
     params.set('end', filter.end)
+  }
+  // Admin-only account scope for the traffic-backed sections; the backend
+  // pins member sessions to themselves regardless of this parameter.
+  if (userId != null) {
+    params.set('user_id', String(userId))
   }
   const qs = params.toString()
   return apiFetch(`/api/admin/dashboard${qs ? `?${qs}` : ''}`)

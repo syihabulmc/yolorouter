@@ -414,3 +414,16 @@ func CountCallableAllowAllAPIKeys(db *gorm.DB, now time.Time) (int64, error) {
 		Count(&cnt).Error
 	return cnt, err
 }
+
+// FindAPIKeyOwnerStatus returns the account status of the key's owning
+// user in one indexed lookup. Split from FindAPIKeyByHash rather than
+// folded into it as a JOIN so the key lookup's error contract
+// (gorm.ErrRecordNotFound = unknown credential) stays untouched; a key
+// whose owner row is missing is impossible under the NOT NULL foreign
+// key and surfaces as an error here rather than as "unknown key".
+func FindAPIKeyOwnerStatus(db *gorm.DB, userID uint) (int, error) {
+	var status int
+	err := db.Model(&model.User{}).Where("id = ?", userID).
+		Select("status").Take(&status).Error
+	return status, err
+}

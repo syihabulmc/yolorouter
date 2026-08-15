@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Multi-user accounts. The single-admin console grows into a team system
+  with two roles: admins keep the full console, members get a self-service
+  view (overview, usage, costs, and their own API keys) that is enforced
+  server-side — every query a member makes is pinned to their own account,
+  provider/upstream details never appear in member responses, and reaching
+  for another account's key is indistinguishable from a key that does not
+  exist.
+- External login via any OAuth2/OIDC provider (authorization-code + PKCE).
+  Providers are configured in the console (with one-click OIDC discovery);
+  accounts are created automatically on first login. The original password
+  account stays as the local escape hatch.
+- User directory for admins: origin (local / login providers), role,
+  status, key count, lifetime spend and last login per account, with
+  enable/disable and promote/demote actions. Disabling an account deletes
+  its sessions and turns off all of its API keys immediately and
+  reversibly; deletion is deliberately not offered, so keys and request
+  history always stay attributable.
+- Account scoping across the console: API keys and request logs carry an
+  owning account, and every dashboard/analytics/cost view can be filtered
+  by account.
+
 ## [0.1.5] - 2026-08-14
 
 ### Added

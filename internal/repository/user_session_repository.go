@@ -7,6 +7,7 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
+	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
 
 // hashSessionToken delegates to crypto.HashToken — the single SHA-256 hex
@@ -27,18 +28,33 @@ func hashSessionToken(token string) string {
 // CreateSession inserts a new session row for rawToken — the
 // caller-generated opaque token (internal/service never generates IDs
 // itself here) that becomes the cookie value. This is the only function
-// that ever constructs a model.UserSession: callers never see or set
-// TokenHash directly, so there's exactly one place the raw-token-to-hash
-// transform happens, and no struct field that means different things
-// depending on which direction the data is flowing.
+// that ever constructs a user_sessions row: callers never see or set the
+// token hash directly, so there's exactly one place the
+// raw-token-to-hash transform happens.
+//
+// The insert is conditional on the owner still being an ENABLED account,
+// checked in the same statement: a login flow races an admin's disable
+// (the login read the user as enabled, the disable then committed and
+// deleted every session), and an unconditional insert here would mint a
+// session AFTER that deletion — dead while disabled, but silently valid
+// again once the account is re-enabled. RowsAffected 0 means the guard
+// failed; surfaced as ErrAccountDisabled so login paths report it
+// exactly like a disable observed up front.
 func CreateSession(db *gorm.DB, rawToken string, userID uint, expiresAt, createdAt time.Time) error {
-	session := &model.UserSession{
-		TokenHash: hashSessionToken(rawToken),
-		UserID:    userID,
-		ExpiresAt: expiresAt,
-		CreatedAt: createdAt,
+	res := db.Exec(
+		`INSERT INTO user_sessions (id, user_id, expires_at, created_at)
+		 SELECT ?, ?, ?, ?
+		 WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND status = ?)`,
+		hashSessionToken(rawToken), userID, expiresAt, createdAt,
+		userID, model.UserStatusEnabled,
+	)
+	if res.Error != nil {
+		return res.Error
 	}
-	return db.Create(session).Error
+	if res.RowsAffected == 0 {
+		return errcode.ErrAccountDisabled
+	}
+	return nil
 }
 
 // FindUserByValidSession takes the raw token (as read from the cookie),

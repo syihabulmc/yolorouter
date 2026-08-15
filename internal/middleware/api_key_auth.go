@@ -68,6 +68,23 @@ func APIKeyAuth(db *gorm.DB) gin.HandlerFunc {
 			gateway.WriteIngressError(c, ingress, http.StatusInternalServerError, "server_error", "internal error", requestID)
 			return
 		}
+		// A disabled account's keys stop working at this gate, immediately
+		// and reversibly: no key rows are mutated on disable, so
+		// re-enabling the account restores every key without repair. The
+		// key id IS attributed in the audit row (unlike the unknown-key
+		// branches above) — the credential is real, only its owner is
+		// suspended.
+		ownerStatus, err := repository.FindAPIKeyOwnerStatus(db, key.UserID)
+		if err != nil {
+			logAuthRejection(c, db, ingress, http.StatusInternalServerError, "auth db lookup failed", "server_error", "internal error")
+			gateway.WriteIngressError(c, ingress, http.StatusInternalServerError, "server_error", "internal error", requestID)
+			return
+		}
+		if ownerStatus != model.UserStatusEnabled {
+			logAuthRejectionForKey(c, db, ingress, &key.ID, &key.UserID, http.StatusUnauthorized, "account disabled", "authentication_error", "account disabled")
+			gateway.WriteIngressError(c, ingress, http.StatusUnauthorized, "authentication_error", "account disabled", requestID)
+			return
+		}
 		gateway.SetGatewayAuth(c, key)
 		// The plaintext credential rides along for loopback self-calls only
 		// (the gateway re-presenting the caller's identity to itself); it is
@@ -145,6 +162,14 @@ const authRejectionBodyCap = 16 << 10 // 16 KiB
 // passed through rather than re-derived so the persisted response_body
 // matches what the caller actually received.
 func logAuthRejection(c *gin.Context, db *gorm.DB, ingress protocols.ProtocolID, status int, reason, errType, message string) {
+	logAuthRejectionForKey(c, db, ingress, nil, nil, status, reason, errType, message)
+}
+
+// logAuthRejectionForKey is logAuthRejection with an attributed key and
+// owning account — used by the disabled-owner branch, where the
+// credential itself is valid and the audit row must stay visible in that
+// account's own scoped views (they filter on request_logs.user_id).
+func logAuthRejectionForKey(c *gin.Context, db *gorm.DB, ingress protocols.ProtocolID, keyID, userID *uint, status int, reason, errType, message string) {
 	// RequestID middleware is always registered ahead of APIKeyAuth (router.go
 	// mounts it first on the root engine), so request_id is always set here.
 	// If a future route mounts APIKeyAuth without RequestID, the empty id
@@ -153,7 +178,8 @@ func logAuthRejection(c *gin.Context, db *gorm.DB, ingress protocols.ProtocolID,
 	requestID := c.GetString(RequestIDKey)
 	row := &model.RequestLog{
 		RequestID:  requestID,
-		APIKeyID:   nil,
+		APIKeyID:   keyID,
+		UserID:     userID,
 		StatusCode: status,
 		FailReason: &reason,
 	}

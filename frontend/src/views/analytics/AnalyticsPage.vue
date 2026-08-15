@@ -242,7 +242,7 @@ import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue
 import FilterSelectField from '../../components/common/FilterSelectField.vue'
 import { useAuthStore } from '../../store/auth'
 import { useIsMobile } from '../../composables/useIsMobile'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { bucketRange, requestLogLocation, type RequestLogLinkQuery } from '../../utils/requestLogLink'
 import TimeRangeSelect, { type RangePreset, type TimeRange } from '../../components/analytics/TimeRangeSelect.vue'
 import { listProviders } from '../../api/providers'
@@ -288,9 +288,16 @@ const message = useMessage()
 // utils/timeRange.ts so every dashboard opens on the same window.
 const authStore = useAuthStore()
 
+// Account scope seeded from ?user_id= (dashboard drill-downs carry the
+// active account filter through). Members never receive the param from
+// our own links, and the backend pins them to themselves regardless.
+const route = useRoute()
+const seededUserID = Number(route.query.user_id)
+const initialUserID = Number.isInteger(seededUserID) && seededUserID > 0 ? seededUserID : null
+
 const preset = ref<RangePreset>('last7d')
 const timeRange = ref<TimeRange>(initialLast7DaysRange())
-const filter = ref<AnalyticsFilter>({ start: timeRange.value.start, end: timeRange.value.end })
+const filter = ref<AnalyticsFilter>({ start: timeRange.value.start, end: timeRange.value.end, user_id: initialUserID })
 const dimension = ref<AnalyticsDimension>('model')
 const bucket = ref<AnalyticsBucket>('day')
 
