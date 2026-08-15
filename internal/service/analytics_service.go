@@ -309,6 +309,27 @@ func bucketForDimension(dimension, bucket string) string {
 
 // === CSV assembly ========================================================
 
+// tokenReportCSVColumns / tokenReportCSVCells are the shared CSV tail for
+// every dimension that reports ReportCallStats + ReportTokenCost (model /
+// caller / user / time): the per-dimension branches only prepend their own
+// key columns. Provider keeps its own tail (duration instead of tokens).
+func tokenReportCSVColumns() []string {
+	return []string{"calls", "success_rate", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "cost_micros", "unknown_cost_calls"}
+}
+
+func tokenReportCSVCells(cs repository.ReportCallStats, tc repository.ReportTokenCost) []string {
+	return []string{
+		strconv.FormatInt(cs.Calls, 10),
+		formatRate(cs.SuccessRate),
+		strconv.FormatInt(tc.InputTokens, 10),
+		strconv.FormatInt(tc.OutputTokens, 10),
+		strconv.FormatInt(tc.CacheWriteTokens, 10),
+		strconv.FormatInt(tc.CacheReadTokens, 10),
+		strconv.FormatInt(tc.CostMicros, 10),
+		strconv.FormatInt(tc.UnknownCostCalls, 10),
+	}
+}
+
 // buildCSV returns the headers and record rows for a dimension's typed row
 // slice. The type assertions encode the row type → column order mapping per
 // dimension; a future column change only needs to update this function.
@@ -319,20 +340,10 @@ func buildCSV(dimension string, rows interface{}) ([]string, [][]string, error) 
 		if !ok {
 			return nil, nil, errCSVTypeMismatch("ModelReportRow")
 		}
-		headers := []string{"model_name", "calls", "success_rate", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "cost_micros", "unknown_cost_calls"}
+		headers := append([]string{"model_name"}, tokenReportCSVColumns()...)
 		records := make([][]string, len(typed))
 		for i, r := range typed {
-			records[i] = []string{
-				r.ModelName,
-				strconv.FormatInt(r.Calls, 10),
-				formatRate(r.SuccessRate),
-				strconv.FormatInt(r.InputTokens, 10),
-				strconv.FormatInt(r.OutputTokens, 10),
-				strconv.FormatInt(r.CacheWriteTokens, 10),
-				strconv.FormatInt(r.CacheReadTokens, 10),
-				strconv.FormatInt(r.CostMicros, 10),
-				strconv.FormatInt(r.UnknownCostCalls, 10),
-			}
+			records[i] = append([]string{r.ModelName}, tokenReportCSVCells(r.ReportCallStats, r.ReportTokenCost)...)
 		}
 		return headers, records, nil
 	case DimensionProvider:
@@ -360,22 +371,10 @@ func buildCSV(dimension string, rows interface{}) ([]string, [][]string, error) 
 		if !ok {
 			return nil, nil, errCSVTypeMismatch("CallerReportRow")
 		}
-		headers := []string{"api_key_id", "username", "key_prefix", "calls", "success_rate", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "cost_micros", "unknown_cost_calls"}
+		headers := append([]string{"api_key_id", "username", "key_prefix"}, tokenReportCSVColumns()...)
 		records := make([][]string, len(typed))
 		for i, r := range typed {
-			records[i] = []string{
-				formatUintPtr(r.APIKeyID),
-				r.Username,
-				r.KeyPrefix,
-				strconv.FormatInt(r.Calls, 10),
-				formatRate(r.SuccessRate),
-				strconv.FormatInt(r.InputTokens, 10),
-				strconv.FormatInt(r.OutputTokens, 10),
-				strconv.FormatInt(r.CacheWriteTokens, 10),
-				strconv.FormatInt(r.CacheReadTokens, 10),
-				strconv.FormatInt(r.CostMicros, 10),
-				strconv.FormatInt(r.UnknownCostCalls, 10),
-			}
+			records[i] = append([]string{formatUintPtr(r.APIKeyID), r.Username, r.KeyPrefix}, tokenReportCSVCells(r.ReportCallStats, r.ReportTokenCost)...)
 		}
 		return headers, records, nil
 	case DimensionUser:
@@ -383,21 +382,10 @@ func buildCSV(dimension string, rows interface{}) ([]string, [][]string, error) 
 		if !ok {
 			return nil, nil, errCSVTypeMismatch("UserReportRow")
 		}
-		headers := []string{"user_id", "username", "calls", "success_rate", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "cost_micros", "unknown_cost_calls"}
+		headers := append([]string{"user_id", "username"}, tokenReportCSVColumns()...)
 		records := make([][]string, len(typed))
 		for i, r := range typed {
-			records[i] = []string{
-				formatUintPtr(r.UserID),
-				r.Username,
-				strconv.FormatInt(r.Calls, 10),
-				formatRate(r.SuccessRate),
-				strconv.FormatInt(r.InputTokens, 10),
-				strconv.FormatInt(r.OutputTokens, 10),
-				strconv.FormatInt(r.CacheWriteTokens, 10),
-				strconv.FormatInt(r.CacheReadTokens, 10),
-				strconv.FormatInt(r.CostMicros, 10),
-				strconv.FormatInt(r.UnknownCostCalls, 10),
-			}
+			records[i] = append([]string{formatUintPtr(r.UserID), r.Username}, tokenReportCSVCells(r.ReportCallStats, r.ReportTokenCost)...)
 		}
 		return headers, records, nil
 	case DimensionTime:
@@ -405,20 +393,10 @@ func buildCSV(dimension string, rows interface{}) ([]string, [][]string, error) 
 		if !ok {
 			return nil, nil, errCSVTypeMismatch("TimeReportRow")
 		}
-		headers := []string{"bucket", "calls", "success_rate", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "cost_micros", "unknown_cost_calls"}
+		headers := append([]string{"bucket"}, tokenReportCSVColumns()...)
 		records := make([][]string, len(typed))
 		for i, r := range typed {
-			records[i] = []string{
-				r.Bucket,
-				strconv.FormatInt(r.Calls, 10),
-				formatRate(r.SuccessRate),
-				strconv.FormatInt(r.InputTokens, 10),
-				strconv.FormatInt(r.OutputTokens, 10),
-				strconv.FormatInt(r.CacheWriteTokens, 10),
-				strconv.FormatInt(r.CacheReadTokens, 10),
-				strconv.FormatInt(r.CostMicros, 10),
-				strconv.FormatInt(r.UnknownCostCalls, 10),
-			}
+			records[i] = append([]string{r.Bucket}, tokenReportCSVCells(r.ReportCallStats, r.ReportTokenCost)...)
 		}
 		return headers, records, nil
 	}

@@ -65,37 +65,52 @@ var ErrInvalidBucket = errors.New("invalid bucket; must be 'day' or 'hour'")
 
 // === Row types ===========================================================
 
-// ModelReportRow is one row of the dimension=model report. UnknownCostCalls
-// counts rows where cost_known=false (price/token missing — must
-// NOT display as zero cost). SuccessRate is computed in Go via finalizeRate.
-type ModelReportRow struct {
-	ModelName        string  `json:"model_name" gorm:"column:model_name"`
-	Calls            int64   `json:"calls" gorm:"column:calls"`
-	SuccessCalls     int64   `json:"success_calls" gorm:"column:success_calls"`
-	EndedCalls       int64   `json:"ended_calls" gorm:"column:ended_calls"`
-	SuccessRate      float64 `json:"success_rate" gorm:"-"`
-	InputTokens      int64   `json:"input_tokens" gorm:"column:input_tokens"`
-	OutputTokens     int64   `json:"output_tokens" gorm:"column:output_tokens"`
-	CacheWriteTokens int64   `json:"cache_write_tokens" gorm:"column:cache_write_tokens"`
-	CacheReadTokens  int64   `json:"cache_read_tokens" gorm:"column:cache_read_tokens"`
-	CostMicros       int64   `json:"cost_micros" gorm:"column:cost_micros"`
-	UnknownCostCalls int64   `json:"unknown_cost_calls" gorm:"column:unknown_cost_calls"`
+// ReportCallStats is the call-volume block every report dimension shares:
+// raw counters straight from SQL plus the Go-computed success rate. It is
+// embedded (flattened) into each dimension's row type so the JSON shape
+// stays exactly what it always was, while the fields and finalizeRate
+// exist once. UnknownCostCalls-style cost fields live in ReportTokenCost.
+type ReportCallStats struct {
+	Calls        int64   `json:"calls" gorm:"column:calls"`
+	SuccessCalls int64   `json:"success_calls" gorm:"column:success_calls"`
+	EndedCalls   int64   `json:"ended_calls" gorm:"column:ended_calls"`
+	SuccessRate  float64 `json:"success_rate" gorm:"-"`
 }
 
-func (r *ModelReportRow) finalizeRate() {
-	r.SuccessRate = successRateOf(r.SuccessCalls, r.EndedCalls)
+// finalizeRate computes SuccessRate from the SQL counters. Promoted onto
+// every embedding row type — the four hand-written copies this replaces
+// were identical.
+func (s *ReportCallStats) finalizeRate() {
+	s.SuccessRate = successRateOf(s.SuccessCalls, s.EndedCalls)
+}
+
+// ReportTokenCost is the token + cost block shared by the model / caller /
+// user / time dimensions (provider reports duration instead of tokens and
+// keeps its own cost columns). UnknownCostCalls counts rows where
+// cost_known=false (price/token missing — must NOT display as zero cost).
+type ReportTokenCost struct {
+	InputTokens      int64 `json:"input_tokens" gorm:"column:input_tokens"`
+	OutputTokens     int64 `json:"output_tokens" gorm:"column:output_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens" gorm:"column:cache_write_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens" gorm:"column:cache_read_tokens"`
+	CostMicros       int64 `json:"cost_micros" gorm:"column:cost_micros"`
+	UnknownCostCalls int64 `json:"unknown_cost_calls" gorm:"column:unknown_cost_calls"`
+}
+
+// ModelReportRow is one row of the dimension=model report.
+type ModelReportRow struct {
+	ModelName       string `json:"model_name" gorm:"column:model_name"`
+	ReportCallStats `gorm:"embedded"`
+	ReportTokenCost `gorm:"embedded"`
 }
 
 // ProviderReportRow is one row of the dimension=provider report. ProviderID
 // nil = the bucket for rows with NULL provider_id (e.g. requests rejected
 // before routing picked a provider). ProviderName is resolved post-fetch.
 type ProviderReportRow struct {
-	ProviderID       *uint   `json:"provider_id" gorm:"column:provider_id"`
-	ProviderName     string  `json:"provider_name" gorm:"-"`
-	Calls            int64   `json:"calls" gorm:"column:calls"`
-	SuccessCalls     int64   `json:"success_calls" gorm:"column:success_calls"`
-	EndedCalls       int64   `json:"ended_calls" gorm:"column:ended_calls"`
-	SuccessRate      float64 `json:"success_rate" gorm:"-"`
+	ProviderID       *uint  `json:"provider_id" gorm:"column:provider_id"`
+	ProviderName     string `json:"provider_name" gorm:"-"`
+	ReportCallStats  `gorm:"embedded"`
 	AvgDurationMs    float64 `json:"avg_duration_ms" gorm:"column:avg_duration_ms"`
 	CostMicros       int64   `json:"cost_micros" gorm:"column:cost_micros"`
 	UnknownCostCalls int64   `json:"unknown_cost_calls" gorm:"column:unknown_cost_calls"`
@@ -107,31 +122,15 @@ type ProviderReportRow struct {
 	Failovers int64 `json:"failovers" gorm:"-"`
 }
 
-func (r *ProviderReportRow) finalizeRate() {
-	r.SuccessRate = successRateOf(r.SuccessCalls, r.EndedCalls)
-}
-
 // CallerReportRow is one row of the dimension=caller report. APIKeyID nil =
 // the bucket for rows with NULL api_key_id (auth failed before the request
 // was tied to a key). Username resolved post-fetch.
 type CallerReportRow struct {
-	APIKeyID         *uint   `json:"api_key_id" gorm:"column:api_key_id"`
-	Username         string  `json:"username" gorm:"-"`
-	KeyPrefix        string  `json:"key_prefix" gorm:"-"`
-	Calls            int64   `json:"calls" gorm:"column:calls"`
-	SuccessCalls     int64   `json:"success_calls" gorm:"column:success_calls"`
-	EndedCalls       int64   `json:"ended_calls" gorm:"column:ended_calls"`
-	SuccessRate      float64 `json:"success_rate" gorm:"-"`
-	InputTokens      int64   `json:"input_tokens" gorm:"column:input_tokens"`
-	OutputTokens     int64   `json:"output_tokens" gorm:"column:output_tokens"`
-	CacheWriteTokens int64   `json:"cache_write_tokens" gorm:"column:cache_write_tokens"`
-	CacheReadTokens  int64   `json:"cache_read_tokens" gorm:"column:cache_read_tokens"`
-	CostMicros       int64   `json:"cost_micros" gorm:"column:cost_micros"`
-	UnknownCostCalls int64   `json:"unknown_cost_calls" gorm:"column:unknown_cost_calls"`
-}
-
-func (r *CallerReportRow) finalizeRate() {
-	r.SuccessRate = successRateOf(r.SuccessCalls, r.EndedCalls)
+	APIKeyID        *uint  `json:"api_key_id" gorm:"column:api_key_id"`
+	Username        string `json:"username" gorm:"-"`
+	KeyPrefix       string `json:"key_prefix" gorm:"-"`
+	ReportCallStats `gorm:"embedded"`
+	ReportTokenCost `gorm:"embedded"`
 }
 
 // UserReportRow is one row of the dimension=user report — the same
@@ -141,22 +140,10 @@ func (r *CallerReportRow) finalizeRate() {
 // user_id (auth-rejected requests never tied to an account). Username
 // resolved post-fetch.
 type UserReportRow struct {
-	UserID           *uint   `json:"user_id" gorm:"column:user_id"`
-	Username         string  `json:"username" gorm:"-"`
-	Calls            int64   `json:"calls" gorm:"column:calls"`
-	SuccessCalls     int64   `json:"success_calls" gorm:"column:success_calls"`
-	EndedCalls       int64   `json:"ended_calls" gorm:"column:ended_calls"`
-	SuccessRate      float64 `json:"success_rate" gorm:"-"`
-	InputTokens      int64   `json:"input_tokens" gorm:"column:input_tokens"`
-	OutputTokens     int64   `json:"output_tokens" gorm:"column:output_tokens"`
-	CacheWriteTokens int64   `json:"cache_write_tokens" gorm:"column:cache_write_tokens"`
-	CacheReadTokens  int64   `json:"cache_read_tokens" gorm:"column:cache_read_tokens"`
-	CostMicros       int64   `json:"cost_micros" gorm:"column:cost_micros"`
-	UnknownCostCalls int64   `json:"unknown_cost_calls" gorm:"column:unknown_cost_calls"`
-}
-
-func (r *UserReportRow) finalizeRate() {
-	r.SuccessRate = successRateOf(r.SuccessCalls, r.EndedCalls)
+	UserID          *uint  `json:"user_id" gorm:"column:user_id"`
+	Username        string `json:"username" gorm:"-"`
+	ReportCallStats `gorm:"embedded"`
+	ReportTokenCost `gorm:"embedded"`
 }
 
 // TimeReportRow is one row of the dimension=time report. Bucket is the local
@@ -170,23 +157,15 @@ func (r *UserReportRow) finalizeRate() {
 // AggregateRequestLogMetrics and copies m.SuccessRate() directly, so the
 // rate is always populated at construction time.
 type TimeReportRow struct {
-	Bucket           string  `json:"bucket"`
-	Calls            int64   `json:"calls"`
-	SuccessCalls     int64   `json:"success_calls"`
-	EndedCalls       int64   `json:"ended_calls"`
-	SuccessRate      float64 `json:"success_rate"`
-	InputTokens      int64   `json:"input_tokens"`
-	OutputTokens     int64   `json:"output_tokens"`
-	CacheWriteTokens int64   `json:"cache_write_tokens"`
-	CacheReadTokens  int64   `json:"cache_read_tokens"`
-	CostMicros       int64   `json:"cost_micros"`
-	UnknownCostCalls int64   `json:"unknown_cost_calls"`
+	Bucket          string `json:"bucket"`
+	ReportCallStats `gorm:"embedded"`
+	ReportTokenCost `gorm:"embedded"`
 }
 
 // === GroupBy functions ===================================================
 
 // successEndedCols is the SELECT fragment shared across the model/provider/
-// caller dimensions: emits success_calls and ended_calls counters so the
+// caller/user dimensions: emits success_calls and ended_calls counters so the
 // success_rate denominator/numerator come from one SQL definition of
 // "success" (identical to AggregateRequestLogMetrics). "Ended" excludes 499
 // caller-cancels. Unqualified column references are safe here
@@ -196,59 +175,73 @@ const successEndedCols = `
 		SUM(CASE WHEN status_code >= 200 AND status_code < 300 AND (fail_reason IS NULL OR fail_reason = '') THEN 1 ELSE 0 END) AS success_calls,
 		SUM(CASE WHEN status_code = 499 THEN 0 ELSE 1 END) AS ended_calls`
 
-// AggregateByModel groups by model_name (dimension "model").
-// Rows ordered by calls DESC. UnknownCostCalls is parameterized on
-// cost_known = ? so the binding translates false → 0 (SQLite) / FALSE
-// (Postgres) per driver, letting the boolean check live inside the
-// aggregating SELECT instead of requiring a second per-group query.
-func AggregateByModel(db *gorm.DB, f *RequestLogFilter) ([]ModelReportRow, error) {
-	var rows []ModelReportRow
-	err := f.applyFilter(db).Select(`
-		model_name,`[1:]+successEndedCols+`,
+// tokenCostSumCols is the SELECT fragment behind ReportTokenCost, shared by
+// every dimension that reports token volume (model / caller / user). The
+// trailing unknown_cost_calls term is parameterized on cost_known = ? so
+// the binding translates false per driver (0 on SQLite, FALSE on Postgres).
+const tokenCostSumCols = `
 		COALESCE(SUM(input_tokens), 0) AS input_tokens,
 		COALESCE(SUM(output_tokens), 0) AS output_tokens,
 		COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
 		COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
 		COALESCE(SUM(cost_micros), 0) AS cost_micros,
-		SUM(CASE WHEN cost_known = ? THEN 1 ELSE 0 END) AS unknown_cost_calls
-	`, false).Group("model_name").Order("calls DESC").Scan(&rows).Error
-	if err != nil {
+		SUM(CASE WHEN cost_known = ? THEN 1 ELSE 0 END) AS unknown_cost_calls`
+
+// runEntityAggregate is the one query shape every entity dimension shares:
+// filtered SELECT, GROUP BY the dimension key, ORDER BY the ranking column,
+// optional post-fetch name resolution, then the Go-side rate computation.
+// A new dimension is one call to this runner plus its row type — the SQL
+// assembly, nil-slice normalization and finalize walk exist only here.
+// selectArgs must carry exactly the bind values for selectExpr's ?
+// placeholders — passing them explicitly (rather than assuming one
+// cost_known bind) keeps a dimension with a different placeholder count
+// from silently binding wrong.
+func runEntityAggregate[R any](db *gorm.DB, f *RequestLogFilter, selectExpr string, selectArgs []any, groupCol, orderExpr string,
+	resolve func(*gorm.DB, []R) error, finalize func(*R)) ([]R, error) {
+	var rows []R
+	if err := f.applyFilter(db).Select(selectExpr, selectArgs...).Group(groupCol).Order(orderExpr).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	for i := range rows {
-		rows[i].finalizeRate()
+	if resolve != nil {
+		if err := resolve(db, rows); err != nil {
+			return nil, err
+		}
+	}
+	if finalize != nil {
+		for i := range rows {
+			finalize(&rows[i])
+		}
 	}
 	if rows == nil {
-		rows = []ModelReportRow{}
+		rows = []R{}
 	}
 	return rows, nil
+}
+
+// AggregateByModel groups by model_name (dimension "model"), ordered by
+// call volume.
+func AggregateByModel(db *gorm.DB, f *RequestLogFilter) ([]ModelReportRow, error) {
+	return runEntityAggregate[ModelReportRow](db, f,
+		`
+		model_name,`[1:]+successEndedCols+`,`+tokenCostSumCols, []any{false},
+		"model_name", "calls DESC", nil, (*ModelReportRow).finalizeRate)
 }
 
 // AggregateByProvider groups by provider_id (dimension "provider").
 // NULL provider_id forms its own bucket (ProviderName resolved to "" via the
 // post-fetch lookup). AvgDurationMs is AVG(duration_ms); rows with no
-// successful duration still aggregate at 0 via COALESCE.
+// successful duration still aggregate at 0 via COALESCE. Providers report
+// latency rather than token volume, so this is the one entity dimension
+// with its own metric tail instead of tokenCostSumCols.
 func AggregateByProvider(db *gorm.DB, f *RequestLogFilter) ([]ProviderReportRow, error) {
-	var rows []ProviderReportRow
-	err := f.applyFilter(db).Select(`
+	return runEntityAggregate[ProviderReportRow](db, f,
+		`
 		provider_id,`[1:]+successEndedCols+`,
 		COALESCE(AVG(duration_ms), 0) AS avg_duration_ms,
 		COALESCE(SUM(cost_micros), 0) AS cost_micros,
 		SUM(CASE WHEN cost_known = ? THEN 1 ELSE 0 END) AS unknown_cost_calls
-	`, false).Group("provider_id").Order("calls DESC").Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	if err := resolveProviderNames(db, rows); err != nil {
-		return nil, err
-	}
-	for i := range rows {
-		rows[i].finalizeRate()
-	}
-	if rows == nil {
-		rows = []ProviderReportRow{}
-	}
-	return rows, nil
+	`, []any{false},
+		"provider_id", "calls DESC", resolveProviderNames, (*ProviderReportRow).finalizeRate)
 }
 
 // AttachProviderFailovers decorates a provider aggregate with each
@@ -372,36 +365,15 @@ func resolveProviderNames(db *gorm.DB, rows []ProviderReportRow) error {
 
 // AggregateByCaller groups by api_key_id (dimension "caller"). NULL
 // api_key_id forms its own bucket (Username resolved to "" — typically
-// requests that failed auth before being associated with a key).
+// auth-rejected traffic). Ordered by spend, not volume: the row to look at
+// first is whoever costs the most, and a cheap chatty key outranking an
+// expensive quiet one would bury it; the table offers call-count sorting
+// client-side.
 func AggregateByCaller(db *gorm.DB, f *RequestLogFilter) ([]CallerReportRow, error) {
-	var rows []CallerReportRow
-	err := f.applyFilter(db).Select(`
-		api_key_id,`[1:]+successEndedCols+`,
-		COALESCE(SUM(input_tokens), 0) AS input_tokens,
-		COALESCE(SUM(output_tokens), 0) AS output_tokens,
-		COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
-		COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-		COALESCE(SUM(cost_micros), 0) AS cost_micros,
-		SUM(CASE WHEN cost_known = ? THEN 1 ELSE 0 END) AS unknown_cost_calls
-	`, false).Group("api_key_id").
-		// Spend, not volume, is what a caller ranking is read for: the row
-		// to look at first is whoever costs the most, and a cheap chatty key
-		// outranking an expensive quiet one buries it. The table offers
-		// call-count sorting client-side.
-		Order("cost_micros DESC").Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	if err := resolveOwnerUsernames(db, rows); err != nil {
-		return nil, err
-	}
-	for i := range rows {
-		rows[i].finalizeRate()
-	}
-	if rows == nil {
-		rows = []CallerReportRow{}
-	}
-	return rows, nil
+	return runEntityAggregate[CallerReportRow](db, f,
+		`
+		api_key_id,`[1:]+successEndedCols+`,`+tokenCostSumCols, []any{false},
+		"api_key_id", "cost_micros DESC", resolveOwnerUsernames, (*CallerReportRow).finalizeRate)
 }
 
 // AggregateByUser groups the same aggregates by owning account
@@ -409,30 +381,10 @@ func AggregateByCaller(db *gorm.DB, f *RequestLogFilter) ([]CallerReportRow, err
 // (auth-rejected traffic never tied to an account). Ordered by spend for
 // the same reason as the caller report.
 func AggregateByUser(db *gorm.DB, f *RequestLogFilter) ([]UserReportRow, error) {
-	var rows []UserReportRow
-	err := f.applyFilter(db).Select(`
-		user_id,`[1:]+successEndedCols+`,
-		COALESCE(SUM(input_tokens), 0) AS input_tokens,
-		COALESCE(SUM(output_tokens), 0) AS output_tokens,
-		COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
-		COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-		COALESCE(SUM(cost_micros), 0) AS cost_micros,
-		SUM(CASE WHEN cost_known = ? THEN 1 ELSE 0 END) AS unknown_cost_calls
-	`, false).Group("user_id").
-		Order("cost_micros DESC").Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	if err := resolveAccountUsernames(db, rows); err != nil {
-		return nil, err
-	}
-	for i := range rows {
-		rows[i].finalizeRate()
-	}
-	if rows == nil {
-		rows = []UserReportRow{}
-	}
-	return rows, nil
+	return runEntityAggregate[UserReportRow](db, f,
+		`
+		user_id,`[1:]+successEndedCols+`,`+tokenCostSumCols, []any{false},
+		"user_id", "cost_micros DESC", resolveAccountUsernames, (*UserReportRow).finalizeRate)
 }
 
 // resolveAccountUsernames populates Username on user-report rows via the
@@ -505,17 +457,21 @@ func AggregateByTime(db *gorm.DB, f *RequestLogFilter, loc *time.Location, bucke
 			bucketLabel = cursor.Format("2006-01-02 15:04 -07:00")
 		}
 		row := TimeReportRow{
-			Bucket:           bucketLabel,
-			Calls:            m.TotalCalls,
-			SuccessCalls:     m.SuccessCalls,
-			EndedCalls:       m.EndedCalls,
-			SuccessRate:      m.SuccessRate(),
-			InputTokens:      m.InputTokens,
-			OutputTokens:     m.OutputTokens,
-			CacheWriteTokens: m.CacheWriteTokens,
-			CacheReadTokens:  m.CacheReadTokens,
-			CostMicros:       m.KnownCostMicros,
-			UnknownCostCalls: m.UnknownCostCalls,
+			Bucket: bucketLabel,
+			ReportCallStats: ReportCallStats{
+				Calls:        m.TotalCalls,
+				SuccessCalls: m.SuccessCalls,
+				EndedCalls:   m.EndedCalls,
+				SuccessRate:  m.SuccessRate(),
+			},
+			ReportTokenCost: ReportTokenCost{
+				InputTokens:      m.InputTokens,
+				OutputTokens:     m.OutputTokens,
+				CacheWriteTokens: m.CacheWriteTokens,
+				CacheReadTokens:  m.CacheReadTokens,
+				CostMicros:       m.KnownCostMicros,
+				UnknownCostCalls: m.UnknownCostCalls,
+			},
 		}
 		result = append(result, row)
 		cursor = next
