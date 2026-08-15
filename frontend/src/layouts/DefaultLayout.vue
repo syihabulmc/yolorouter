@@ -281,9 +281,16 @@ const navItems = computed<NavItem[]>(() => {
 
     { key: 'cost-optimization', label: t('nav.costOptimization'), icon: TrendingDown, to: '/cost-optimization', tag: t('nav.saveBadge') },
 
-    { key: 'group-system', label: t('nav.groupSystem'), group: true },
+    // Account administration gets its own group: users and login providers
+    // manage who can enter the instance (admin-only concerns), while the
+    // system group below holds every signed-in user's own preferences —
+    // mixing the two under one heading read as if user management were a
+    // personal setting.
+    { key: 'group-accounts', label: t('nav.groupAccounts'), group: true },
     { key: 'users', label: t('nav.users'), icon: UsersRound, to: '/users' },
     { key: 'oauth-providers', label: t('nav.oauthProviders'), icon: LogIn, to: '/oauth-providers' },
+
+    { key: 'group-system', label: t('nav.groupSystem'), group: true },
     { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
     // An admin promoted from an OAuth account has no password to change —
     // same is_local gate as the member branch above.

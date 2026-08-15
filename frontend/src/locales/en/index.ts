@@ -28,6 +28,7 @@ export default {
     models: 'Models',
     tokens: 'Tokens',
     costOptimization: 'Cost Optimization',
+    groupAccounts: 'Account Management',
     groupSystem: 'System Settings',
     oauthProviders: 'Login Providers',
     users: 'Users',

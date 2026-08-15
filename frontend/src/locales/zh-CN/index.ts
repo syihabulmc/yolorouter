@@ -28,6 +28,7 @@ export default {
     models: '大模型管理',
     tokens: '令牌管理',
     costOptimization: '成本优化',
+    groupAccounts: '账号管理',
     groupSystem: '系统设置',
     oauthProviders: '登录方式',
     users: '用户管理',
