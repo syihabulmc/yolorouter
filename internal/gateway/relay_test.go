@@ -318,8 +318,7 @@ func createAPIKey(t *testing.T, db *gorm.DB, status int, modelIDs []uint) *model
 	t.Helper()
 	now := time.Now().UTC()
 	k := &model.APIKey{
-		KeyHash: ycrypto.HashToken("sk-yr-test"), KeyPrefix: "sk-yr-test------",
-		OwnerLabel: "tester", Status: status, CreatedAt: now, UpdatedAt: now,
+		KeyHash: ycrypto.HashToken("sk-yr-test"), KeyPrefix: "sk-yr-test------", Status: status, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := db.Create(k).Error; err != nil {
 		t.Fatalf("seed api key: %v", err)
@@ -947,8 +946,7 @@ func TestRelayBudgetExceededReturnsInsufficientQuota(t *testing.T) {
 	now := time.Now().UTC()
 	limit := int64(100)
 	apiKey := &model.APIKey{
-		KeyHash: ycrypto.HashToken("sk-yr-test"), KeyPrefix: "sk-yr-test------",
-		OwnerLabel: "tester", Status: model.APIKeyStatusActive,
+		KeyHash: ycrypto.HashToken("sk-yr-test"), KeyPrefix: "sk-yr-test------", Status: model.APIKeyStatusActive,
 		BudgetLimitMicros: &limit, BudgetSpentMicros: 100,
 		CreatedAt: now, UpdatedAt: now,
 	}

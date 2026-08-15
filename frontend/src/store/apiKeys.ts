@@ -8,7 +8,6 @@ interface ApiKeysState {
   page: number
   pageSize: number
   query: string
-  owner: string
   status: string
   // Admin-only owner-account filter (users.id); null = all accounts. The
   // backend pins member sessions to themselves regardless of this value.
@@ -28,7 +27,6 @@ export const useApiKeysStore = defineStore('apiKeys', {
     page: 1,
     pageSize: 20,
     query: '',
-    owner: '',
     status: '',
     userId: null,
     loading: false,
@@ -43,7 +41,6 @@ export const useApiKeysStore = defineStore('apiKeys', {
       try {
         const res: APIKeyPage = await apiKeysApi.listAPIKeys({
           q: this.query,
-          owner: this.owner,
           status: this.status,
           userId: this.userId,
           page: this.page,
@@ -64,9 +61,8 @@ export const useApiKeysStore = defineStore('apiKeys', {
     },
     // Applies the list filters at once and resets to the first page — the
     // search/reset buttons are the only thing that changes them.
-    setFilters(f: { query: string; owner: string; status: string; userId: number | null }) {
+    setFilters(f: { query: string; status: string; userId: number | null }) {
       this.query = f.query
-      this.owner = f.owner
       this.status = f.status
       this.userId = f.userId
       this.page = 1

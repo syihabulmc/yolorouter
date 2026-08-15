@@ -23,15 +23,6 @@
             <template #prefix><Search :size="14" /></template>
           </n-input>
         </div>
-        <div class="filter-item">
-          <n-input
-            v-model:value="draft.owner"
-            :placeholder="t('apiKeys.filterOwner')"
-            clearable
-            size="small"
-            @keyup.enter="onSearch"
-          />
-        </div>
         <FilterSelectField
           v-if="authStore.isAdmin"
           v-model:value="draft.userId"
@@ -101,6 +92,7 @@ import { useAuthStore } from '../../store/auth'
 import { displayMessage, errorCodeOf } from '../../api/client'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
+import { callerDisplay } from '../../utils/format'
 import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
 import { useUserOptions } from '../../composables/useUserOptions'
 import { copyToClipboard } from '../../utils/clipboard'
@@ -135,7 +127,6 @@ const { userOptions, loadUserOptions } = useUserOptions()
 // on change — matching the request-logs page.
 const draft = reactive({
   query: store.query,
-  owner: store.owner,
   status: (store.status || null) as string | null,
   userId: store.userId as number | null,
 })
@@ -174,15 +165,14 @@ async function reload() {
 // setFilters resets the store to page 1, so a search always lands on the
 // first page of results.
 function onSearch() {
-  store.setFilters({ query: draft.query.trim(), owner: draft.owner.trim(), status: draft.status ?? '', userId: draft.userId })
+  store.setFilters({ query: draft.query.trim(), status: draft.status ?? '', userId: draft.userId })
   void reload()
 }
 function onReset() {
   draft.query = ''
-  draft.owner = ''
   draft.status = null
   draft.userId = null
-  store.setFilters({ query: '', owner: '', status: '', userId: null })
+  store.setFilters({ query: '', status: '', userId: null })
   void reload()
 }
 
@@ -396,7 +386,10 @@ async function importKeyToCCS(row: APIKey) {
   if (importingId.value !== null) return
   importingId.value = row.id
   try {
-    const name = `YoloRouter${row.owner_label ? ` - ${row.owner_label}` : ''}`
+    // Owner + key prefix, so several keys of one account import as
+    // distinguishable CC-Switch profiles instead of identical names.
+    const identity = callerDisplay(row.owner_username, row.key_prefix)
+    const name = `YoloRouter${identity ? ` - ${identity}` : ''}`
     let plaintext: string | undefined
     try {
       plaintext = (await store.fetchPlaintext(row.id)).plaintext_key
@@ -484,12 +477,6 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
         render: (row: APIKey) => row.owner_username || '—',
       }]
     : []),
-  {
-    title: columnTitle(t('apiKeys.ownerColumn'), t('apiKeys.ownerColumn_tip')),
-    key: 'owner_label',
-    minWidth: 120,
-    render: (row) => row.owner_label || '—',
-  },
   {
     title: columnTitle(t('apiKeys.remarkColumn'), t('apiKeys.remarkColumn_tip')),
     key: 'remark',

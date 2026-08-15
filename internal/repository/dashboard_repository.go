@@ -127,30 +127,36 @@ func GetTrendRange(db *gorm.DB, rangeStart, rangeEnd time.Time, loc *time.Locati
 
 // TopCaller is one row in the "top callers by cost" list.
 type TopCaller struct {
-	APIKeyID   uint   `json:"api_key_id"`
-	OwnerLabel string `json:"owner_label"`
+	APIKeyID uint   `json:"api_key_id"`
+	Username string `json:"username"`
+	// KeyPrefix disambiguates rows when one account owns several keys —
+	// the username alone would render identical labels for distinct keys.
+	KeyPrefix  string `json:"key_prefix"`
 	Calls      int64  `json:"calls"`
 	CostMicros int64  `json:"cost_micros"`
 }
 
 // GetTopCallers returns the top `limit` API keys by known cost incurred
-// within [start, end), joined to api_keys for owner_label display. Rows with
+// within [start, end), joined to users (via the denormalized
+// request_logs.user_id) for the owning account's username. Rows with
 // NULL api_key_id are excluded — they represent requests that failed auth
 // before being tied to a key and carry no meaningful "caller" identity.
 // Ties on cost break by api_key_id ascending for a stable order.
 //
-// GROUP BY both rl.api_key_id AND ak.owner_label to satisfy Postgres's
-// "non-aggregated SELECT column must appear in GROUP BY" rule; because each
-// api_key_id maps to exactly one owner_label through the INNER JOIN, this
-// produces the same groups as grouping by api_key_id alone.
+// GROUP BY rl.api_key_id AND the joined display columns to satisfy
+// Postgres's "non-aggregated SELECT column must appear in GROUP BY" rule;
+// because each api_key_id maps to exactly one owner through rl.user_id and
+// one key row, this produces the same groups as api_key_id alone.
 func GetTopCallers(db *gorm.DB, start, end time.Time, limit int, userID *uint) ([]TopCaller, error) {
 	if limit < 1 {
 		limit = 1
 	}
 	q := db.Table("request_logs AS rl").
-		Select("rl.api_key_id AS api_key_id, COALESCE(ak.owner_label, '') AS owner_label, "+
+		Select("rl.api_key_id AS api_key_id, COALESCE(u.username, '') AS username, "+
+			"COALESCE(ak.key_prefix, '') AS key_prefix, "+
 			"COUNT(*) AS calls, COALESCE(SUM(rl.cost_micros), 0) AS cost_micros").
-		Joins("INNER JOIN api_keys ak ON ak.id = rl.api_key_id").
+		Joins("LEFT JOIN users u ON u.id = rl.user_id").
+		Joins("LEFT JOIN api_keys ak ON ak.id = rl.api_key_id").
 		Where("rl.created_at >= ? AND rl.created_at < ?", start, end).
 		Where("rl.api_key_id IS NOT NULL")
 	if userID != nil {
@@ -158,7 +164,7 @@ func GetTopCallers(db *gorm.DB, start, end time.Time, limit int, userID *uint) (
 	}
 	var rows []TopCaller
 	err := q.
-		Group("rl.api_key_id, ak.owner_label").
+		Group("rl.api_key_id, u.username, ak.key_prefix").
 		Order("cost_micros DESC, rl.api_key_id ASC").
 		Limit(limit).
 		Scan(&rows).Error

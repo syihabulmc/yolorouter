@@ -53,10 +53,9 @@ type APIKeyView struct {
 	KeyPrefix string `json:"key_prefix"`
 	// UserID / OwnerUsername identify the owning account. OwnerUsername is
 	// resolved from the users table for display (empty when the owner row
-	// is missing); OwnerLabel remains the free-text tag it always was.
+	// is missing).
 	UserID            uint       `json:"user_id"`
 	OwnerUsername     string     `json:"owner_username"`
-	OwnerLabel        string     `json:"owner_label"`
 	Remark            string     `json:"remark"`
 	Status            int        `json:"status"`
 	DisplayStatus     string     `json:"display_status"`
@@ -88,7 +87,6 @@ type CreateAPIKeyInput struct {
 	// UserID is the owning account — required; repository.CreateAPIKey
 	// rejects 0. The handler fills it from the authenticated session.
 	UserID            uint
-	OwnerLabel        string
 	Remark            string
 	AllowAllModels    bool
 	ModelIDs          []uint
@@ -130,7 +128,6 @@ type CreateAPIKeyResult struct {
 // (it does a fresh GET before editing); EditKeyModal/CreateKeyModal omit it,
 // preserving their legacy non-CAS behavior.
 type UpdateAPIKeyInput struct {
-	OwnerLabel        *string
 	Remark            *string
 	AllowAllModels    *bool
 	ModelIDs          []uint
@@ -153,12 +150,12 @@ type UpdateAPIKeyInput struct {
 	ExpectedUpdatedAt *time.Time
 }
 
-func (s *APIKeyService) ListAPIKeys(q, owner, status string, userID uint, page, pageSize int) ([]APIKeyView, int64, error) {
+func (s *APIKeyService) ListAPIKeys(q, status string, userID uint, page, pageSize int) ([]APIKeyView, int64, error) {
 	// Anchor the status filter's expiry check AND the rendered display status
 	// to one clock, so a key expiring mid-request can't be filtered as active
 	// while being rendered as expired.
 	now := time.Now().UTC()
-	filter := repository.APIKeyFilter{Query: q, Owner: owner, Status: status, UserID: userID, Now: now}
+	filter := repository.APIKeyFilter{Query: q, Status: status, UserID: userID, Now: now}
 	total, err := repository.CountAPIKeys(s.db, filter)
 	if err != nil {
 		return nil, 0, err
@@ -246,7 +243,6 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 		EncryptedKey:                      encryptedKey,
 		KeyPrefix:                         truncatePrefix(rawKey),
 		UserID:                            input.UserID,
-		OwnerLabel:                        input.OwnerLabel,
 		Remark:                            input.Remark,
 		Status:                            model.APIKeyStatusActive,
 		AllowAllModels:                    input.AllowAllModels,
@@ -265,6 +261,14 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 		return nil, err
 	}
 	view := toAPIKeyView(*key, modelIDs, now)
+	// Same owner-username enrichment the list/get paths perform — the POST
+	// response is what the create form renders next, and without this the
+	// freshly created key would display with no owner identity.
+	usernames, err := repository.FindUsernamesByIDs(s.db, []uint{key.UserID})
+	if err != nil {
+		return nil, err
+	}
+	view.OwnerUsername = usernames[key.UserID]
 	return &CreateAPIKeyResult{PlaintextKey: rawKey, APIKey: view}, nil
 }
 
@@ -367,9 +371,6 @@ func (s *APIKeyService) UpdateAPIKey(id uint, input UpdateAPIKeyInput, requiredO
 		}
 	} else if input.CompressEnabled != nil {
 		updates["compress_enabled"] = *input.CompressEnabled
-	}
-	if input.OwnerLabel != nil {
-		updates["owner_label"] = *input.OwnerLabel
 	}
 	if input.Remark != nil {
 		updates["remark"] = *input.Remark
@@ -474,7 +475,7 @@ func toAPIKeyView(k model.APIKey, modelIDs []uint, now time.Time) APIKeyView {
 		modelIDs = []uint{}
 	}
 	return APIKeyView{
-		ID: k.ID, KeyPrefix: k.KeyPrefix, UserID: k.UserID, OwnerLabel: k.OwnerLabel, Remark: k.Remark,
+		ID: k.ID, KeyPrefix: k.KeyPrefix, UserID: k.UserID, Remark: k.Remark,
 		Status: k.Status, DisplayStatus: computeAPIKeyDisplayStatus(k, now),
 		ExpiresAt: k.ExpiresAt, RPMLimit: k.RPMLimit, TPMLimit: k.TPMLimit,
 		ConcurrencyLimit: k.ConcurrencyLimit, BudgetLimitMicros: k.BudgetLimitMicros,

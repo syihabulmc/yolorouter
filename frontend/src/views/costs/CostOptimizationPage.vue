@@ -19,6 +19,7 @@
       :description="t('costOptimization.pageDescription')"
     >
       <template #actions>
+        <UserFilterSelect v-if="authStore.isAdmin" :value="selectedUserId" :options="userOptions" @update:value="onUserChange" />
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPresetChange" />
         <NButton @click="settingsShow = true">
           <template #icon><Settings :size="16" /></template>
@@ -190,12 +191,15 @@ import HelpLabel from '../../components/HelpLabel.vue'
 import TimeRangeSelect, { type RangePreset, type TimeRange } from '../../components/analytics/TimeRangeSelect.vue'
 import { initialLast7DaysRange } from '../../utils/timeRange'
 import { formatMicros } from '../../utils/money'
-import { formatNumber, formatRate } from '../../utils/format'
+import { callerDisplay, formatNumber, formatRate } from '../../utils/format'
 import { displayMessage } from '../../api/client'
 import OptimizationSettingsModal from '../../components/costs/OptimizationSettingsModal.vue'
 import CompressLineChart from '../../components/costs/CompressLineChart.vue'
 import { SKIP_REASON_KEYS } from '../../utils/compressSkipReason'
 import { getCustomSystemPrompt, getInputCompression } from '../../api/systemSettings'
+import { useAuthStore } from '../../store/auth'
+import { useUserFilter } from '../../composables/useUserFilter'
+import UserFilterSelect from '../../components/common/UserFilterSelect.vue'
 import {
   getCompressStats,
   type AnalyticsFilter,
@@ -206,6 +210,13 @@ import {
 
 const { t } = useI18n()
 const message = useMessage()
+const authStore = useAuthStore()
+
+// Per-account scope for every savings figure on the page (seeded from
+// ?user_id=; see useUserFilter). The route is admin-only already; the
+// admin gate on the control matches the convention every other stats
+// page uses, and stays correct if the route ever opens up.
+const { selectedUserId, userOptions, loadUserOptions, onUserChange } = useUserFilter(() => void reload())
 
 // === Settings modal visibility ============================================
 const settingsShow = ref(false)
@@ -291,7 +302,7 @@ const dailyRowsAsc = computed(() => {
 const dailyLabels = computed(() => dailyRowsAsc.value.map((r) => r.bucket.slice(5)))
 const dailyTokensSaved = computed(() => dailyRowsAsc.value.map((r) => r.tokens_saved))
 
-const apiKeyLabels = computed(() => (stats.value?.top_api_keys ?? []).map((r) => r.owner_label))
+const apiKeyLabels = computed(() => (stats.value?.top_api_keys ?? []).map((r) => callerDisplay(r.username, r.key_prefix)))
 const apiKeyTokensSaved = computed(() => (stats.value?.top_api_keys ?? []).map((r) => r.tokens_saved))
 
 const modelLabels = computed(() => (stats.value?.top_models ?? []).map((r) => r.model_name))
@@ -318,7 +329,7 @@ async function reload() {
   // than the previous filter's numbers; on error the results stay cleared.
   stats.value = null
   try {
-    const filter: AnalyticsFilter = { start: timeRange.value.start, end: timeRange.value.end }
+    const filter: AnalyticsFilter = { start: timeRange.value.start, end: timeRange.value.end, user_id: selectedUserId.value }
     const result = await getCompressStats(filter)
     if (mySeq !== reloadSeq) return // a newer reload started; discard this one
     stats.value = result
@@ -340,6 +351,7 @@ async function reload() {
 // loadSettingsEnabled handles its own errors, so no .catch is needed.
 onMounted(() => {
   void loadSettingsEnabled()
+  if (authStore.isAdmin) void loadUserOptions()
 })
 
 // Stats reload whenever the time range changes — including the initial range

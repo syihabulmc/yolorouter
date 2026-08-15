@@ -37,9 +37,7 @@ func TestCreateAPIKeySucceeds(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "gpt-4o")
 
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
-		OwnerLabel: "alice", Remark: "test key", ModelIDs: []uint{mid},
-	}, time.Now().UTC())
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), Remark: "test key", ModelIDs: []uint{mid}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)
 	}
@@ -54,6 +52,11 @@ func TestCreateAPIKeySucceeds(t *testing.T) {
 	}
 	if result.APIKey.DisplayStatus != APIKeyDisplayActive {
 		t.Fatalf("expected active display status, got %q", result.APIKey.DisplayStatus)
+	}
+	// The create response is what the form renders next — it must carry the
+	// owner's username like the list/get views do.
+	if result.APIKey.OwnerUsername == "" {
+		t.Fatalf("create response missing owner_username")
 	}
 
 	// The stored row keeps a hash (never the plaintext) and an AES-GCM
@@ -109,9 +112,7 @@ func TestCreateAPIKeyAllowAllModels(t *testing.T) {
 
 	// AllowAllModels wins even if the caller also sends ids — the service owns
 	// the invariant, so the join table stays empty regardless of the frontend.
-	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db),
-		OwnerLabel: "wide", AllowAllModels: true, ModelIDs: []uint{mid},
-	}, time.Now().UTC())
+	result, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), AllowAllModels: true, ModelIDs: []uint{mid}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
@@ -365,13 +366,13 @@ func TestUpdateAPIKeySparsePatchLeavesOtherLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
-	owner := "bob"
-	view, err := svc.UpdateAPIKey(result.APIKey.ID, UpdateAPIKeyInput{OwnerLabel: &owner}, nil, time.Now().UTC())
+	remark := "bob's key"
+	view, err := svc.UpdateAPIKey(result.APIKey.ID, UpdateAPIKeyInput{Remark: &remark}, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("UpdateAPIKey: %v", err)
 	}
-	if view.OwnerLabel != "bob" {
-		t.Fatalf("owner not updated: %q", view.OwnerLabel)
+	if view.Remark != "bob's key" {
+		t.Fatalf("remark not updated: %q", view.Remark)
 	}
 	if view.RPMLimit == nil || *view.RPMLimit != 100 || view.TPMLimit == nil || *view.TPMLimit != 200 {
 		t.Fatalf("sparse patch wiped other limits: rpm=%v tpm=%v", view.RPMLimit, view.TPMLimit)
@@ -444,24 +445,6 @@ func TestRevokeAPIKeyNotFound(t *testing.T) {
 	}
 }
 
-func TestListAPIKeysSearchesByOwnerLabel(t *testing.T) {
-	svc, db := newAPIKeyServiceForTest(t)
-	mid := seedModelForAPIKeyTest(t, db, "m1")
-	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "alice", ModelIDs: []uint{mid}}, time.Now().UTC()); err != nil {
-		t.Fatalf("CreateAPIKey alice: %v", err)
-	}
-	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "bob", ModelIDs: []uint{mid}}, time.Now().UTC()); err != nil {
-		t.Fatalf("CreateAPIKey bob: %v", err)
-	}
-	list, total, err := svc.ListAPIKeys("", "alice", "", 0, 1, 20)
-	if err != nil {
-		t.Fatalf("ListAPIKeys: %v", err)
-	}
-	if total != 1 || len(list) != 1 || list[0].OwnerLabel != "alice" {
-		t.Fatalf("expected 1 alice key, got total=%d list=%v", total, list)
-	}
-}
-
 // CreateAPIKey doesn't reject a past expiry at the service layer (the handler
 // does, via validateExpiryFuture); seed a row directly to exercise the runtime
 // display-status computation for an expired-but-still-active key.
@@ -502,7 +485,7 @@ func TestListAPIKeysFiltersByDisplayStatus(t *testing.T) {
 	limit := int64(1000)
 
 	// Active (created via the service so it goes through the normal path).
-	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "live", ModelIDs: []uint{mid}}, now); err != nil {
+	if _, err := svc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{mid}}, now); err != nil {
 		t.Fatalf("CreateAPIKey live: %v", err)
 	}
 	// The other statuses seed rows directly (the service create path won't
@@ -533,7 +516,7 @@ func TestListAPIKeysFiltersByDisplayStatus(t *testing.T) {
 		APIKeyDisplayBudgetHit: 1,
 	}
 	for status, want := range wantCount {
-		list, total, err := svc.ListAPIKeys("", "", status, 0, 1, 20)
+		list, total, err := svc.ListAPIKeys("", status, 0, 1, 20)
 		if err != nil {
 			t.Fatalf("ListAPIKeys %s: %v", status, err)
 		}
@@ -748,7 +731,7 @@ func TestListAndGetAPIKeySurfacesCompressFields(t *testing.T) {
 	}
 
 	// List view.
-	list, _, err := svc.ListAPIKeys("", "", "", 0, 1, 20)
+	list, _, err := svc.ListAPIKeys("", "", 0, 1, 20)
 	if err != nil {
 		t.Fatalf("ListAPIKeys: %v", err)
 	}

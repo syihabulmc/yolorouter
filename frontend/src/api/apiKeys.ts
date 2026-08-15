@@ -4,10 +4,9 @@ import { apiFetch } from './client'
 export interface APIKey {
   id: number
   key_prefix: string
-  // Owning account (user id + username), plus the legacy free-text label.
+  // Owning account (user id + username).
   user_id: number
   owner_username: string
-  owner_label: string
   remark: string
   status: number
   display_status: string
@@ -41,20 +40,20 @@ export interface APIKeyPage {
   list: APIKey[]
 }
 
-// toAPIKeyOptions maps API keys to naive-ui <select> options: owner_label
-// disambiguated by key_prefix (keys can share an owner label or have none).
+// toAPIKeyOptions maps API keys to naive-ui <select> options: the owning
+// account's username disambiguated by key_prefix (one account usually owns
+// several keys).
 // Kept here — next to the APIKey type — so every api-key <select> (analytics
 // filter bar, request-log caller filter) maps the same way and can't drift on
 // label formatting.
 export function toAPIKeyOptions(keys: APIKey[]): SelectOption[] {
   return keys.map((k) => ({
-    label: k.owner_label ? `${k.owner_label} (${k.key_prefix}…)` : `${k.key_prefix}…`,
+    label: k.owner_username ? `${k.owner_username} (${k.key_prefix}…)` : `${k.key_prefix}…`,
     value: k.id,
   }))
 }
 
 export interface CreateAPIKeyInput {
-  owner_label?: string
   remark?: string
   // Optional so a member payload can omit the model scope entirely — the
   // backend forces all-models for member-created keys and rejects any
@@ -81,14 +80,13 @@ export interface CreateAPIKeyResult {
 
 // UpdateAPIKeyInput is a sparse PATCH. Numeric limits: undefined = leave
 // unchanged; 0 = clear sentinel; positive = set. model_ids: undefined =
-// unchanged; an array (including empty) replaces the whitelist. owner_label /
+// unchanged; an array (including empty) replaces the whitelist. remark /
 // remark: undefined = unchanged. expected_updated_at: when set, the backend
 // qualifies the UPDATE with `AND updated_at = ?` and returns 11013 (409) if
 // another writer committed first — the optimistic-lock CAS token captured by
 // the optimization modal's authoritative GET on open. Omitted by legacy callers
 // (EditKeyModal/CreateKeyModal) to keep their non-CAS behavior.
 export interface UpdateAPIKeyInput {
-  owner_label?: string
   remark?: string
   allow_all_models?: boolean
   model_ids?: number[]
@@ -109,7 +107,6 @@ export interface UpdateAPIKeyInput {
 
 export interface APIKeyListParams {
   q: string
-  owner: string
   status: string
   // Narrow to keys owned by one account; omit/null = all.
   userId?: number | null
@@ -120,7 +117,6 @@ export interface APIKeyListParams {
 export function listAPIKeys(p: APIKeyListParams): Promise<APIKeyPage> {
   const params = new URLSearchParams({
     q: p.q,
-    owner: p.owner,
     status: p.status,
     page: String(p.page),
     page_size: String(p.pageSize),

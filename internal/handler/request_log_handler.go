@@ -29,7 +29,7 @@ import (
 // analytics handler so a new bucket lands in both endpoints at once.
 
 // GetRequestLogs handles GET /api/admin/request-logs — paginated list with
-// filter, JOIN'd owner_label / provider_name, and a derived status_class on
+// filter, JOIN'd username / provider_name, and a derived status_class on
 // every row. Reuses parseAPIKeyPagination (1-indexed, default 20, max 200)
 // since the pagination contract is identical across all paginated admin
 // endpoints.

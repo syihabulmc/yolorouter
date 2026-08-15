@@ -39,7 +39,7 @@
           :label="t('analytics.user')"
           :value="filter.user_id ?? null"
           :options="userOptions"
-          :placeholder="t('analytics.allUser')"
+          :placeholder="t('common.allAccounts')"
           filterable
           width="100%"
           @update:value="(v) => update('user_id', v)"
@@ -252,7 +252,7 @@ import { useUserOptions } from '../../composables/useUserOptions'
 import { clampedRangeStart, initialLast7DaysRange } from '../../utils/timeRange'
 import { columnTitle } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
-import { formatNumber, formatRate } from '../../utils/format'
+import { callerDisplay, formatNumber, formatRate } from '../../utils/format'
 import {
   failoversColumn,
   avgDurationColumn,
@@ -493,7 +493,7 @@ async function loadFilterOptions() {
     // from their filter bar anyway (model options are derived from their
     // own report rows instead, below).
     if (!authStore.isAdmin) {
-      const apiKeyPage = await listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: 200 })
+      const apiKeyPage = await listAPIKeys({ q: '', status: '', page: 1, pageSize: 200 })
       apiKeyOptions.value = toAPIKeyOptions(apiKeyPage.list)
       return
     }
@@ -502,7 +502,7 @@ async function loadFilterOptions() {
     const [providerPage, modelPage, apiKeyPage] = await Promise.all([
       listProviders(),
       listModels(),
-      listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: 200 }),
+      listAPIKeys({ q: '', status: '', page: 1, pageSize: 200 }),
       loadUserOptions(),
     ])
     providerOptions.value = providerPage.list.map((p) => ({ label: p.name, value: p.id }))
@@ -619,9 +619,9 @@ const providerColumns = computed<DataTableColumns<ProviderReportRow>>(() => [
 const callerColumns = computed<DataTableColumns<CallerReportRow>>(() => [
   {
     title: columnTitle(t('analytics.callerColumn'), t('analytics.callerColumn_tip')),
-    key: 'owner_label',
+    key: 'username',
     minWidth: 200,
-    render: (r) => r.owner_label || t('analytics.unknownCallerBucket'),
+    render: (r) => callerDisplay(r.username, r.key_prefix) || t('analytics.unknownCallerBucket'),
   },
   // The ranking leads with spend (the server orders by it); the calls
   // column stays sortable so the old by-volume ordering remains reachable

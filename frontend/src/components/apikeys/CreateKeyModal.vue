@@ -21,12 +21,6 @@
       :rules="rules"
       label-placement="top"
     >
-      <n-form-item path="owner_label">
-        <template #label>
-          <HelpLabel :tip="t('apiKeys.ownerLabel_tip')">{{ t('apiKeys.ownerLabel') }}</HelpLabel>
-        </template>
-        <n-input v-model:value="form.owner_label" :maxlength="50" />
-      </n-form-item>
       <n-form-item path="remark">
         <template #label>
           <HelpLabel :tip="t('apiKeys.remark_tip')">{{ t('apiKeys.remark') }}</HelpLabel>
@@ -164,7 +158,6 @@ const copied = ref(false)
 
 function initialForm() {
   return {
-    owner_label: '',
     remark: '',
     // Default new keys to all-models access; users opt into a specific
     // allowlist via the model-scope toggle.
@@ -218,7 +211,6 @@ async function onGenerate() {
     // send empty values.
     const input: CreateAPIKeyInput = authStore.isAdmin
       ? {
-          owner_label: form.owner_label || undefined,
           remark: form.remark || undefined,
           allow_all_models: form.allow_all_models,
           model_ids: form.model_ids,
@@ -229,7 +221,6 @@ async function onGenerate() {
           budget_limit_micros: form.budget_amount != null ? toMicros(form.budget_amount) : undefined,
         }
       : {
-          owner_label: form.owner_label || undefined,
           remark: form.remark || undefined,
           expires_at: form.expires_at != null ? new Date(form.expires_at).toISOString() : undefined,
         }

@@ -114,10 +114,11 @@ func (r *ProviderReportRow) finalizeRate() {
 
 // CallerReportRow is one row of the dimension=caller report. APIKeyID nil =
 // the bucket for rows with NULL api_key_id (auth failed before the request
-// was tied to a key). OwnerLabel resolved post-fetch.
+// was tied to a key). Username resolved post-fetch.
 type CallerReportRow struct {
 	APIKeyID         *uint   `json:"api_key_id" gorm:"column:api_key_id"`
-	OwnerLabel       string  `json:"owner_label" gorm:"-"`
+	Username         string  `json:"username" gorm:"-"`
+	KeyPrefix        string  `json:"key_prefix" gorm:"-"`
 	Calls            int64   `json:"calls" gorm:"column:calls"`
 	SuccessCalls     int64   `json:"success_calls" gorm:"column:success_calls"`
 	EndedCalls       int64   `json:"ended_calls" gorm:"column:ended_calls"`
@@ -359,7 +360,7 @@ func resolveProviderNames(db *gorm.DB, rows []ProviderReportRow) error {
 }
 
 // AggregateByCaller groups by api_key_id (dimension "caller"). NULL
-// api_key_id forms its own bucket (OwnerLabel resolved to "" — typically
+// api_key_id forms its own bucket (Username resolved to "" — typically
 // requests that failed auth before being associated with a key).
 func AggregateByCaller(db *gorm.DB, f *RequestLogFilter) ([]CallerReportRow, error) {
 	var rows []CallerReportRow
@@ -380,7 +381,7 @@ func AggregateByCaller(db *gorm.DB, f *RequestLogFilter) ([]CallerReportRow, err
 	if err != nil {
 		return nil, err
 	}
-	if err := resolveOwnerLabels(db, rows); err != nil {
+	if err := resolveOwnerUsernames(db, rows); err != nil {
 		return nil, err
 	}
 	for i := range rows {
@@ -392,10 +393,10 @@ func AggregateByCaller(db *gorm.DB, f *RequestLogFilter) ([]CallerReportRow, err
 	return rows, nil
 }
 
-// resolveOwnerLabels populates OwnerLabel via a single batched SELECT
-// against api_keys. Same nil / hard-deleted semantics as
+// resolveOwnerUsernames populates Username via a single batched query
+// joining api_keys to users. Same nil / hard-deleted semantics as
 // resolveProviderNames.
-func resolveOwnerLabels(db *gorm.DB, rows []CallerReportRow) error {
+func resolveOwnerUsernames(db *gorm.DB, rows []CallerReportRow) error {
 	ids := make([]uint, 0, len(rows))
 	for _, r := range rows {
 		if r.APIKeyID != nil {
@@ -405,13 +406,14 @@ func resolveOwnerLabels(db *gorm.DB, rows []CallerReportRow) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	labels, err := fetchOwnerLabels(db, ids)
+	names, err := fetchOwnerUsernames(db, ids)
 	if err != nil {
 		return err
 	}
 	for i := range rows {
 		if rows[i].APIKeyID != nil {
-			rows[i].OwnerLabel = labels[*rows[i].APIKeyID]
+			rows[i].Username = names[*rows[i].APIKeyID].Username
+			rows[i].KeyPrefix = names[*rows[i].APIKeyID].KeyPrefix
 		}
 	}
 	return nil
@@ -586,14 +588,15 @@ func AggregateCompressSkipReasons(ctx context.Context, db *gorm.DB, f *RequestLo
 }
 
 // CompressTopAPIKeyRow is one row of the per-API-key Top N. TokensSaved is
-// the sort key (DESC); OwnerLabel is resolved post-fetch via the same
+// the sort key (DESC); Username is resolved post-fetch via the same
 // batched-SELECT pattern the caller dimension uses. Rows with NULL
 // api_key_id are excluded by HAVING api_key_id IS NOT NULL — they represent
 // requests that failed auth before being tied to a key and would otherwise
 // surface as an "(unknown)" bucket at the top of the list.
 type CompressTopAPIKeyRow struct {
 	APIKeyID    *uint  `json:"api_key_id" gorm:"column:api_key_id"`
-	OwnerLabel  string `json:"owner_label" gorm:"-"`
+	Username    string `json:"username" gorm:"-"`
+	KeyPrefix   string `json:"key_prefix" gorm:"-"`
 	Calls       int64  `json:"calls" gorm:"column:calls"`
 	TokensSaved int64  `json:"tokens_saved" gorm:"column:tokens_saved"`
 }
@@ -623,15 +626,15 @@ func AggregateCompressTopAPIKeys(ctx context.Context, db *gorm.DB, f *RequestLog
 	if rows == nil {
 		rows = []CompressTopAPIKeyRow{}
 	}
-	if err := resolveCompressOwnerLabels(db.WithContext(ctx), rows); err != nil {
+	if err := resolveCompressOwnerUsernames(db.WithContext(ctx), rows); err != nil {
 		return nil, err
 	}
 	return rows, nil
 }
 
-// resolveCompressOwnerLabels populates OwnerLabel via a single batched SELECT
-// against api_keys — same nil / hard-deleted semantics as resolveOwnerLabels.
-func resolveCompressOwnerLabels(db *gorm.DB, rows []CompressTopAPIKeyRow) error {
+// resolveCompressOwnerUsernames populates Username via a single batched
+// SELECT — same nil / hard-deleted semantics as resolveOwnerUsernames.
+func resolveCompressOwnerUsernames(db *gorm.DB, rows []CompressTopAPIKeyRow) error {
 	ids := make([]uint, 0, len(rows))
 	for _, r := range rows {
 		if r.APIKeyID != nil {
@@ -641,13 +644,14 @@ func resolveCompressOwnerLabels(db *gorm.DB, rows []CompressTopAPIKeyRow) error 
 	if len(ids) == 0 {
 		return nil
 	}
-	labels, err := fetchOwnerLabels(db, ids)
+	names, err := fetchOwnerUsernames(db, ids)
 	if err != nil {
 		return err
 	}
 	for i := range rows {
 		if rows[i].APIKeyID != nil {
-			rows[i].OwnerLabel = labels[*rows[i].APIKeyID]
+			rows[i].Username = names[*rows[i].APIKeyID].Username
+			rows[i].KeyPrefix = names[*rows[i].APIKeyID].KeyPrefix
 		}
 	}
 	return nil
@@ -771,21 +775,39 @@ func resolveCompressProviderNames(db *gorm.DB, rows []CompressTopProviderRow) er
 	return nil
 }
 
-// fetchOwnerLabels runs a single batched SELECT against api_keys and returns
-// a map of key ID → owner_label. Keys that are hard-deleted or missing simply
-// don't appear in the map (the caller's lookup yields "" for those rows).
-// Shared by resolveOwnerLabels and resolveCompressOwnerLabels so the query +
+// ownerIdentity is what a per-key aggregate row displays: the owning
+// account's username plus the key's own prefix. One account usually owns
+// several keys, so the username alone would render indistinguishable
+// duplicate rows — the prefix is what tells them apart.
+type ownerIdentity struct {
+	Username  string
+	KeyPrefix string
+}
+
+// fetchOwnerUsernames runs a single batched query joining api_keys to users
+// and returns a map of key ID → owner identity. Keys that are hard-deleted
+// or missing (and keys whose owner row is gone) simply don't appear in the
+// map (the caller's lookup yields zero values for those rows). Shared by
+// resolveOwnerUsernames and resolveCompressOwnerUsernames so the query +
 // map-build logic exists in exactly one place.
-func fetchOwnerLabels(db *gorm.DB, ids []uint) (map[uint]string, error) {
-	var keys []model.APIKey
-	if err := db.Select("id", "owner_label").Where("id IN ?", ids).Find(&keys).Error; err != nil {
+func fetchOwnerUsernames(db *gorm.DB, ids []uint) (map[uint]ownerIdentity, error) {
+	var rows []struct {
+		ID        uint
+		Username  string
+		KeyPrefix string
+	}
+	if err := db.Table("api_keys").
+		Select("api_keys.id AS id, users.username AS username, api_keys.key_prefix AS key_prefix").
+		Joins("JOIN users ON users.id = api_keys.user_id").
+		Where("api_keys.id IN ?", ids).
+		Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	labels := make(map[uint]string, len(keys))
-	for _, k := range keys {
-		labels[k.ID] = k.OwnerLabel
+	names := make(map[uint]ownerIdentity, len(rows))
+	for _, r := range rows {
+		names[r.ID] = ownerIdentity{Username: r.Username, KeyPrefix: r.KeyPrefix}
 	}
-	return labels, nil
+	return names, nil
 }
 
 // CompressDailySeriesRow is one day of the daily token-saved trend. Bucket is

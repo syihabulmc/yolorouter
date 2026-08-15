@@ -63,7 +63,7 @@
           :label="t('requestLogs.filterUser')"
           :value="filter.user_id"
           :options="userOptions"
-          :placeholder="t('requestLogs.allFilterUser')"
+          :placeholder="t('common.allAccounts')"
           filterable
           width="100%"
           @update:value="onUserChange"
@@ -334,8 +334,8 @@ const providerOptions = computed<SelectOption[]>(() =>
 
 // The "caller" filter reuses the existing api_key_id filter param — the
 // backend already filters request_logs by api_key_id, so no backend change is
-// needed. Options are the API keys (owner_label + key_prefix to disambiguate
-// keys that share an owner label or have none). Revoked keys are kept in the
+// needed. Options are the API keys (owner username + key_prefix to
+// disambiguate keys sharing an owner account). Revoked keys are kept in the
 // list so historical logs of a since-revoked key stay filterable. One-shot
 // fetch on mount, same rationale as loadProviders above; 200 covers every
 // realistic v0.1 key count without a remote-search handshake.
@@ -510,7 +510,7 @@ async function loadProviders() {
 }
 
 async function loadCallers() {
-  const { list } = await listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: 200 })
+  const { list } = await listAPIKeys({ q: '', status: '', page: 1, pageSize: 200 })
   apiKeys.value = list
 }
 
@@ -812,11 +812,11 @@ const sharedColumns = computed<DataTableColumns<RequestLogRow>>(() => [
     render: (row) => h('span', { style: 'font-variant-numeric: tabular-nums; font-size:12px;' }, formatTime(row.created_at)),
   },
   {
-    title: columnTitle(t('requestLogs.col_owner'), t('requestLogs.col_owner_tip')),
-    key: 'owner_label',
-    width: 110,
+    title: columnTitle(t('requestLogs.col_user'), t('requestLogs.col_user_tip')),
+    key: 'username',
+    width: 100,
     ellipsis: { tooltip: true },
-    render: (row) => row.owner_label || '-',
+    render: (row) => row.username || '-',
   },
   {
     title: columnTitle(t('requestLogs.col_model'), t('requestLogs.col_model_tip')),

@@ -24,8 +24,7 @@ type limitFields struct {
 }
 
 type createAPIKeyRequest struct {
-	OwnerLabel string `json:"owner_label" binding:"omitempty,max=50"`
-	Remark     string `json:"remark" binding:"omitempty,max=200"`
+	Remark string `json:"remark" binding:"omitempty,max=200"`
 	// AllowAllModels lets the key call any enabled model. When true the
 	// allowlist is bypassed and model_ids may be empty; when false (the wire
 	// default) model_ids must name at least one model — enforced in the service
@@ -58,8 +57,7 @@ type createAPIKeyRequest struct {
 // when present the service/repo pair qualifies the UPDATE with it and a
 // mismatch returns 11013 (409). Omitted on legacy callers (EditKeyModal etc.).
 type updateAPIKeyRequest struct {
-	OwnerLabel *string `json:"owner_label" binding:"omitempty,max=50"`
-	Remark     *string `json:"remark" binding:"omitempty,max=200"`
+	Remark *string `json:"remark" binding:"omitempty,max=200"`
 	// AllowAllModels is a pointer so an omitted field leaves the flag unchanged;
 	// switching it on lets the caller send an empty model_ids to clear the
 	// now-unused allowlist.
@@ -136,7 +134,7 @@ func GetAPIKeys(svc *service.APIKeyService) gin.HandlerFunc {
 		if forced := middleware.ForcedUserID(c); forced != nil {
 			filterUserID = *forced
 		}
-		list, total, err := svc.ListAPIKeys(c.Query("q"), c.Query("owner"), status, filterUserID, page, pageSize)
+		list, total, err := svc.ListAPIKeys(c.Query("q"), status, filterUserID, page, pageSize)
 		if err != nil {
 			writeServiceError(c, err)
 			return
@@ -163,8 +161,8 @@ func PostAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 		result, err := svc.CreateAPIKey(service.CreateAPIKeyInput{
 			// The session user owns the key they create. RequireSession has
 			// already resolved the identity or this handler is unreachable.
-			UserID:     c.MustGet(middleware.UserIDKey).(uint),
-			OwnerLabel: req.OwnerLabel, Remark: req.Remark,
+			UserID:         c.MustGet(middleware.UserIDKey).(uint),
+			Remark:         req.Remark,
 			AllowAllModels: req.AllowAllModels, ModelIDs: req.ModelIDs,
 			ExpiresAt: req.ExpiresAt, RPMLimit: req.RPMLimit, TPMLimit: req.TPMLimit,
 			ConcurrencyLimit: req.ConcurrencyLimit, BudgetLimitMicros: req.BudgetLimitMicros,
@@ -256,7 +254,7 @@ func PatchAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			return
 		}
 		view, err := svc.UpdateAPIKey(id, service.UpdateAPIKeyInput{
-			OwnerLabel: req.OwnerLabel, Remark: req.Remark,
+			Remark:         req.Remark,
 			AllowAllModels: req.AllowAllModels, ModelIDs: req.ModelIDs,
 			ExpiresAt: req.ExpiresAt, RPMLimit: req.RPMLimit, TPMLimit: req.TPMLimit,
 			ConcurrencyLimit: req.ConcurrencyLimit, BudgetLimitMicros: req.BudgetLimitMicros,
@@ -276,7 +274,7 @@ func PatchAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 }
 
 // memberCreateAllowed enforces the member field boundary at key creation:
-// members set owner_label, remark and expires_at; the model scope is
+// members set remark and expires_at; the model scope is
 // always "all models" for them (the admin-only allowlist knob must not
 // be reachable), and limits plus the per-key overrides are admin-only.
 // The caller forces AllowAllModels=true afterwards, so the check here is
@@ -290,7 +288,7 @@ func memberCreateAllowed(c *gin.Context, req *createAPIKeyRequest) bool {
 		req.CustomSystemPrompt != "" ||
 		req.CompressEnabledOverride || req.CompressEnabled
 	if restricted {
-		response.ParamError(c, "members may only set owner_label, remark and expires_at")
+		response.ParamError(c, "members may only set remark and expires_at")
 		return false
 	}
 	// The wire default AllowAllModels=false would demand an allowlist —
@@ -300,7 +298,7 @@ func memberCreateAllowed(c *gin.Context, req *createAPIKeyRequest) bool {
 }
 
 // memberPatchAllowed enforces the member field boundary on key edits:
-// members may rename (owner_label/remark) and re-schedule expiry on their
+// members may rename (remark) and re-schedule expiry on their
 // own keys — model scope, limits, and the per-key overrides are
 // admin-only knobs. Writes a 400 and returns false when a restricted
 // field is present.
@@ -312,7 +310,7 @@ func memberPatchAllowed(c *gin.Context, req *updateAPIKeyRequest) bool {
 		req.CustomSystemPrompt != nil ||
 		req.CompressEnabledOverride != nil || req.CompressEnabled != nil
 	if restricted {
-		response.ParamError(c, "members may only change owner_label, remark and expires_at")
+		response.ParamError(c, "members may only change remark and expires_at")
 		return false
 	}
 	return true

@@ -133,7 +133,7 @@ export function setModelStatus(id: number, enabled: boolean): Promise<void> {
 
 export interface ModelImpactKey {
   id: number
-  owner_label: string
+  remark: string
   key_prefix: string
 }
 

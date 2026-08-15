@@ -55,7 +55,7 @@ type trendPoint struct {
 
 type topCaller struct {
 	APIKeyID   uint   `json:"api_key_id"`
-	OwnerLabel string `json:"owner_label"`
+	Username   string `json:"username"`
 	Calls      int64  `json:"calls"`
 	CostMicros int64  `json:"cost_micros"`
 }
@@ -376,40 +376,27 @@ func TestGetDashboardTopCallersRankedByCost(t *testing.T) {
 	pinDashboardClock(t, dashboardTestNow)
 	now := dashboardTestNow
 
-	// Create three api_keys. The dashboard's top-callers list should rank
-	// them by cost_micros DESC regardless of how many requests each made —
-	// one expensive call beats many cheap ones.
+	// Create three accounts, one api_key each. The dashboard's top-callers
+	// list should rank them by cost_micros DESC regardless of how many
+	// requests each made — one expensive call beats many cheap ones.
 	keys := []struct {
-		label    string
+		owner    string
 		costEach int64
 		calls    int
 	}{
-		{label: "big-spender", costEach: 500, calls: 1},
-		{label: "mid-spender", costEach: 100, calls: 3},
-		{label: "tiny-spender", costEach: 10, calls: 10},
+		{owner: "big-spender", costEach: 500, calls: 1},
+		{owner: "mid-spender", costEach: 100, calls: 3},
+		{owner: "tiny-spender", costEach: 10, calls: 10},
 	}
-	keyIDs := make([]uint, len(keys))
-	for i, k := range keys {
-		ak := model.APIKey{
-			// key_hash has a UNIQUE constraint — give each row a distinct
-			// hash (we never authenticate via this test, so the value just
-			// has to be unique, not a real SHA-256 of anything).
-			KeyHash:    "test-hash-" + k.label,
-			KeyPrefix:  "sk-xx-",
-			OwnerLabel: k.label,
-			Status:     model.APIKeyStatusActive,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		if err := db.Create(&ak).Error; err != nil {
-			t.Fatalf("create api_key %q: %v", k.label, err)
-		}
-		keyIDs[i] = ak.ID
+	for _, k := range keys {
+		keyID, userID := seedAPIKey(t, db, k.owner)
 		for j := 0; j < k.calls; j++ {
-			id := ak.ID
+			id := keyID
+			owner := userID
 			cost := k.costEach
 			insertRequestLog(t, db, now.Add(-time.Duration(j+1)*time.Minute), func(r *model.RequestLog) {
 				r.APIKeyID = &id
+				r.UserID = &owner
 				r.CostMicros = cost
 				r.CostKnown = true
 			})
@@ -429,7 +416,7 @@ func TestGetDashboardTopCallersRankedByCost(t *testing.T) {
 	}
 	// Rank: big-spender (500) > mid-spender (300) > tiny-spender (100).
 	want := []struct {
-		label      string
+		username   string
 		costMicros int64
 		calls      int64
 	}{
@@ -439,9 +426,9 @@ func TestGetDashboardTopCallersRankedByCost(t *testing.T) {
 	}
 	for i, w := range want {
 		got := body.TopCallers[i]
-		if got.OwnerLabel != w.label || got.CostMicros != w.costMicros || got.Calls != w.calls {
-			t.Fatalf("TopCallers[%d]: want {label=%s cost=%d calls=%d}, got %+v",
-				i, w.label, w.costMicros, w.calls, got)
+		if got.Username != w.username || got.CostMicros != w.costMicros || got.Calls != w.calls {
+			t.Fatalf("TopCallers[%d]: want {username=%s cost=%d calls=%d}, got %+v",
+				i, w.username, w.costMicros, w.calls, got)
 		}
 	}
 }
@@ -453,24 +440,17 @@ func TestGetDashboardTopCallersExcludesRowsWithoutAPIKey(t *testing.T) {
 
 	// A high-cost row with NULL api_key_id (e.g. failed auth) must NOT
 	// surface in the top-callers list — there's no caller identity to show.
-	ak := model.APIKey{
-		KeyHash: "test-hash-real-caller", KeyPrefix: "sk-xx-",
-		OwnerLabel: "real-caller", Status: model.APIKeyStatusActive,
-		CreatedAt: now, UpdatedAt: now,
-	}
-	if err := db.Create(&ak).Error; err != nil {
-		t.Fatalf("create api_key: %v", err)
-	}
+	realID, ownerID := seedAPIKey(t, db, "real-caller")
 	insertRequestLog(t, db, now.Add(-1*time.Minute), func(r *model.RequestLog) {
 		r.CostMicros = 99999
 		r.CostKnown = true
 		r.APIKeyID = nil
 	})
-	realID := ak.ID
 	insertRequestLog(t, db, now.Add(-30*time.Second), func(r *model.RequestLog) {
 		r.CostMicros = 5
 		r.CostKnown = true
 		r.APIKeyID = &realID
+		r.UserID = &ownerID
 	})
 
 	w, env := doJSON(t, r, http.MethodGet, "/api/admin/dashboard", nil, nil)
@@ -481,7 +461,7 @@ func TestGetDashboardTopCallersExcludesRowsWithoutAPIKey(t *testing.T) {
 	if err := json.Unmarshal(env.Data, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(body.TopCallers) != 1 || body.TopCallers[0].OwnerLabel != "real-caller" {
+	if len(body.TopCallers) != 1 || body.TopCallers[0].Username != "real-caller" {
 		t.Fatalf("TopCallers: expected only [real-caller], got %+v", body.TopCallers)
 	}
 }
@@ -656,8 +636,8 @@ func TestGetDashboardSetupStatusCountsFunnelEntities(t *testing.T) {
 	}
 
 	// APIKeys counts active (non-revoked) only: 1 of 2.
-	kActive := model.APIKey{KeyHash: "h-active", KeyPrefix: "pk-a", OwnerLabel: "a", Status: model.APIKeyStatusActive}
-	kRevoked := model.APIKey{KeyHash: "h-revoked", KeyPrefix: "pk-r", OwnerLabel: "r", Status: model.APIKeyStatusRevoked}
+	kActive := model.APIKey{KeyHash: "h-active", KeyPrefix: "pk-a", Status: model.APIKeyStatusActive}
+	kRevoked := model.APIKey{KeyHash: "h-revoked", KeyPrefix: "pk-r", Status: model.APIKeyStatusRevoked}
 	if err := db.Create(&kActive).Error; err != nil {
 		t.Fatalf("create kActive: %v", err)
 	}

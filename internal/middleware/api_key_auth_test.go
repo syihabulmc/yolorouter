@@ -156,8 +156,7 @@ func seedAPIKey(t *testing.T, db *gorm.DB, rawKey string) *model.APIKey {
 		t.Fatalf("seed key owner: %v", err)
 	}
 	k := &model.APIKey{
-		KeyHash: crypto.HashToken(rawKey), KeyPrefix: rawKey[:prefixLen], UserID: owner.ID,
-		OwnerLabel: "tester", Status: model.APIKeyStatusActive, CreatedAt: now, UpdatedAt: now,
+		KeyHash: crypto.HashToken(rawKey), KeyPrefix: rawKey[:prefixLen], UserID: owner.ID, Status: model.APIKeyStatusActive, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := db.Create(k).Error; err != nil {
 		t.Fatalf("seed api key: %v", err)

@@ -3317,14 +3317,14 @@ func TestProviderImpactNamesKeysOnlyThroughStrandedModels(t *testing.T) {
 	survivor := makeModel("survivor", providerA, providerB)
 
 	keySvc := NewAPIKeyService(db, testMasterKey())
-	both, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "both-stranded", ModelIDs: []uint{stranded1, stranded2}}, now)
+	both, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{stranded1, stranded2}}, now)
 	if err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)
 	}
-	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "survivor-only", ModelIDs: []uint{survivor}}, now); err != nil {
+	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{survivor}}, now); err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)
 	}
-	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "allow-all", AllowAllModels: true}, now); err != nil {
+	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), AllowAllModels: true}, now); err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)
 	}
 

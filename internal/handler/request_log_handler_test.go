@@ -59,24 +59,45 @@ func newRequestLogTestRouterWithBodiesDir(t *testing.T) (*gin.Engine, *gorm.DB, 
 	return r, db, svc, bodiesDir
 }
 
-// seedAPIKey inserts a minimal api_keys row with a unique key_hash and
-// returns its assigned ID. request_logs.api_key_id references this row so
-// the list/detail handler can be tested with a populated owner_label.
-func seedAPIKey(t *testing.T, db *gorm.DB, label string) uint {
+// seedUser inserts a users row with the given username and returns its ID.
+// api_keys.user_id and request_logs.user_id both reference it, so tests can
+// assert the username the list / detail / export paths resolve.
+func seedUser(t *testing.T, db *gorm.DB, username string) uint {
 	t.Helper()
 	now := time.Now().UTC()
+	u := model.User{
+		Username:  username,
+		Role:      model.RoleMember,
+		Status:    model.UserStatusEnabled,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatalf("seed user %q: %v", username, err)
+	}
+	return u.ID
+}
+
+// seedAPIKey inserts an account named owner plus a minimal api_keys row it
+// owns (unique key_hash), returning the key ID and the owner's user ID.
+// request_logs.api_key_id / user_id reference the pair so the list and
+// detail handlers can be tested with a populated username.
+func seedAPIKey(t *testing.T, db *gorm.DB, owner string) (uint, uint) {
+	t.Helper()
+	now := time.Now().UTC()
+	userID := seedUser(t, db, owner)
 	ak := model.APIKey{
-		KeyHash:    "test-hash-" + label + "-" + now.Format("150405.000000000"),
-		KeyPrefix:  "sk-xx-",
-		OwnerLabel: label,
-		Status:     model.APIKeyStatusActive,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		KeyHash:   "test-hash-" + owner + "-" + now.Format("150405.000000000"),
+		KeyPrefix: "sk-xx-",
+		UserID:    userID,
+		Status:    model.APIKeyStatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if err := db.Create(&ak).Error; err != nil {
-		t.Fatalf("seed api_key %q: %v", label, err)
+		t.Fatalf("seed api_key %q: %v", owner, err)
 	}
-	return ak.ID
+	return ak.ID, userID
 }
 
 // seedProvider inserts a providers row and returns its ID, so provider_id
@@ -124,7 +145,7 @@ func seedRequestLog(t *testing.T, db *gorm.DB, requestID string, ts time.Time, m
 // directly, same convention as dashboard_handler_test.go.
 type listItem struct {
 	RequestID    string  `json:"request_id"`
-	OwnerLabel   string  `json:"owner_label"`
+	Username     string  `json:"username"`
 	ModelName    string  `json:"model_name"`
 	ProviderName string  `json:"provider_name"`
 	StatusCode   int     `json:"status_code"`
@@ -162,13 +183,14 @@ func TestListRequestLogsReturnsEmptyByDefault(t *testing.T) {
 	}
 }
 
-func TestListRequestLogsJoinsOwnerLabelAndProviderName(t *testing.T) {
+func TestListRequestLogsJoinsUsernameAndProviderName(t *testing.T) {
 	r, db, _ := newRequestLogTestRouter(t)
-	keyID := seedAPIKey(t, db, "alice")
+	keyID, userID := seedAPIKey(t, db, "alice")
 	provID := seedProvider(t, db, "openai-main")
 	now := time.Now().UTC()
 	seedRequestLog(t, db, "req-join-1", now, func(r *model.RequestLog) {
 		r.APIKeyID = &keyID
+		r.UserID = &userID
 		r.ProviderID = &provID
 	})
 
@@ -186,8 +208,8 @@ func TestListRequestLogsJoinsOwnerLabelAndProviderName(t *testing.T) {
 		t.Fatalf("expected 1 row, got %d", len(page.List))
 	}
 	row := page.List[0]
-	if row.OwnerLabel != "alice" {
-		t.Errorf("owner_label: want alice, got %q", row.OwnerLabel)
+	if row.Username != "alice" {
+		t.Errorf("username: want alice, got %q", row.Username)
 	}
 	if row.ProviderName != "openai-main" {
 		t.Errorf("provider_name: want openai-main, got %q", row.ProviderName)
@@ -341,17 +363,19 @@ func TestListRequestLogsRejectsInvalidStatusClass(t *testing.T) {
 
 func TestListRequestLogsFiltersByAPIKeyIDAndProviderID(t *testing.T) {
 	r, db, _ := newRequestLogTestRouter(t)
-	keyA := seedAPIKey(t, db, "alice")
-	keyB := seedAPIKey(t, db, "bob")
+	keyA, userA := seedAPIKey(t, db, "alice")
+	keyB, userB := seedAPIKey(t, db, "bob")
 	provA := seedProvider(t, db, "openai")
 	provB := seedProvider(t, db, "anthropic")
 	now := time.Now().UTC()
 	seedRequestLog(t, db, "req-A", now, func(r *model.RequestLog) {
 		r.APIKeyID = &keyA
+		r.UserID = &userA
 		r.ProviderID = &provA
 	})
 	seedRequestLog(t, db, "req-B", now, func(r *model.RequestLog) {
 		r.APIKeyID = &keyB
+		r.UserID = &userB
 		r.ProviderID = &provB
 	})
 
@@ -369,9 +393,9 @@ func TestListRequestLogsFiltersByAPIKeyIDAndProviderID(t *testing.T) {
 	if len(page.List) != 1 || page.List[0].RequestID != "req-A" {
 		t.Fatalf("expected only req-A, got %+v", page.List)
 	}
-	if page.List[0].OwnerLabel != "alice" || page.List[0].ProviderName != "openai" {
+	if page.List[0].Username != "alice" || page.List[0].ProviderName != "openai" {
 		t.Fatalf("expected alice/openai JOIN, got %s/%s",
-			page.List[0].OwnerLabel, page.List[0].ProviderName)
+			page.List[0].Username, page.List[0].ProviderName)
 	}
 }
 
@@ -463,7 +487,7 @@ func TestListRequestLogsReturns500WhenDBErrors(t *testing.T) {
 
 func TestGetRequestLogDetailReturnsParsedAttempts(t *testing.T) {
 	r, db, _ := newRequestLogTestRouter(t)
-	keyID := seedAPIKey(t, db, "alice")
+	keyID, userID := seedAPIKey(t, db, "alice")
 	provID := seedProvider(t, db, "openai")
 	now := time.Now().UTC()
 	// Two-attempt failover: first attempt 429 (rotate key), second 200 OK.
@@ -473,6 +497,7 @@ func TestGetRequestLogDetailReturnsParsedAttempts(t *testing.T) {
 		`]`
 	seedRequestLog(t, db, "req-failover", now, func(r *model.RequestLog) {
 		r.APIKeyID = &keyID
+		r.UserID = &userID
 		r.ProviderID = &provID
 		r.Attempts = 2
 		r.AttemptsDetail = &detail
@@ -484,7 +509,7 @@ func TestGetRequestLogDetailReturnsParsedAttempts(t *testing.T) {
 	}
 	var d struct {
 		RequestID      string `json:"request_id"`
-		OwnerLabel     string `json:"owner_label"`
+		Username       string `json:"username"`
 		ProviderName   string `json:"provider_name"`
 		StatusCode     int    `json:"status_code"`
 		StatusClass    string `json:"status_class"`
@@ -501,8 +526,8 @@ func TestGetRequestLogDetailReturnsParsedAttempts(t *testing.T) {
 	if err := json.Unmarshal(env.Data, &d); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if d.OwnerLabel != "alice" || d.ProviderName != "openai" {
-		t.Errorf("JOIN: want alice/openai, got %q/%q", d.OwnerLabel, d.ProviderName)
+	if d.Username != "alice" || d.ProviderName != "openai" {
+		t.Errorf("JOIN: want alice/openai, got %q/%q", d.Username, d.ProviderName)
 	}
 	if len(d.AttemptsDetail) != 2 {
 		t.Fatalf("expected 2 attempts, got %d", len(d.AttemptsDetail))
@@ -669,15 +694,17 @@ func TestGetRequestLogBodyStreamNotFound(t *testing.T) {
 
 func TestExportRequestLogsCSVReturnsBOMAndHeaderAndRows(t *testing.T) {
 	r, db, _ := newRequestLogTestRouter(t)
-	keyID := seedAPIKey(t, db, "alice")
+	keyID, userID := seedAPIKey(t, db, "alice")
 	provID := seedProvider(t, db, "openai")
 	now := time.Now().UTC()
 	seedRequestLog(t, db, "req-exp-1", now, func(r *model.RequestLog) {
 		r.APIKeyID = &keyID
+		r.UserID = &userID
 		r.ProviderID = &provID
 	})
 	seedRequestLog(t, db, "req-exp-2", now, func(r *model.RequestLog) {
 		r.APIKeyID = &keyID
+		r.UserID = &userID
 		r.ProviderID = &provID
 		r.StatusCode = 500
 	})
@@ -691,7 +718,7 @@ func TestExportRequestLogsCSVReturnsBOMAndHeaderAndRows(t *testing.T) {
 	}
 	body := w.Body.Bytes()
 	// UTF-8 BOM is the first three bytes — Excel/Sheets use it to detect
-	// the encoding for CJK owner_label / model_name columns.
+	// the encoding for CJK username / model_name columns.
 	if len(body) < 3 || body[0] != 0xEF || body[1] != 0xBB || body[2] != 0xBF {
 		t.Fatalf("expected UTF-8 BOM (EF BB BF) at start, got %x", body[:min(3, len(body))])
 	}
@@ -709,7 +736,7 @@ func TestExportRequestLogsCSVReturnsBOMAndHeaderAndRows(t *testing.T) {
 	if len(lines) < 3 {
 		t.Fatalf("expected at least 3 CSV lines (header + 2 rows), got %d: %q", len(lines), text)
 	}
-	if lines[0] != "request_id,created_at,status_class,status_code,owner_label,model_name,provider_name,is_stream,key_switches,failovers,final_provider_model,duration_ms,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,cost_micros,cost_known,fail_reason" {
+	if lines[0] != "request_id,created_at,status_class,status_code,username,model_name,provider_name,is_stream,key_switches,failovers,final_provider_model,duration_ms,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,cost_micros,cost_known,fail_reason" {
 		t.Fatalf("unexpected CSV header: %q", lines[0])
 	}
 	// Both data rows should be present; the success row references req-exp-1.
@@ -717,11 +744,11 @@ func TestExportRequestLogsCSVReturnsBOMAndHeaderAndRows(t *testing.T) {
 		t.Fatalf("expected both request IDs in CSV, got: %s", text)
 	}
 	// Desensitization: no plaintext key material is ever stored on the
-	// row (only id/prefix are kept), so the CSV's owner_label column is the
-	// admin label "alice" — never a key string. The JOIN'd rows are
-	// desensitized by construction; assert the label appears.
+	// row (only id/prefix are kept), so the CSV's username column carries
+	// the owning account "alice" — never a key string. The JOIN'd rows are
+	// desensitized by construction; assert the username appears.
 	if !strings.Contains(text, "alice") {
-		t.Fatalf("expected owner_label 'alice' in CSV, got: %s", text)
+		t.Fatalf("expected username 'alice' in CSV, got: %s", text)
 	}
 }
 
@@ -889,8 +916,8 @@ func TestListRequestLogsSplitsKeySwitchesFromFailovers(t *testing.T) {
 func TestListRequestLogsFiltersByKeyPrefix(t *testing.T) {
 	r, db, _ := newRequestLogTestRouter(t)
 	now := time.Now().UTC()
-	alpha := &model.APIKey{OwnerLabel: "alpha", KeyHash: "h-a", KeyPrefix: "sk-yr-a1", Status: model.APIKeyStatusActive}
-	beta := &model.APIKey{OwnerLabel: "beta", KeyHash: "h-b", KeyPrefix: "skXyr-b2", Status: model.APIKeyStatusActive}
+	alpha := &model.APIKey{KeyHash: "h-a", KeyPrefix: "sk-yr-a1", Status: model.APIKeyStatusActive}
+	beta := &model.APIKey{KeyHash: "h-b", KeyPrefix: "skXyr-b2", Status: model.APIKeyStatusActive}
 	for _, k := range []*model.APIKey{alpha, beta} {
 		if err := db.Create(k).Error; err != nil {
 			t.Fatalf("seed key: %v", err)

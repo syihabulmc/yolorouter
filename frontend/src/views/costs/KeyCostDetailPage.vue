@@ -91,6 +91,7 @@ import CostOverviewCards from '../../components/costs/CostOverviewCards.vue'
 import CostTrendChart from '../../components/costs/CostTrendChart.vue'
 import BreakdownTable from '../../components/costs/BreakdownTable.vue'
 import { formatMicros } from '../../utils/money'
+import { callerDisplay } from '../../utils/format'
 import { computeDaysToExhaust, formatDaysToExhaustLabel } from '../../utils/budget'
 import { initialLast7DaysRange, logsRouteWithRange, rangeFromQuery, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage, errorCodeOf } from '../../api/client'
@@ -122,7 +123,9 @@ type State = 'loading' | 'success' | 'error' | 'notfound'
 const state = ref<State>('loading')
 const stats = ref<CostStats | null>(null)
 const budget = ref<BudgetRow | null>(null)
-const ownerLabel = ref('')
+// Title identity: owning username + key prefix — one account usually owns
+// several keys, so the username alone would title distinct keys identically.
+const ownerName = ref('')
 
 // reloadSeq guards against a stale window reload landing after a newer one and
 // overwriting it with the previous range's figures (same pattern the cost
@@ -130,7 +133,7 @@ const ownerLabel = ref('')
 let reloadSeq = 0
 
 const title = computed(() =>
-  t('costs.detail.keyTitle', { name: ownerLabel.value || `#${keyId}` }),
+  t('costs.detail.keyTitle', { name: ownerName.value || `#${keyId}` }),
 )
 
 // Trend passes [] when the window has no data so the chart shows its own
@@ -150,7 +153,7 @@ const exhaustLabel = computed(() =>
 )
 
 // Identity + budget come from ONE getKeyBudgetRow call (it fetches the key
-// internally and returns owner_label for the header). identityOk guards so a
+// internally and returns the owning username for the header). identityOk guards so a
 // TimeRange change does NOT re-fetch the key — only the window-scoped stats.
 let identityOk = false
 
@@ -160,9 +163,9 @@ async function reload() {
     try {
       budget.value = await getKeyBudgetRow(keyId)
       // Stale guard on the identity-success write point: a slower earlier
-      // reload must not overwrite a newer ownerLabel / identityOk.
+      // reload must not overwrite a newer ownerName / identityOk.
       if (mySeq !== reloadSeq) return
-      ownerLabel.value = budget.value.owner_label
+      ownerName.value = callerDisplay(budget.value.owner_username, budget.value.key_prefix)
       identityOk = true
     } catch (err) {
       // Distinguish "key does not exist" (terminal notfound) from any other

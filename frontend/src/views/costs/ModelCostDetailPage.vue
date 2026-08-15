@@ -10,6 +10,7 @@
     <PageHeader class="new-line" :title="title" :description="t('costs.detail.modelDesc')">
       <template #actions>
         <NButton v-if="authStore.isAdmin" size="small" @click="goLogs">{{ t('costs.detail.viewLogs') }}</NButton>
+        <UserFilterSelect v-if="authStore.isAdmin" :value="selectedUserId" :options="userOptions" @update:value="onUserChange" />
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPreset" />
       </template>
     </PageHeader>
@@ -75,6 +76,8 @@ import BreakdownTable from '../../components/costs/BreakdownTable.vue'
 import { initialLast7DaysRange, logsRouteWithRange, rangeFromQuery, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage } from '../../api/client'
 import { useAuthStore } from '../../store/auth'
+import { useUserFilter } from '../../composables/useUserFilter'
+import UserFilterSelect from '../../components/common/UserFilterSelect.vue'
 import { getCostStats, type CostStats } from '../../api/costs'
 import type { AnalyticsFilter } from '../../api/analytics'
 
@@ -83,6 +86,9 @@ const authStore = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+
+// Admin-only per-account scope (seeded from ?user_id=); see useUserFilter.
+const { selectedUserId, userOptions, loadUserOptions, onUserChange, withUserQuery, userQueryParam } = useUserFilter(() => void reload())
 
 // Identity comes straight from the route — Vue Router already decodes
 // params/query once, so a second decodeURIComponent here would mangle any name
@@ -138,6 +144,7 @@ async function reload() {
     start: timeRange.value.start,
     end: timeRange.value.end,
     model_name: name,
+    user_id: selectedUserId.value,
   }
   try {
     const result = await getCostStats(filter, authStore.isAdmin)
@@ -159,14 +166,15 @@ function onSelect(p: { kind: string; model?: string; providerId?: number; apiKey
   if (p.kind === 'caller' && p.apiKeyId != null) {
     router.push(withRangeQuery(`/costs/keys/${p.apiKeyId}`, range.start, range.end))
   } else if (p.kind === 'provider' && p.providerId != null) {
-    router.push(withRangeQuery(`/costs/providers/${p.providerId}`, range.start, range.end))
+    router.push(withUserQuery(withRangeQuery(`/costs/providers/${p.providerId}`, range.start, range.end)))
   }
 }
 
 function goLogs() {
   // model_name is passed verbatim (exact match); logsRouteWithRange normalizes
-  // a cleared range and clamps to the analytics cap.
-  router.push(logsRouteWithRange({ model_name: name }, timeRange.value))
+  // a cleared range and clamps to the analytics cap. The active account
+  // scope rides along so the log list opens pre-filtered the same way.
+  router.push(logsRouteWithRange({ model_name: name, ...userQueryParam() }, timeRange.value))
 }
 
 // First load: for a carried custom range (drilled from another analytics
@@ -176,6 +184,7 @@ function goLogs() {
 // and fires the watch below (calling reload here too would double it).
 onMounted(() => {
   if (carried) void reload()
+  if (authStore.isAdmin) void loadUserOptions()
 })
 
 watch(timeRange, () => { void reload() }, { deep: true })

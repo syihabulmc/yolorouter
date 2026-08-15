@@ -11,17 +11,7 @@
   <div class="common-page">
     <PageHeader :eyebrow="t('dashboard.eyebrow')" :title="t('dashboard.pageTitle')" :description="t('dashboard.pageDescription')">
       <template #actions>
-        <NSelect
-          v-if="authStore.isAdmin"
-          :value="selectedUserId"
-          :options="userOptions"
-          :placeholder="t('dashboard.allUser')"
-          clearable
-          filterable
-          size="small"
-          style="width: 180px"
-          @update:value="onUserChange"
-        />
+        <UserFilterSelect v-if="authStore.isAdmin" :value="selectedUserId" :options="userOptions" @update:value="onUserChange" />
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPresetChange" />
       </template>
     </PageHeader>
@@ -187,7 +177,7 @@
             v-bind="c.api_key_id != null ? drillLogs({ api_key_id: c.api_key_id }) : {}"
           >
             <span class="caller-rank">{{ i + 1 }}</span>
-            <span class="caller-label">{{ c.owner_label || t('dashboard.unknownCaller') }}</span>
+            <span class="caller-label">{{ callerDisplay(c.username, c.key_prefix) || t('dashboard.unknownCaller') }}</span>
             <span class="caller-meta">{{ formatNumber(c.calls) }} {{ t('dashboard.callsUnit') }}</span>
             <span class="caller-cost">¥{{ formatMicros(c.cost_micros, 2) }}</span>
           </li>
@@ -261,7 +251,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NSelect, useMessage } from 'naive-ui'
+import { NButton, useMessage } from 'naive-ui'
 import type { Component } from 'vue'
 import {
   Activity,
@@ -286,11 +276,12 @@ import { bucketRange, pressable, requestLogLocation, type RequestLogLinkQuery } 
 import { clampedRangeStart, DASHBOARD_RANGE_CAP_DAYS } from '../../utils/timeRange'
 import type { RouteLocationRaw } from 'vue-router'
 import { getDashboard, type DashboardData } from '../../api/analytics'
-import { useUserOptions } from '../../composables/useUserOptions'
+import { useUserFilter } from '../../composables/useUserFilter'
+import UserFilterSelect from '../../components/common/UserFilterSelect.vue'
 import { useAuthStore } from '../../store/auth'
 import { displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
-import { formatNumber, formatRate } from '../../utils/format'
+import { callerDisplay, formatNumber, formatRate } from '../../utils/format'
 import { formatFailReason } from '../../utils/failReason'
 import { useIsMobile } from '../../composables/useIsMobile'
 
@@ -302,16 +293,9 @@ const authStore = useAuthStore()
 const data = ref<DashboardData | null>(null)
 const loading = ref(true)
 
-// Admin-only account scope. Loaded once on mount from the same user
-// directory the analytics filters use; members never see the control and
-// the backend pins them to themselves anyway.
-const selectedUserId = ref<number | null>(null)
-const { userOptions, loadUserOptions } = useUserOptions()
-
-function onUserChange(v: number | null) {
-  selectedUserId.value = v
-  void reload()
-}
+// Admin-only account scope; see useUserFilter. Members never see the
+// control and the backend pins them to themselves anyway.
+const { selectedUserId, userOptions, loadUserOptions, onUserChange } = useUserFilter(() => void reload())
 
 
 const preset = ref<RangePreset>('last7d')

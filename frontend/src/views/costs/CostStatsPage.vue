@@ -13,17 +13,7 @@
   <div class="common-page">
     <PageHeader :eyebrow="t('costs.eyebrow')" :title="t('costs.pageTitle')" :description="t('costs.pageDescription')">
       <template #actions>
-        <NSelect
-          v-if="authStore.isAdmin"
-          :value="selectedUserId"
-          :options="userOptions"
-          :placeholder="t('costs.allUser')"
-          clearable
-          filterable
-          size="small"
-          style="width: 180px"
-          @update:value="onUserChange"
-        />
+        <UserFilterSelect v-if="authStore.isAdmin" :value="selectedUserId" :options="userOptions" @update:value="onUserChange" />
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPresetChange" />
       </template>
     </PageHeader>
@@ -116,8 +106,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute, useRouter } from 'vue-router'
-import { NSelect, useMessage } from 'naive-ui'
+import { useRouter } from 'vue-router'
+import { useMessage } from 'naive-ui'
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import TimeRangeSelect, {
@@ -132,7 +122,8 @@ import { formatMicros, isNegativeMicros, netCacheSavedMicros } from '../../utils
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import { initialLast7DaysRange, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage } from '../../api/client'
-import { useUserOptions } from '../../composables/useUserOptions'
+import { useUserFilter } from '../../composables/useUserFilter'
+import UserFilterSelect from '../../components/common/UserFilterSelect.vue'
 import { getBudgetRows, getCostStats, type BudgetRow, type CostStats } from '../../api/costs'
 import { useAuthStore } from '../../store/auth'
 import type { AnalyticsFilter } from '../../api/analytics'
@@ -151,9 +142,9 @@ function onSpendersSelect(p: { apiKeyId: number }) {
 function onBreakdownSelect(p: { providerId?: number; model?: string }) {
   const range = { start: timeRange.value.start, end: timeRange.value.end }
   if (p.providerId != null) {
-    router.push(withRangeQuery(`/costs/providers/${p.providerId}`, range.start, range.end))
+    router.push(withUserQuery(withRangeQuery(`/costs/providers/${p.providerId}`, range.start, range.end)))
   } else if (p.model != null && p.model !== '') {
-    router.push(withRangeQuery(modelCostDetailLocation(p.model), range.start, range.end))
+    router.push(withUserQuery(withRangeQuery(modelCostDetailLocation(p.model), range.start, range.end)))
   }
 }
 
@@ -233,19 +224,11 @@ async function loadBudget() {
 // admin-configured catalogs.
 const authStore = useAuthStore()
 
-// Seeded from ?user_id= so dashboard drill-downs keep the active account
-// scope; the backend pins member sessions to themselves regardless.
-const route = useRoute()
-const seededUserID = Number(route.query.user_id)
-
-const selectedUserId = ref<number | null>(Number.isInteger(seededUserID) && seededUserID > 0 ? seededUserID : null)
-const { userOptions, loadUserOptions } = useUserOptions()
-
-function onUserChange(v: number | null) {
-  selectedUserId.value = v
+// Per-account scope (seeded from ?user_id=); see useUserFilter.
+const { selectedUserId, userOptions, loadUserOptions, onUserChange, withUserQuery } = useUserFilter(() => {
   void loadStats()
   void loadBudget()
-}
+})
 
 
 // Total configured budget = sum of capped keys' limits (uncapped keys have no

@@ -34,7 +34,8 @@ export interface TrendPoint {
 
 export interface TopCaller {
   api_key_id: number
-  owner_label: string
+  username: string
+  key_prefix: string
   calls: number
   cost_micros: number
 }
@@ -167,7 +168,8 @@ export interface ProviderReportRow {
 
 export interface CallerReportRow {
   api_key_id: number | null
-  owner_label: string
+  username: string
+  key_prefix: string
   calls: number
   success_calls: number
   ended_calls: number
@@ -294,7 +296,8 @@ export interface CompressSkipReasonRow {
 
 export interface CompressTopAPIKeyRow {
   api_key_id: number | null
-  owner_label: string
+  username: string
+  key_prefix: string
   calls: number
   tokens_saved: number
 }

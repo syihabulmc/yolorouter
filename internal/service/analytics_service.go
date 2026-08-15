@@ -356,12 +356,13 @@ func buildCSV(dimension string, rows interface{}) ([]string, [][]string, error) 
 		if !ok {
 			return nil, nil, errCSVTypeMismatch("CallerReportRow")
 		}
-		headers := []string{"api_key_id", "owner_label", "calls", "success_rate", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "cost_micros", "unknown_cost_calls"}
+		headers := []string{"api_key_id", "username", "key_prefix", "calls", "success_rate", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "cost_micros", "unknown_cost_calls"}
 		records := make([][]string, len(typed))
 		for i, r := range typed {
 			records[i] = []string{
 				formatUintPtr(r.APIKeyID),
-				r.OwnerLabel,
+				r.Username,
+				r.KeyPrefix,
 				strconv.FormatInt(r.Calls, 10),
 				formatRate(r.SuccessRate),
 				strconv.FormatInt(r.InputTokens, 10),

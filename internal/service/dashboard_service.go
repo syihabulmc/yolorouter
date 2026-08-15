@@ -33,7 +33,7 @@ const (
 // DashboardService is the stateless composition layer over
 // dashboard_repository. It has no caching, masking, or permission post-
 // processing — those concerns will hang off this struct in later milestones
-// (e.g. it may redact owner_label per admin role).
+// (e.g. it may redact caller identity per admin role).
 type DashboardService struct {
 	db *gorm.DB
 }

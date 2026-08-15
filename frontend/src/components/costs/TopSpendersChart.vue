@@ -21,6 +21,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { callerDisplay } from '../../utils/format'
 import { useI18n } from 'vue-i18n'
 import { BarChart3 } from '@lucide/vue'
 import EmptyState from '../EmptyState.vue'
@@ -60,7 +61,7 @@ const bars = computed<Bar[]>(() => {
     .sort((a, b) => b.cost_micros - a.cost_micros)
     .slice(0, TOP_N)
     .map((r) => ({
-      label: r.owner_label || t('costs.topSpenders.unknownCaller'),
+      label: callerDisplay(r.username, r.key_prefix) || t('costs.topSpenders.unknownCaller'),
       micros: r.cost_micros,
       value: fromMicros(r.cost_micros),
       apiKeyId: r.api_key_id ?? null,

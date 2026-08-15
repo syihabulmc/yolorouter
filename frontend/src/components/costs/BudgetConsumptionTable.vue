@@ -24,6 +24,7 @@
 
 <script setup lang="ts">
 import { computed, h } from 'vue'
+import { callerDisplay } from '../../utils/format'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { type DataTableColumns } from 'naive-ui'
@@ -109,7 +110,7 @@ function renderDaysToExhaust(r: BudgetRow) {
 const columns = computed<DataTableColumns<BudgetRow>>(() => [
   {
     title: columnTitle(t('costs.budget.callerColumn'), t('costs.budget.callerColumn_tip')),
-    key: 'owner_label',
+    key: 'owner_username',
     minWidth: 180,
     render: (r) =>
       h('div', { class: 'budget-caller' }, [
@@ -119,7 +120,7 @@ const columns = computed<DataTableColumns<BudgetRow>>(() => [
             class: 'budget-caller__label budget-caller__label--link',
             onClick: () => router.push(`/costs/keys/${r.id}`),
           },
-          r.owner_label || t('costs.budget.unnamedKey'),
+          callerDisplay(r.owner_username, r.key_prefix) || t('costs.budget.unnamedKey'),
         ),
       ]),
   },

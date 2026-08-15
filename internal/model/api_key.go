@@ -35,7 +35,6 @@ type APIKey struct {
 	// pre-00021 keys. Read only on the reveal path; never used for auth.
 	EncryptedKey      string     `gorm:"column:encrypted_key" json:"-"`
 	KeyPrefix         string     `gorm:"column:key_prefix" json:"key_prefix"`
-	OwnerLabel        string     `gorm:"column:owner_label" json:"owner_label"`
 	Remark            string     `gorm:"column:remark" json:"remark"`
 	Status            int        `gorm:"column:status" json:"status"`
 	ExpiresAt         *time.Time `gorm:"column:expires_at" json:"expires_at"`

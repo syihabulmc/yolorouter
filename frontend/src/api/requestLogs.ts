@@ -26,7 +26,8 @@ export type StatusClass = 'success' | 'failed' | 'partial' | 'cancelled' | 'reje
 export interface RequestLogRow {
   request_id: string
   api_key_id: number | null
-  owner_label: string
+  /** Username of the account owning the request's key; '' for unattributed (auth-rejected) rows. */
+  username: string
   model_name: string
   /** Endpoint the caller hit, e.g. /v1/chat/completions; '' for pre-relay rejects. */
   request_path: string

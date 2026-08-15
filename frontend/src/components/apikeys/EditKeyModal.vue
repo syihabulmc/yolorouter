@@ -27,12 +27,6 @@
       :rules="rules"
       label-placement="top"
     >
-      <n-form-item path="owner_label">
-        <template #label>
-          <HelpLabel :tip="t('apiKeys.ownerLabel_tip')">{{ t('apiKeys.ownerLabel') }}</HelpLabel>
-        </template>
-        <n-input v-model:value="form.owner_label" :maxlength="50" />
-      </n-form-item>
       <n-form-item path="remark">
         <template #label>
           <HelpLabel :tip="t('apiKeys.remark_tip')">{{ t('apiKeys.remark') }}</HelpLabel>
@@ -144,7 +138,6 @@ const loading = ref(true)
 const saving = ref(false)
 
 const form = reactive({
-  owner_label: '',
   remark: '',
   allow_all_models: false,
   model_ids: [] as number[],
@@ -156,7 +149,6 @@ const form = reactive({
 })
 
 const rules = computed<FormRules>(() => ({
-  owner_label: [{ max: 50, trigger: ['blur', 'input'] }],
   remark: [{ max: 200, trigger: ['blur', 'input'] }],
   // A custom allowlist needs at least one model; an all-models key needs none.
   model_ids: modelIdsRule(t, !form.allow_all_models),
@@ -173,7 +165,6 @@ const modelOptions = computed(() =>
 const initialExpiresAt = ref<number | null>(null)
 
 function fill(k: APIKey) {
-  form.owner_label = k.owner_label
   form.remark = k.remark
   form.allow_all_models = k.allow_all_models
   form.model_ids = [...k.model_ids]
@@ -229,7 +220,6 @@ async function onSave() {
     // restricted field outright, so their payload must omit the rest.
     const input: UpdateAPIKeyInput = authStore.isAdmin
       ? {
-          owner_label: form.owner_label,
           remark: form.remark,
           allow_all_models: form.allow_all_models,
           model_ids: form.model_ids,
@@ -240,7 +230,6 @@ async function onSave() {
           budget_limit_micros: form.budget_amount != null ? toMicros(form.budget_amount) : 0,
         }
       : {
-          owner_label: form.owner_label,
           remark: form.remark,
           expires_at: expiryChanged && form.expires_at != null ? new Date(form.expires_at).toISOString() : undefined,
         }

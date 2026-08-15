@@ -213,11 +213,11 @@ func TestMemberKeyCreationFieldBoundary(t *testing.T) {
 	f := newMemberScopeFixture(t)
 
 	for _, body := range []string{
-		`{"owner_label":"x","rpm_limit":10}`,
-		`{"owner_label":"x","budget_limit_micros":1000}`,
-		`{"owner_label":"x","model_ids":[1]}`,
-		`{"owner_label":"x","custom_system_prompt_enabled_override":true,"custom_system_prompt_enabled":true,"custom_system_prompt":"p"}`,
-		`{"owner_label":"x","compress_enabled_override":true,"compress_enabled":true}`,
+		`{"remark":"x","rpm_limit":10}`,
+		`{"remark":"x","budget_limit_micros":1000}`,
+		`{"remark":"x","model_ids":[1]}`,
+		`{"remark":"x","custom_system_prompt_enabled_override":true,"custom_system_prompt_enabled":true,"custom_system_prompt":"p"}`,
+		`{"remark":"x","compress_enabled_override":true,"compress_enabled":true}`,
 	} {
 		w := f.do(t, http.MethodPost, "/api/admin/api-keys", body, f.aliceCk)
 		if w.Code != http.StatusBadRequest {
@@ -225,7 +225,7 @@ func TestMemberKeyCreationFieldBoundary(t *testing.T) {
 		}
 	}
 
-	w := f.do(t, http.MethodPost, "/api/admin/api-keys", `{"owner_label":"mine","remark":"ok"}`, f.aliceCk)
+	w := f.do(t, http.MethodPost, "/api/admin/api-keys", `{"remark":"ok"}`, f.aliceCk)
 	if w.Code != http.StatusOK {
 		t.Fatalf("permitted member create: %d %s", w.Code, w.Body.String())
 	}

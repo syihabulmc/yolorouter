@@ -237,8 +237,7 @@ func TestPatchAPIKeyWithoutCASKeepsLegacyBehavior(t *testing.T) {
 	}
 
 	// No expected_updated_at field — unconditional UPDATE, never 409.
-	owner := "nocas-owner"
-	wp := patchAPIKey(t, r, createEnv.Data.APIKey.ID, map[string]any{"owner_label": owner})
+	wp := patchAPIKey(t, r, createEnv.Data.APIKey.ID, map[string]any{"remark": "nocas-remark"})
 	if wp.Code != http.StatusOK {
 		t.Fatalf("non-CAS PATCH should succeed, got %d: %s", wp.Code, wp.Body.String())
 	}

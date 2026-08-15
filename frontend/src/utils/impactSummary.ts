@@ -18,7 +18,7 @@ function joinNames(names: string[], limit?: number): string {
 }
 
 function keyDisplayName(key: ModelImpactKey): string {
-  return key.owner_label || key.key_prefix
+  return key.remark || key.key_prefix
 }
 
 // modelImpactOverview is the shared factual part: who references the model and

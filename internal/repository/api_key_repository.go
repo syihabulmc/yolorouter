@@ -54,7 +54,6 @@ func FindAPIKeyByID(db *gorm.DB, id uint) (*model.APIKey, error) {
 // status is computed against).
 type APIKeyFilter struct {
 	Query  string
-	Owner  string
 	Status string
 	// UserID narrows to keys owned by one account; 0 = no constraint (0 is
 	// never a valid owner, see migration 00024).
@@ -84,14 +83,10 @@ func likePrefixPattern(q string) string {
 // Postgres's case-sensitive LIKE behaving identically — search must not depend
 // on the driver.
 func applyAPIKeyFilters(tx *gorm.DB, f APIKeyFilter) *gorm.DB {
-	// Free-text search matches the key prefix or remark (owner has its own
-	// dedicated filter below).
+	// Free-text search matches the key prefix or remark.
 	if f.Query != "" {
 		like := likeContainsPattern(f.Query)
 		tx = tx.Where("LOWER(key_prefix) LIKE LOWER(?) ESCAPE '\\' OR LOWER(remark) LIKE LOWER(?) ESCAPE '\\'", like, like)
-	}
-	if f.Owner != "" {
-		tx = tx.Where("LOWER(owner_label) LIKE LOWER(?) ESCAPE '\\'", likeContainsPattern(f.Owner))
 	}
 	if f.UserID != 0 {
 		tx = tx.Where("user_id = ?", f.UserID)

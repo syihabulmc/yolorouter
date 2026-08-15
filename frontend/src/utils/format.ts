@@ -13,3 +13,15 @@ export function formatNumber(n: number): string {
 export function formatRate(r: number): string {
   return `${(r * 100).toFixed(1)}%`
 }
+
+// callerDisplay renders a per-key aggregate row's label: the owning
+// account's username disambiguated by the key prefix (one account usually
+// owns several keys, so the username alone would produce identical rows).
+// Returns '' when neither part is known — callers supply their own
+// "unknown" fallback text.
+export function callerDisplay(username: string, keyPrefix: string): string {
+  if (username && keyPrefix) return `${username} (${keyPrefix}…)`
+  if (username) return username
+  if (keyPrefix) return `${keyPrefix}…`
+  return ''
+}

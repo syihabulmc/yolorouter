@@ -1272,9 +1272,9 @@ const modelImpactRecentWindow = 7 * 24 * time.Hour
 // ModelImpactKeyView is one key an operator would break: enough to recognize
 // it in the key list (label plus prefix), nothing that could rebuild it.
 type ModelImpactKeyView struct {
-	ID         uint   `json:"id"`
-	OwnerLabel string `json:"owner_label"`
-	KeyPrefix  string `json:"key_prefix"`
+	ID        uint   `json:"id"`
+	Remark    string `json:"remark"`
+	KeyPrefix string `json:"key_prefix"`
 }
 
 // ModelImpactView is what disabling or renaming this model touches.
@@ -1306,7 +1306,7 @@ func (s *ModelService) GetModelImpact(id uint, now time.Time) (*ModelImpactView,
 	}
 	keyViews := make([]ModelImpactKeyView, 0, len(keys))
 	for _, k := range keys {
-		keyViews = append(keyViews, ModelImpactKeyView{ID: k.ID, OwnerLabel: k.OwnerLabel, KeyPrefix: k.KeyPrefix})
+		keyViews = append(keyViews, ModelImpactKeyView{ID: k.ID, Remark: k.Remark, KeyPrefix: k.KeyPrefix})
 	}
 	allowAll, err := repository.CountCallableAllowAllAPIKeys(s.db, now)
 	if err != nil {

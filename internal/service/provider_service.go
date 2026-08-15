@@ -1362,7 +1362,7 @@ func (s *ProviderService) GetProviderImpact(id uint, now time.Time) (*ProviderIm
 			return nil, err
 		}
 		for _, k := range keys {
-			affectedKeys = append(affectedKeys, ModelImpactKeyView{ID: k.ID, OwnerLabel: k.OwnerLabel, KeyPrefix: k.KeyPrefix})
+			affectedKeys = append(affectedKeys, ModelImpactKeyView{ID: k.ID, Remark: k.Remark, KeyPrefix: k.KeyPrefix})
 		}
 		allowAll, err = repository.CountCallableAllowAllAPIKeys(s.db, now)
 		if err != nil {

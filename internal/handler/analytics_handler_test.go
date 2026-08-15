@@ -371,16 +371,13 @@ func TestGetAnalyticsReportByProviderResolvesNamesViaPostFetch(t *testing.T) {
 	}
 }
 
-func TestGetAnalyticsReportByCallerResolvesOwnerLabels(t *testing.T) {
+func TestGetAnalyticsReportByCallerResolvesOwnerUsernames(t *testing.T) {
 	r, db := newAnalyticsTestRouter(t)
-	key := &model.APIKey{OwnerLabel: "alice", KeyHash: "x", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
-	if err := db.Create(key).Error; err != nil {
-		t.Fatalf("seed api_key: %v", err)
-	}
+	key, _ := seedAPIKey(t, db, "alice")
 	now := time.Now().UTC()
 	seedRequestLog(t, db, "k1", now, func(r *model.RequestLog) {
 		r.ModelName = "gpt-4"
-		r.APIKeyID = &key.ID
+		r.APIKeyID = &key
 		r.StatusCode = 200
 		r.InputTokens = 30
 		r.OutputTokens = 15
@@ -399,9 +396,9 @@ func TestGetAnalyticsReportByCallerResolvesOwnerLabels(t *testing.T) {
 	var env struct {
 		Data struct {
 			Rows []struct {
-				APIKeyID   *uint  `json:"api_key_id"`
-				OwnerLabel string `json:"owner_label"`
-				Calls      int64  `json:"calls"`
+				APIKeyID *uint  `json:"api_key_id"`
+				Username string `json:"username"`
+				Calls    int64  `json:"calls"`
 			} `json:"rows"`
 		} `json:"data"`
 	}
@@ -411,21 +408,21 @@ func TestGetAnalyticsReportByCallerResolvesOwnerLabels(t *testing.T) {
 	if len(env.Data.Rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(env.Data.Rows))
 	}
-	var labeled *struct {
-		APIKeyID   *uint  `json:"api_key_id"`
-		OwnerLabel string `json:"owner_label"`
-		Calls      int64  `json:"calls"`
+	var named *struct {
+		APIKeyID *uint  `json:"api_key_id"`
+		Username string `json:"username"`
+		Calls    int64  `json:"calls"`
 	}
 	for i := range env.Data.Rows {
 		if env.Data.Rows[i].APIKeyID != nil {
-			labeled = &env.Data.Rows[i]
+			named = &env.Data.Rows[i]
 		}
 	}
-	if labeled == nil {
+	if named == nil {
 		t.Fatalf("no non-NULL api_key bucket in %+v", env.Data.Rows)
 	}
-	if labeled.OwnerLabel != "alice" {
-		t.Fatalf("OwnerLabel = %q, want alice", labeled.OwnerLabel)
+	if named.Username != "alice" {
+		t.Fatalf("Username = %q, want alice", named.Username)
 	}
 }
 
@@ -712,7 +709,7 @@ type compressStatsEnvelop struct {
 	} `json:"skip_reason_breakdown"`
 	TopAPIKeys []struct {
 		APIKeyID    *uint  `json:"api_key_id"`
-		OwnerLabel  string `json:"owner_label"`
+		Username    string `json:"username"`
 		Calls       int64  `json:"calls"`
 		TokensSaved int64  `json:"tokens_saved"`
 	} `json:"top_api_keys"`
@@ -773,15 +770,10 @@ func doCompressStats(t *testing.T, r *gin.Engine, query string) compressStatsEnv
 func TestGetCompressStatsAggregatesSeededRows(t *testing.T) {
 	r, db := newAnalyticsTestRouter(t)
 
-	// Seed two api_keys so the Top-N bucket resolves owner_label.
-	key1 := &model.APIKey{OwnerLabel: "alice", KeyHash: "x", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
-	key2 := &model.APIKey{OwnerLabel: "bob", KeyHash: "y", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
-	if err := db.Create(key1).Error; err != nil {
-		t.Fatalf("seed api_key 1: %v", err)
-	}
-	if err := db.Create(key2).Error; err != nil {
-		t.Fatalf("seed api_key 2: %v", err)
-	}
+	// Seed two api_keys with distinct owners so the Top-N bucket resolves
+	// each key's username.
+	key1, _ := seedAPIKey(t, db, "alice")
+	key2, _ := seedAPIKey(t, db, "bob")
 	// Seed two providers so TopProviders resolves provider_name.
 	prov1 := seedProvider(t, db, "openai-main")
 	prov2 := seedProvider(t, db, "anthropic-main")
@@ -791,7 +783,7 @@ func TestGetCompressStatsAggregatesSeededRows(t *testing.T) {
 
 	// Row 1 (alice, gpt-4o-mini, openai, compressed, diff+gotest+diff): 100 tokens, 10 cost.
 	seedRequestLog(t, db, "c1", now, func(r *model.RequestLog) {
-		r.APIKeyID = &key1.ID
+		r.APIKeyID = &key1
 		r.ModelName = "gpt-4o-mini"
 		r.ProviderID = &prov1
 		r.InputTokens = 500
@@ -802,7 +794,7 @@ func TestGetCompressStatsAggregatesSeededRows(t *testing.T) {
 	})
 	// Row 2 (bob, claude-3-haiku, anthropic, compressed, diff): 50 tokens, 5 cost.
 	seedRequestLog(t, db, "c2", now, func(r *model.RequestLog) {
-		r.APIKeyID = &key2.ID
+		r.APIKeyID = &key2
 		r.ModelName = "claude-3-haiku"
 		r.ProviderID = &prov2
 		r.InputTokens = 200
@@ -813,7 +805,7 @@ func TestGetCompressStatsAggregatesSeededRows(t *testing.T) {
 	})
 	// Row 3 (alice, gpt-4o-mini, openai, skipped too_small, 0 tokens, no compressors).
 	seedRequestLog(t, db, "c3", now, func(r *model.RequestLog) {
-		r.APIKeyID = &key1.ID
+		r.APIKeyID = &key1
 		r.ModelName = "gpt-4o-mini"
 		r.ProviderID = &prov1
 		r.InputTokens = 5
@@ -822,7 +814,7 @@ func TestGetCompressStatsAggregatesSeededRows(t *testing.T) {
 	})
 	// Row 4 (alice, gpt-4o-mini, openai, 3 days ago, compressed, gotest): 30 tokens, 3 cost.
 	seedRequestLog(t, db, "c4", day3, func(r *model.RequestLog) {
-		r.APIKeyID = &key1.ID
+		r.APIKeyID = &key1
 		r.ModelName = "gpt-4o-mini"
 		r.ProviderID = &prov1
 		r.InputTokens = 100
@@ -837,7 +829,7 @@ func TestGetCompressStatsAggregatesSeededRows(t *testing.T) {
 	// compressors_applied, not on compress_skip_reason. Counting this row as
 	// compressed would be the overcount bug.
 	seedRequestLog(t, db, "c5", now, func(r *model.RequestLog) {
-		r.APIKeyID = &key2.ID
+		r.APIKeyID = &key2
 		r.ModelName = "claude-3-haiku"
 		r.ProviderID = &prov2
 		r.InputTokens = 50
@@ -883,10 +875,10 @@ func TestGetCompressStatsAggregatesSeededRows(t *testing.T) {
 	if len(data.TopAPIKeys) != 2 {
 		t.Fatalf("TopAPIKeys len = %d, want 2", len(data.TopAPIKeys))
 	}
-	if data.TopAPIKeys[0].OwnerLabel != "alice" || data.TopAPIKeys[0].TokensSaved != 130 {
+	if data.TopAPIKeys[0].Username != "alice" || data.TopAPIKeys[0].TokensSaved != 130 {
 		t.Fatalf("TopAPIKeys[0] = %+v, want alice/130", data.TopAPIKeys[0])
 	}
-	if data.TopAPIKeys[1].OwnerLabel != "bob" || data.TopAPIKeys[1].TokensSaved != 50 {
+	if data.TopAPIKeys[1].Username != "bob" || data.TopAPIKeys[1].TokensSaved != 50 {
 		t.Fatalf("TopAPIKeys[1] = %+v, want bob/50", data.TopAPIKeys[1])
 	}
 	// Calls per key: alice has 3 rows (c1, c3, c4); bob has 2 (c2, c5).
@@ -1048,35 +1040,29 @@ func TestGetCompressStatsEmptyReturnsEmptyArrays(t *testing.T) {
 // rows only.
 func TestGetCompressStatsRespectsAPIKeyFilter(t *testing.T) {
 	r, db := newAnalyticsTestRouter(t)
-	key1 := &model.APIKey{OwnerLabel: "alice", KeyHash: "x", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
-	key2 := &model.APIKey{OwnerLabel: "bob", KeyHash: "y", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
-	if err := db.Create(key1).Error; err != nil {
-		t.Fatalf("seed api_key 1: %v", err)
-	}
-	if err := db.Create(key2).Error; err != nil {
-		t.Fatalf("seed api_key 2: %v", err)
-	}
+	key1, _ := seedAPIKey(t, db, "alice")
+	key2, _ := seedAPIKey(t, db, "bob")
 	now := time.Now().UTC()
 	seedRequestLog(t, db, "c1", now, func(r *model.RequestLog) {
-		r.APIKeyID = &key1.ID
+		r.APIKeyID = &key1
 		r.CompressEstimatedTokensSaved = 100
 		r.CompressorsApplied = "diff"
 	})
 	seedRequestLog(t, db, "c2", now, func(r *model.RequestLog) {
-		r.APIKeyID = &key2.ID
+		r.APIKeyID = &key2
 		r.CompressEstimatedTokensSaved = 50
 		r.CompressorsApplied = "gotest"
 	})
 
 	// Filter to alice's key only.
-	data := doCompressStats(t, r, "api_key_id="+strconv.FormatUint(uint64(key1.ID), 10))
+	data := doCompressStats(t, r, "api_key_id="+strconv.FormatUint(uint64(key1), 10))
 	if data.Totals.TotalCalls != 1 {
 		t.Fatalf("TotalCalls = %d, want 1 (filtered)", data.Totals.TotalCalls)
 	}
 	if data.Totals.TokensSaved != 100 {
 		t.Fatalf("TokensSaved = %d, want 100", data.Totals.TokensSaved)
 	}
-	if len(data.TopAPIKeys) != 1 || data.TopAPIKeys[0].OwnerLabel != "alice" {
+	if len(data.TopAPIKeys) != 1 || data.TopAPIKeys[0].Username != "alice" {
 		t.Fatalf("TopAPIKeys = %+v, want alice only", data.TopAPIKeys)
 	}
 	// CompressorHits returns all four known compressors; only diff has a
@@ -1146,17 +1132,9 @@ func TestGetCompressStatsTopAPIKeysDropsNullBucketWithinLimit(t *testing.T) {
 	// deterministic. Their values are all BELOW the NULL bucket's 1000 so
 	// the NULL row would land at position 0 inside the LIMIT=5 window.
 	for i := 0; i < 5; i++ {
-		key := &model.APIKey{
-			OwnerLabel: "k" + strconv.Itoa(i),
-			KeyHash:    "h" + strconv.Itoa(i),
-			KeyPrefix:  "sk-",
-			Status:     model.APIKeyStatusActive,
-		}
-		if err := db.Create(key).Error; err != nil {
-			t.Fatalf("seed api_key %d: %v", i, err)
-		}
+		key, _ := seedAPIKey(t, db, "owner"+strconv.Itoa(i))
 		seedRequestLog(t, db, "real"+strconv.Itoa(i), time.Now().UTC(), func(r *model.RequestLog) {
-			r.APIKeyID = &key.ID
+			r.APIKeyID = &key
 			r.CompressEstimatedTokensSaved = 100 - i // 100, 99, 98, 97, 96
 		})
 	}
@@ -1175,8 +1153,8 @@ func TestGetCompressStatsTopAPIKeysDropsNullBucketWithinLimit(t *testing.T) {
 		if row.APIKeyID == nil {
 			t.Fatalf("NULL api_key_id row leaked into TopAPIKeys: %+v", row)
 		}
-		if row.OwnerLabel == "" {
-			t.Fatalf("OwnerLabel empty for api_key_id=%v (label resolution broken)", row.APIKeyID)
+		if row.Username == "" {
+			t.Fatalf("Username empty for api_key_id=%v (owner resolution broken)", row.APIKeyID)
 		}
 	}
 }
@@ -1323,8 +1301,8 @@ func TestAnalyticsReportFilterPin(t *testing.T) {
 	// filter query strings use the real values (SQLite picks IDs; we don't
 	// hard-code 1/2). Two rows with disjoint (key, model, provider) triples
 	// and distinct cost so a pin that leaks the other entity is detectable.
-	key1 := seedAPIKey(t, db, "alice")
-	key2 := seedAPIKey(t, db, "bob")
+	key1, _ := seedAPIKey(t, db, "alice")
+	key2, _ := seedAPIKey(t, db, "bob")
 	prov1 := seedProvider(t, db, "openai-main")
 	prov2 := seedProvider(t, db, "anthropic-main")
 
@@ -1520,23 +1498,18 @@ func minInt(a, b int) int {
 func TestCallerReportRanksBySpendNotVolume(t *testing.T) {
 	r, db := newAnalyticsTestRouter(t)
 	now := time.Now().UTC()
-	cheap := &model.APIKey{OwnerLabel: "cheap-chatty", KeyHash: "h1", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
-	pricey := &model.APIKey{OwnerLabel: "pricey-quiet", KeyHash: "h2", KeyPrefix: "sk-", Status: model.APIKeyStatusActive}
-	for _, k := range []*model.APIKey{cheap, pricey} {
-		if err := db.Create(k).Error; err != nil {
-			t.Fatalf("seed api_key: %v", err)
-		}
-	}
+	cheap, _ := seedAPIKey(t, db, "chatty-cheap")
+	pricey, _ := seedAPIKey(t, db, "pricey-quiet")
 	for i := 0; i < 3; i++ {
 		seedRequestLog(t, db, fmt.Sprintf("cheap-%d", i), now, func(rl *model.RequestLog) {
-			rl.APIKeyID = &cheap.ID
+			rl.APIKeyID = &cheap
 			rl.StatusCode = 200
 			rl.CostMicros = 1
 			rl.CostKnown = true
 		})
 	}
 	seedRequestLog(t, db, "pricey-1", now, func(rl *model.RequestLog) {
-		rl.APIKeyID = &pricey.ID
+		rl.APIKeyID = &pricey
 		rl.StatusCode = 200
 		rl.CostMicros = 1000
 		rl.CostKnown = true
@@ -1549,8 +1522,8 @@ func TestCallerReportRanksBySpendNotVolume(t *testing.T) {
 	var env struct {
 		Data struct {
 			Rows []struct {
-				OwnerLabel string `json:"owner_label"`
-				Calls      int64  `json:"calls"`
+				Username string `json:"username"`
+				Calls    int64  `json:"calls"`
 			} `json:"rows"`
 		} `json:"data"`
 	}
@@ -1560,9 +1533,9 @@ func TestCallerReportRanksBySpendNotVolume(t *testing.T) {
 	if len(env.Data.Rows) < 2 {
 		t.Fatalf("rows = %d, want at least 2", len(env.Data.Rows))
 	}
-	if env.Data.Rows[0].OwnerLabel != "pricey-quiet" {
+	if env.Data.Rows[0].Username != "pricey-quiet" {
 		t.Fatalf("first row = %q (calls=%d), want pricey-quiet on top despite fewer calls",
-			env.Data.Rows[0].OwnerLabel, env.Data.Rows[0].Calls)
+			env.Data.Rows[0].Username, env.Data.Rows[0].Calls)
 	}
 }
 

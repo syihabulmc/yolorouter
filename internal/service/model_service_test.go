@@ -2500,11 +2500,11 @@ func TestModelImpactNamesOnlyKeysThatCanStillCall(t *testing.T) {
 	}
 
 	keySvc := NewAPIKeyService(db, testMasterKey())
-	callable, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "alice", ModelIDs: []uint{modelView.ID}}, now)
+	callable, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), Remark: "alice's laptop", ModelIDs: []uint{modelView.ID}}, now)
 	if err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)
 	}
-	revoked, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "bob", ModelIDs: []uint{modelView.ID}}, now)
+	revoked, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{modelView.ID}}, now)
 	if err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)
 	}
@@ -2512,7 +2512,7 @@ func TestModelImpactNamesOnlyKeysThatCanStillCall(t *testing.T) {
 		Update("status", model.APIKeyStatusRevoked).Error; err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	expired, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "carol", ModelIDs: []uint{modelView.ID}}, now)
+	expired, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{modelView.ID}}, now)
 	if err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)
 	}
@@ -2521,10 +2521,10 @@ func TestModelImpactNamesOnlyKeysThatCanStillCall(t *testing.T) {
 		Update("expires_at", past).Error; err != nil {
 		t.Fatalf("expire: %v", err)
 	}
-	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "dave", ModelIDs: []uint{otherModel.ID}}, now); err != nil {
+	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{otherModel.ID}}, now); err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)
 	}
-	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), OwnerLabel: "erin", AllowAllModels: true}, now); err != nil {
+	if _, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), AllowAllModels: true}, now); err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)
 	}
 
@@ -2535,8 +2535,8 @@ func TestModelImpactNamesOnlyKeysThatCanStillCall(t *testing.T) {
 	if len(impact.AllowlistedKeys) != 1 || impact.AllowlistedKeys[0].ID != callable.APIKey.ID {
 		t.Fatalf("allowlisted keys = %+v, want exactly the callable key %d", impact.AllowlistedKeys, callable.APIKey.ID)
 	}
-	if impact.AllowlistedKeys[0].OwnerLabel != "alice" {
-		t.Fatalf("owner label = %q, want alice", impact.AllowlistedKeys[0].OwnerLabel)
+	if impact.AllowlistedKeys[0].Remark != "alice's laptop" {
+		t.Fatalf("remark = %q, want alice's laptop", impact.AllowlistedKeys[0].Remark)
 	}
 	if impact.AllowAllKeyCount != 1 {
 		t.Fatalf("allow-all count = %d, want 1", impact.AllowAllKeyCount)

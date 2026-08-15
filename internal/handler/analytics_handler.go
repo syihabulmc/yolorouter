@@ -103,7 +103,7 @@ func GetAnalyticsReport(svc *service.AnalyticsService) gin.HandlerFunc {
 
 // ExportAnalyticsCSV handles GET /api/admin/analytics/export — streams the
 // report as CSV with a UTF-8 BOM (so Excel auto-detects the encoding and
-// renders CJK columns like owner_label / model_name correctly). Filename is
+// renders CJK columns like username / model_name correctly). Filename is
 // timestamped so repeated exports don't clobber each other in the browser's
 // downloads. Once the BOM is written the response can no longer switch to
 // the JSON envelope on a mid-stream error; we surface the failure via

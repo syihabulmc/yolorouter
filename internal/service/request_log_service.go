@@ -1,7 +1,7 @@
 // Package service additions: request-log list + detail composition.
 // Strict 3-layer: handler → service → repository. The service
 // owns the business-DTO shape (RequestLogListItem / RequestLogDetail), the
-// owner_label / provider_name JOIN post-fetch, the attempts_detail JSON
+// provider_name / username JOIN post-fetch, the attempts_detail JSON
 // parse, the status-class derivation at the row level, and the CSV stream
 // assembly. The repository owns the SQL filter / pagination / aggregate
 // helpers (request_log_query.go).
@@ -29,7 +29,7 @@ import (
 // RequestLogService is the stateless composition layer over
 // request_log_query.go. It has no caching, masking, or permission post-
 // processing — those concerns will hang off this struct in later milestones
-// (owner_label masking per admin role is a likely add).
+// (per-role masking is a likely add).
 type RequestLogService struct {
 	db *gorm.DB
 }
@@ -73,14 +73,17 @@ type RequestLogListFilter struct {
 // RequestLogListItem is the list-row DTO. It carries no
 // plaintext key material (only id/prefix are stored anyway) and no
 // attempts_detail blob — only the attempt count, with full attempts reserved
-// for the detail endpoint. OwnerLabel and ProviderName are JOIN'd from
+// for the detail endpoint. Username and ProviderName are JOIN'd from
 // api_keys / providers at this layer. StatusClass mirrors the list-filter
 // buckets so a row and its filter use one definition of "success".
 type RequestLogListItem struct {
-	RequestID  string `json:"request_id"`
-	APIKeyID   *uint  `json:"api_key_id"`
-	OwnerLabel string `json:"owner_label"`
-	ModelName  string `json:"model_name"`
+	RequestID string `json:"request_id"`
+	APIKeyID  *uint  `json:"api_key_id"`
+	// Username of the account that owns the request's key (request_logs.
+	// user_id), batch-resolved post-fetch. Empty for auth-rejected
+	// rows with no attributed key.
+	Username  string `json:"username"`
+	ModelName string `json:"model_name"`
 	// RequestPath is the endpoint the caller hit (e.g. /v1/chat/completions);
 	// empty for rows rejected before relay and for rows predating the field.
 	RequestPath string `json:"request_path"`
@@ -122,9 +125,10 @@ type RequestLogListItem struct {
 // (pre-migration rows or capture failure) they degrade to zero values and
 // the detail page shows "not recorded" rather than erroring.
 type RequestLogDetail struct {
-	RequestID        string  `json:"request_id"`
-	APIKeyID         *uint   `json:"api_key_id"`
-	OwnerLabel       string  `json:"owner_label"`
+	RequestID string `json:"request_id"`
+	APIKeyID  *uint  `json:"api_key_id"`
+	// Username of the owning account — same resolution as the list rows.
+	Username         string  `json:"username"`
 	ModelName        string  `json:"model_name"`
 	RequestPath      string  `json:"request_path"`
 	Source           string  `json:"source"`
@@ -193,7 +197,7 @@ func truncateInlineBody(s string) string {
 }
 
 // ListRequestLogs returns one page of rows (newest first) plus the total
-// count for pagination. Each row is enriched with its api_keys.owner_label
+// count for pagination. Each row is enriched with its owning account username
 // and providers.name via a post-fetch batch lookup (one SELECT per related
 // table) rather than a SQL JOIN, so the shared repository.ListRequestLogs
 // stays the single source of truth for filtering and pagination.
@@ -210,14 +214,14 @@ func (s *RequestLogService) ListRequestLogs(filter RequestLogListFilter) ([]Requ
 }
 
 // toListItems converts raw request_log rows into the wire DTO, batch-loading
-// owner_label / provider_name and deriving status_class. Shared by the
+// provider_name / username and deriving status_class. Shared by the
 // paginated list endpoint and the keyset-based CSV export so both render
 // identical rows.
 func (s *RequestLogService) toListItems(rows []model.RequestLog) ([]RequestLogListItem, error) {
 	if len(rows) == 0 {
 		return []RequestLogListItem{}, nil
 	}
-	ownerLabels, providerNames, err := s.fetchRelatedNames(rows)
+	providerNames, userNames, err := s.fetchRelatedNames(rows)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +232,7 @@ func (s *RequestLogService) toListItems(rows []model.RequestLog) ([]RequestLogLi
 		items = append(items, RequestLogListItem{
 			RequestID:          r.RequestID,
 			APIKeyID:           r.APIKeyID,
-			OwnerLabel:         lookupName(r.APIKeyID, ownerLabels),
+			Username:           ownerUsernameFor(r.APIKeyID, r.UserID, userNames),
 			ModelName:          r.ModelName,
 			RequestPath:        r.RequestPath,
 			Source:             r.Source,
@@ -319,7 +323,7 @@ func (s *RequestLogService) GetRequestLogDetail(requestID string) (*RequestLogDe
 		}
 		return nil, err
 	}
-	ownerLabels, providerNames, err := s.fetchRelatedNames([]model.RequestLog{*row})
+	providerNames, userNames, err := s.fetchRelatedNames([]model.RequestLog{*row})
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +354,7 @@ func (s *RequestLogService) GetRequestLogDetail(requestID string) (*RequestLogDe
 	detail := &RequestLogDetail{
 		RequestID:          row.RequestID,
 		APIKeyID:           row.APIKeyID,
-		OwnerLabel:         lookupName(row.APIKeyID, ownerLabels),
+		Username:           ownerUsernameFor(row.APIKeyID, row.UserID, userNames),
 		ModelName:          row.ModelName,
 		RequestPath:        row.RequestPath,
 		Source:             row.Source,
@@ -418,7 +422,7 @@ func (s *RequestLogService) GetStreamBodyPath(requestID string) (string, error) 
 // ExportRequestLogsCSV walks every page of the filter (PageSize=200, the
 // repository's clamp ceiling) and streams each row as CSV. The UTF-8 BOM is
 // written first so Excel/Sheets auto-detect the encoding and render CJK
-// columns correctly (owner_label / provider_name / model_name may all carry
+// columns correctly (username / provider_name / model_name may all carry
 // CJK). The csv.Writer is flushed after every page so the HTTP response
 // streams incrementally rather than buffering the whole export in memory.
 //
@@ -474,41 +478,30 @@ func buildCSVRecords(items []RequestLogListItem) [][]string {
 	return records
 }
 
-// fetchRelatedNames batch-loads owner_label / provider_name for every
-// api_key_id / provider_id referenced in rows. Returns two lookup maps
-// keyed by id; rows whose key/provider has been soft-deleted (or whose FK
+// fetchRelatedNames batch-loads provider_name / username for every
+// provider_id / user_id referenced in rows. Returns two lookup maps
+// keyed by id; rows whose provider/user row is gone (or whose FK
 // is NULL) surface as empty strings in the DTO via lookupName. Two small
 // SELECTs rather than one JOIN keeps the read path on the shared
 // repository.ListRequestLogs — adding batch-by-id repository helpers
 // purely for this display-name lookup isn't worth the layering overhead.
-func (s *RequestLogService) fetchRelatedNames(rows []model.RequestLog) (ownerLabels map[uint]string, providerNames map[uint]string, err error) {
-	apiKeyIDs := make([]uint, 0)
+func (s *RequestLogService) fetchRelatedNames(rows []model.RequestLog) (providerNames, userNames map[uint]string, err error) {
 	providerIDs := make([]uint, 0)
-	seenKey := make(map[uint]struct{})
+	userIDs := make([]uint, 0)
 	seenProv := make(map[uint]struct{})
+	seenUser := make(map[uint]struct{})
 	for i := range rows {
-		if rows[i].APIKeyID != nil {
-			if _, ok := seenKey[*rows[i].APIKeyID]; !ok {
-				seenKey[*rows[i].APIKeyID] = struct{}{}
-				apiKeyIDs = append(apiKeyIDs, *rows[i].APIKeyID)
-			}
-		}
 		if rows[i].ProviderID != nil {
 			if _, ok := seenProv[*rows[i].ProviderID]; !ok {
 				seenProv[*rows[i].ProviderID] = struct{}{}
 				providerIDs = append(providerIDs, *rows[i].ProviderID)
 			}
 		}
-	}
-
-	ownerLabels = make(map[uint]string, len(apiKeyIDs))
-	if len(apiKeyIDs) > 0 {
-		var keys []model.APIKey
-		if qErr := s.db.Select("id", "owner_label").Where("id IN ?", apiKeyIDs).Find(&keys).Error; qErr != nil {
-			return nil, nil, qErr
-		}
-		for i := range keys {
-			ownerLabels[keys[i].ID] = keys[i].OwnerLabel
+		if rows[i].UserID != nil {
+			if _, ok := seenUser[*rows[i].UserID]; !ok {
+				seenUser[*rows[i].UserID] = struct{}{}
+				userIDs = append(userIDs, *rows[i].UserID)
+			}
 		}
 	}
 
@@ -522,7 +515,18 @@ func (s *RequestLogService) fetchRelatedNames(rows []model.RequestLog) (ownerLab
 			providerNames[provs[i].ID] = provs[i].Name
 		}
 	}
-	return ownerLabels, providerNames, nil
+
+	userNames = make(map[uint]string, len(userIDs))
+	if len(userIDs) > 0 {
+		var users []model.User
+		if qErr := s.db.Select("id", "username").Where("id IN ?", userIDs).Find(&users).Error; qErr != nil {
+			return nil, nil, qErr
+		}
+		for i := range users {
+			userNames[users[i].ID] = users[i].Username
+		}
+	}
+	return providerNames, userNames, nil
 }
 
 // toRepoFilterFromList maps the service-layer list filter to repository's
@@ -551,9 +555,21 @@ func toRepoFilterFromList(f RequestLogListFilter) *repository.RequestLogFilter {
 	}
 }
 
+// ownerUsernameFor resolves a row's display username only when the row has
+// an attributed key. The multi-user backfill stamped user_id onto EVERY
+// historical row — including auth-rejected ones that never resolved a key —
+// so user_id alone cannot prove ownership; a NULL api_key_id means "nobody's
+// traffic" regardless of what user_id says.
+func ownerUsernameFor(apiKeyID, userID *uint, userNames map[uint]string) string {
+	if apiKeyID == nil {
+		return ""
+	}
+	return lookupName(userID, userNames)
+}
+
 // lookupName returns names[*id], or "" when id is nil or absent from the
-// map (e.g. soft-deleted api_key, NULL provider_id on a pre-route reject).
-// Centralizes the nil-check + map-lookup pair repeated for owner_label and
+// map (e.g. a missing users row, NULL provider_id on a pre-route reject).
+// Centralizes the nil-check + map-lookup pair repeated for username and
 // provider_name.
 func lookupName(id *uint, names map[uint]string) string {
 	if id == nil {
@@ -598,7 +614,7 @@ func DeriveStatusClass(statusCode int, failReason *string) string {
 func csvHeaderRow() []string {
 	return []string{
 		"request_id", "created_at", "status_class", "status_code",
-		"owner_label", "model_name", "provider_name",
+		"username", "model_name", "provider_name",
 		"is_stream", "key_switches", "failovers", "final_provider_model", "duration_ms",
 		"input_tokens", "output_tokens",
 		"cache_write_tokens", "cache_read_tokens",
@@ -620,7 +636,7 @@ func csvRowFromItem(it RequestLogListItem) []string {
 		it.CreatedAt.Format(time.RFC3339),
 		it.StatusClass,
 		strconv.Itoa(it.StatusCode),
-		it.OwnerLabel,
+		it.Username,
 		it.ModelName,
 		it.ProviderName,
 		strconv.FormatBool(it.IsStream),

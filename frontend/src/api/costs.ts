@@ -63,7 +63,7 @@ export async function getCostStats(filter: AnalyticsFilter, includeProvider = tr
 // current burn rate rather than the selected reporting period.
 export interface BudgetRow {
   id: number
-  owner_label: string
+  owner_username: string
   key_prefix: string
   status: number
   display_status: string
@@ -83,12 +83,12 @@ const BUDGET_KEYS_PAGE_SIZE = 200
 // the summary complete matters more than the request count here — the overview
 // cards present these as authoritative totals.
 async function getAllAPIKeys(userId?: number | null): Promise<APIKey[]> {
-  const first = await listAPIKeys({ q: '', owner: '', status: '', userId, page: 1, pageSize: BUDGET_KEYS_PAGE_SIZE })
+  const first = await listAPIKeys({ q: '', status: '', userId, page: 1, pageSize: BUDGET_KEYS_PAGE_SIZE })
   if (first.total <= first.list.length) return first.list
   const pageCount = Math.ceil(first.total / BUDGET_KEYS_PAGE_SIZE)
   const rest = await Promise.all(
     Array.from({ length: pageCount - 1 }, (_, i) =>
-      listAPIKeys({ q: '', owner: '', status: '', userId, page: i + 2, pageSize: BUDGET_KEYS_PAGE_SIZE }),
+      listAPIKeys({ q: '', status: '', userId, page: i + 2, pageSize: BUDGET_KEYS_PAGE_SIZE }),
     ),
   )
   return rest.reduce((acc, page) => acc.concat(page.list), first.list)
@@ -100,7 +100,7 @@ async function getAllAPIKeys(userId?: number | null): Promise<APIKey[]> {
 function toBudgetRow(key: APIKey, dailyAvgMicros: number): BudgetRow {
   return {
     id: key.id,
-    owner_label: key.owner_label,
+    owner_username: key.owner_username,
     key_prefix: key.key_prefix,
     status: key.status,
     display_status: key.display_status,

@@ -38,8 +38,8 @@
           <NDescriptionsItem :label="t('requestLogs.fieldCreatedAt')">
             {{ formatTimeFull(detail.created_at) }}
           </NDescriptionsItem>
-          <NDescriptionsItem :label="t('requestLogs.col_owner')">
-            {{ detail.owner_label || '—' }}
+          <NDescriptionsItem :label="t('requestLogs.col_user')">
+            {{ detail.username || '—' }}
           </NDescriptionsItem>
           <NDescriptionsItem :label="t('requestLogs.fieldApiKey')">
             {{ detail.api_key_id != null ? `#${detail.api_key_id}` : '—' }}

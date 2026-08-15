@@ -24,6 +24,7 @@
 
 <script setup lang="ts">
 import { computed, h } from 'vue'
+import { callerDisplay } from '../../utils/format'
 import { useI18n } from 'vue-i18n'
 import { type DataTableColumns } from 'naive-ui'
 import { Table as TableIcon } from '@lucide/vue'
@@ -138,7 +139,7 @@ const columns = computed<DataTableColumns<BreakdownRow>>(() => {
         ? (row as ModelReportRow).model_name || '—'
         : isProvider
           ? (row as ProviderReportRow).provider_name || t('analytics.unroutedBucket')
-          : (row as CallerReportRow).owner_label || t('analytics.unknownCallerBucket')
+          : callerDisplay((row as CallerReportRow).username, (row as CallerReportRow).key_prefix) || t('analytics.unknownCallerBucket')
       if (!isClickable(row)) return label
       // Clickable link styling; emit on click (router.push handled by parent
       // to keep this component presentation-only).
