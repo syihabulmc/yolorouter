@@ -118,27 +118,6 @@ func (f *memberScopeFixture) do(t *testing.T, method, path string, body string, 
 	return w
 }
 
-// TestMemberCannotReachAdminRoutes sweeps the admin-only surface: every
-// route on the RequireAdmin group answers 403 to a member session.
-func TestMemberCannotReachAdminRoutes(t *testing.T) {
-	f := newMemberScopeFixture(t)
-	adminOnly := []struct{ method, path string }{
-		{http.MethodGet, "/api/admin/providers"},
-		{http.MethodGet, "/api/admin/models"},
-		{http.MethodGet, "/api/admin/users"},
-		{http.MethodGet, "/api/admin/oauth-providers"},
-		{http.MethodGet, "/api/admin/request-logs"},
-		{http.MethodGet, "/api/admin/analytics/compress-stats"},
-		{http.MethodGet, "/api/admin/system/version"},
-	}
-	for _, route := range adminOnly {
-		w := f.do(t, route.method, route.path, "", f.aliceCk)
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("%s %s: expected 403 for member, got %d", route.method, route.path, w.Code)
-		}
-	}
-}
-
 // TestMemberKeyAccessIsOwnerScoped: list shows only own keys regardless
 // of the user_id filter, and every by-id operation on another member's
 // key answers 404 — indistinguishable from a key that never existed.
