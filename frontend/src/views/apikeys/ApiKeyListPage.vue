@@ -33,6 +33,17 @@
           />
         </div>
         <FilterSelectField
+          v-if="authStore.isAdmin"
+          v-model:value="draft.userId"
+          :label="t('apiKeys.filterUser')"
+          :options="userOptions"
+          :placeholder="t('apiKeys.filterUser')"
+          filterable
+          size="small"
+          width="100%"
+          @update:value="onSearch"
+        />
+        <FilterSelectField
           v-model:value="draft.status"
           :label="t('apiKeys.filterStatus')"
           :options="statusOptions"
@@ -80,20 +91,21 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { NButton, NInput, NTag, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption, type PaginationProps } from 'naive-ui'
 import { KeyRound, Plus, Search, MoreHorizontal, Copy } from '@lucide/vue'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { useAuthStore } from '../../store/auth'
-import { displayMessage } from '../../api/client'
+import { displayMessage, errorCodeOf } from '../../api/client'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
 import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
+import { useUserOptions } from '../../composables/useUserOptions'
 import { copyToClipboard } from '../../utils/clipboard'
 import { listModels, type Model } from '../../api/models'
-import type { APIKey } from '../../api/apiKeys'
+import { discoverGatewayModels, ERRCODE_KEY_PLAINTEXT_UNAVAILABLE, type APIKey } from '../../api/apiKeys'
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import CreateKeyModal from '../../components/apikeys/CreateKeyModal.vue'
@@ -116,9 +128,17 @@ const editingId = ref<number | null>(null)
 const showCompress = ref(false)
 const compressKeyId = ref<number | null>(null)
 const models = ref<Model[]>([])
-// Live draft of the filter controls; the server filters only update when the
-// user hits Enter or the Search button, matching the request-logs page.
-const draft = reactive({ query: store.query, owner: store.owner, status: (store.status || null) as string | null })
+const { userOptions, loadUserOptions } = useUserOptions()
+
+// Live draft of the filter controls. The text inputs only apply on Enter or
+// the Search button; the selects (status, owner account) apply immediately
+// on change — matching the request-logs page.
+const draft = reactive({
+  query: store.query,
+  owner: store.owner,
+  status: (store.status || null) as string | null,
+  userId: store.userId as number | null,
+})
 
 const statusOptions = computed(() => [
   { label: t('apiKeys.statusActive'), value: 'active' },
@@ -134,7 +154,7 @@ const draftValueLength = computed(() => {
 onMounted(() => {
   // The model catalog is admin-only; members don't render any model-derived
   // cell, so they only load their own key list.
-  const loads = authStore.isAdmin ? [store.fetchList(), fetchModels()] : [store.fetchList()]
+  const loads = authStore.isAdmin ? [store.fetchList(), fetchModels(), loadUserOptions()] : [store.fetchList()]
   void Promise.all(loads).catch((err) => message.error(displayMessage(err, t)))
 })
 
@@ -154,14 +174,15 @@ async function reload() {
 // setFilters resets the store to page 1, so a search always lands on the
 // first page of results.
 function onSearch() {
-  store.setFilters({ query: draft.query.trim(), owner: draft.owner.trim(), status: draft.status ?? ''})
+  store.setFilters({ query: draft.query.trim(), owner: draft.owner.trim(), status: draft.status ?? '', userId: draft.userId })
   void reload()
 }
 function onReset() {
   draft.query = ''
   draft.owner = ''
   draft.status = null
-  store.setFilters({ query: '', owner: '', status: '' })
+  draft.userId = null
+  store.setFilters({ query: '', owner: '', status: '', userId: null })
   void reload()
 }
 
@@ -328,11 +349,81 @@ function firstUsableModel(row: APIKey): string | undefined {
   return models.value.find((model) => model.id === firstAllowedModelId)?.name
 }
 
-function importKeyToCCS(row: APIKey) {
-  importToCCS({
-    name: `YoloRouter${row.owner_label ? ` - ${row.owner_label}` : ''}`,
-    model: firstUsableModel(row),
-  })
+// importKeyToCCS hands the key to CC-Switch with its REAL plaintext and a
+// model this key can actually route to. The plaintext comes from the
+// re-view endpoint (owner-scoped, so members reach it for their own keys);
+// the model comes from discoverGatewayModels — the gateway's own /v1/models
+// AUTHED WITH THIS KEY, the one source that is correct for both roles
+// (members cannot read the admin model catalog) and reflects the key's
+// real scope. The admin catalog (firstUsableModel) is only a fallback when
+// discovery fails.
+//
+// Reveal failures split by cause: only the permanent legacy case
+// (plaintext never stored) imports with the placeholder plus a paste-by-
+// hand toast. Any other failure is transient — importing the placeholder
+// then would silently hand CC-Switch a wrong key for a perfectly readable
+// credential — so the import aborts with the real error and the user
+// retries. The legacy case cannot lose the model fallback either: plaintext
+// storage predates per-account key ownership, so a legacy key can only
+// belong to the admin-era account, and admin viewers have the catalog
+// loaded for firstUsableModel.
+//
+// One import at a time (same single-flight rule as copyPlaintext, same
+// reason): two in flight would race to the deep link, and the profile
+// CC-Switch opens would be whichever request finished last, not the row the
+// user clicked last. A completion that lands after the page unmounted must
+// not fire the deep link from an unrelated page either — the unmounted
+// flag drops it.
+const importingId = ref<number | null>(null)
+const unmounted = ref(false)
+onUnmounted(() => {
+  unmounted.value = true
+})
+
+// pickDiscoveredModel chooses among the key-scoped names /v1/models
+// returned. The gateway lists management-enabled models only and says
+// nothing about live availability, while the admin catalog knows
+// running_status but not the key's scope — so intersect the two: the first
+// discovered name the catalog marks available wins. Members have an empty
+// catalog and keep the gateway's first entry.
+function pickDiscoveredModel(names: string[]): string | undefined {
+  const available = names.find((name) =>
+    models.value.some((m) => m.name === name && m.running_status === 'available'))
+  return available ?? names[0]
+}
+
+async function importKeyToCCS(row: APIKey) {
+  if (importingId.value !== null) return
+  importingId.value = row.id
+  try {
+    const name = `YoloRouter${row.owner_label ? ` - ${row.owner_label}` : ''}`
+    let plaintext: string | undefined
+    try {
+      plaintext = (await store.fetchPlaintext(row.id)).plaintext_key
+    } catch (err) {
+      if (errorCodeOf(err) !== ERRCODE_KEY_PLAINTEXT_UNAVAILABLE) {
+        message.error(displayMessage(err, t))
+        return
+      }
+      message.warning(t('ccswitch.plaintextUnavailable'))
+    }
+    let model: string | undefined
+    if (plaintext) {
+      try {
+        model = pickDiscoveredModel(await discoverGatewayModels(plaintext))
+      } catch {
+        // Discovery is best-effort; fall through to the catalog fallback.
+      }
+    }
+    if (unmounted.value) return
+    importToCCS({
+      name,
+      apiKey: plaintext,
+      model: model ?? firstUsableModel(row),
+    })
+  } finally {
+    importingId.value = null
+  }
 }
 
 function rowActions(row: APIKey): DropdownOption[] {

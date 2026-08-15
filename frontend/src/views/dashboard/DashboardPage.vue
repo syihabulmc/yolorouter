@@ -261,7 +261,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { NButton, NSelect, useMessage, type SelectOption } from 'naive-ui'
+import { NButton, NSelect, useMessage } from 'naive-ui'
 import type { Component } from 'vue'
 import {
   Activity,
@@ -286,7 +286,7 @@ import { bucketRange, pressable, requestLogLocation, type RequestLogLinkQuery } 
 import { clampedRangeStart, DASHBOARD_RANGE_CAP_DAYS } from '../../utils/timeRange'
 import type { RouteLocationRaw } from 'vue-router'
 import { getDashboard, type DashboardData } from '../../api/analytics'
-import { listUsers, toUserOptions } from '../../api/users'
+import { useUserOptions } from '../../composables/useUserOptions'
 import { useAuthStore } from '../../store/auth'
 import { displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
@@ -306,21 +306,13 @@ const loading = ref(true)
 // directory the analytics filters use; members never see the control and
 // the backend pins them to themselves anyway.
 const selectedUserId = ref<number | null>(null)
-const userOptions = ref<SelectOption[]>([])
+const { userOptions, loadUserOptions } = useUserOptions()
 
 function onUserChange(v: number | null) {
   selectedUserId.value = v
   void reload()
 }
 
-async function loadUserOptions() {
-  try {
-    const page = await listUsers()
-    userOptions.value = toUserOptions(page.users)
-  } catch (err) {
-    message.error(displayMessage(err, t))
-  }
-}
 
 const preset = ref<RangePreset>('last7d')
 const timeRange = ref<TimeRange>({ start: null, end: null })

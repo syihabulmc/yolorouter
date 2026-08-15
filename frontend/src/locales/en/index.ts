@@ -234,7 +234,11 @@ export default {
     opening: 'Opening CC Switch...',
     openFailed:
       'CC-Switch is not installed or the protocol handler is not registered. Please install CC-Switch first or manually copy the API key.',
+    plaintextUnavailable: 'This key predates plaintext storage and cannot be read back; imported with a placeholder — paste the key inside CC-Switch',
     openSuccess: 'CC-Switch import successful. Please enter the correct API Key.',
+    confirmLaunchTitle: 'Open CC-Switch',
+    confirmLaunchContent: 'The import data is ready. Click the button below to open CC-Switch and finish the import.',
+    confirmLaunchButton: 'Open CC-Switch',
   },
   models: {
     eyebrow: 'Model Configuration',
@@ -403,6 +407,7 @@ export default {
     pageTitle: 'API Keys',
     pageDescription: 'Create and manage Yolorouter calling credentials — configure owner, model allowlist, and limits.',
     searchPlaceholder: 'Search by key prefix or remark',
+    filterUser: 'Account',
     filterOwner: 'Owner',
     filterStatus: 'Status',
     search: 'Search',

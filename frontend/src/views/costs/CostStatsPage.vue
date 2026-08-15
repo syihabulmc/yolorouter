@@ -117,7 +117,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
-import { NSelect, useMessage, type SelectOption } from 'naive-ui'
+import { NSelect, useMessage } from 'naive-ui'
 import PageHeader from '../../components/PageHeader.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import TimeRangeSelect, {
@@ -132,7 +132,7 @@ import { formatMicros, isNegativeMicros, netCacheSavedMicros } from '../../utils
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import { initialLast7DaysRange, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage } from '../../api/client'
-import { listUsers, toUserOptions } from '../../api/users'
+import { useUserOptions } from '../../composables/useUserOptions'
 import { getBudgetRows, getCostStats, type BudgetRow, type CostStats } from '../../api/costs'
 import { useAuthStore } from '../../store/auth'
 import type { AnalyticsFilter } from '../../api/analytics'
@@ -239,7 +239,7 @@ const route = useRoute()
 const seededUserID = Number(route.query.user_id)
 
 const selectedUserId = ref<number | null>(Number.isInteger(seededUserID) && seededUserID > 0 ? seededUserID : null)
-const userOptions = ref<SelectOption[]>([])
+const { userOptions, loadUserOptions } = useUserOptions()
 
 function onUserChange(v: number | null) {
   selectedUserId.value = v
@@ -247,14 +247,6 @@ function onUserChange(v: number | null) {
   void loadBudget()
 }
 
-async function loadUserOptions() {
-  try {
-    const page = await listUsers()
-    userOptions.value = toUserOptions(page.users)
-  } catch (err) {
-    message.error(displayMessage(err, t))
-  }
-}
 
 // Total configured budget = sum of capped keys' limits (uncapped keys have no
 // ceiling to add). Remaining subtracts each capped key's lifetime spend,

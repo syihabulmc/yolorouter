@@ -10,6 +10,9 @@ interface ApiKeysState {
   query: string
   owner: string
   status: string
+  // Admin-only owner-account filter (users.id); null = all accounts. The
+  // backend pins member sessions to themselves regardless of this value.
+  userId: number | null
   loading: boolean
   error: unknown | null
   // Monotonic token so a stale list response can't clobber a newer one if a
@@ -27,6 +30,7 @@ export const useApiKeysStore = defineStore('apiKeys', {
     query: '',
     owner: '',
     status: '',
+    userId: null,
     loading: false,
     error: null,
     lastFetchId: 0,
@@ -41,6 +45,7 @@ export const useApiKeysStore = defineStore('apiKeys', {
           q: this.query,
           owner: this.owner,
           status: this.status,
+          userId: this.userId,
           page: this.page,
           pageSize: this.pageSize,
         })
@@ -57,12 +62,13 @@ export const useApiKeysStore = defineStore('apiKeys', {
         if (fetchId === this.lastFetchId) this.loading = false
       }
     },
-    // Applies all three list filters at once and resets to the first page —
-    // the search/reset buttons are the only thing that changes them.
-    setFilters(f: { query: string; owner: string; status: string }) {
+    // Applies the list filters at once and resets to the first page — the
+    // search/reset buttons are the only thing that changes them.
+    setFilters(f: { query: string; owner: string; status: string; userId: number | null }) {
       this.query = f.query
       this.owner = f.owner
       this.status = f.status
+      this.userId = f.userId
       this.page = 1
     },
     setPage(page: number) {

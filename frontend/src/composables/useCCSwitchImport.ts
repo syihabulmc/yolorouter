@@ -7,11 +7,11 @@
 // probably not registered and we surface an install hint.
 import { onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useMessage } from 'naive-ui'
+import { useDialog, useMessage } from 'naive-ui'
 
-// The full API key secret is never returned by the list endpoints (only a
-// truncated prefix), so imports carry a placeholder key that the user fills in
-// inside CC-Switch after the provider is created.
+// Fallback when the caller cannot supply the real key (keys created before
+// plaintext persistence existed cannot be read back): the import carries a
+// placeholder the user replaces inside CC-Switch.
 const PLACEHOLDER_API_KEY = 'sk-'
 
 // Milliseconds to wait for a focus/visibility change before deciding the deep
@@ -23,11 +23,15 @@ export interface CCSwitchImportParams {
   name: string
   // Optional model name to preselect; omitted for provider-only imports.
   model?: string
+  // The real key plaintext. When omitted (unreadable legacy key), the import
+  // carries the placeholder and the user pastes the key inside CC-Switch.
+  apiKey?: string
 }
 
 export function useCCSwitchImport() {
   const { t } = useI18n()
   const message = useMessage()
+  const dialog = useDialog()
 
   let openTimer: ReturnType<typeof setTimeout> | null = null
   let openCleanup: (() => void) | null = null
@@ -38,14 +42,38 @@ export function useCCSwitchImport() {
       app: 'claude',
       name: p.name,
       endpoint: location.origin,
-      apiKey: PLACEHOLDER_API_KEY,
+      apiKey: p.apiKey || PLACEHOLDER_API_KEY,
       homepage: location.origin,
     })
     if (p.model) params.set('model', p.model)
     return `ccswitch://v1/import?${params.toString()}`
   }
 
+  // importToCCS launches the deep link, but only while the browser still
+  // honors it: an external-protocol navigation needs live transient user
+  // activation (roughly a five-second window after the last real click), and
+  // callers may have awaited network requests since that click. Once the
+  // window has expired the navigation would be silently blocked and the
+  // no-focus-change heuristic below would then report "not installed" on a
+  // perfectly good installation — so instead we ask for one fresh click and
+  // launch from that click's own handler. Browsers without the
+  // userActivation API keep the direct-launch behavior.
   function importToCCS(p: CCSwitchImportParams) {
+    const activation = window.navigator.userActivation
+    if (activation && !activation.isActive) {
+      dialog.info({
+        title: t('ccswitch.confirmLaunchTitle'),
+        content: t('ccswitch.confirmLaunchContent'),
+        positiveText: t('ccswitch.confirmLaunchButton'),
+        negativeText: t('common.cancel'),
+        onPositiveClick: () => launchCCS(p),
+      })
+      return
+    }
+    launchCCS(p)
+  }
+
+  function launchCCS(p: CCSwitchImportParams) {
     let maybeOpened = false
 
     const cleanup = () => {

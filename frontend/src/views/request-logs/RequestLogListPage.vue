@@ -210,7 +210,7 @@ import {
 } from '../../api/requestLogs'
 import { listProviders, type Provider } from '../../api/providers'
 import { listAPIKeys, toAPIKeyOptions, type APIKey } from '../../api/apiKeys'
-import { listUsers, toUserOptions } from '../../api/users'
+import { useUserOptions } from '../../composables/useUserOptions'
 import { displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
 import { columnTitle } from '../../utils/columnTitle'
@@ -341,7 +341,7 @@ const providerOptions = computed<SelectOption[]>(() =>
 // realistic v0.1 key count without a remote-search handshake.
 const apiKeys = ref<APIKey[]>([])
 const callerOptions = computed<SelectOption[]>(() => toAPIKeyOptions(apiKeys.value))
-const userOptions = ref<SelectOption[]>([])
+const { userOptions, loadUserOptions } = useUserOptions()
 
 const statusOptions = computed<SelectOption[]>(() => ([
   { label: t('requestLogs.status_success'), value: 'success' },
@@ -501,7 +501,7 @@ onMounted(() => {
   void reload().catch((err) => message.error(displayMessage(err, t)))
   void loadProviders().catch((err) => message.error(displayMessage(err, t)))
   void loadCallers().catch((err) => message.error(displayMessage(err, t)))
-  void loadUsers().catch((err) => message.error(displayMessage(err, t)))
+  void loadUserOptions()
 })
 
 async function loadProviders() {
@@ -514,10 +514,6 @@ async function loadCallers() {
   apiKeys.value = list
 }
 
-async function loadUsers() {
-  const page = await listUsers()
-  userOptions.value = toUserOptions(page.users)
-}
 
 function buildListParams(): RequestLogListParams {
   const params: RequestLogListParams = {

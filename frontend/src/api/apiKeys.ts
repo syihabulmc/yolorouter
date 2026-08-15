@@ -137,13 +137,36 @@ export function getAPIKey(id: number): Promise<APIKey> {
   return apiFetch(`/api/admin/api-keys/${id}`)
 }
 
+// The backend's code for "this key predates the encrypted_key column, its
+// plaintext was never stored" — the one reveal failure that is permanent and
+// expected, as opposed to transient transport/auth errors. Callers that want
+// a legacy-specific fallback (e.g. the CC-Switch import's placeholder path)
+// compare errorCodeOf(err) against this.
+export const ERRCODE_KEY_PLAINTEXT_UNAVAILABLE = 11016
+
 // Reveal the full plaintext key for the list-page copy button. Returns the
 // same plaintext_key field name as createAPIKey so the caller can reuse one
-// code path. The backend returns 11016 when the key predates the
-// encrypted_key column (its plaintext was never stored); that surfaces as an
-// APIError the UI displays via displayMessage.
+// code path. Legacy keys fail with ERRCODE_KEY_PLAINTEXT_UNAVAILABLE; that
+// surfaces as an APIError the UI displays via displayMessage.
 export function getAPIKeyPlaintext(id: number): Promise<{ plaintext_key: string }> {
   return apiFetch(`/api/admin/api-keys/${id}/plaintext`)
+}
+
+// discoverGatewayModels lists the model names a gateway credential can route
+// to, by calling the gateway's own OpenAI-compatible /v1/models authed with
+// that key — NOT the admin catalog, which members cannot read. The response
+// is the OpenAI list shape, not the admin API envelope, so this cannot go
+// through apiFetch; it carries its own timeout so a hung gateway cannot
+// stall the caller's click handler indefinitely. Failures (non-2xx, timeout,
+// network) reject — callers treat discovery as best-effort.
+export async function discoverGatewayModels(plaintextKey: string): Promise<string[]> {
+  const res = await fetch('/v1/models', {
+    headers: { Authorization: `Bearer ${plaintextKey}` },
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!res.ok) throw new Error(`gateway /v1/models answered ${res.status}`)
+  const body = (await res.json()) as { data?: Array<{ id: string }> }
+  return (body.data ?? []).map((m) => m.id)
 }
 
 export function updateAPIKey(id: number, input: UpdateAPIKeyInput): Promise<APIKey> {

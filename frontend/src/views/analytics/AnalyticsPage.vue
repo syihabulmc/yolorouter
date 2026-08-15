@@ -248,7 +248,7 @@ import TimeRangeSelect, { type RangePreset, type TimeRange } from '../../compone
 import { listProviders } from '../../api/providers'
 import { listModels } from '../../api/models'
 import { listAPIKeys, toAPIKeyOptions } from '../../api/apiKeys'
-import { listUsers, toUserOptions } from '../../api/users'
+import { useUserOptions } from '../../composables/useUserOptions'
 import { clampedRangeStart, initialLast7DaysRange } from '../../utils/timeRange'
 import { columnTitle } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
@@ -314,7 +314,7 @@ const bucketOptions = computed<SelectOption[]>(() => [
 const apiKeyOptions = ref<SelectOption[]>([])
 const providerOptions = ref<SelectOption[]>([])
 const modelOptions = ref<SelectOption[]>([])
-const userOptions = ref<SelectOption[]>([])
+const { userOptions, loadUserOptions } = useUserOptions()
 
 const statusOptions = computed<SelectOption[]>(() => [
   { label: t('analytics.statusSuccess'), value: 'success' },
@@ -497,16 +497,17 @@ async function loadFilterOptions() {
       apiKeyOptions.value = toAPIKeyOptions(apiKeyPage.list)
       return
     }
-    const [providerPage, modelPage, apiKeyPage, userPage] = await Promise.all([
+    // loadUserOptions assigns and toasts internally; riding in the same
+    // Promise.all keeps all four catalogs loading in parallel.
+    const [providerPage, modelPage, apiKeyPage] = await Promise.all([
       listProviders(),
       listModels(),
       listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: 200 }),
-      listUsers(),
+      loadUserOptions(),
     ])
     providerOptions.value = providerPage.list.map((p) => ({ label: p.name, value: p.id }))
     modelOptions.value = modelPage.list.map((m) => ({ label: m.name, value: m.name }))
     apiKeyOptions.value = toAPIKeyOptions(apiKeyPage.list)
-    userOptions.value = toUserOptions(userPage.users)
   } catch (err) {
     message.error(displayMessage(err, t))
   }
