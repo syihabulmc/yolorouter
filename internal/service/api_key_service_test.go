@@ -143,7 +143,7 @@ func TestUpdateAPIKeyTogglesAllowAllModels(t *testing.T) {
 	allow := true
 	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
 		AllowAllModels: &allow, ModelIDs: []uint{mid},
-	}, time.Now().UTC())
+	}, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("update to allow-all: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestUpdateAPIKeyTogglesAllowAllModels(t *testing.T) {
 	deny := false
 	view2, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
 		AllowAllModels: &deny, ModelIDs: []uint{mid},
-	}, time.Now().UTC())
+	}, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("update to custom: %v", err)
 	}
@@ -190,12 +190,12 @@ func TestUpdateAPIKeyRejectsEmptyCustomAllowlist(t *testing.T) {
 	deny := false
 	if _, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
 		AllowAllModels: &deny, ModelIDs: []uint{},
-	}, time.Now().UTC()); !errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist) {
+	}, nil, time.Now().UTC()); !errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist) {
 		t.Fatalf("expected ErrAPIKeyEmptyAllowlist, got %v", err)
 	}
 
 	// The rejected update rolls back — the original allowlist stays intact.
-	view, err := svc.GetAPIKey(created.APIKey.ID)
+	view, err := svc.GetAPIKey(created.APIKey.ID, nil)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -216,12 +216,12 @@ func TestUpdateAPIKeyRejectsAllToCustomWithoutModels(t *testing.T) {
 	deny := false
 	if _, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
 		AllowAllModels: &deny,
-	}, time.Now().UTC()); !errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist) {
+	}, nil, time.Now().UTC()); !errors.Is(err, errcode.ErrAPIKeyEmptyAllowlist) {
 		t.Fatalf("expected ErrAPIKeyEmptyAllowlist, got %v", err)
 	}
 
 	// The rejected transition rolls back — the key stays all-models.
-	view, err := svc.GetAPIKey(created.APIKey.ID)
+	view, err := svc.GetAPIKey(created.APIKey.ID, nil)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestUpdateAPIKeyScopeOmittedLeavesAllowlist(t *testing.T) {
 	// A remark-only PATCH (no scope flag, no model_ids) must leave the custom
 	// allowlist intact — it must never force-clear off a stale flag read.
 	remark := "note"
-	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{Remark: &remark}, time.Now().UTC())
+	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{Remark: &remark}, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("update remark: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestGetAPIKeyReturnsWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
-	detail, err := svc.GetAPIKey(result.APIKey.ID)
+	detail, err := svc.GetAPIKey(result.APIKey.ID, nil)
 	if err != nil {
 		t.Fatalf("GetAPIKey: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestGetAPIKeyReturnsWhitelist(t *testing.T) {
 
 func TestGetAPIKeyNotFound(t *testing.T) {
 	svc, _ := newAPIKeyServiceForTest(t)
-	_, err := svc.GetAPIKey(999999)
+	_, err := svc.GetAPIKey(999999, nil)
 	if !errors.Is(err, errcode.ErrAPIKeyNotFound) {
 		t.Fatalf("expected ErrAPIKeyNotFound, got %v", err)
 	}
@@ -289,7 +289,7 @@ func TestGetAPIKeyPlaintextRoundTripsTheCreatePlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
-	revealed, err := svc.GetAPIKeyPlaintext(result.APIKey.ID)
+	revealed, err := svc.GetAPIKeyPlaintext(result.APIKey.ID, nil)
 	if err != nil {
 		t.Fatalf("GetAPIKeyPlaintext: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestGetAPIKeyPlaintextUnavailableForLegacyRow(t *testing.T) {
 	if err := db.Create(legacy).Error; err != nil {
 		t.Fatalf("seed legacy key: %v", err)
 	}
-	_, err := svc.GetAPIKeyPlaintext(legacy.ID)
+	_, err := svc.GetAPIKeyPlaintext(legacy.ID, nil)
 	if !errors.Is(err, errcode.ErrAPIKeyPlaintextUnavailable) {
 		t.Fatalf("expected ErrAPIKeyPlaintextUnavailable for a legacy row, got %v", err)
 	}
@@ -323,7 +323,7 @@ func TestGetAPIKeyPlaintextUnavailableForLegacyRow(t *testing.T) {
 // reveal endpoint surfaces the same 11001 the rest of the resource does.
 func TestGetAPIKeyPlaintextNotFound(t *testing.T) {
 	svc, _ := newAPIKeyServiceForTest(t)
-	_, err := svc.GetAPIKeyPlaintext(999999)
+	_, err := svc.GetAPIKeyPlaintext(999999, nil)
 	if !errors.Is(err, errcode.ErrAPIKeyNotFound) {
 		t.Fatalf("expected ErrAPIKeyNotFound, got %v", err)
 	}
@@ -347,7 +347,7 @@ func TestGetAPIKeyPlaintextFailsWithDifferentMasterKey(t *testing.T) {
 		otherKey[i] = byte(i + 99)
 	}
 	decryptSvc := NewAPIKeyService(db, otherKey)
-	if _, err := decryptSvc.GetAPIKeyPlaintext(result.APIKey.ID); err == nil {
+	if _, err := decryptSvc.GetAPIKeyPlaintext(result.APIKey.ID, nil); err == nil {
 		t.Fatalf("expected a decrypt error when the masterKey differs, got nil")
 	}
 }
@@ -366,7 +366,7 @@ func TestUpdateAPIKeySparsePatchLeavesOtherLimits(t *testing.T) {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
 	owner := "bob"
-	view, err := svc.UpdateAPIKey(result.APIKey.ID, UpdateAPIKeyInput{OwnerLabel: &owner}, time.Now().UTC())
+	view, err := svc.UpdateAPIKey(result.APIKey.ID, UpdateAPIKeyInput{OwnerLabel: &owner}, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("UpdateAPIKey: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestUpdateAPIKeyClearsLimitWithZeroSentinel(t *testing.T) {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
 	zero := 0
-	view, err := svc.UpdateAPIKey(result.APIKey.ID, UpdateAPIKeyInput{RPMLimit: &zero}, time.Now().UTC())
+	view, err := svc.UpdateAPIKey(result.APIKey.ID, UpdateAPIKeyInput{RPMLimit: &zero}, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("UpdateAPIKey: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestUpdateAPIKeyReplacesWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
-	view, err := svc.UpdateAPIKey(result.APIKey.ID, UpdateAPIKeyInput{ModelIDs: []uint{m2}}, time.Now().UTC())
+	view, err := svc.UpdateAPIKey(result.APIKey.ID, UpdateAPIKeyInput{ModelIDs: []uint{m2}}, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("UpdateAPIKey: %v", err)
 	}
@@ -421,13 +421,13 @@ func TestRevokeAPIKeyIdempotent(t *testing.T) {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
 	now := time.Now().UTC()
-	if err := svc.RevokeAPIKey(result.APIKey.ID, now); err != nil {
+	if err := svc.RevokeAPIKey(result.APIKey.ID, nil, now); err != nil {
 		t.Fatalf("first revoke: %v", err)
 	}
-	if err := svc.RevokeAPIKey(result.APIKey.ID, now); err != nil {
+	if err := svc.RevokeAPIKey(result.APIKey.ID, nil, now); err != nil {
 		t.Fatalf("second revoke should be idempotent, got: %v", err)
 	}
-	view, err := svc.GetAPIKey(result.APIKey.ID)
+	view, err := svc.GetAPIKey(result.APIKey.ID, nil)
 	if err != nil {
 		t.Fatalf("GetAPIKey: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestRevokeAPIKeyIdempotent(t *testing.T) {
 
 func TestRevokeAPIKeyNotFound(t *testing.T) {
 	svc, _ := newAPIKeyServiceForTest(t)
-	err := svc.RevokeAPIKey(999999, time.Now().UTC())
+	err := svc.RevokeAPIKey(999999, nil, time.Now().UTC())
 	if !errors.Is(err, errcode.ErrAPIKeyNotFound) {
 		t.Fatalf("expected ErrAPIKeyNotFound, got %v", err)
 	}
@@ -478,7 +478,7 @@ func TestDisplayStatusExpiredForPastExpiry(t *testing.T) {
 	if err := db.Create(key).Error; err != nil {
 		t.Fatalf("seed key: %v", err)
 	}
-	view, err := svc.GetAPIKey(key.ID)
+	view, err := svc.GetAPIKey(key.ID, nil)
 	if err != nil {
 		t.Fatalf("GetAPIKey: %v", err)
 	}
@@ -622,7 +622,7 @@ func TestUpdateAPIKeyCompressOverrideFalseZeroesEnabled(t *testing.T) {
 	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
 		CompressEnabledOverride: &overrideFalse,
 		CompressEnabled:         &enabledTrue,
-	}, time.Now().UTC())
+	}, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -659,7 +659,7 @@ func TestUpdateAPIKeyCompressOverrideTrueRequiresEnabled(t *testing.T) {
 	overrideTrue := true
 	_, err = svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
 		CompressEnabledOverride: &overrideTrue,
-	}, time.Now().UTC())
+	}, nil, time.Now().UTC())
 	if !errors.Is(err, errcode.ErrCompressEnabledRequired) {
 		t.Fatalf("expected ErrCompressEnabledRequired, got %v", err)
 	}
@@ -682,7 +682,7 @@ func TestUpdateAPIKeyCompressOverrideTrueWithEnabled(t *testing.T) {
 	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
 		CompressEnabledOverride: &overrideTrue,
 		CompressEnabled:         &enabledTrue,
-	}, time.Now().UTC())
+	}, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -711,7 +711,7 @@ func TestUpdateAPIKeyCompressSparsePatchLeavesOverride(t *testing.T) {
 	enabledTrue := true
 	view, err := svc.UpdateAPIKey(created.APIKey.ID, UpdateAPIKeyInput{
 		CompressEnabled: &enabledTrue,
-	}, time.Now().UTC())
+	}, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -738,7 +738,7 @@ func TestListAndGetAPIKeySurfacesCompressFields(t *testing.T) {
 	}
 
 	// Detail view.
-	detail, err := svc.GetAPIKey(result.APIKey.ID)
+	detail, err := svc.GetAPIKey(result.APIKey.ID, nil)
 	if err != nil {
 		t.Fatalf("GetAPIKey: %v", err)
 	}

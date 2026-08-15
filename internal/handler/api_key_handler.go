@@ -131,6 +131,11 @@ func GetAPIKeys(svc *service.APIKeyService) gin.HandlerFunc {
 		if !applyUintQueryParam(c, "user_id", func(v uint) { filterUserID = v }) {
 			return
 		}
+		// A member's list is pinned to their own keys no matter what the
+		// query says; admins keep the optional filter.
+		if forced := middleware.ForcedUserID(c); forced != nil {
+			filterUserID = *forced
+		}
 		list, total, err := svc.ListAPIKeys(c.Query("q"), c.Query("owner"), status, filterUserID, page, pageSize)
 		if err != nil {
 			writeServiceError(c, err)
@@ -150,6 +155,9 @@ func PostAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			return
 		}
 		if !validateExpiryFuture(c, req.ExpiresAt) {
+			return
+		}
+		if middleware.ForcedUserID(c) != nil && !memberCreateAllowed(c, &req) {
 			return
 		}
 		result, err := svc.CreateAPIKey(service.CreateAPIKeyInput{
@@ -201,7 +209,7 @@ func GetAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		view, err := svc.GetAPIKey(id)
+		view, err := svc.GetAPIKey(id, middleware.ForcedUserID(c))
 		if err != nil {
 			writeServiceError(c, err)
 			return
@@ -220,7 +228,7 @@ func GetAPIKeyPlaintext(svc *service.APIKeyService) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		plaintext, err := svc.GetAPIKeyPlaintext(id)
+		plaintext, err := svc.GetAPIKeyPlaintext(id, middleware.ForcedUserID(c))
 		if err != nil {
 			writeServiceError(c, err)
 			return
@@ -243,6 +251,10 @@ func PatchAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 		if !validateExpiryFuture(c, req.ExpiresAt) {
 			return
 		}
+		forced := middleware.ForcedUserID(c)
+		if forced != nil && !memberPatchAllowed(c, &req) {
+			return
+		}
 		view, err := svc.UpdateAPIKey(id, service.UpdateAPIKeyInput{
 			OwnerLabel: req.OwnerLabel, Remark: req.Remark,
 			AllowAllModels: req.AllowAllModels, ModelIDs: req.ModelIDs,
@@ -254,7 +266,7 @@ func PatchAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 			CompressEnabledOverride:           req.CompressEnabledOverride,
 			CompressEnabled:                   req.CompressEnabled,
 			ExpectedUpdatedAt:                 req.ExpectedUpdatedAt,
-		}, timeNow())
+		}, forced, timeNow())
 		if err != nil {
 			writeServiceError(c, err)
 			return
@@ -263,13 +275,56 @@ func PatchAPIKey(svc *service.APIKeyService) gin.HandlerFunc {
 	}
 }
 
+// memberCreateAllowed enforces the member field boundary at key creation:
+// members set owner_label, remark and expires_at; the model scope is
+// always "all models" for them (the admin-only allowlist knob must not
+// be reachable), and limits plus the per-key overrides are admin-only.
+// The caller forces AllowAllModels=true afterwards, so the check here is
+// that the member did not try to send a custom scope or any restricted
+// knob. Writes a 400 and returns false on violation.
+func memberCreateAllowed(c *gin.Context, req *createAPIKeyRequest) bool {
+	restricted := len(req.ModelIDs) > 0 ||
+		req.RPMLimit != nil || req.TPMLimit != nil || req.ConcurrencyLimit != nil ||
+		req.BudgetLimitMicros != nil ||
+		req.CustomSystemPromptEnabledOverride || req.CustomSystemPromptEnabled ||
+		req.CustomSystemPrompt != "" ||
+		req.CompressEnabledOverride || req.CompressEnabled
+	if restricted {
+		response.ParamError(c, "members may only set owner_label, remark and expires_at")
+		return false
+	}
+	// The wire default AllowAllModels=false would demand an allowlist —
+	// members always get the all-models scope instead.
+	req.AllowAllModels = true
+	return true
+}
+
+// memberPatchAllowed enforces the member field boundary on key edits:
+// members may rename (owner_label/remark) and re-schedule expiry on their
+// own keys — model scope, limits, and the per-key overrides are
+// admin-only knobs. Writes a 400 and returns false when a restricted
+// field is present.
+func memberPatchAllowed(c *gin.Context, req *updateAPIKeyRequest) bool {
+	restricted := req.AllowAllModels != nil || len(req.ModelIDs) > 0 ||
+		req.RPMLimit != nil || req.TPMLimit != nil || req.ConcurrencyLimit != nil ||
+		req.BudgetLimitMicros != nil ||
+		req.CustomSystemPromptEnabledOverride != nil || req.CustomSystemPromptEnabled != nil ||
+		req.CustomSystemPrompt != nil ||
+		req.CompressEnabledOverride != nil || req.CompressEnabled != nil
+	if restricted {
+		response.ParamError(c, "members may only change owner_label, remark and expires_at")
+		return false
+	}
+	return true
+}
+
 func PatchAPIKeyRevoke(svc *service.APIKeyService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id, ok := parseUintParam(c, "id")
 		if !ok {
 			return
 		}
-		if err := svc.RevokeAPIKey(id, timeNow()); err != nil {
+		if err := svc.RevokeAPIKey(id, middleware.ForcedUserID(c), timeNow()); err != nil {
 			writeServiceError(c, err)
 			return
 		}

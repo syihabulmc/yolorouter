@@ -227,7 +227,11 @@ watch(() => route.fullPath, () => (drawerOpen.value = false))
 // failed check is an expected pre-public / GitHub-outage state), so
 // fire-and-forget here is safe — no unhandled rejection.
 onMounted(() => {
-  void updateStore.checkForUpdates()
+  // The version endpoint is admin-only; a member shell has no about page or
+  // update badge, so skip the call rather than fire a guaranteed 403.
+  if (authStore.isAdmin) {
+    void updateStore.checkForUpdates()
+  }
 })
 
 // A single ordered list where static group headers interleave with standalone
@@ -240,42 +244,67 @@ onMounted(() => {
 // keeps its fuller heading. Entries carrying `disabled` are placeholders for
 // features that aren't built yet. `onClick` entries open a modal instead of
 // navigating.
-const navItems = computed<NavItem[]>(() => [
-  { key: 'overview', label: t('nav.overview'), icon: LayoutGrid, to: '/' },
+const navItems = computed<NavItem[]>(() => {
+  // A member's sidebar carries exactly the self-service surface: overview,
+  // usage, costs, their API keys, and language. The change-password entry
+  // additionally requires the password-backed local account — an OAuth
+  // account has no password to change.
+  if (!authStore.isAdmin) {
+    const items: NavItem[] = [
+      { key: 'overview', label: t('nav.overview'), icon: LayoutGrid, to: '/' },
+      { key: 'group-analytics', label: t('nav.groupAnalytics'), group: true },
+      { key: 'usage', label: t('nav.usage'), icon: BarChart3, to: '/analytics' },
+      { key: 'cost-stats', label: t('nav.costStats'), icon: Receipt, to: '/costs' },
+      { key: 'tokens', label: t('nav.tokens'), icon: Key, to: '/api-keys' },
+      { key: 'group-system', label: t('nav.groupSystem'), group: true },
+      { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
+    ]
+    if (authStore.isLocal) {
+      items.push({ key: 'change-password', label: t('auth.changePasswordTitle'), icon: KeyRound, onClick: () => (showChangePassword.value = true) })
+    }
+    return items
+  }
+  return [
+    { key: 'overview', label: t('nav.overview'), icon: LayoutGrid, to: '/' },
 
-  { key: 'group-analytics', label: t('nav.groupAnalytics'), group: true },
-  { key: 'usage', label: t('nav.usage'), icon: BarChart3, to: '/analytics' },
-  { key: 'log-audit', label: t('nav.logAudit'), icon: ScrollText, to: '/request-logs' },
-  { key: 'cost-stats', label: t('nav.costStats'), icon: Receipt, to: '/costs' },
+    { key: 'group-analytics', label: t('nav.groupAnalytics'), group: true },
+    { key: 'usage', label: t('nav.usage'), icon: BarChart3, to: '/analytics' },
+    { key: 'log-audit', label: t('nav.logAudit'), icon: ScrollText, to: '/request-logs' },
+    { key: 'cost-stats', label: t('nav.costStats'), icon: Receipt, to: '/costs' },
 
-  { key: 'group-models', label: t('nav.groupModels'), group: true },
-  { key: 'providers', label: t('nav.providers'), icon: Server, to: '/providers' },
-  { key: 'models', label: t('nav.models'), icon: Box, to: '/models' },
+    { key: 'group-models', label: t('nav.groupModels'), group: true },
+    { key: 'providers', label: t('nav.providers'), icon: Server, to: '/providers' },
+    { key: 'models', label: t('nav.models'), icon: Box, to: '/models' },
 
-  { key: 'tokens', label: t('nav.tokens'), icon: Key, to: '/api-keys' },
+    { key: 'tokens', label: t('nav.tokens'), icon: Key, to: '/api-keys' },
 
-  { key: 'cost-optimization', label: t('nav.costOptimization'), icon: TrendingDown, to: '/cost-optimization', tag: t('nav.saveBadge') },
+    { key: 'cost-optimization', label: t('nav.costOptimization'), icon: TrendingDown, to: '/cost-optimization', tag: t('nav.saveBadge') },
 
-  { key: 'group-system', label: t('nav.groupSystem'), group: true },
-  { key: 'oauth-providers', label: t('nav.oauthProviders'), icon: LogIn, to: '/oauth-providers' },
-  { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
-  { key: 'change-password', label: t('auth.changePasswordTitle'), icon: KeyRound, onClick: () => (showChangePassword.value = true) },
-  // New-release indicator: the text chip (same superscript style as the
-  // cost-optimization tag) renders in the expanded sidebar; SidebarNav
-  // itself falls back to the badge dot whenever the chip isn't visible, so
-  // each rendering instance (collapsed sider, mobile drawer) shows exactly
-  // one signal.
-  {
-    key: 'about',
-    label: t('nav.about'),
-    icon: Info,
-    to: '/about',
-    tag: updateStore.hasUpdate ? t('nav.newVersionBadge') : undefined,
-    badge: updateStore.hasUpdate,
-  },
-  // Hidden from the sidebar for now (feature not built yet).
-  { key: 'model-pricing', label: t('nav.modelPricing'), icon: Tags, disabled: true, hidden: true },
-])
+    { key: 'group-system', label: t('nav.groupSystem'), group: true },
+    { key: 'oauth-providers', label: t('nav.oauthProviders'), icon: LogIn, to: '/oauth-providers' },
+    { key: 'language', label: t('nav.language'), icon: Languages, onClick: () => (showLanguage.value = true) },
+    // An admin promoted from an OAuth account has no password to change —
+    // same is_local gate as the member branch above.
+    ...(authStore.isLocal
+      ? [{ key: 'change-password', label: t('auth.changePasswordTitle'), icon: KeyRound, onClick: () => (showChangePassword.value = true) } satisfies NavItem]
+      : []),
+    // New-release indicator: the text chip (same superscript style as the
+    // cost-optimization tag) renders in the expanded sidebar; SidebarNav
+    // itself falls back to the badge dot whenever the chip isn't visible, so
+    // each rendering instance (collapsed sider, mobile drawer) shows exactly
+    // one signal.
+    {
+      key: 'about',
+      label: t('nav.about'),
+      icon: Info,
+      to: '/about',
+      tag: updateStore.hasUpdate ? t('nav.newVersionBadge') : undefined,
+      badge: updateStore.hasUpdate,
+    },
+    // Hidden from the sidebar for now (feature not built yet).
+    { key: 'model-pricing', label: t('nav.modelPricing'), icon: Tags, disabled: true, hidden: true },
+  ]
+})
 
 // Just "logout" now — change password moved into the System Settings group in
 // the sidebar. computed rather than a plain array so the label stays in sync

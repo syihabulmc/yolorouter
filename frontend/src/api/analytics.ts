@@ -43,7 +43,8 @@ export interface RecentFailure {
   request_id: string
   api_key_id: number | null
   model_name: string
-  provider_id: number | null
+  /** Absent on member responses and on rows whose request never reached a provider. */
+  provider_id?: number | null
   status_code: number
   fail_reason: string | null
   is_stream: boolean

@@ -194,7 +194,8 @@
             v-for="f in data.recent_failures"
             :key="f.request_id"
             class="failure-row"
-            :title="t('dashboard.viewRequestDetail')"
+            :class="{ 'failure-row--static': !authStore.isAdmin }"
+            :title="authStore.isAdmin ? t('dashboard.viewRequestDetail') : undefined"
             @click="goToRequestLog(f.request_id)"
           >
             <div class="failure-main">
@@ -211,8 +212,9 @@
       </section>
     </div>
 
-    <!-- Upstream status -->
-    <section class="section-card">
+    <!-- Upstream status (deployment health — operator information, so
+         admin-only; a member response carries zeroed values here anyway) -->
+    <section v-if="authStore.isAdmin" class="section-card">
       <header class="section-head">
         <h2 class="section-title">{{ t('dashboard.upstreamTitle') }}</h2>
       </header>
@@ -273,6 +275,7 @@ import { bucketRange, pressable, requestLogLocation, type RequestLogLinkQuery } 
 import { clampedRangeStart, DASHBOARD_RANGE_CAP_DAYS } from '../../utils/timeRange'
 import type { RouteLocationRaw } from 'vue-router'
 import { getDashboard, type DashboardData } from '../../api/analytics'
+import { useAuthStore } from '../../store/auth'
 import { displayMessage } from '../../api/client'
 import { formatMicros } from '../../utils/money'
 import { formatNumber, formatRate } from '../../utils/format'
@@ -282,6 +285,7 @@ import { useIsMobile } from '../../composables/useIsMobile'
 const { t } = useI18n()
 const router = useRouter()
 const message = useMessage()
+const authStore = useAuthStore()
 
 const data = ref<DashboardData | null>(null)
 const loading = ref(true)
@@ -322,6 +326,11 @@ interface SetupStep {
 }
 
 const setupStep = computed<SetupStep | null>(() => {
+  // The setup funnel describes the deployment, not the member's own traffic
+  // — and a member response carries zeroed setup counts, which would
+  // otherwise read as "add your first provider" on a fully-configured
+  // system.
+  if (!authStore.isAdmin) return null
   const d = data.value
   if (!d) return null
   const s = d.setup
@@ -435,6 +444,10 @@ function windowFragment() {
   return { start: clampedRangeStart(start, end, DASHBOARD_RANGE_CAP_DAYS), end }
 }
 function drillLogs(extra: RequestLogLinkQuery = {}) {
+  // The request-log audit page is admin-only; a member card must not even
+  // look clickable — the router guard would just bounce the click back
+  // here.
+  if (!authStore.isAdmin) return {}
   return pressable(() => {
     void router.push(requestLogLocation({ ...windowFragment(), ...extra }))
   })
@@ -445,11 +458,13 @@ function drillPath(to: RouteLocationRaw) {
   })
 }
 function onTrendPointClick(date: string) {
+  if (!authStore.isAdmin) return
   const range = bucketRange(date)
   if (range) void router.push(requestLogLocation(range))
 }
 
 function goToRequestLog(requestId: string) {
+  if (!authStore.isAdmin) return
   // Route is registered by the main router; if the
   // route isn't there yet, vue-router will log a warning and stay put —
   // safe failure mode for a forward reference.
@@ -695,6 +710,14 @@ function goToRequestLog(requestId: string) {
 
 .failure-row:hover {
   background: var(--color-surface-hover);
+}
+
+/* Member sessions have no request-log page to drill into — the row stays
+   informational. */
+.failure-row--static,
+.failure-row--static:hover {
+  background: transparent;
+  cursor: default;
 }
 
 .failure-main {

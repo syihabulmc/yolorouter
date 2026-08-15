@@ -261,6 +261,15 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	sessionOnly.GET("/auth/me", handler.GetMe(db))
 	sessionOnly.PUT("/auth/password", handler.PutPassword(db))
 
+	// Ownership-scoped routes: reachable by members, but every query a
+	// non-admin makes through them is pinned to their own rows by
+	// MemberScope + the ForcedUserID checks in the handlers/services —
+	// list filters overridden, by-id operations owner-checked, provider
+	// dimensions and deployment sections refused. Admins pass through
+	// with full reach. Registration happens below once the services exist.
+	scoped := admin.Group("")
+	scoped.Use(middleware.RequireSession(db), middleware.MemberScope())
+
 	// Every route below requires a valid session AND the admin role. When
 	// more member-visible routes arrive they will register on the
 	// session-only subgroup above — the admin requirement stays the default
@@ -308,12 +317,12 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	protected.DELETE("/models/:id/candidates/:candidateId", handler.DeleteModelCandidate(modelSvc))
 
 	apiKeySvc := service.NewAPIKeyService(db, providerMasterKey)
-	protected.GET("/api-keys", handler.GetAPIKeys(apiKeySvc))
-	protected.POST("/api-keys", handler.PostAPIKey(apiKeySvc))
-	protected.GET("/api-keys/:id", handler.GetAPIKey(apiKeySvc))
-	protected.GET("/api-keys/:id/plaintext", handler.GetAPIKeyPlaintext(apiKeySvc))
-	protected.PATCH("/api-keys/:id", handler.PatchAPIKey(apiKeySvc))
-	protected.PATCH("/api-keys/:id/revoke", handler.PatchAPIKeyRevoke(apiKeySvc))
+	scoped.GET("/api-keys", handler.GetAPIKeys(apiKeySvc))
+	scoped.POST("/api-keys", handler.PostAPIKey(apiKeySvc))
+	scoped.GET("/api-keys/:id", handler.GetAPIKey(apiKeySvc))
+	scoped.GET("/api-keys/:id/plaintext", handler.GetAPIKeyPlaintext(apiKeySvc))
+	scoped.PATCH("/api-keys/:id", handler.PatchAPIKey(apiKeySvc))
+	scoped.PATCH("/api-keys/:id/revoke", handler.PatchAPIKeyRevoke(apiKeySvc))
 
 	// Custom system prompt (global setting). Read returns the authoritative
 	// DB state; PUT uses CAS on version. Registered alongside the other admin
@@ -339,12 +348,12 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// /request-logs/export route MUST be registered before /request-logs/:requestId
 	// or gin treats "export" as a requestId.
 	dashboardSvc := service.NewDashboardService(db)
-	protected.GET("/dashboard", handler.GetDashboard(dashboardSvc))
+	scoped.GET("/dashboard", handler.GetDashboard(dashboardSvc))
 
 	analyticsSvc := service.NewAnalyticsService(db)
-	protected.GET("/analytics/overview", handler.GetAnalyticsOverview(analyticsSvc))
-	protected.GET("/analytics/report", handler.GetAnalyticsReport(analyticsSvc))
-	protected.GET("/analytics/export", handler.ExportAnalyticsCSV(analyticsSvc))
+	scoped.GET("/analytics/overview", handler.GetAnalyticsOverview(analyticsSvc))
+	scoped.GET("/analytics/report", handler.GetAnalyticsReport(analyticsSvc))
+	scoped.GET("/analytics/export", handler.ExportAnalyticsCSV(analyticsSvc))
 	protected.GET("/analytics/compress-stats", handler.GetCompressStats(analyticsSvc))
 
 	requestLogSvc := service.NewRequestLogService(db)

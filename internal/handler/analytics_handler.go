@@ -15,11 +15,13 @@
 package handler
 
 import (
+	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yolorouter/yolorouter/internal/middleware"
 	"github.com/yolorouter/yolorouter/internal/repository" // for StatusXxx constants only
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/pkg/csvutil"
@@ -202,6 +204,18 @@ func parseAnalyticsFilter(c *gin.Context) (service.AnalyticsFilter, bool) {
 	if loc, ok := c.Get("timezone"); ok {
 		filter.Location = loc.(*time.Location)
 	}
+	// A member's analytics are pinned to their own rows and never carry
+	// the provider dimension (upstream identities are operator
+	// information): the forced scope overrides any user_id the query
+	// smuggled in, and provider-scoped filtering plus the failover scan
+	// are stripped rather than trusted. This block must stay LAST, after
+	// every query-param assignment — stripping before a param is parsed
+	// would silently re-admit it.
+	if forced := middleware.ForcedUserID(c); forced != nil {
+		filter.UserID = forced
+		filter.ProviderID = nil
+		filter.WithFailovers = false
+	}
 	return filter, true
 }
 
@@ -229,11 +243,17 @@ func parseTopNParam(c *gin.Context) (int, bool) {
 
 // parseDimensionParam returns the dimension query param, defaulting to
 // "model" when absent. Returns false (after writing a 400) on an
-// unrecognized value.
+// unrecognized value, or (after writing a 403) when a member requests
+// the provider dimension — per-provider aggregates name the upstream
+// vendors, which is operator information members never see.
 func parseDimensionParam(c *gin.Context) (string, bool) {
 	dimension := c.DefaultQuery("dimension", service.DimensionModel)
 	if _, ok := validAnalyticsDimensions[dimension]; !ok {
 		response.ParamError(c, "dimension must be one of: model, provider, caller, time")
+		return "", false
+	}
+	if dimension == service.DimensionProvider && middleware.ForcedUserID(c) != nil {
+		middleware.WriteAdminError(c, http.StatusForbidden, errcode.AccountPageForbidden)
 		return "", false
 	}
 	return dimension, true

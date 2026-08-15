@@ -35,18 +35,22 @@ export interface CostStats {
 // getCostStats fetches every window-scoped figure in parallel. bucket is
 // forwarded to the daily trend (dimension=time) and, per the analytics
 // contract, also caps the overview's range to match.
-export async function getCostStats(filter: AnalyticsFilter): Promise<CostStats> {
+// includeProvider controls the provider split: the provider dimension is
+// admin-only on the backend (it exposes upstream topology), so a member
+// page must skip that request instead of letting the whole Promise.all
+// reject on its 403.
+export async function getCostStats(filter: AnalyticsFilter, includeProvider = true): Promise<CostStats> {
   const [overview, timeReport, providerReport, modelReport, callerReport] = await Promise.all([
     getAnalyticsOverview('day', filter),
     getAnalyticsReport('time', 'day', filter),
-    getAnalyticsReport('provider', 'day', filter),
+    includeProvider ? getAnalyticsReport('provider', 'day', filter) : Promise.resolve(null),
     getAnalyticsReport('model', 'day', filter),
     getAnalyticsReport('caller', 'day', filter),
   ])
   return {
     overview,
     timeRows: (timeReport.rows as TimeReportRow[]) ?? [],
-    providerRows: (providerReport.rows as ProviderReportRow[]) ?? [],
+    providerRows: (providerReport?.rows as ProviderReportRow[]) ?? [],
     modelRows: (modelReport.rows as ModelReportRow[]) ?? [],
     callerRows: (callerReport.rows as CallerReportRow[]) ?? [],
   }

@@ -35,6 +35,7 @@
         </div>
 
         <FilterSelectField
+          v-if="authStore.isAdmin"
           :label="t('analytics.user')"
           :value="filter.user_id ?? null"
           :options="userOptions"
@@ -65,6 +66,7 @@
         />
 
         <FilterSelectField
+          v-if="authStore.isAdmin"
           :label="t('analytics.provider')"
           :value="filter.provider_id ?? null"
           :options="providerOptions"
@@ -161,7 +163,7 @@
             </template>
           </ResponsiveDataTable>
         </NTabPane>
-        <NTabPane :name="'provider'" :tab="t('analytics.dimensionProvider')">
+        <NTabPane v-if="authStore.isAdmin" :name="'provider'" :tab="t('analytics.dimensionProvider')">
           <!-- Mobile cards have no sortable headers, so metric sorting
                lives in this shared selector on the three entity tabs. -->
           <FilterSelectField
@@ -238,6 +240,7 @@ import EmptyState from '../../components/EmptyState.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import FilterSelectField from '../../components/common/FilterSelectField.vue'
+import { useAuthStore } from '../../store/auth'
 import { useIsMobile } from '../../composables/useIsMobile'
 import { useRouter } from 'vue-router'
 import { bucketRange, requestLogLocation, type RequestLogLinkQuery } from '../../utils/requestLogLink'
@@ -283,6 +286,8 @@ const message = useMessage()
 // dimension=time and feels like a reasonable default for "show me recent
 // usage" without over-querying). Shared with the other dashboard pages via
 // utils/timeRange.ts so every dashboard opens on the same window.
+const authStore = useAuthStore()
+
 const preset = ref<RangePreset>('last7d')
 const timeRange = ref<TimeRange>(initialLast7DaysRange())
 const filter = ref<AnalyticsFilter>({ start: timeRange.value.start, end: timeRange.value.end })
@@ -363,7 +368,9 @@ function activeFilterFragment(): RequestLogLinkQuery {
 // form of row drill-down (a link cell) is a cross-page change tracked
 // separately.
 function drillRowProps(extra: RequestLogLinkQuery | null): Record<string, unknown> {
-  if (extra === null) return {}
+  // The drill target is the request-log audit page, which is admin-only —
+  // a member click would just bounce off the router guard.
+  if (extra === null || !authStore.isAdmin) return {}
   return {
     style: 'cursor: pointer',
     onClick: () => {
@@ -435,6 +442,13 @@ async function reload() {
     switch (report.dimension) {
       case 'model':
         modelRows.value = (report.rows as ModelReportRow[]) ?? []
+        // Members can't read the admin model catalog; the models they've
+        // actually used are the only ones worth filtering by anyway.
+        if (!authStore.isAdmin) {
+          modelOptions.value = modelRows.value
+            .filter((r) => r.model_name)
+            .map((r) => ({ label: r.model_name, value: r.model_name }))
+        }
         break
       case 'provider':
         providerRows.value = (report.rows as ProviderReportRow[]) ?? []
@@ -467,6 +481,15 @@ onMounted(() => {
 // don't block the page.
 async function loadFilterOptions() {
   try {
+    // Members only get the key selector: the provider/model/user catalogs
+    // are admin-only endpoints, and the corresponding filters are hidden
+    // from their filter bar anyway (model options are derived from their
+    // own report rows instead, below).
+    if (!authStore.isAdmin) {
+      const apiKeyPage = await listAPIKeys({ q: '', owner: '', status: '', page: 1, pageSize: 200 })
+      apiKeyOptions.value = toAPIKeyOptions(apiKeyPage.list)
+      return
+    }
     const [providerPage, modelPage, apiKeyPage, userPage] = await Promise.all([
       listProviders(),
       listModels(),

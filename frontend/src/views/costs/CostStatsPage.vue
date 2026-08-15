@@ -14,6 +14,7 @@
     <PageHeader :eyebrow="t('costs.eyebrow')" :title="t('costs.pageTitle')" :description="t('costs.pageDescription')">
       <template #actions>
         <NSelect
+          v-if="authStore.isAdmin"
           :value="selectedUserId"
           :options="userOptions"
           :placeholder="t('costs.allUser')"
@@ -90,6 +91,7 @@
         <CostBreakdownChart
           :provider-rows="stats?.providerRows ?? []"
           :model-rows="stats?.modelRows ?? []"
+          :hide-provider="!authStore.isAdmin"
           @select="onBreakdownSelect"
         />
       </div>
@@ -132,6 +134,7 @@ import { initialLast7DaysRange, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage } from '../../api/client'
 import { listUsers, toUserOptions } from '../../api/users'
 import { getBudgetRows, getCostStats, type BudgetRow, type CostStats } from '../../api/costs'
+import { useAuthStore } from '../../store/auth'
 import type { AnalyticsFilter } from '../../api/analytics'
 
 const { t } = useI18n()
@@ -183,7 +186,7 @@ async function loadStats() {
   // money on screen.
   stats.value = null
   try {
-    const result = await getCostStats(filter)
+    const result = await getCostStats(filter, authStore.isAdmin)
     if (mySeq !== reloadSeq) return
     stats.value = result
   } catch (err) {
@@ -228,6 +231,8 @@ async function loadBudget() {
 // One account's view of the same page: window stats and the budget table
 // both re-scope; the option list loads once on mount like the other
 // admin-configured catalogs.
+const authStore = useAuthStore()
+
 const selectedUserId = ref<number | null>(null)
 const userOptions = ref<SelectOption[]>([])
 
@@ -271,7 +276,11 @@ const cappedKeyCount = computed(
 // loadBudget handles its own errors, so no outer .catch is needed.
 onMounted(() => {
   void loadBudget()
-  void loadUserOptions()
+  // The user catalog is an admin-only endpoint and the account filter is
+  // hidden from members anyway.
+  if (authStore.isAdmin) {
+    void loadUserOptions()
+  }
 })
 
 // The window-scoped stats load whenever the range changes — including the

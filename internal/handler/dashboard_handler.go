@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/yolorouter/yolorouter/internal/middleware"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 	"github.com/yolorouter/yolorouter/pkg/response"
@@ -49,12 +50,19 @@ func GetDashboard(svc *service.DashboardService) gin.HandlerFunc {
 			response.ParamError(c, "start must be before end")
 			return
 		}
-		// Optional per-account scope for the traffic-backed sections.
+		// Optional per-account scope for the traffic-backed sections. A
+		// member session is pinned to itself regardless of the query; only
+		// a member session (not an admin filtering by ?user_id) loses the
+		// deployment-status sections.
 		var userID *uint
 		if !applyUintQueryParam(c, "user_id", func(v uint) { userID = &v }) {
 			return
 		}
-		data, err := svc.GetDashboard(loc, rangeStart, rangeEnd, userID, timeNow())
+		forced := middleware.ForcedUserID(c)
+		if forced != nil {
+			userID = forced
+		}
+		data, err := svc.GetDashboard(loc, rangeStart, rangeEnd, userID, forced != nil, timeNow())
 		if err != nil {
 			response.Error(c, errcode.InternalError, errcode.GetMessage(errcode.InternalError))
 			return

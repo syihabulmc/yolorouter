@@ -28,17 +28,21 @@ export const router = createRouter({
     {
       path: '/',
       component: DefaultLayout,
+      // Routes without `meta.memberAllowed` are admin-only; the guard below
+      // bounces a member session back to the home page. Members keep exactly
+      // the self-service surface: overview, usage analytics, cost stats
+      // (including their own key/model drill-downs), and their API keys.
       children: [
-        { path: '', component: DashboardPage },
-        { path: 'analytics', component: AnalyticsPage },
-        { path: 'costs', component: CostStatsPage },
+        { path: '', component: DashboardPage, meta: { memberAllowed: true } },
+        { path: 'analytics', component: AnalyticsPage, meta: { memberAllowed: true } },
+        { path: 'costs', component: CostStatsPage, meta: { memberAllowed: true } },
         { path: 'cost-optimization', component: CostOptimizationPage },
-        { path: 'costs/keys/:id(\\d+)', component: KeyCostDetailPage },
+        { path: 'costs/keys/:id(\\d+)', component: KeyCostDetailPage, meta: { memberAllowed: true } },
         // Bare `costs/models` must come before the catch-all so the `?name=`
         // dot-segment fallback still matches here instead of being swallowed
         // by `:name(.*)`.
-        { path: 'costs/models', component: ModelCostDetailPage },
-        { path: 'costs/models/:name(.*)', component: ModelCostDetailPage },
+        { path: 'costs/models', component: ModelCostDetailPage, meta: { memberAllowed: true } },
+        { path: 'costs/models/:name(.*)', component: ModelCostDetailPage, meta: { memberAllowed: true } },
         { path: 'costs/providers/:id(\\d+)', component: ProviderCostDetailPage },
         { path: 'request-logs', component: RequestLogListPage },
         { path: 'request-logs/:requestId', component: RequestLogDetailPage },
@@ -46,7 +50,7 @@ export const router = createRouter({
         { path: 'providers/:id', component: ProviderDetailPage },
         { path: 'models', component: ModelListPage },
         { path: 'models/:id', component: ModelDetailPage },
-        { path: 'api-keys', component: ApiKeyListPage },
+        { path: 'api-keys', component: ApiKeyListPage, meta: { memberAllowed: true } },
         { path: 'oauth-providers', component: OAuthProviderListPage },
         { path: 'about', component: SystemInfoPage },
       ],
@@ -107,6 +111,15 @@ router.beforeEach(async (to) => {
   // Already logged in and trying to visit /login or /setup: pointless,
   // just send them back to the home page.
   if (authStore.isLoggedIn && (to.path === '/login' || to.path === '/setup')) {
+    return '/'
+  }
+  // A member session on an admin-only page: bounce to the overview. The
+  // backend's RequireAdmin middleware protects the actual data either way;
+  // this guard just keeps members from ever rendering a shell full of
+  // forbidden-request toasts. Gated on the meta.memberAllowed flag (not a
+  // path allowlist) so a newly added route is admin-only until it
+  // explicitly opts in.
+  if (authStore.isLoggedIn && !authStore.isAdmin && !to.meta.memberAllowed && to.path !== '/') {
     return '/'
   }
   return true

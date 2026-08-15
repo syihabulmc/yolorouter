@@ -39,7 +39,7 @@
         </template>
         <n-input v-model:value="form.remark" type="textarea" :autosize="{ minRows: 2 }" :maxlength="200" />
       </n-form-item>
-      <n-form-item>
+      <n-form-item v-if="authStore.isAdmin">
         <template #label>
           <HelpLabel :tip="t('apiKeys.modelScope_tip')">{{ t('apiKeys.modelScope') }}</HelpLabel>
         </template>
@@ -48,7 +48,7 @@
           <n-radio :value="false">{{ t('apiKeys.modelScopeCustom') }}</n-radio>
         </n-radio-group>
       </n-form-item>
-      <n-form-item v-if="!form.allow_all_models" path="model_ids">
+      <n-form-item v-if="authStore.isAdmin && !form.allow_all_models" path="model_ids">
         <template #label>
           <HelpLabel :tip="t('apiKeys.modelAllowlist_tip')">{{ t('apiKeys.modelAllowlist') }}</HelpLabel>
         </template>
@@ -70,7 +70,7 @@
         <NDatePicker v-model:value="form.expires_at" type="datetime" :clearable="false" class="full-width" :placeholder="t('apiKeys.selectExpiresAt')" />
       </div>
 
-      <div class="limit-section">
+      <div v-if="authStore.isAdmin" class="limit-section">
         <div class="limit-section__label">{{ t('apiKeys.limitsSection') }}</div>
         <div class="limit-grid">
           <n-form-item>
@@ -109,6 +109,7 @@ import { useI18n } from 'vue-i18n'
 import { NDatePicker, NRadio, NRadioGroup, useMessage, type FormInst, type FormRules } from 'naive-ui'
 import { useApiKeysStore } from '../../store/apiKeys'
 import { useModelsStore } from '../../store/models'
+import { useAuthStore } from '../../store/auth'
 import { displayMessage } from '../../api/client'
 import { getAPIKey, type APIKey, type UpdateAPIKeyInput } from '../../api/apiKeys'
 import { fromMicros, toMicros } from '../../utils/money'
@@ -132,6 +133,7 @@ const { t } = useI18n()
 const message = useMessage()
 const store = useApiKeysStore()
 const modelsStore = useModelsStore()
+const authStore = useAuthStore()
 
 // Drives the header float position for the expiry picker (mobile drawer vs
 // desktop card anchor differently).
@@ -187,7 +189,11 @@ onMounted(async () => {
   // The models list is best-effort for the allowlist picker; don't let its
   // failure block loading the key — and fetchList's own .catch already
   // swallowed its rejection, so Promise.all bought nothing but ceremony.
-  void modelsStore.fetchList().catch((err) => message.error(displayMessage(err, t)))
+  // The catalog endpoint is admin-only and the picker is hidden for
+  // members, so they skip the fetch entirely.
+  if (authStore.isAdmin) {
+    void modelsStore.fetchList().catch((err) => message.error(displayMessage(err, t)))
+  }
   try {
     const key = await getAPIKey(props.apiKeyId)
     fill(key)
@@ -219,17 +225,25 @@ async function onSave() {
   saving.value = true
   try {
     // Numeric limits: empty -> 0 sentinel -> backend clears the column.
-    const input: UpdateAPIKeyInput = {
-      owner_label: form.owner_label,
-      remark: form.remark,
-      allow_all_models: form.allow_all_models,
-      model_ids: form.model_ids,
-      expires_at: expiryChanged && form.expires_at != null ? new Date(form.expires_at).toISOString() : undefined,
-      rpm_limit: form.rpm_limit ?? 0,
-      tpm_limit: form.tpm_limit ?? 0,
-      concurrency_limit: form.concurrency_limit ?? 0,
-      budget_limit_micros: form.budget_amount != null ? toMicros(form.budget_amount) : 0,
-    }
+    // Members may only send label/remark/expiry — the backend rejects any
+    // restricted field outright, so their payload must omit the rest.
+    const input: UpdateAPIKeyInput = authStore.isAdmin
+      ? {
+          owner_label: form.owner_label,
+          remark: form.remark,
+          allow_all_models: form.allow_all_models,
+          model_ids: form.model_ids,
+          expires_at: expiryChanged && form.expires_at != null ? new Date(form.expires_at).toISOString() : undefined,
+          rpm_limit: form.rpm_limit ?? 0,
+          tpm_limit: form.tpm_limit ?? 0,
+          concurrency_limit: form.concurrency_limit ?? 0,
+          budget_limit_micros: form.budget_amount != null ? toMicros(form.budget_amount) : 0,
+        }
+      : {
+          owner_label: form.owner_label,
+          remark: form.remark,
+          expires_at: expiryChanged && form.expires_at != null ? new Date(form.expires_at).toISOString() : undefined,
+        }
     await store.update(props.apiKeyId, input)
     emit('saved')
   } catch (err) {

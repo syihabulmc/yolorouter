@@ -268,12 +268,26 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 	return &CreateAPIKeyResult{PlaintextKey: rawKey, APIKey: view}, nil
 }
 
-func (s *APIKeyService) GetAPIKey(id uint) (*APIKeyView, error) {
+// requireKeyOwner is the ownership floor for every by-id key operation:
+// when requiredOwner is set (a member session), a key owned by anyone
+// else answers exactly like a nonexistent one — never a 403 that would
+// confirm the id exists.
+func requireKeyOwner(key *model.APIKey, requiredOwner *uint) error {
+	if requiredOwner != nil && key.UserID != *requiredOwner {
+		return errcode.ErrAPIKeyNotFound
+	}
+	return nil
+}
+
+func (s *APIKeyService) GetAPIKey(id uint, requiredOwner *uint) (*APIKeyView, error) {
 	key, err := repository.FindAPIKeyByID(s.db, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errcode.ErrAPIKeyNotFound
 		}
+		return nil, err
+	}
+	if err := requireKeyOwner(key, requiredOwner); err != nil {
 		return nil, err
 	}
 	modelIDs, err := repository.FindAPIKeyModelIDs(s.db, id)
@@ -294,12 +308,15 @@ func (s *APIKeyService) GetAPIKey(id uint) (*APIKeyView, error) {
 // the encrypted_key column (its plaintext was never stored), and
 // ErrAPIKeyNotFound when the id does not exist. Auth is unaffected — the
 // gateway never calls this; it authenticates by key_hash.
-func (s *APIKeyService) GetAPIKeyPlaintext(id uint) (string, error) {
+func (s *APIKeyService) GetAPIKeyPlaintext(id uint, requiredOwner *uint) (string, error) {
 	key, err := repository.FindAPIKeyByID(s.db, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return "", errcode.ErrAPIKeyNotFound
 		}
+		return "", err
+	}
+	if err := requireKeyOwner(key, requiredOwner); err != nil {
 		return "", err
 	}
 	if key.EncryptedKey == "" {
@@ -312,11 +329,15 @@ func (s *APIKeyService) GetAPIKeyPlaintext(id uint) (string, error) {
 	return plaintext, nil
 }
 
-func (s *APIKeyService) UpdateAPIKey(id uint, input UpdateAPIKeyInput, now time.Time) (*APIKeyView, error) {
-	if _, err := repository.FindAPIKeyByID(s.db, id); err != nil {
+func (s *APIKeyService) UpdateAPIKey(id uint, input UpdateAPIKeyInput, requiredOwner *uint, now time.Time) (*APIKeyView, error) {
+	existing, err := repository.FindAPIKeyByID(s.db, id)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errcode.ErrAPIKeyNotFound
 		}
+		return nil, err
+	}
+	if err := requireKeyOwner(existing, requiredOwner); err != nil {
 		return nil, err
 	}
 
@@ -406,15 +427,19 @@ func (s *APIKeyService) UpdateAPIKey(id uint, input UpdateAPIKeyInput, now time.
 		}
 		return nil, err
 	}
-	return s.GetAPIKey(id)
+	// Ownership was already verified above; no need to re-scope the readback.
+	return s.GetAPIKey(id, nil)
 }
 
-func (s *APIKeyService) RevokeAPIKey(id uint, now time.Time) error {
+func (s *APIKeyService) RevokeAPIKey(id uint, requiredOwner *uint, now time.Time) error {
 	key, err := repository.FindAPIKeyByID(s.db, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return errcode.ErrAPIKeyNotFound
 		}
+		return err
+	}
+	if err := requireKeyOwner(key, requiredOwner); err != nil {
 		return err
 	}
 	if key.Status == model.APIKeyStatusRevoked {

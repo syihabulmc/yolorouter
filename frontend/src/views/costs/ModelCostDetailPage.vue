@@ -9,7 +9,7 @@
   <div class="common-page">
     <PageHeader class="new-line" :title="title" :description="t('costs.detail.modelDesc')">
       <template #actions>
-        <NButton size="small" @click="goLogs">{{ t('costs.detail.viewLogs') }}</NButton>
+        <NButton v-if="authStore.isAdmin" size="small" @click="goLogs">{{ t('costs.detail.viewLogs') }}</NButton>
         <TimeRangeSelect v-model="timeRange" :preset="preset" @update:preset="onPreset" />
       </template>
     </PageHeader>
@@ -47,7 +47,7 @@
           @select="onSelect"
         />
       </div>
-      <div class="section-card  table-card">
+      <div v-if="authStore.isAdmin" class="section-card  table-card">
         <div class="section-card__head">{{ t('costs.detail.byProvider') }}</div>
         <BreakdownTable
           :rows="stats?.providerRows ?? []"
@@ -74,10 +74,12 @@ import CostTrendChart from '../../components/costs/CostTrendChart.vue'
 import BreakdownTable from '../../components/costs/BreakdownTable.vue'
 import { initialLast7DaysRange, logsRouteWithRange, rangeFromQuery, withRangeQuery } from '../../utils/timeRange'
 import { displayMessage } from '../../api/client'
+import { useAuthStore } from '../../store/auth'
 import { getCostStats, type CostStats } from '../../api/costs'
 import type { AnalyticsFilter } from '../../api/analytics'
 
 const { t } = useI18n()
+const authStore = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
@@ -138,7 +140,7 @@ async function reload() {
     model_name: name,
   }
   try {
-    const result = await getCostStats(filter)
+    const result = await getCostStats(filter, authStore.isAdmin)
     if (mySeq !== reloadSeq) return
     stats.value = result
     state.value = 'success'

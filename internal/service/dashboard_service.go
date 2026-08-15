@@ -62,10 +62,15 @@ type DashboardData struct {
 // CreatedAt is RFC3339 so the frontend can parse it with native Date without
 // guessing the format.
 type RecentFailureView struct {
-	RequestID  string  `json:"request_id"`
-	APIKeyID   *uint   `json:"api_key_id"`
-	ModelName  string  `json:"model_name"`
-	ProviderID *uint   `json:"provider_id"`
+	RequestID string `json:"request_id"`
+	APIKeyID  *uint  `json:"api_key_id"`
+	ModelName string `json:"model_name"`
+	// omitempty so a member response carries no provider key at all —
+	// "member payloads contain no provider fields" is a key-absence
+	// requirement, not a null-value one. Admin rows with a NULL provider
+	// (requests rejected before routing) also drop the key; the frontend
+	// never reads it from this list.
+	ProviderID *uint   `json:"provider_id,omitempty"`
 	StatusCode int     `json:"status_code"`
 	FailReason *string `json:"fail_reason"`
 	IsStream   bool    `json:"is_stream"`
@@ -90,7 +95,12 @@ type RecentFailureView struct {
 // callers, recent failures) to one account's rows; nil = all accounts. The
 // upstream/setup status sections stay global — they describe the
 // deployment, not anyone's traffic.
-func (s *DashboardService) GetDashboard(loc *time.Location, rangeStart, rangeEnd *time.Time, userID *uint, now time.Time) (*DashboardData, error) {
+//
+// memberScoped marks a member session (not merely "a user filter is set"):
+// an admin filtering by ?user_id keeps the deployment sections and the
+// failures' provider identities, while a member session gets both
+// stripped — that distinction cannot be derived from userID alone.
+func (s *DashboardService) GetDashboard(loc *time.Location, rangeStart, rangeEnd *time.Time, userID *uint, memberScoped bool, now time.Time) (*DashboardData, error) {
 	if loc == nil {
 		loc = time.Local
 	}
@@ -133,6 +143,25 @@ func (s *DashboardService) GetDashboard(loc *time.Location, rangeStart, rangeEnd
 	failures, err := repository.GetRecentFailures(s.db, DashboardRecentFailuresLim, userID)
 	if err != nil {
 		return nil, err
+	}
+
+	// The upstream-health and setup-funnel cards describe the deployment
+	// (which providers exist, how far onboarding got) — operator
+	// information a member's dashboard must not carry. Member sessions get
+	// zero-valued sections instead of the counts, and their recent
+	// failures drop the provider identity too: which upstream served a
+	// request is the same operator information in row form.
+	if memberScoped {
+		views := toRecentFailureViews(failures)
+		for i := range views {
+			views[i].ProviderID = nil
+		}
+		return &DashboardData{
+			Today:          *metrics,
+			Trend:          trend,
+			TopCallers:     topCallers,
+			RecentFailures: views,
+		}, nil
 	}
 
 	upstream, err := repository.GetUpstreamStatus(s.db)

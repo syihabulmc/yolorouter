@@ -9,6 +9,8 @@ interface AuthStoreState {
   username: string | null
   /** Account role ('admin' | 'member') as reported by the backend; null while logged out. */
   role: string | null
+  /** Whether the account is the password-backed local one; false for OAuth accounts, null while logged out. */
+  isLocal: boolean | null
   /**
    * Set whenever handleSessionExpired fires (a genuinely mid-use session
    * expiry, caught by withSessionInvalidHandling on some later
@@ -28,6 +30,7 @@ export const useAuthStore = defineStore('auth', {
     initialized: null,
     username: null,
     role: null,
+    isLocal: null,
     sessionExpiredNotice: false,
   }),
   getters: {
@@ -36,6 +39,9 @@ export const useAuthStore = defineStore('auth', {
     // action had to assign in lockstep, which only stays consistent for
     // as long as every future edit remembers to touch both.
     isLoggedIn: (state): boolean => state.username !== null,
+    // Single source of truth for role checks — pages and the router guard
+    // must never string-compare state.role themselves.
+    isAdmin: (state): boolean => state.role === 'admin',
   },
   actions: {
     /**
@@ -69,6 +75,7 @@ export const useAuthStore = defineStore('auth', {
           const me = await authApi.getMe()
           this.username = me.username
           this.role = me.role
+          this.isLocal = me.is_local
         } catch (err) {
           if (err instanceof APIError && err.code === ACCOUNT_SESSION_INVALID) {
             this.clearIdentity()
@@ -83,11 +90,13 @@ export const useAuthStore = defineStore('auth', {
       this.initialized = true
       this.username = admin.username
       this.role = admin.role
+      this.isLocal = admin.is_local
     },
     async login(username: string, password: string) {
       const admin = await authApi.login(username, password)
       this.username = admin.username
       this.role = admin.role
+      this.isLocal = admin.is_local
     },
     async logout() {
       await authApi.logout()
@@ -108,6 +117,7 @@ export const useAuthStore = defineStore('auth', {
     clearIdentity() {
       this.username = null
       this.role = null
+      this.isLocal = null
     },
     /** Reads and clears the pending notice in one step, so it's shown at most once per expiry. */
     consumeSessionExpiredNotice(): boolean {

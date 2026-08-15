@@ -56,8 +56,11 @@ export function toAPIKeyOptions(keys: APIKey[]): SelectOption[] {
 export interface CreateAPIKeyInput {
   owner_label?: string
   remark?: string
-  allow_all_models: boolean
-  model_ids: number[]
+  // Optional so a member payload can omit the model scope entirely — the
+  // backend forces all-models for member-created keys and rejects any
+  // explicit allowlist from them. Admin payloads always send both.
+  allow_all_models?: boolean
+  model_ids?: number[]
   expires_at?: string
   rpm_limit?: number
   tpm_limit?: number

@@ -217,12 +217,14 @@ func GetMe(db *gorm.DB) gin.HandlerFunc {
 
 // writeMeResponse emits the shared me-shape used by PostSetup, PostLogin, and
 // GetMe. Centralizing it keeps the three "you are now logged in" responses
-// identical. Role is included so the frontend can decide which navigation
-// to render without a second request.
+// identical. Role drives which navigation the frontend renders; is_local
+// drives whether the change-password entry appears at all — externally-
+// provisioned accounts have no password to change.
 func writeMeResponse(c *gin.Context, user *model.User) {
 	response.Success(c, gin.H{
 		"username": user.Username,
 		"role":     user.Role,
+		"is_local": user.IsLocal,
 	})
 }
 

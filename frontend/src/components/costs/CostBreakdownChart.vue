@@ -5,7 +5,7 @@
 <template>
   <div class="cost-breakdown">
     <NTabs :value="tab" type="segment" size="small" @update:value="onTab">
-      <NTabPane :name="'provider'" :tab="t('costs.breakdown.byProvider')" />
+      <NTabPane v-if="!hideProvider" :name="'provider'" :tab="t('costs.breakdown.byProvider')" />
       <NTabPane :name="'model'" :tab="t('costs.breakdown.byModel')" />
     </NTabs>
     <div v-if="!slices.length" class="cost-breakdown__empty">
@@ -35,6 +35,11 @@ import type { ModelReportRow, ProviderReportRow } from '../../api/analytics'
 const props = defineProps<{
   providerRows: ProviderReportRow[]
   modelRows: ModelReportRow[]
+  /**
+   * Drops the by-provider tab entirely — set for member sessions, whose
+   * backend scope has no provider dimension to slice by.
+   */
+  hideProvider?: boolean
 }>()
 
 const emit = defineEmits<{ select: [payload: { providerId?: number; model?: string }] }>()
@@ -42,7 +47,7 @@ const emit = defineEmits<{ select: [payload: { providerId?: number; model?: stri
 const { t } = useI18n()
 
 type BreakdownTab = 'provider' | 'model'
-const tab = ref<BreakdownTab>('provider')
+const tab = ref<BreakdownTab>(props.hideProvider ? 'model' : 'provider')
 function onTab(v: string | number) {
   tab.value = v as BreakdownTab
 }

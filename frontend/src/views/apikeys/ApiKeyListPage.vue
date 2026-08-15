@@ -86,6 +86,7 @@ import { useRouter } from 'vue-router'
 import { NButton, NInput, NTag, NTooltip, useDialog, useMessage, type DataTableColumns, type DropdownOption, type PaginationProps } from 'naive-ui'
 import { KeyRound, Plus, Search, MoreHorizontal, Copy } from '@lucide/vue'
 import { useApiKeysStore } from '../../store/apiKeys'
+import { useAuthStore } from '../../store/auth'
 import { displayMessage } from '../../api/client'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
@@ -107,6 +108,7 @@ const router = useRouter()
 const dialog = useDialog()
 const message = useMessage()
 const store = useApiKeysStore()
+const authStore = useAuthStore()
 const { importToCCS } = useCCSwitchImport()
 const showCreate = ref(false)
 const showEdit = ref(false)
@@ -130,7 +132,10 @@ const draftValueLength = computed(() => {
 })
 
 onMounted(() => {
-  void Promise.all([store.fetchList(), fetchModels()]).catch((err) => message.error(displayMessage(err, t)))
+  // The model catalog is admin-only; members don't render any model-derived
+  // cell, so they only load their own key list.
+  const loads = authStore.isAdmin ? [store.fetchList(), fetchModels()] : [store.fetchList()]
+  void Promise.all(loads).catch((err) => message.error(displayMessage(err, t)))
 })
 
 async function fetchModels() {
@@ -332,6 +337,8 @@ function importKeyToCCS(row: APIKey) {
 
 function rowActions(row: APIKey): DropdownOption[] {
   // Revoked keys only keep cost view; config, optimize, import, and revoke drop out.
+  // The optimization modal edits admin-only per-key overrides, so members
+  // don't get that entry at all.
   const revoked = row.display_status === 'revoked'
   return [
     ...(revoked ? [] : [
@@ -339,7 +346,7 @@ function rowActions(row: APIKey): DropdownOption[] {
     ]),
     { label: t('costs.detail.viewCost'), key: 'look' },
     ...(revoked ? [] : [
-      { label: t('costOptimization.title'), key: 'optimize' },
+      ...(authStore.isAdmin ? [{ label: t('costOptimization.title'), key: 'optimize' }] : []),
       { label: t('ccswitch.importAction'), key: 'importCCSImport' },
       { type: 'divider', key: 'd' },
       { label: t('apiKeys.revoke'), key: 'delete', props: { style: 'color: var(--color-danger)' } },
@@ -376,12 +383,16 @@ const columns = computed<DataTableColumns<APIKey>>(() => [
         ),
       ]),
   },
-  {
-    title: columnTitle(t('apiKeys.ownerUserColumn'), t('apiKeys.ownerUserColumn_tip')),
-    key: 'owner_username',
-    minWidth: 110,
-    render: (row) => row.owner_username || '—',
-  },
+  // The owning-account column only means something across accounts — a
+  // member's list is always entirely their own.
+  ...(authStore.isAdmin
+    ? [{
+        title: columnTitle(t('apiKeys.ownerUserColumn'), t('apiKeys.ownerUserColumn_tip')),
+        key: 'owner_username',
+        minWidth: 110,
+        render: (row: APIKey) => row.owner_username || '—',
+      }]
+    : []),
   {
     title: columnTitle(t('apiKeys.ownerColumn'), t('apiKeys.ownerColumn_tip')),
     key: 'owner_label',
