@@ -1780,3 +1780,79 @@ func TestProviderReportSurvivesMalformedAttemptDetail(t *testing.T) {
 		t.Fatalf("the valid switch must still count beside the malformed row; rows: %+v", env.Data.Rows)
 	}
 }
+
+// TestGetAnalyticsReportByUserGroupsAcrossKeys: dimension=user must merge
+// every key an account owns into one row (usage per person, not per
+// credential), resolve the account's username, and keep keyless
+// auth-rejected traffic in its own NULL bucket.
+func TestGetAnalyticsReportByUserGroupsAcrossKeys(t *testing.T) {
+	r, db := newAnalyticsTestRouter(t)
+	key1, userID := seedAPIKey(t, db, "carol")
+	// A second key owned by the SAME account — its traffic must fold into
+	// carol's single row.
+	now := time.Now().UTC()
+	key2 := model.APIKey{KeyHash: "test-hash-carol-2", KeyPrefix: "sk-x2-", UserID: userID,
+		Status: model.APIKeyStatusActive, CreatedAt: now, UpdatedAt: now}
+	if err := db.Create(&key2).Error; err != nil {
+		t.Fatalf("seed second key: %v", err)
+	}
+	seedRequestLog(t, db, "u1", now, func(l *model.RequestLog) {
+		l.APIKeyID = &key1
+		l.UserID = &userID
+		l.StatusCode = 200
+		l.InputTokens = 10
+		l.CostMicros = 5
+		l.CostKnown = true
+	})
+	seedRequestLog(t, db, "u2", now, func(l *model.RequestLog) {
+		l.APIKeyID = &key2.ID
+		l.UserID = &userID
+		l.StatusCode = 200
+		l.InputTokens = 7
+		l.CostMicros = 2
+		l.CostKnown = true
+	})
+	seedRequestLog(t, db, "u3", now, func(l *model.RequestLog) {
+		l.StatusCode = 401 // keyless, accountless reject
+	})
+
+	w, _ := doJSON(t, r, http.MethodGet, "/api/admin/analytics/report?dimension=user", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data struct {
+			Rows []struct {
+				UserID      *uint  `json:"user_id"`
+				Username    string `json:"username"`
+				Calls       int64  `json:"calls"`
+				InputTokens int64  `json:"input_tokens"`
+				CostMicros  int64  `json:"cost_micros"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(env.Data.Rows) != 2 {
+		t.Fatalf("expected carol + NULL bucket = 2 rows, got %d: %s", len(env.Data.Rows), w.Body.String())
+	}
+	var carol, nullBucket bool
+	for _, row := range env.Data.Rows {
+		if row.UserID != nil && *row.UserID == userID {
+			carol = true
+			if row.Username != "carol" || row.Calls != 2 || row.InputTokens != 17 || row.CostMicros != 7 {
+				t.Fatalf("carol row must merge both keys' traffic, got %+v", row)
+			}
+		}
+		if row.UserID == nil {
+			nullBucket = true
+			if row.Username != "" || row.Calls != 1 {
+				t.Fatalf("NULL bucket must stay unattributed, got %+v", row)
+			}
+		}
+	}
+	if !carol || !nullBucket {
+		t.Fatalf("missing expected rows: carol=%v null=%v", carol, nullBucket)
+	}
+}

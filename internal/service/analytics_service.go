@@ -38,6 +38,8 @@ const (
 	DimensionProvider = repository.ReportDimensionProvider
 	// DimensionCaller groups by request_logs.api_key_id.
 	DimensionCaller = repository.ReportDimensionCaller
+	// DimensionUser groups by request_logs.user_id (the owning account).
+	DimensionUser = repository.ReportDimensionUser
 	// DimensionTime groups by local-day (or local-hour) time bucket.
 	DimensionTime = repository.ReportDimensionTime
 )
@@ -257,6 +259,8 @@ func (s *AnalyticsService) runReport(dimension, bucket string, filter AnalyticsF
 		return rows, nil
 	case DimensionCaller:
 		return repository.AggregateByCaller(s.db, rf)
+	case DimensionUser:
+		return repository.AggregateByUser(s.db, rf)
 	case DimensionTime:
 		return repository.AggregateByTime(s.db, rf, filter.location(), bucket, now)
 	}
@@ -363,6 +367,28 @@ func buildCSV(dimension string, rows interface{}) ([]string, [][]string, error) 
 				formatUintPtr(r.APIKeyID),
 				r.Username,
 				r.KeyPrefix,
+				strconv.FormatInt(r.Calls, 10),
+				formatRate(r.SuccessRate),
+				strconv.FormatInt(r.InputTokens, 10),
+				strconv.FormatInt(r.OutputTokens, 10),
+				strconv.FormatInt(r.CacheWriteTokens, 10),
+				strconv.FormatInt(r.CacheReadTokens, 10),
+				strconv.FormatInt(r.CostMicros, 10),
+				strconv.FormatInt(r.UnknownCostCalls, 10),
+			}
+		}
+		return headers, records, nil
+	case DimensionUser:
+		typed, ok := rows.([]repository.UserReportRow)
+		if !ok {
+			return nil, nil, errCSVTypeMismatch("UserReportRow")
+		}
+		headers := []string{"user_id", "username", "calls", "success_rate", "input_tokens", "output_tokens", "cache_write_tokens", "cache_read_tokens", "cost_micros", "unknown_cost_calls"}
+		records := make([][]string, len(typed))
+		for i, r := range typed {
+			records[i] = []string{
+				formatUintPtr(r.UserID),
+				r.Username,
 				strconv.FormatInt(r.Calls, 10),
 				formatRate(r.SuccessRate),
 				strconv.FormatInt(r.InputTokens, 10),

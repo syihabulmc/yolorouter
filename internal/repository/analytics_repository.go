@@ -42,6 +42,7 @@ const (
 	ReportDimensionModel    = "model"
 	ReportDimensionProvider = "provider"
 	ReportDimensionCaller   = "caller"
+	ReportDimensionUser     = "user"
 	ReportDimensionTime     = "time"
 )
 
@@ -132,6 +133,31 @@ type CallerReportRow struct {
 }
 
 func (r *CallerReportRow) finalizeRate() {
+	r.SuccessRate = successRateOf(r.SuccessCalls, r.EndedCalls)
+}
+
+// UserReportRow is one row of the dimension=user report — the same
+// aggregates as the caller report but grouped by owning account, so an
+// admin can read usage per person regardless of how many keys each person
+// spreads their traffic over. UserID nil = the bucket for rows with NULL
+// user_id (auth-rejected requests never tied to an account). Username
+// resolved post-fetch.
+type UserReportRow struct {
+	UserID           *uint   `json:"user_id" gorm:"column:user_id"`
+	Username         string  `json:"username" gorm:"-"`
+	Calls            int64   `json:"calls" gorm:"column:calls"`
+	SuccessCalls     int64   `json:"success_calls" gorm:"column:success_calls"`
+	EndedCalls       int64   `json:"ended_calls" gorm:"column:ended_calls"`
+	SuccessRate      float64 `json:"success_rate" gorm:"-"`
+	InputTokens      int64   `json:"input_tokens" gorm:"column:input_tokens"`
+	OutputTokens     int64   `json:"output_tokens" gorm:"column:output_tokens"`
+	CacheWriteTokens int64   `json:"cache_write_tokens" gorm:"column:cache_write_tokens"`
+	CacheReadTokens  int64   `json:"cache_read_tokens" gorm:"column:cache_read_tokens"`
+	CostMicros       int64   `json:"cost_micros" gorm:"column:cost_micros"`
+	UnknownCostCalls int64   `json:"unknown_cost_calls" gorm:"column:unknown_cost_calls"`
+}
+
+func (r *UserReportRow) finalizeRate() {
 	r.SuccessRate = successRateOf(r.SuccessCalls, r.EndedCalls)
 }
 
@@ -391,6 +417,68 @@ func AggregateByCaller(db *gorm.DB, f *RequestLogFilter) ([]CallerReportRow, err
 		rows = []CallerReportRow{}
 	}
 	return rows, nil
+}
+
+// AggregateByUser groups the same aggregates by owning account
+// (request_logs.user_id). Rows with NULL user_id form their own bucket
+// (auth-rejected traffic never tied to an account). Ordered by spend for
+// the same reason as the caller report.
+func AggregateByUser(db *gorm.DB, f *RequestLogFilter) ([]UserReportRow, error) {
+	var rows []UserReportRow
+	err := f.applyFilter(db).Select(`
+		user_id,`[1:]+successEndedCols+`,
+		COALESCE(SUM(input_tokens), 0) AS input_tokens,
+		COALESCE(SUM(output_tokens), 0) AS output_tokens,
+		COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+		COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+		COALESCE(SUM(cost_micros), 0) AS cost_micros,
+		SUM(CASE WHEN cost_known = ? THEN 1 ELSE 0 END) AS unknown_cost_calls
+	`, false).Group("user_id").
+		Order("cost_micros DESC").Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveAccountUsernames(db, rows); err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		rows[i].finalizeRate()
+	}
+	if rows == nil {
+		rows = []UserReportRow{}
+	}
+	return rows, nil
+}
+
+// resolveAccountUsernames populates Username on user-report rows via one
+// batched SELECT against users. Missing user rows simply stay "".
+func resolveAccountUsernames(db *gorm.DB, rows []UserReportRow) error {
+	ids := make([]uint, 0, len(rows))
+	for _, r := range rows {
+		if r.UserID != nil {
+			ids = append(ids, *r.UserID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var users []struct {
+		ID       uint
+		Username string
+	}
+	if err := db.Table("users").Select("id", "username").Where("id IN ?", ids).Scan(&users).Error; err != nil {
+		return err
+	}
+	names := make(map[uint]string, len(users))
+	for _, u := range users {
+		names[u.ID] = u.Username
+	}
+	for i := range rows {
+		if rows[i].UserID != nil {
+			rows[i].Username = names[*rows[i].UserID]
+		}
+	}
+	return nil
 }
 
 // resolveOwnerUsernames populates Username via a single batched query

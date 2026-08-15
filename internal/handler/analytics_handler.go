@@ -36,6 +36,7 @@ var validAnalyticsDimensions = map[string]struct{}{
 	service.DimensionModel:    {},
 	service.DimensionProvider: {},
 	service.DimensionCaller:   {},
+	service.DimensionUser:     {},
 	service.DimensionTime:     {},
 }
 
@@ -249,7 +250,7 @@ func parseTopNParam(c *gin.Context) (int, bool) {
 func parseDimensionParam(c *gin.Context) (string, bool) {
 	dimension := c.DefaultQuery("dimension", service.DimensionModel)
 	if _, ok := validAnalyticsDimensions[dimension]; !ok {
-		response.ParamError(c, "dimension must be one of: model, provider, caller, time")
+		response.ParamError(c, "dimension must be one of: model, provider, caller, user, time")
 		return "", false
 	}
 	if dimension == service.DimensionProvider && middleware.ForcedUserID(c) != nil {

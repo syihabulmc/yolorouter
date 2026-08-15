@@ -1,7 +1,7 @@
 <!-- frontend/src/views/analytics/AnalyticsPage.vue
      Usage report. Combines:
        - Filter bar (time range / api key / model / provider / status)
-       - Dimension tabs (model / provider / time / caller)
+       - Dimension tabs (account / model / provider / time / caller)
        - Overview metric row (calls / success rate / tokens / cost)
        - Dimension-specific NDataTable (column tooltips via columnTitle)
        - CSV export button
@@ -138,9 +138,32 @@
     <!-- Dimension tabs + report table -->
     <div class="section-card  table-card">
       <NTabs :value="dimension" type="line" @update:value="onDimensionChange">
+        <NTabPane v-if="authStore.isAdmin" :name="'user'" :tab="t('analytics.dimensionUser')">
+          <FilterSelectField
+            v-if="isMobile"
+            v-model:value="mobileSort"
+            :label="t('analytics.mobileSortBy')"
+            :options="mobileSortOptions"
+            :placeholder="t('analytics.mobileSortDefault')"
+            size="small"
+            width="100%"
+          />
+          <ResponsiveDataTable
+            :columns="userColumns"
+            :data="displayedUserRows"
+            :row-props="(r: UserReportRow) => drillRowProps(r.user_id != null ? { user_id: r.user_id } : null)"
+            :loading="loading"
+            :scroll-x="1330"
+            :row-key="userRowKey"
+          >
+            <template #empty>
+              <EmptyState :icon="BarChart3" :title="t('analytics.noData')" />
+            </template>
+          </ResponsiveDataTable>
+        </NTabPane>
         <NTabPane :name="'model'" :tab="t('analytics.dimensionModel')">
           <!-- Mobile cards have no sortable headers, so metric sorting
-               lives in this shared selector on the three entity tabs. -->
+               lives in this shared selector on the four entity tabs. -->
           <FilterSelectField
             v-if="isMobile"
             v-model:value="mobileSort"
@@ -165,7 +188,7 @@
         </NTabPane>
         <NTabPane v-if="authStore.isAdmin" :name="'provider'" :tab="t('analytics.dimensionProvider')">
           <!-- Mobile cards have no sortable headers, so metric sorting
-               lives in this shared selector on the three entity tabs. -->
+               lives in this shared selector on the four entity tabs. -->
           <FilterSelectField
             v-if="isMobile"
             v-model:value="mobileSort"
@@ -271,6 +294,7 @@ import {
   type AnalyticsDimension,
   type AnalyticsFilter,
   type CallerReportRow,
+  type UserReportRow,
   type ModelReportRow,
   type OverviewRow,
   type ProviderReportRow,
@@ -298,7 +322,10 @@ const initialUserID = Number.isInteger(seededUserID) && seededUserID > 0 ? seede
 const preset = ref<RangePreset>('last7d')
 const timeRange = ref<TimeRange>(initialLast7DaysRange())
 const filter = ref<AnalyticsFilter>({ start: timeRange.value.start, end: timeRange.value.end, user_id: initialUserID })
-const dimension = ref<AnalyticsDimension>('model')
+// Admins land on the per-account view (the leftmost tab, and the "who is
+// using how much" question they usually come for); members don't have that
+// tab, so their default stays the model breakdown.
+const dimension = ref<AnalyticsDimension>(authStore.isAdmin ? 'user' : 'model')
 const bucket = ref<AnalyticsBucket>('day')
 
 const bucketOptions = computed<SelectOption[]>(() => [
@@ -335,7 +362,8 @@ const modelRows = ref<ModelReportRow[]>([])
 const providerRows = ref<ProviderReportRow[]>([])
 const isMobile = useIsMobile()
 const callerRows = ref<CallerReportRow[]>([])
-// Mobile-only sort preference, shared across the model/provider/caller tabs
+const userRows = ref<UserReportRow[]>([])
+// Mobile-only sort preference, shared across the account/model/provider/caller tabs
 // (the time tab stays chronological — reordering date buckets destroys the
 // trend it exists to show). null keeps each dimension's server order: calls
 // for model/provider, spend for caller.
@@ -389,6 +417,7 @@ function drillRowProps(extra: RequestLogLinkQuery | null): Record<string, unknow
 const displayedModelRows = computed(() => mobileSorted(modelRows.value))
 const displayedProviderRows = computed(() => mobileSorted(providerRows.value))
 const displayedCallerRows = computed(() => mobileSorted(callerRows.value))
+const displayedUserRows = computed(() => mobileSorted(userRows.value))
 const timeRows = ref<TimeReportRow[]>([])
 const loading = ref(false)
 const exporting = ref(false)
@@ -403,6 +432,8 @@ const reportRows = computed<unknown[]>(() => {
       return providerRows.value
     case 'caller':
       return callerRows.value
+    case 'user':
+      return userRows.value
     case 'time':
       return timeRows.value
   }
@@ -428,6 +459,7 @@ async function reload() {
   modelRows.value = []
   providerRows.value = []
   callerRows.value = []
+  userRows.value = []
   timeRows.value = []
   // Effective bucket: the time dimension honors the caller's bucket; every
   // other dimension uses 'day' for range resolution, so overview and non-time
@@ -462,6 +494,9 @@ async function reload() {
         break
       case 'caller':
         callerRows.value = (report.rows as CallerReportRow[]) ?? []
+        break
+      case 'user':
+        userRows.value = (report.rows as UserReportRow[]) ?? []
         break
       case 'time':
         timeRows.value = (report.rows as TimeReportRow[]) ?? []
@@ -572,6 +607,12 @@ function providerRowKey(r: ProviderReportRow): string {
   return r.provider_id == null ? '__null_provider__' : `p-${r.provider_id}`
 }
 
+// NULL bucket has no id; a fixed sentinel keeps its expand/render state
+// stable, same as the caller table's key.
+function userRowKey(r: UserReportRow): string {
+  return r.user_id != null ? String(r.user_id) : 'unattributed'
+}
+
 function callerRowKey(r: CallerReportRow): string {
   return r.api_key_id == null ? '__null_caller__' : `k-${r.api_key_id}`
 }
@@ -634,6 +675,23 @@ const callerColumns = computed<DataTableColumns<CallerReportRow>>(() => [
   tokenColumn<CallerReportRow>(t, 'cache_read_tokens', 'cacheReadTokensColumn', 150),
   costColumn<CallerReportRow>(t, { sortable: true, defaultDescend: true }),
   unknownCostColumn<CallerReportRow>(t),
+])
+
+const userColumns = computed<DataTableColumns<UserReportRow>>(() => [
+  {
+    title: columnTitle(t('analytics.userColumn'), t('analytics.userColumn_tip')),
+    key: 'username',
+    minWidth: 200,
+    render: (r) => r.username || t('analytics.unknownUserBucket'),
+  },
+  callsColumn<UserReportRow>(t, { sortable: true }),
+  successRateColumn<UserReportRow>(t),
+  tokenColumn<UserReportRow>(t, 'input_tokens', 'inputTokensColumn'),
+  tokenColumn<UserReportRow>(t, 'output_tokens', 'outputTokensColumn'),
+  tokenColumn<UserReportRow>(t, 'cache_write_tokens', 'cacheWriteTokensColumn', 150),
+  tokenColumn<UserReportRow>(t, 'cache_read_tokens', 'cacheReadTokensColumn', 150),
+  costColumn<UserReportRow>(t, { sortable: true, defaultDescend: true }),
+  unknownCostColumn<UserReportRow>(t),
 ])
 
 const timeColumns = computed<DataTableColumns<TimeReportRow>>(() => [

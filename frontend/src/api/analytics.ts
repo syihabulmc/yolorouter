@@ -99,7 +99,7 @@ export function getDashboard(filter?: { start: string; end: string }, userId?: n
 // Dimension vocabulary — mirrors internal/service/analytics_service.go's
 // constants. Keep as a string union so a typo at a call site fails typecheck
 // instead of sending an unknown value silently.
-export type AnalyticsDimension = 'model' | 'provider' | 'time' | 'caller'
+export type AnalyticsDimension = 'model' | 'provider' | 'time' | 'caller' | 'user'
 export type AnalyticsBucket = 'day' | 'hour'
 
 // Shared filter shape across overview / report / export. Pointer-typed fields
@@ -164,6 +164,24 @@ export interface ProviderReportRow {
   unknown_cost_calls: number
   /** Provider-to-provider switches charged to the provider that failed. */
   failovers: number
+}
+
+// Mirrors repository.UserReportRow (dimension=user): the caller aggregates
+// merged per owning account. user_id null = the unattributed bucket
+// (auth-rejected traffic tied to no account).
+export interface UserReportRow {
+  user_id: number | null
+  username: string
+  calls: number
+  success_calls: number
+  ended_calls: number
+  success_rate: number
+  input_tokens: number
+  output_tokens: number
+  cache_write_tokens: number
+  cache_read_tokens: number
+  cost_micros: number
+  unknown_cost_calls: number
 }
 
 export interface CallerReportRow {
