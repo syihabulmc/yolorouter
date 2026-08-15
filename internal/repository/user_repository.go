@@ -57,25 +57,6 @@ func UpdateUserPasswordHash(db *gorm.DB, id uint, passwordHash string, now time.
 		Updates(map[string]interface{}{"password_hash": passwordHash, "updated_at": now}).Error
 }
 
-// FindUsernamesByIDs batch-resolves user ids to usernames for display
-// (the same N+1 fix shape as FindAPIKeyModelsByAPIKeyIDs). Unknown ids are
-// simply absent from the map — callers render an empty owner rather than
-// failing the whole list.
-func FindUsernamesByIDs(db *gorm.DB, ids []uint) (map[uint]string, error) {
-	result := make(map[uint]string)
-	if len(ids) == 0 {
-		return result, nil
-	}
-	var rows []model.User
-	if err := db.Select("id, username").Where("id IN ?", ids).Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	for _, u := range rows {
-		result[u.ID] = u.Username
-	}
-	return result, nil
-}
-
 // ListUsers returns every account in creation order (id ascending) — the
 // admin's user directory and the data source for "filter by user"
 // dropdowns. The user base is company-internal (tens, not millions), so

@@ -27,8 +27,6 @@ import (
 	"time"
 
 	"gorm.io/gorm"
-
-	"github.com/yolorouter/yolorouter/internal/model"
 )
 
 // === Dimensions / buckets ================================================
@@ -360,22 +358,9 @@ func collectProviderFailovers(db *gorm.DB, f *RequestLogFilter) (map[uint]int64,
 // or whose provider has been hard-deleted surface as "" — the frontend
 // renders those as the "unknown" / "unrouted" bucket.
 func resolveProviderNames(db *gorm.DB, rows []ProviderReportRow) error {
-	ids := make([]uint, 0, len(rows))
-	for _, r := range rows {
-		if r.ProviderID != nil {
-			ids = append(ids, *r.ProviderID)
-		}
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	var providers []model.Provider
-	if err := db.Select("id", "name").Where("id IN ?", ids).Find(&providers).Error; err != nil {
+	names, err := FindProviderNamesByIDs(db, CollectPtrIDs(rows, func(r *ProviderReportRow) *uint { return r.ProviderID }))
+	if err != nil {
 		return err
-	}
-	names := make(map[uint]string, len(providers))
-	for _, p := range providers {
-		names[p.ID] = p.Name
 	}
 	for i := range rows {
 		if rows[i].ProviderID != nil {
@@ -450,28 +435,12 @@ func AggregateByUser(db *gorm.DB, f *RequestLogFilter) ([]UserReportRow, error) 
 	return rows, nil
 }
 
-// resolveAccountUsernames populates Username on user-report rows via one
-// batched SELECT against users. Missing user rows simply stay "".
+// resolveAccountUsernames populates Username on user-report rows via the
+// shared batch lookup. Missing user rows simply stay "".
 func resolveAccountUsernames(db *gorm.DB, rows []UserReportRow) error {
-	ids := make([]uint, 0, len(rows))
-	for _, r := range rows {
-		if r.UserID != nil {
-			ids = append(ids, *r.UserID)
-		}
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	var users []struct {
-		ID       uint
-		Username string
-	}
-	if err := db.Table("users").Select("id", "username").Where("id IN ?", ids).Scan(&users).Error; err != nil {
+	names, err := FindUsernamesByIDs(db, CollectPtrIDs(rows, func(r *UserReportRow) *uint { return r.UserID }))
+	if err != nil {
 		return err
-	}
-	names := make(map[uint]string, len(users))
-	for _, u := range users {
-		names[u.ID] = u.Username
 	}
 	for i := range rows {
 		if rows[i].UserID != nil {
@@ -485,16 +454,7 @@ func resolveAccountUsernames(db *gorm.DB, rows []UserReportRow) error {
 // joining api_keys to users. Same nil / hard-deleted semantics as
 // resolveProviderNames.
 func resolveOwnerUsernames(db *gorm.DB, rows []CallerReportRow) error {
-	ids := make([]uint, 0, len(rows))
-	for _, r := range rows {
-		if r.APIKeyID != nil {
-			ids = append(ids, *r.APIKeyID)
-		}
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	names, err := fetchOwnerUsernames(db, ids)
+	names, err := FindOwnerIdentitiesByKeyIDs(db, CollectPtrIDs(rows, func(r *CallerReportRow) *uint { return r.APIKeyID }))
 	if err != nil {
 		return err
 	}
@@ -723,16 +683,7 @@ func AggregateCompressTopAPIKeys(ctx context.Context, db *gorm.DB, f *RequestLog
 // resolveCompressOwnerUsernames populates Username via a single batched
 // SELECT — same nil / hard-deleted semantics as resolveOwnerUsernames.
 func resolveCompressOwnerUsernames(db *gorm.DB, rows []CompressTopAPIKeyRow) error {
-	ids := make([]uint, 0, len(rows))
-	for _, r := range rows {
-		if r.APIKeyID != nil {
-			ids = append(ids, *r.APIKeyID)
-		}
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	names, err := fetchOwnerUsernames(db, ids)
+	names, err := FindOwnerIdentitiesByKeyIDs(db, CollectPtrIDs(rows, func(r *CompressTopAPIKeyRow) *uint { return r.APIKeyID }))
 	if err != nil {
 		return err
 	}
@@ -838,22 +789,9 @@ func AggregateCompressTopProviders(ctx context.Context, db *gorm.DB, f *RequestL
 // SELECT against providers — same nil / hard-deleted semantics as
 // resolveProviderNames.
 func resolveCompressProviderNames(db *gorm.DB, rows []CompressTopProviderRow) error {
-	ids := make([]uint, 0, len(rows))
-	for _, r := range rows {
-		if r.ProviderID != nil {
-			ids = append(ids, *r.ProviderID)
-		}
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	var providers []model.Provider
-	if err := db.Select("id", "name").Where("id IN ?", ids).Find(&providers).Error; err != nil {
+	names, err := FindProviderNamesByIDs(db, CollectPtrIDs(rows, func(r *CompressTopProviderRow) *uint { return r.ProviderID }))
+	if err != nil {
 		return err
-	}
-	names := make(map[uint]string, len(providers))
-	for _, p := range providers {
-		names[p.ID] = p.Name
 	}
 	for i := range rows {
 		if rows[i].ProviderID != nil {
@@ -861,41 +799,6 @@ func resolveCompressProviderNames(db *gorm.DB, rows []CompressTopProviderRow) er
 		}
 	}
 	return nil
-}
-
-// ownerIdentity is what a per-key aggregate row displays: the owning
-// account's username plus the key's own prefix. One account usually owns
-// several keys, so the username alone would render indistinguishable
-// duplicate rows — the prefix is what tells them apart.
-type ownerIdentity struct {
-	Username  string
-	KeyPrefix string
-}
-
-// fetchOwnerUsernames runs a single batched query joining api_keys to users
-// and returns a map of key ID → owner identity. Keys that are hard-deleted
-// or missing (and keys whose owner row is gone) simply don't appear in the
-// map (the caller's lookup yields zero values for those rows). Shared by
-// resolveOwnerUsernames and resolveCompressOwnerUsernames so the query +
-// map-build logic exists in exactly one place.
-func fetchOwnerUsernames(db *gorm.DB, ids []uint) (map[uint]ownerIdentity, error) {
-	var rows []struct {
-		ID        uint
-		Username  string
-		KeyPrefix string
-	}
-	if err := db.Table("api_keys").
-		Select("api_keys.id AS id, users.username AS username, api_keys.key_prefix AS key_prefix").
-		Joins("JOIN users ON users.id = api_keys.user_id").
-		Where("api_keys.id IN ?", ids).
-		Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	names := make(map[uint]ownerIdentity, len(rows))
-	for _, r := range rows {
-		names[r.ID] = ownerIdentity{Username: r.Username, KeyPrefix: r.KeyPrefix}
-	}
-	return names, nil
 }
 
 // CompressDailySeriesRow is one day of the daily token-saved trend. Bucket is

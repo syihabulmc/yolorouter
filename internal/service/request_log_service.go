@@ -479,52 +479,20 @@ func buildCSVRecords(items []RequestLogListItem) [][]string {
 }
 
 // fetchRelatedNames batch-loads provider_name / username for every
-// provider_id / user_id referenced in rows. Returns two lookup maps
-// keyed by id; rows whose provider/user row is gone (or whose FK
-// is NULL) surface as empty strings in the DTO via lookupName. Two small
-// SELECTs rather than one JOIN keeps the read path on the shared
-// repository.ListRequestLogs — adding batch-by-id repository helpers
-// purely for this display-name lookup isn't worth the layering overhead.
+// provider_id / user_id referenced in rows, via the shared namelookup
+// helpers. Returns two lookup maps keyed by id; rows whose provider/user
+// row is gone (or whose FK is NULL) surface as empty strings in the DTO
+// via lookupName.
 func (s *RequestLogService) fetchRelatedNames(rows []model.RequestLog) (providerNames, userNames map[uint]string, err error) {
-	providerIDs := make([]uint, 0)
-	userIDs := make([]uint, 0)
-	seenProv := make(map[uint]struct{})
-	seenUser := make(map[uint]struct{})
-	for i := range rows {
-		if rows[i].ProviderID != nil {
-			if _, ok := seenProv[*rows[i].ProviderID]; !ok {
-				seenProv[*rows[i].ProviderID] = struct{}{}
-				providerIDs = append(providerIDs, *rows[i].ProviderID)
-			}
-		}
-		if rows[i].UserID != nil {
-			if _, ok := seenUser[*rows[i].UserID]; !ok {
-				seenUser[*rows[i].UserID] = struct{}{}
-				userIDs = append(userIDs, *rows[i].UserID)
-			}
-		}
+	providerNames, err = repository.FindProviderNamesByIDs(s.db,
+		repository.CollectPtrIDs(rows, func(r *model.RequestLog) *uint { return r.ProviderID }))
+	if err != nil {
+		return nil, nil, err
 	}
-
-	providerNames = make(map[uint]string, len(providerIDs))
-	if len(providerIDs) > 0 {
-		var provs []model.Provider
-		if qErr := s.db.Select("id", "name").Where("id IN ?", providerIDs).Find(&provs).Error; qErr != nil {
-			return nil, nil, qErr
-		}
-		for i := range provs {
-			providerNames[provs[i].ID] = provs[i].Name
-		}
-	}
-
-	userNames = make(map[uint]string, len(userIDs))
-	if len(userIDs) > 0 {
-		var users []model.User
-		if qErr := s.db.Select("id", "username").Where("id IN ?", userIDs).Find(&users).Error; qErr != nil {
-			return nil, nil, qErr
-		}
-		for i := range users {
-			userNames[users[i].ID] = users[i].Username
-		}
+	userNames, err = repository.FindUsernamesByIDs(s.db,
+		repository.CollectPtrIDs(rows, func(r *model.RequestLog) *uint { return r.UserID }))
+	if err != nil {
+		return nil, nil, err
 	}
 	return providerNames, userNames, nil
 }
