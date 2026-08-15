@@ -66,8 +66,12 @@ export interface OAuthProviderInput {
   auth_style: 'basic' | 'post'
 }
 
-export function listOAuthProviders(): Promise<{ providers: OAuthProviderView[] }> {
-  return apiFetch<{ providers: OAuthProviderView[] }>('/api/admin/oauth-providers')
+// callback_base is this deployment's callback address prefix
+// (".../oauth/callback/"), built server-side from external_url when
+// configured — the admin form appends the slug to it instead of deriving
+// from its own page origin, which can differ from the real redirect_uri.
+export function listOAuthProviders(): Promise<{ providers: OAuthProviderView[]; callback_base: string }> {
+  return apiFetch<{ providers: OAuthProviderView[]; callback_base: string }>('/api/admin/oauth-providers')
 }
 
 export function createOAuthProvider(input: OAuthProviderInput): Promise<OAuthProviderView> {

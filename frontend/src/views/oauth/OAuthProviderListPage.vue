@@ -1,7 +1,10 @@
 <!-- frontend/src/views/oauth/OAuthProviderListPage.vue
-     External-login provider management. One generic form covers every
-     standard OAuth2/OIDC provider; presets prefill the popular ones and
-     the OIDC discovery button fills the endpoints from a well-known URL.
+     External-login provider management. The create/edit modal is built
+     around progressive disclosure: the admin picks how the provider is
+     configured (GitHub / Google preset, OIDC discovery, or manual
+     endpoints), and only the fields that mode actually needs stay
+     visible — endpoints, scopes, token auth style and field mapping all
+     have correct defaults and live under a collapsed advanced section.
      The client secret is write-only: the form never shows the stored
      value, and leaving the field blank on edit keeps it. -->
 <template>
@@ -39,61 +42,65 @@
       :close-on-esc="false"
     >
       <NForm ref="formRef" :model="form" :rules="rules" label-placement="top" require-mark-placement="left">
+        <!-- Setup method: how the endpoint configuration is obtained. Only a
+             choice on create — editing an existing provider just edits its
+             stored values. -->
         <NFormItem v-if="!editing">
           <template #label>
-            <HelpLabel :tip="t('oauthProviders.presetLabel_tip')">{{ t('oauthProviders.presetLabel') }}</HelpLabel>
+            <HelpLabel :tip="t('oauthProviders.modeLabel_tip')">{{ t('oauthProviders.modeLabel') }}</HelpLabel>
           </template>
-          <NSelect
-            :value="preset"
-            :options="presetOptions"
-            :placeholder="t('oauthProviders.presetPlaceholder')"
-            clearable
-            @update:value="applyPreset"
-          />
+          <NSelect :value="mode" :options="modeOptions" @update:value="selectMode" />
         </NFormItem>
 
-        <div class="form-grid">
-          <NFormItem path="name">
-            <template #label>
-              <HelpLabel :tip="t('oauthProviders.nameLabel_tip')">{{ t('oauthProviders.nameLabel') }}</HelpLabel>
-            </template>
-            <NInput v-model:value="form.name" :placeholder="t('oauthProviders.namePlaceholder')" />
-          </NFormItem>
-          <NFormItem path="slug">
-            <template #label>
-              <HelpLabel :tip="t('oauthProviders.slugLabel_tip')">{{ t('oauthProviders.slugLabel') }}</HelpLabel>
-            </template>
-            <NInput v-model:value="form.slug" :disabled="editing !== null" :placeholder="t('oauthProviders.slugPlaceholder')" />
-          </NFormItem>
-        </div>
-
-        <NFormItem>
+        <!-- OIDC mode: one URL replaces the three endpoint fields. Discovery
+             runs automatically when the field loses focus; the result is a
+             one-line status instead of three visible inputs. -->
+        <NFormItem v-if="!editing && mode === 'oidc'" :show-feedback="discoveryState === 'idle'">
           <template #label>
             <HelpLabel :tip="t('oauthProviders.wellKnownLabel_tip')">{{ t('oauthProviders.wellKnownLabel') }}</HelpLabel>
           </template>
-          <NInput v-model:value="wellKnownURL" :placeholder="t('oauthProviders.wellKnownPlaceholder')" />
-          <NButton class="discover-btn" :loading="discovering" @click="runDiscovery">
-            {{ t('oauthProviders.discoverButton') }}
-          </NButton>
+          <NInput
+            :value="wellKnownURL"
+            :loading="discovering"
+            :placeholder="t('oauthProviders.wellKnownPlaceholder')"
+            @update:value="onWellKnownInput"
+            @blur="autoDiscover"
+            @keyup.enter="autoDiscover"
+          />
         </NFormItem>
+        <div v-if="!editing && mode === 'oidc' && discoveryState !== 'idle'" class="discover-status">
+          <span v-if="discoveryState === 'ok'" class="discover-status--ok">✓ {{ t('oauthProviders.discoverSuccess') }}</span>
+          <template v-else>
+            <span class="discover-status--failed">{{ t('oauthProviders.discoverFailed') }}</span>
+            <NButton text size="tiny" type="primary" @click="autoDiscover">{{ t('oauthProviders.discoverRetry') }}</NButton>
+          </template>
+        </div>
 
-        <NFormItem path="authorization_endpoint">
+        <NFormItem path="name">
           <template #label>
-            <HelpLabel :tip="t('oauthProviders.authorizeLabel_tip')">{{ t('oauthProviders.authorizeLabel') }}</HelpLabel>
+            <HelpLabel :tip="t('oauthProviders.nameLabel_tip')">{{ t('oauthProviders.nameLabel') }}</HelpLabel>
           </template>
-          <NInput v-model:value="form.authorization_endpoint" placeholder="https://idp.example.com/authorize" />
+          <NInput :value="form.name" :placeholder="t('oauthProviders.namePlaceholder')" @update:value="onNameInput" />
         </NFormItem>
-        <NFormItem path="token_endpoint">
+        <!-- The slug derives from the name; showing it as a caption keeps it
+             out of the way while keeping the callback URL below honest. It
+             expands into a real input on click (create only — the slug is
+             immutable once saved because it is part of the callback URL).
+             Both states stay mounted (v-show, not v-if/v-else) so the slug
+             rule is always registered with the form and validate() covers it
+             even while the caption is showing. -->
+        <div class="slug-line" v-show="!slugExpanded || editing">
+          <span class="slug-line__label">{{ t('oauthProviders.slugLabel') }}:</span>
+          <span class="slug-line__value">{{ form.slug || '—' }}</span>
+          <NButton v-if="!editing" text size="tiny" type="primary" @click="slugExpanded = true">
+            {{ t('common.edit') }}
+          </NButton>
+        </div>
+        <NFormItem v-show="slugExpanded && !editing" path="slug">
           <template #label>
-            <HelpLabel :tip="t('oauthProviders.tokenLabel_tip')">{{ t('oauthProviders.tokenLabel') }}</HelpLabel>
+            <HelpLabel :tip="t('oauthProviders.slugLabel_tip')">{{ t('oauthProviders.slugLabel') }}</HelpLabel>
           </template>
-          <NInput v-model:value="form.token_endpoint" placeholder="https://idp.example.com/token" />
-        </NFormItem>
-        <NFormItem path="userinfo_endpoint">
-          <template #label>
-            <HelpLabel :tip="t('oauthProviders.userinfoLabel_tip')">{{ t('oauthProviders.userinfoLabel') }}</HelpLabel>
-          </template>
-          <NInput v-model:value="form.userinfo_endpoint" placeholder="https://idp.example.com/userinfo" />
+          <NInput v-model:value="form.slug" :placeholder="t('oauthProviders.slugPlaceholder')" @update:value="slugTouched = true" />
         </NFormItem>
 
         <div class="form-grid">
@@ -116,55 +123,90 @@
           </NFormItem>
         </div>
 
-        <div class="form-grid">
-          <NFormItem>
-            <template #label>
-              <HelpLabel :tip="t('oauthProviders.scopesLabel_tip')">{{ t('oauthProviders.scopesLabel') }}</HelpLabel>
-            </template>
-            <NInput v-model:value="form.scopes" placeholder="openid profile email" />
-          </NFormItem>
-          <NFormItem>
-            <template #label>
-              <HelpLabel :tip="t('oauthProviders.authStyleLabel_tip')">{{ t('oauthProviders.authStyleLabel') }}</HelpLabel>
-            </template>
-            <NSelect v-model:value="form.auth_style" :options="authStyleOptions" />
-          </NFormItem>
-        </div>
-
-        <NDivider class="mapping-divider">{{ t('oauthProviders.mappingDivider') }}</NDivider>
-        <div class="form-grid">
-          <NFormItem>
-            <template #label>
-              <HelpLabel :tip="t('oauthProviders.userIdFieldLabel_tip')">{{ t('oauthProviders.userIdFieldLabel') }}</HelpLabel>
-            </template>
-            <NInput v-model:value="form.user_id_field" placeholder="sub" />
-          </NFormItem>
-          <NFormItem>
-            <template #label>
-              <HelpLabel :tip="t('oauthProviders.usernameFieldLabel_tip')">{{ t('oauthProviders.usernameFieldLabel') }}</HelpLabel>
-            </template>
-            <NInput v-model:value="form.username_field" placeholder="preferred_username" />
-          </NFormItem>
-          <NFormItem>
-            <template #label>
-              <HelpLabel :tip="t('oauthProviders.displayNameFieldLabel_tip')">{{ t('oauthProviders.displayNameFieldLabel') }}</HelpLabel>
-            </template>
-            <NInput v-model:value="form.display_name_field" placeholder="name" />
-          </NFormItem>
-          <NFormItem>
-            <template #label>
-              <HelpLabel :tip="t('oauthProviders.emailFieldLabel_tip')">{{ t('oauthProviders.emailFieldLabel') }}</HelpLabel>
-            </template>
-            <NInput v-model:value="form.email_field" placeholder="email" />
-          </NFormItem>
-        </div>
-
+        <!-- The redirect_uri the admin must register at the identity
+             provider. Read-only and always visible: forgetting it is the
+             single most common way an OAuth setup fails. -->
         <NFormItem>
           <template #label>
-            <HelpLabel :tip="t('oauthProviders.enabledLabel_tip')">{{ t('oauthProviders.enabledLabel') }}</HelpLabel>
+            <HelpLabel :tip="t('oauthProviders.callbackLabel_tip')">{{ t('oauthProviders.callbackLabel') }}</HelpLabel>
           </template>
-          <NSwitch v-model:value="form.enabled" />
+          <NInput :value="callbackURL" readonly />
+          <NButton class="callback-copy-btn" @click="copyCallback">{{ t('common.copy') }}</NButton>
         </NFormItem>
+
+        <!-- Manual mode is the only case where the endpoints must be typed,
+             so it is the only case where they sit in the main form. The same
+             descriptor list renders the advanced-section copy below; exactly
+             one of the two is mounted at a time, so each form path registers
+             once. -->
+        <template v-if="endpointsInMainForm">
+          <NFormItem v-for="ep in endpointFields" :key="ep.path" :path="ep.path">
+            <template #label>
+              <HelpLabel :tip="t(ep.tipKey)">{{ t(ep.labelKey) }}</HelpLabel>
+            </template>
+            <NInput v-model:value="form[ep.path]" :placeholder="ep.placeholder" />
+          </NFormItem>
+        </template>
+
+        <!-- display-directive="show" keeps the collapsed content mounted:
+             the endpoint/slug rules must stay registered with the form, or
+             validate() would silently skip everything hidden in here and an
+             empty-endpoint create would sail through to the server. -->
+        <NCollapse v-model:expanded-names="advancedOpen" class="advanced-collapse" display-directive="show">
+          <NCollapseItem :title="t('oauthProviders.advancedTitle')" name="advanced" display-directive="show">
+            <template v-if="!endpointsInMainForm">
+              <NFormItem v-for="ep in endpointFields" :key="ep.path" :path="ep.path">
+                <template #label>
+                  <HelpLabel :tip="t(ep.tipKey)">{{ t(ep.labelKey) }}</HelpLabel>
+                </template>
+                <NInput v-model:value="form[ep.path]" :placeholder="ep.placeholder" />
+              </NFormItem>
+            </template>
+
+            <div class="form-grid">
+              <NFormItem>
+                <template #label>
+                  <HelpLabel :tip="t('oauthProviders.scopesLabel_tip')">{{ t('oauthProviders.scopesLabel') }}</HelpLabel>
+                </template>
+                <NInput v-model:value="form.scopes" placeholder="openid profile email" />
+              </NFormItem>
+              <NFormItem>
+                <template #label>
+                  <HelpLabel :tip="t('oauthProviders.authStyleLabel_tip')">{{ t('oauthProviders.authStyleLabel') }}</HelpLabel>
+                </template>
+                <NSelect v-model:value="form.auth_style" :options="authStyleOptions" />
+              </NFormItem>
+            </div>
+
+            <NDivider class="mapping-divider">{{ t('oauthProviders.mappingDivider') }}</NDivider>
+            <div class="form-grid">
+              <NFormItem>
+                <template #label>
+                  <HelpLabel :tip="t('oauthProviders.userIdFieldLabel_tip')">{{ t('oauthProviders.userIdFieldLabel') }}</HelpLabel>
+                </template>
+                <NInput v-model:value="form.user_id_field" placeholder="sub" />
+              </NFormItem>
+              <NFormItem>
+                <template #label>
+                  <HelpLabel :tip="t('oauthProviders.usernameFieldLabel_tip')">{{ t('oauthProviders.usernameFieldLabel') }}</HelpLabel>
+                </template>
+                <NInput v-model:value="form.username_field" placeholder="preferred_username" />
+              </NFormItem>
+              <NFormItem>
+                <template #label>
+                  <HelpLabel :tip="t('oauthProviders.displayNameFieldLabel_tip')">{{ t('oauthProviders.displayNameFieldLabel') }}</HelpLabel>
+                </template>
+                <NInput v-model:value="form.display_name_field" placeholder="name" />
+              </NFormItem>
+              <NFormItem>
+                <template #label>
+                  <HelpLabel :tip="t('oauthProviders.emailFieldLabel_tip')">{{ t('oauthProviders.emailFieldLabel') }}</HelpLabel>
+                </template>
+                <NInput v-model:value="form.email_field" placeholder="email" />
+              </NFormItem>
+            </div>
+          </NCollapseItem>
+        </NCollapse>
       </NForm>
       <template #footer>
         <NSpace justify="end">
@@ -177,11 +219,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, nextTick, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
-  NButton, NDataTable, NDivider, NForm, NFormItem, NInput, NModal,
-  NSelect, NSpace, NSwitch, NTag,
+  NButton, NCollapse, NCollapseItem, NDataTable, NDivider, NForm, NFormItem,
+  NInput, NModal, NSelect, NSpace, NSwitch, NTag,
   useDialog, useMessage,
   type DataTableColumns, type FormInst, type FormRules, type SelectOption,
 } from 'naive-ui'
@@ -191,6 +233,7 @@ import EmptyState from '../../components/EmptyState.vue'
 import HelpLabel from '../../components/HelpLabel.vue'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { displayMessage } from '../../api/client'
+import { copyToClipboard } from '../../utils/clipboard'
 import {
   createOAuthProvider, deleteOAuthProvider, discoverOIDC, listOAuthProviders,
   updateOAuthProvider, type OAuthProviderInput, type OAuthProviderView,
@@ -204,12 +247,16 @@ const dialog = useDialog()
 
 const providers = ref<OAuthProviderView[]>([])
 const loading = ref(false)
+// Server-provided callback prefix (external_url-aware); the page origin is
+// only a fallback until the first list response arrives.
+const callbackBase = ref('')
 
 async function load() {
   loading.value = true
   try {
     const res = await listOAuthProviders()
     providers.value = res.providers
+    callbackBase.value = res.callback_base
   } catch (err) {
     message.error(displayMessage(err, t))
   } finally {
@@ -304,13 +351,25 @@ const columns = computed<DataTableColumns<OAuthProviderView>>(() => [
 
 // === Create / edit modal ==================================================
 
+type ProviderMode = 'github' | 'google' | 'oidc' | 'manual'
+
 const showModal = ref(false)
 const editing = ref<OAuthProviderView | null>(null)
 const saving = ref(false)
 const formRef = ref<FormInst | null>(null)
 const wellKnownURL = ref('')
 const discovering = ref(false)
-const preset = ref<string | null>(null)
+// The URL that last completed discovery — blur re-runs discovery only when
+// the field actually changed, so tabbing through the form doesn't refetch.
+const lastDiscovered = ref('')
+const discoveryState = ref<'idle' | 'ok' | 'failed'>('idle')
+const mode = ref<ProviderMode>('oidc')
+const slugTouched = ref(false)
+// Whether the display name was typed by the admin (as opposed to prefilled
+// by a preset) — a preset's own name/slug must not follow a mode switch.
+const nameTouched = ref(false)
+const slugExpanded = ref(false)
+const advancedOpen = ref<string[]>([])
 
 function emptyForm(): OAuthProviderInput {
   return {
@@ -330,7 +389,18 @@ const rules = computed<FormRules>(() => {
   const required = { required: true, message: t('oauthProviders.fieldRequired'), trigger: ['blur', 'input'] }
   return {
     name: [required],
-    slug: [required],
+    // Mirrors the server's create rule (3-32 chars of [A-Za-z0-9_-], the
+    // same set its alnum_dash validator accepts); without it a too-short
+    // derived slug (e.g. from the name "AI") would pass the form and
+    // bounce off the API instead. Edit skips the rule entirely: the slug
+    // is immutable, never sent in the PATCH, and its input never renders
+    // there — a rule that can fail only invisibly would make Save a
+    // silent no-op for slugs created through the API.
+    slug: editing.value ? [] : [required, {
+      validator: (_rule: unknown, v: string) => !v || /^[A-Za-z0-9_-]{3,32}$/.test(v),
+      message: t('oauthProviders.slugInvalid'),
+      trigger: ['blur', 'input'],
+    }],
     client_id: [required],
     client_secret: [required],
     authorization_endpoint: [required],
@@ -344,22 +414,78 @@ const authStyleOptions = computed<SelectOption[]>(() => [
   { label: t('oauthProviders.authStyleBasic'), value: 'basic' },
 ])
 
-// Presets prefill the form for the popular providers; everything stays
-// editable afterwards. The generic OIDC preset just resets to defaults —
-// its endpoints come from discovery.
-const presetOptions = computed<SelectOption[]>(() => [
+const modeOptions = computed<SelectOption[]>(() => [
   { label: t('oauthProviders.presetOIDC'), value: 'oidc' },
   { label: 'GitHub', value: 'github' },
   { label: 'Google', value: 'google' },
+  { label: t('oauthProviders.modeManual'), value: 'manual' },
 ])
 
-function applyPreset(v: string | null) {
-  preset.value = v
-  if (!v) return
+// The three endpoint inputs, rendered from one descriptor list in both
+// possible homes (main form for manual mode, advanced section otherwise) so
+// the two copies cannot drift apart.
+type EndpointPath = 'authorization_endpoint' | 'token_endpoint' | 'userinfo_endpoint'
+const endpointFields: Array<{ path: EndpointPath; labelKey: string; tipKey: string; placeholder: string }> = [
+  { path: 'authorization_endpoint', labelKey: 'oauthProviders.authorizeLabel', tipKey: 'oauthProviders.authorizeLabel_tip', placeholder: 'https://idp.example.com/authorize' },
+  { path: 'token_endpoint', labelKey: 'oauthProviders.tokenLabel', tipKey: 'oauthProviders.tokenLabel_tip', placeholder: 'https://idp.example.com/token' },
+  { path: 'userinfo_endpoint', labelKey: 'oauthProviders.userinfoLabel', tipKey: 'oauthProviders.userinfoLabel_tip', placeholder: 'https://idp.example.com/userinfo' },
+]
+const endpointsInMainForm = computed(() => !editing.value && mode.value === 'manual')
+
+// The redirect_uri the admin registers at the identity provider — the
+// server-provided prefix (which honors external_url, unlike this page's
+// own origin) plus the live slug.
+const callbackURL = computed(() =>
+  `${callbackBase.value || `${location.origin}/oauth/callback/`}${form.value.slug || 'your-slug'}`)
+
+async function copyCallback() {
+  if (await copyToClipboard(callbackURL.value)) {
+    message.success(t('oauthProviders.callbackCopied'))
+  } else {
+    // The URL sits in a selectable read-only input right above the button.
+    message.error(t('oauthProviders.callbackCopyFailed'))
+  }
+}
+
+// slugify derives a callback-safe slug from the display name: lowercase
+// alphanumerics and single hyphens. Capped at 32 characters to match the
+// server's 3-32 slug rule, so pasting a long string (say, a URL) into the
+// name field can't derive a slug the create request would reject.
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32)
+    .replace(/-+$/, '')
+}
+
+function onNameInput(v: string) {
+  form.value.name = v
+  nameTouched.value = true
+  if (!slugTouched.value && !editing.value) {
+    form.value.slug = slugify(v)
+  }
+}
+
+// selectMode prefills what the chosen mode already knows. Popular presets
+// carry their full endpoint + mapping sets; oidc/manual reset to the
+// defaults and rely on discovery / typing. Client credentials and anything
+// the admin actually typed survive the switch — but a preset's own
+// prefilled name/slug does NOT follow into another mode, or "GitHub" would
+// masquerade as user input after switching away. Returning to OIDC with a
+// discovery URL still in the field re-runs discovery, since the endpoints
+// were just reset.
+function selectMode(v: ProviderMode) {
+  const leavingPreset = mode.value === 'github' || mode.value === 'google'
+  mode.value = v
   const base = emptyForm()
-  base.enabled = form.value.enabled
   base.client_id = form.value.client_id
   base.client_secret = form.value.client_secret
+  discoveryState.value = 'idle'
+  lastDiscovered.value = ''
   switch (v) {
     case 'github':
       Object.assign(base, {
@@ -371,6 +497,8 @@ function applyPreset(v: string | null) {
         user_id_field: 'id', username_field: 'login',
         display_name_field: 'name', email_field: 'email',
       })
+      slugTouched.value = false
+      nameTouched.value = false
       break
     case 'google':
       Object.assign(base, {
@@ -380,45 +508,113 @@ function applyPreset(v: string | null) {
         userinfo_endpoint: 'https://openidconnect.googleapis.com/v1/userinfo',
         username_field: 'email',
       })
+      slugTouched.value = false
+      nameTouched.value = false
       break
-    case 'oidc':
-      base.slug = form.value.slug
-      base.name = form.value.name
+    default:
+      // Each field keeps its own value only if the admin actually typed it
+      // — judged independently, so a hand-edited slug survives leaving a
+      // preset even when the name is still the preset's.
+      if (!(leavingPreset && !nameTouched.value)) base.name = form.value.name
+      if (!(leavingPreset && !slugTouched.value)) base.slug = form.value.slug
       break
   }
   form.value = base
+  if (v === 'oidc' && wellKnownURL.value.trim()) {
+    void autoDiscover()
+  }
 }
 
-async function runDiscovery() {
-  if (!wellKnownURL.value.trim()) return
+// Monotonic token invalidating in-flight discovery: bumped each time a
+// new discovery starts, so an older in-flight response is dropped instead
+// of overwriting endpoints that no longer belong to it. Staleness from a
+// mode switch, a closed modal, or an edited URL is caught separately by
+// the direct state checks where results land.
+let discoverSeq = 0
+// The URL the currently in-flight discovery is fetching — dedupes repeated
+// blur/Enter on the same value without blocking a NEW url from starting
+// its own discovery while an older one is still running.
+let inflightURL = ''
+
+// onWellKnownInput invalidates previous discovery the moment the URL is
+// edited: the endpoints on the form belong to the OLD url, and keeping
+// them would let a save go through with the previous issuer's endpoints
+// while the new discovery is still running (or after it failed).
+function onWellKnownInput(v: string) {
+  wellKnownURL.value = v
+  if (v.trim() !== lastDiscovered.value && discoveryState.value !== 'idle') {
+    discoveryState.value = 'idle'
+    lastDiscovered.value = ''
+    form.value.authorization_endpoint = ''
+    form.value.token_endpoint = ''
+    form.value.userinfo_endpoint = ''
+  }
+}
+
+// autoDiscover runs OIDC discovery when the well-known field settles (blur
+// or Enter), replacing the old explicit button. Skips silently when the
+// field is empty or unchanged since the last successful run.
+async function autoDiscover() {
+  const url = wellKnownURL.value.trim()
+  if (!url) return
+  // Dedupe only the SAME url: a repeated blur while its request is in
+  // flight, or one that already succeeded. A different url always starts
+  // its own discovery immediately — the seq guard retires the older
+  // flight — so correcting the address mid-flight is never silently lost.
+  if (discovering.value && url === inflightURL) return
+  if (url === lastDiscovered.value && discoveryState.value === 'ok') return
+  const seq = ++discoverSeq
+  inflightURL = url
   discovering.value = true
   try {
-    const doc = await discoverOIDC(wellKnownURL.value.trim())
+    const doc = await discoverOIDC(url)
+    // Stale guard: the admin may have switched mode, closed the modal, or
+    // edited the URL while this request was in flight.
+    if (seq !== discoverSeq || mode.value !== 'oidc' || !showModal.value || url !== wellKnownURL.value.trim()) return
     form.value.authorization_endpoint = doc.authorization_endpoint
     form.value.token_endpoint = doc.token_endpoint
     // Unconditional: a document without a userinfo endpoint must clear a
-    // stale one from a previous provider, not silently keep it — the
-    // required-field validation then forces an explicit value.
+    // stale one from a previous run, not silently keep it — the required-
+    // field validation then forces an explicit value.
     form.value.userinfo_endpoint = doc.userinfo_endpoint
-    message.success(t('oauthProviders.discoverSuccess'))
+    lastDiscovered.value = url
+    discoveryState.value = 'ok'
   } catch (err) {
+    // Same staleness rules as the success path — including the URL check,
+    // so an old address's failure is never reported against the corrected
+    // address the admin has since typed.
+    if (seq !== discoverSeq || mode.value !== 'oidc' || !showModal.value || url !== wellKnownURL.value.trim()) return
+    discoveryState.value = 'failed'
     message.error(displayMessage(err, t))
   } finally {
-    discovering.value = false
+    if (seq === discoverSeq) discovering.value = false
   }
 }
 
 function openCreate() {
   editing.value = null
-  preset.value = null
+  mode.value = 'oidc'
   wellKnownURL.value = ''
+  lastDiscovered.value = ''
+  discoveryState.value = 'idle'
+  slugTouched.value = false
+  nameTouched.value = false
+  slugExpanded.value = false
+  advancedOpen.value = []
   form.value = emptyForm()
   showModal.value = true
 }
 
 function openEdit(row: OAuthProviderView) {
   editing.value = row
+  mode.value = 'oidc'
   wellKnownURL.value = ''
+  lastDiscovered.value = ''
+  discoveryState.value = 'idle'
+  slugTouched.value = true
+  nameTouched.value = true
+  slugExpanded.value = false
+  advancedOpen.value = []
   form.value = {
     slug: row.slug, name: row.name, icon: row.icon, enabled: row.enabled,
     client_id: row.client_id, client_secret: '',
@@ -434,9 +630,27 @@ function openEdit(row: OAuthProviderView) {
 }
 
 async function save() {
+  // Rules can only run for mounted fields, and NCollapseItem lazy-mounts
+  // its body until the first expand — even with display-directive="show".
+  // So a required field hiding in the never-opened advanced section (the
+  // endpoints) or behind the slug caption would silently skip validation
+  // and the create would sail through to the server. Pre-check those
+  // fields by hand; when any is empty, expand their homes first so the
+  // FormItems mount and register, then let validate() paint the errors.
+  const f = form.value
+  if (!f.slug || !f.authorization_endpoint || !f.token_endpoint || !f.userinfo_endpoint) {
+    advancedOpen.value = ['advanced']
+    if (!editing.value) slugExpanded.value = true
+    await nextTick()
+  }
   try {
     await formRef.value?.validate()
   } catch {
+    // A failed rule may sit inside a collapsed or caption-collapsed area
+    // (endpoints under the advanced section, the slug caption) — open both
+    // so the error message is actually visible.
+    advancedOpen.value = ['advanced']
+    if (!editing.value) slugExpanded.value = true
     return
   }
   saving.value = true
@@ -469,9 +683,45 @@ async function save() {
   gap: 0 16px;
 }
 
-.discover-btn {
+.discover-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin: 2px 0 12px;
+}
+
+.discover-status--ok {
+  color: var(--color-success, #18a058);
+}
+
+.discover-status--failed {
+  color: var(--color-danger, #d03050);
+}
+
+.slug-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  margin: 0 0 14px;
+}
+
+.slug-line__label {
+  color: var(--color-text-secondary);
+}
+
+.slug-line__value {
+  font-family: monospace;
+}
+
+.callback-copy-btn {
   margin-left: 8px;
   flex-shrink: 0;
+}
+
+.advanced-collapse {
+  margin-top: 4px;
 }
 
 .mapping-divider {

@@ -216,15 +216,23 @@ type oauthProviderRequest struct {
 	AuthStyle             string `json:"auth_style" binding:"omitempty,oneof=basic post"`
 }
 
-// GetOAuthProviders handles GET /api/admin/oauth-providers.
-func GetOAuthProviders(svc *service.OAuthProviderService) gin.HandlerFunc {
+// GetOAuthProviders handles GET /api/admin/oauth-providers. Besides the
+// provider list it returns callback_base — this deployment's callback
+// address prefix (server.external_url when configured, else derived from
+// the request) — so the admin form can show the exact redirect_uri to
+// register at the IdP. The form must not derive it from its own page
+// origin: an admin browsing over LAN while external_url points at the
+// public HTTPS origin would otherwise copy a mismatched redirect_uri.
+func GetOAuthProviders(svc *service.OAuthProviderService, externalURL string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		views, err := svc.ListProviders()
 		if err != nil {
 			middleware.WriteAdminError(c, http.StatusInternalServerError, errcode.DatabaseError)
 			return
 		}
-		response.Success(c, gin.H{"providers": views})
+		// callbackURL with an empty slug yields ".../oauth/callback/", the
+		// prefix the form appends the live slug to.
+		response.Success(c, gin.H{"providers": views, "callback_base": callbackURL(c, "", externalURL)})
 	}
 }
 

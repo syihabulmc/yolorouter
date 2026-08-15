@@ -331,7 +331,7 @@ func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDi
 	// resources under the session-protected group.
 	settingsSvc := service.NewSystemSettingsService(db)
 	oauthProviderSvc := service.NewOAuthProviderService(db, providerMasterKey)
-	protected.GET("/oauth-providers", handler.GetOAuthProviders(oauthProviderSvc))
+	protected.GET("/oauth-providers", handler.GetOAuthProviders(oauthProviderSvc, externalURL))
 	protected.POST("/oauth-providers", handler.PostOAuthProvider(oauthProviderSvc))
 	protected.PATCH("/oauth-providers/:id", handler.PatchOAuthProvider(oauthProviderSvc))
 	protected.DELETE("/oauth-providers/:id", handler.DeleteOAuthProvider(oauthProviderSvc))

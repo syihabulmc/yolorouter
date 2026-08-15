@@ -266,3 +266,42 @@ func TestCallbackURLPrefersConfiguredExternalURL(t *testing.T) {
 		t.Fatalf("unexpected derived fallback: %q", got)
 	}
 }
+
+// TestAdminProviderListCarriesCallbackBase: the admin list response must
+// carry callback_base so the form shows the redirect_uri this deployment
+// actually uses — the configured external_url verbatim when set, else the
+// request-derived origin. Registering a page-origin-derived URL from a LAN
+// session against a public external_url would break every IdP login.
+func TestAdminProviderListCarriesCallbackBase(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := testutil.NewSQLiteDB(t)
+	svc := service.NewOAuthProviderService(db, oauthTestMasterKey())
+
+	fetchBase := func(externalURL string) string {
+		r := gin.New()
+		r.GET("/api/admin/oauth-providers", GetOAuthProviders(svc, externalURL))
+		req := httptest.NewRequest(http.MethodGet, "/api/admin/oauth-providers", nil)
+		req.Host = "lan.local:8084"
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("list providers: %d %s", w.Code, w.Body.String())
+		}
+		var env struct {
+			Data struct {
+				CallbackBase string `json:"callback_base"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return env.Data.CallbackBase
+	}
+
+	if got := fetchBase("https://public.example.com/"); got != "https://public.example.com/oauth/callback/" {
+		t.Fatalf("configured external_url: unexpected callback_base %q", got)
+	}
+	if got := fetchBase(""); got != "http://lan.local:8084/oauth/callback/" {
+		t.Fatalf("derived origin: unexpected callback_base %q", got)
+	}
+}
