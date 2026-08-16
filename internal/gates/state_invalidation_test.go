@@ -177,59 +177,80 @@ func firstIndexWithExit(body *ast.BlockStmt, kind token.Token) int {
 	return -1
 }
 
-// TestReleaseIsArmedBeforeTheSettlementSafetyNet pins a defer registration
-// order in the request handler that nothing else can reach.
+// TestReleaseIsArmedBeforeTheSettlementSafetyNet pins the structure of the
+// end-of-exchange choreography that the behavioural tests cannot reach.
 //
-// Deferred functions run last-registered-first. The admission release must be
-// REGISTERED before the panic-settlement defer so that on an unwind it runs
-// AFTER settlement: a release is a reconciliation against how the request
-// ended, and run first it reads a zero status and a blank reason on exactly
-// the requests that ended worst. The two registrations sit a few lines apart
-// in one function, which is what makes the order easy to flip in a refactor
-// and invisible to every behavioural test that does not panic mid-request.
+// concludeExchange (gateway/conclude.go) orders the ending as: settlement,
+// then admission release, then recording. The behavioural tests over there
+// assert that ORDER on the happy path; what only the source can show is the
+// panic posture — release and recording are armed as defers BEFORE the
+// settlement runs inline, so a panic inside the settlement step still lets
+// them execute while it propagates. Deferred functions run
+// last-registered-first, so that posture is exactly: the record defer
+// registered first (unwinds last), the release defer second, and the
+// settlement (the logWritten check) inline in the body, never inside a defer.
+// Each of those three placements is one careless edit away from silently
+// changing how the worst-ending requests are accounted.
 func TestReleaseIsArmedBeforeTheSettlementSafetyNet(t *testing.T) {
 	root := repoRoot(t)
-	path := filepath.Join(root, "internal", "gateway", "relay.go")
+	path := filepath.Join(root, "internal", "gateway", "conclude.go")
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
-		t.Fatalf("parsing relay.go: %v", err)
+		t.Fatalf("parsing conclude.go: %v", err)
 	}
 
-	var handle *ast.FuncDecl
+	var conclude *ast.FuncDecl
 	for _, decl := range file.Decls {
-		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == "Handle" {
-			handle = fd
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == "concludeExchange" {
+			conclude = fd
 			break
 		}
 	}
-	if handle == nil {
-		t.Fatal("Handle not found in relay.go; the handler moved and this check needs re-aiming")
+	if conclude == nil {
+		t.Fatal("concludeExchange not found in conclude.go; the choreography moved and this check needs re-aiming")
 	}
 
-	releaseLine, settleLine := 0, 0
-	ast.Inspect(handle, func(n ast.Node) bool {
+	recordLine, releaseLine, settleLine, settleInDefer := 0, 0, 0, false
+	ast.Inspect(conclude, func(n ast.Node) bool {
 		def, ok := n.(*ast.DeferStmt)
 		if !ok {
+			if call, ok := n.(*ast.CallExpr); ok && settleLine == 0 &&
+				strings.Contains(renderCallSource(fset, call), "logWritten") {
+				settleLine = fset.Position(call.Pos()).Line
+			}
 			return true
 		}
 		text := renderCallSource(fset, def)
+		if recordLine == 0 && strings.Contains(text, "recordTerminal") {
+			recordLine = fset.Position(def.Pos()).Line
+		}
 		if releaseLine == 0 && strings.Contains(text, "releaseAdmissions") {
 			releaseLine = fset.Position(def.Pos()).Line
 		}
-		if settleLine == 0 && strings.Contains(text, "logWritten") {
-			settleLine = fset.Position(def.Pos()).Line
+		if strings.Contains(text, "logWritten") {
+			settleInDefer = true
 		}
-		return true
+		return false // a defer's body is accounted for; don't double-count its calls
 	})
-	if releaseLine == 0 || settleLine == 0 {
-		t.Fatalf("could not find both defers (release at %d, settlement at %d); Handle was "+
-			"restructured and this check needs rewriting", releaseLine, settleLine)
+	if recordLine == 0 || releaseLine == 0 {
+		t.Fatalf("could not find both defers (record at %d, release at %d); concludeExchange was "+
+			"restructured and this check needs rewriting", recordLine, releaseLine)
 	}
-	if releaseLine > settleLine {
-		t.Errorf("the release defer is registered at line %d, after the settlement safety net "+
-			"at line %d: on a panic the release now runs before settlement and reconciles "+
-			"against a zero status", releaseLine, settleLine)
+	if recordLine > releaseLine {
+		t.Errorf("the record defer is registered at line %d, after the release defer at line %d: "+
+			"on the unwind recording now runs before the releases and misses the reversal "+
+			"facts they append", recordLine, releaseLine)
+	}
+	if settleInDefer || settleLine == 0 {
+		t.Errorf("the settlement safety net (the logWritten check) must run inline, not inside "+
+			"a defer (inDefer=%v inlineLine=%d): armed as a defer it would unwind FIRST and "+
+			"the release would reconcile against a zero status", settleInDefer, settleLine)
+	}
+	if settleLine != 0 && settleLine < releaseLine {
+		t.Errorf("the inline settlement at line %d runs before the release defer is armed at "+
+			"line %d: a panic inside the settlement step would now skip the release and the "+
+			"recording entirely — both defers must be armed first", settleLine, releaseLine)
 	}
 
 	// There must be exactly ONE construction of the exchange's Outcome in the

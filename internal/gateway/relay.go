@@ -277,21 +277,17 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// RequestCtx deadline => attempt ctx deadline too.
 	requestCtx, requestCancel := context.WithDeadline(c.Request.Context(), rc.requestDeadline)
 	defer requestCancel()
-	// Armed before every other defer except the context cancel, so of the work
-	// that matters it unwinds LAST: recording has
-	// to see a timeline that nothing will append to, and admissions release
-	// after their own defer, which is registered later and therefore runs
-	// first.
-	//
-	// The test hook fires here, after recording, because "done" must mean done:
-	// a hook that fired with releases and recording still pending handed tests a
-	// signal to tear down their temp directories while this goroutine was still
-	// writing capture files into them.
+	// The whole ending of the exchange — safety-net settlement, admission
+	// release, recording, the test hook, in that load-bearing order — is one
+	// call, so the choreography is written once (and tested once) in
+	// concludeExchange instead of being encoded in the registration order of
+	// defers here. Armed immediately after the context cancel so it covers a
+	// panic anywhere below, including inside the admission calls themselves.
+	// held is declared here and read by the closure at unwind time, so
+	// tickets acquired by BOTH admission phases below are released.
+	var held []heldTicket
 	defer func() {
-		s.recordTerminal(rc)
-		if testHookHandleDone != nil {
-			testHookHandleDone(rc)
-		}
+		s.concludeExchange(c, rc, held, start)
 	}()
 	rc.requestCtx = requestCtx
 	// The ingress protocol is a property of the request path, computed once
@@ -321,52 +317,10 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		rc.requestHeaders = SanitizeHeaders(c.Request.Header)
 	}
 	// Admissions gate the exchange before any work is done on its behalf.
-	// Whatever they take is released on every exit path below, including the
-	// refusal path and a panic, which is why the release is deferred the moment
-	// the tickets exist rather than at each return.
-	//
-	// Two ordering rules are load-bearing here:
-	//   - The release is armed before anything is acquired, not after: an
-	//     admission that panics must still give back whatever its predecessors
-	//     took, and a defer installed after the call would never run at all.
-	//   - The release is armed BEFORE the panic-settlement defer below, so on
-	//     an unwind it runs AFTER settlement. A release is a reconciliation
-	//     against how the request ended; run first, it would read a status of
-	//     zero and a blank reason on exactly the requests that ended worst.
-	//
-	// The outcome is read at release time rather than captured when the defer
-	// was armed, and it is finalize's own record rather than a second literal
-	// built here: a capability deciding whether a reservation became a charge
-	// needs what the request SETTLED as, and two sites each assembling their own
-	// account of that would drift — the recorders would reconcile one ending and
-	// the releases another.
-	var held []heldTicket
-	defer func() {
-		s.releaseAdmissions(rc.requestCtx, rc, held, rc.outcome)
-	}()
-
-	// Panic-recovery safety net: if any sub-call panics (nil
-	// deref, index OOB, type assertion), gin's Recovery middleware catches
-	// it upstream, but finalize would otherwise never run and the request
-	// would leave no audit/cost row. finalize is idempotent (logWritten
-	// guard), so a normal-exit finalize first + this defer on panic writes
-	// exactly one row either way.
-	//
-	// Registered after the release defer above so it runs BEFORE it on an
-	// unwind: settlement first, then release reads the settled outcome.
-	defer func() {
-		if !rc.logWritten.Load() {
-			d := fact.Undelivered(http.StatusInternalServerError, fact.VerdictSettled,
-				fact.FaultGateway, "panic_recovered", nil)
-			if c != nil && c.Writer != nil && c.Writer.Written() {
-				// Something already went out, so the caller saw a status and
-				// this cannot claim nothing was committed.
-				d = fact.Truncated(c.Writer.Status(), http.StatusInternalServerError,
-					fact.FaultGateway, "panic_recovered", nil)
-			}
-			s.settle(rc, d, start)
-		}
-	}()
+	// Whatever they take lands in held (declared with the conclude defer
+	// above) and is given back on every exit path, including a panic inside
+	// an admission: tickets are appended as they are acquired, so the
+	// already-armed conclude defer sees everything taken so far.
 
 	// The loopback marker resolves before any admission: a request bearing
 	// this process's own token is the gateway calling itself on behalf of a
