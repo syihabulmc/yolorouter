@@ -2,12 +2,19 @@
 // build timestamp, default GitHub release source) injected via -ldflags, plus
 // the process start time the system info handler uses to compute uptime.
 //
+// It is also the shared home of the routing policy for update-related GitHub
+// traffic — the mirror fallback order (UpdateRoutes, DefaultMirror), URL
+// prefixing (ProxyURL) and per-attempt budget discipline
+// (RouteAttemptContext) — because both the self-updater and the version-check
+// service walk the same routes and must agree on them.
+//
 // All vars default to development placeholders ("dev" / "unknown" / "") so a
 // plain `go build` without -ldflags still works; release builds override them
 // via `make build-release` (Makefile) or goreleaser (.goreleaser.yaml).
 package version
 
 import (
+	"context"
 	"strings"
 	"time"
 )
@@ -55,6 +62,53 @@ func ResolveRepo(enabled bool, githubRepo string) string {
 		return githubRepo
 	}
 	return DefaultGitHubRepo
+}
+
+// DefaultMirror is the project's public GitHub mirror (a Cloudflare proxy
+// that prefixes the original URL). It is only ever used as an automatic
+// FALLBACK: direct GitHub is always tried first, so deployments with a
+// healthy path to GitHub never send update traffic through it, and an
+// explicitly configured proxy suppresses it entirely.
+const DefaultMirror = "https://gh.yolorouter.com"
+
+// UpdateRoutes is the ordered list of proxy prefixes update-related GitHub
+// traffic (release lookups, version checks, asset downloads) tries: an
+// explicit proxy is the operator's decision and gets no fallback; without
+// one, direct first, then the built-in mirror. "" means direct.
+func UpdateRoutes(explicitProxy string) []string {
+	if explicitProxy != "" {
+		return []string{explicitProxy}
+	}
+	return []string{"", DefaultMirror}
+}
+
+// fallbackReserve is how much of a route walk's remaining budget every
+// non-final attempt must leave untouched for the routes behind it. One
+// minute is enough for the mirror to move an asset at ordinary speed while
+// costing a healthy earlier route only its final sliver of budget.
+const fallbackReserve = time.Minute
+
+// RouteAttemptContext bounds one route attempt of a walk. The final attempt
+// runs on the walk context as-is — everything that remains is its to spend.
+// Any earlier attempt is capped below the walk deadline so the fallback
+// routes behind it always inherit a usable share: without this, a first
+// route that hangs until the walk deadline starves the very fallback the
+// walk exists for. The cap is the remainder minus a reserve —
+// fallbackReserve, or half the remainder when less than that is left. A
+// context without a deadline is returned as-is.
+func RouteAttemptContext(ctx context.Context, finalAttempt bool) (context.Context, context.CancelFunc) {
+	if finalAttempt {
+		return ctx, func() {}
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx, func() {}
+	}
+	reserve := min(time.Until(deadline)/2, fallbackReserve)
+	if reserve <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, deadline.Add(-reserve))
 }
 
 // ProxyURL prefixes rawURL with a mirror when proxy is non-empty, so a

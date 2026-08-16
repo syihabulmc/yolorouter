@@ -30,6 +30,7 @@ func newTestService(t *testing.T, status int, body any) (*VersionService, *atomi
 		}
 	}))
 	svc := NewVersionService("owner/repo", "")
+	svc.routes = []string{""} // hermetic: no built-in mirror fallback in unit tests
 	svc.baseURL = srv.URL
 	svc.posTTL = 80 * time.Millisecond
 	svc.negTTL = 40 * time.Millisecond
@@ -269,6 +270,7 @@ func TestCheckDegradesOnBadJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 	svc := NewVersionService("owner/repo", "")
+	svc.routes = []string{""} // hermetic: no built-in mirror fallback in unit tests
 	svc.baseURL = srv.URL
 
 	if st := svc.Check(context.Background()); !st.CheckFailed {
@@ -352,5 +354,79 @@ func TestCheckFreshBypassesPositiveCache(t *testing.T) {
 	}
 	if got := hits.Load(); got != 2 {
 		t.Fatalf("the fresh result must land in the cache (got %d hits)", got)
+	}
+}
+
+// TestCheckFallsBackToMirror: the About page's badge gates the update
+// button, so its lookup must walk the same direct-then-mirror routes the
+// updater walks — a blocked direct path with a working mirror must still
+// report the release instead of check_failed.
+func TestCheckFallsBackToMirror(t *testing.T) {
+	withVersion(t, "v0.1.0")
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name":"v0.2.0","html_url":"h"}`))
+	}))
+	defer mirror.Close()
+
+	svc := NewVersionService("owner/repo", "")
+	svc.baseURL = "http://127.0.0.1:1" // direct route: refused instantly
+	svc.routes = []string{"", mirror.URL}
+
+	st := svc.Check(context.Background())
+	if st.CheckFailed || !st.HasUpdate || st.Latest != "v0.2.0" {
+		t.Fatalf("mirror fallback must surface the release, got %+v", st)
+	}
+}
+
+// TestCheckWalkSharesOneTimeoutBudget: the client restarts its timeout per
+// request, so a direct-plus-mirror walk would double the documented bound
+// without a walk-level deadline. Two hanging routes must together fail
+// within roughly ONE client timeout.
+func TestCheckWalkSharesOneTimeoutBudget(t *testing.T) {
+	withVersion(t, "v0.1.0")
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer hang.Close()
+
+	svc := NewVersionService("owner/repo", "")
+	svc.baseURL = hang.URL
+	svc.routes = []string{"", hang.URL}
+	svc.client = &http.Client{Timeout: 400 * time.Millisecond}
+
+	start := time.Now()
+	st := svc.Check(context.Background())
+	if !st.CheckFailed {
+		t.Fatalf("two hanging routes must degrade to CheckFailed, got %+v", st)
+	}
+	if took := time.Since(start); took > 700*time.Millisecond {
+		t.Fatalf("the walk took %v — the second route got a fresh timeout instead of the walk's remainder", took)
+	}
+}
+
+// TestCheckHangingDirectStillReachesTheMirror: a direct request that hangs
+// until the walk deadline must not consume the mirror's share — the About
+// page must still learn about the release from the mirror.
+func TestCheckHangingDirectStillReachesTheMirror(t *testing.T) {
+	withVersion(t, "v0.1.0")
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer hang.Close()
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name":"v0.2.0","html_url":"h"}`))
+	}))
+	defer mirror.Close()
+
+	svc := NewVersionService("owner/repo", "")
+	svc.baseURL = hang.URL
+	svc.routes = []string{"", mirror.URL}
+	svc.client = &http.Client{Timeout: 800 * time.Millisecond}
+
+	st := svc.Check(context.Background())
+	if st.CheckFailed || !st.HasUpdate || st.Latest != "v0.2.0" {
+		t.Fatalf("the mirror must still get a live share of the walk budget, got %+v", st)
 	}
 }

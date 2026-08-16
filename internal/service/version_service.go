@@ -35,8 +35,13 @@ type VersionStatus struct {
 // the result. It is safe for concurrent use: a singleflight collapses
 // simultaneous refreshes into one GitHub call, and a mutex guards the cache.
 type VersionService struct {
-	repo    string
-	proxy   string // non-empty routes the release lookup through a mirror prefix
+	repo string
+	// routes is the ordered list of proxy prefixes the lookup tries ("" =
+	// direct): the same fallback walk the updater uses, so the About page's
+	// "update available" badge appears in exactly the deployments where the
+	// fallback-backed update it gates would succeed. An explicitly
+	// configured proxy is the sole route.
+	routes  []string
 	baseURL string // "https://api.github.com" in production; tests inject a httptest URL
 	client  *http.Client
 
@@ -67,7 +72,7 @@ type versionCacheEntry struct {
 func NewVersionService(repo, proxy string) *VersionService {
 	return &VersionService{
 		repo:    repo,
-		proxy:   proxy,
+		routes:  version.UpdateRoutes(proxy),
 		baseURL: "https://api.github.com",
 		client:  &http.Client{Timeout: 10 * time.Second},
 		posTTL:  10 * time.Minute,
@@ -199,11 +204,43 @@ type githubRelease struct {
 // bad JSON, non-semver tag) becomes a failed entry, so Check never has to
 // distinguish "couldn't fetch" from "fetched". The entry's fetchedAt starts
 // the positive-or-negative cache clock.
+//
+// The lookup walks s.routes in order and settles on the first route that
+// yields a usable release. EVERY failure moves to the next route, content
+// failures included — a transparent middlebox can answer a direct request
+// with a 200 HTML page that fails to decode, and the mirror is exactly the
+// route that gets past it.
+//
+// The whole walk shares ONE client.Timeout budget: the client restarts its
+// clock per request, so without this deadline a direct-plus-mirror walk
+// would quietly double the bound the Check documentation promises — later
+// routes get only what the earlier ones left.
 func (s *VersionService) fetchLatest(ctx context.Context) *versionCacheEntry {
-	url := version.ProxyURL(s.proxy, fmt.Sprintf("%s/repos/%s/releases/latest", s.baseURL, s.repo))
+	if s.client.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.client.Timeout)
+		defer cancel()
+	}
+	for i, proxy := range s.routes {
+		// A non-final attempt leaves the fallback routes a share of the
+		// walk budget — a hanging direct request must not starve the
+		// mirror the walk exists to reach.
+		attemptCtx, cancel := version.RouteAttemptContext(ctx, i == len(s.routes)-1)
+		entry := s.fetchLatestVia(attemptCtx, proxy)
+		cancel()
+		if entry != nil {
+			return entry
+		}
+	}
+	return s.failEntry()
+}
+
+// fetchLatestVia is one route's lookup attempt; nil means try the next route.
+func (s *VersionService) fetchLatestVia(ctx context.Context, proxy string) *versionCacheEntry {
+	url := version.ProxyURL(proxy, fmt.Sprintf("%s/repos/%s/releases/latest", s.baseURL, s.repo))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return s.failEntry()
+		return nil
 	}
 	// User-Agent is required by the GitHub REST API; without it requests are
 	// rejected. Accept pins the documented JSON media type.
@@ -212,25 +249,25 @@ func (s *VersionService) fetchLatest(ctx context.Context) *versionCacheEntry {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return s.failEntry()
+		return nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	// 404 (no releases published yet — the pre-v0.1.0 public state), 403/429
-	// (rate limit), and 5xx all degrade identically: check_failed, not a 500
-	// to the admin UI.
+	// (rate limit), and 5xx all degrade identically: check_failed (after the
+	// remaining routes also fail), not a 500 to the admin UI.
 	if resp.StatusCode != http.StatusOK {
-		return s.failEntry()
+		return nil
 	}
 
 	var rel githubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return s.failEntry()
+		return nil
 	}
 	// A tag_name that isn't valid semver can't be compared against current,
 	// so treat it as a failed check rather than a misleading "no update".
 	if !semver.IsValid(rel.TagName) {
-		return s.failEntry()
+		return nil
 	}
 	// A prerelease latest (v1.3.0-rc1) is incomparable: currentUpdatable
 	// refuses to install it and buildStatus reports CheckFailed. Cache it as
@@ -238,7 +275,7 @@ func (s *VersionService) fetchLatest(ctx context.Context) *versionCacheEntry {
 	// stable release is picked up on the next negTTL cycle rather than being
 	// hidden for 10 minutes.
 	if semver.Prerelease(rel.TagName) != "" {
-		return s.failEntry()
+		return nil
 	}
 	return &versionCacheEntry{
 		latest:     rel.TagName,

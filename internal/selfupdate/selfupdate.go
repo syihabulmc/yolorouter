@@ -18,8 +18,6 @@ import (
 	"time"
 
 	"golang.org/x/mod/semver"
-
-	"github.com/yolorouter/yolorouter/internal/version"
 )
 
 // githubAPITimeout bounds the release-metadata lookup. Update runs are
@@ -221,8 +219,12 @@ func Apply(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("the current binary carries Linux file capabilities, which the replacement cannot preserve; update via `yolorouter update` and reapply them before restarting")
 	}
 
+	// One route set spans the lookup and both downloads: the route that
+	// works is promoted, so a run that fell back to the mirror does not
+	// re-probe the failing direct path for every asset.
+	routes := newRouteSet(opts.Proxy)
 	client := &http.Client{Timeout: githubAPITimeout}
-	rel, err := FetchLatestRelease(ctx, client, opts.Repo, opts.Proxy)
+	rel, err := routes.fetchLatest(ctx, client, opts.Repo)
 	if err != nil {
 		return Result{}, fmt.Errorf("look up latest release: %w", err)
 	}
@@ -259,14 +261,16 @@ func Apply(ctx context.Context, opts Options) (Result, error) {
 	// updater does not need a writable temp directory — allocating one would
 	// make updates fail on systems where TMPDIR is read-only or absent even
 	// though the actual writes never touch it.
-	// GitHub returns absolute github.com asset URLs; route them through the
-	// mirror too so a blocked-GitHub deployment can actually fetch the bytes.
+	// GitHub returns absolute github.com asset URLs; the route set prefixes
+	// them with whichever mirror it settles on, and its stall watchdog turns
+	// a trickling CDN into a prompt fallback instead of a burned-out
+	// timeout.
 	downloadClient := &http.Client{Timeout: downloadTimeout}
-	assetBytes, err := download(ctx, downloadClient, version.ProxyURL(opts.Proxy, asset.BrowserDownloadURL))
+	assetBytes, err := routes.download(ctx, downloadClient, asset.BrowserDownloadURL)
 	if err != nil {
 		return Result{}, fmt.Errorf("download %s: %w", asset.Name, err)
 	}
-	checksumsBytes, err := download(ctx, downloadClient, version.ProxyURL(opts.Proxy, checksumsAsset.BrowserDownloadURL))
+	checksumsBytes, err := routes.download(ctx, downloadClient, checksumsAsset.BrowserDownloadURL)
 	if err != nil {
 		return Result{}, fmt.Errorf("download checksums.txt: %w", err)
 	}
