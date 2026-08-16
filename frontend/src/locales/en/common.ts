@@ -1,0 +1,18 @@
+export default {
+  confirmContinue: 'Continue?',
+  dashboard: 'Dashboard',
+  actions: 'Actions',
+  loading: 'Loading…',
+  empty: 'No data',
+  save: 'Save',
+  cancel: 'Cancel',
+  back: 'Back',
+  edit: 'Edit',
+  delete: 'Delete',
+  copy: 'Copy',
+  allAccounts: 'All accounts',
+  confirm: 'Confirm',
+  networkError: 'Network request failed, please check your connection',
+  requestTimedOut: 'Request timed out',
+  unexpectedResponse: 'The server returned an unrecognized response',
+}

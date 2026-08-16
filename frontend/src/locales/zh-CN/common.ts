@@ -1,0 +1,18 @@
+export default {
+  confirmContinue: '确定要继续吗？',
+  dashboard: '概览',
+  actions: '操作',
+  loading: '加载中…',
+  empty: '暂无数据',
+  save: '保存',
+  cancel: '取消',
+  back: '返回',
+  edit: '编辑',
+  delete: '删除',
+  copy: '复制',
+  allAccounts: '全部账号',
+  confirm: '确定',
+  networkError: '网络请求失败，请检查网络连接',
+  requestTimedOut: '请求超时',
+  unexpectedResponse: '服务器返回了无法识别的响应',
+}
