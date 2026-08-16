@@ -609,7 +609,7 @@ export default {
   analytics: {
     eyebrow: '用量',
     pageTitle: '用量统计报表',
-    pageDescription: '按时间、令牌、模型、供应商维度查看调用次数、Token 与成本，并导出 CSV。',
+    pageDescription: '按账号、时间、令牌、模型、供应商维度查看调用次数、Token 与成本，并导出 CSV。',
     timeRange: '时间范围',
     user: '归属账号',
     apiKey: '令牌',

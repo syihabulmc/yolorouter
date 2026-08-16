@@ -2,7 +2,7 @@
 
 # Yolorouter
 
-**A free, self-hosted LLM gateway that speaks four wire protocols, fails over across providers, rotates upstream keys, and ships with an admin console in one binary.**
+**A free, self-hosted LLM gateway that speaks four wire protocols, fails over across providers, rotates upstream keys, and ships with a multi-user admin console in one binary.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/yolorouter/yolorouter/actions/workflows/ci.yml/badge.svg)](https://github.com/yolorouter/yolorouter/actions/workflows/ci.yml)
@@ -14,7 +14,7 @@ English · [简体中文](README_zh.md)
 
 [Quick start](#quick-start) · [Protocols](#protocols) · [Cost optimization](#cost-optimization) · [Documentation](#documentation) · [Contributing](#contributing)
 
-⚡ **Low-overhead streaming proxy** · 🔀 **Any protocol in, any protocol out** · 🆓 **Free & open-source** · 📦 **Single binary, zero external deps** · 🔁 **Automatic failover + key rotation** · 💰 **Cost analytics & optimization**
+⚡ **Low-overhead streaming proxy** · 🔀 **Any protocol in, any protocol out** · 🆓 **Free & open-source** · 📦 **Single binary, zero external deps** · 🔁 **Automatic failover + key rotation** · 👥 **Multi-user with SSO** · 💰 **Cost analytics & optimization**
 
 </div>
 
@@ -53,7 +53,7 @@ the box; switch to PostgreSQL when you want it.
 - **Per-key access control.** Model allowlists, rate and concurrency limits, cumulative budget caps, optional expiry, instant revocation.
 - **Multi-user with SSO.** Team members sign in through any OAuth2/OIDC provider (Zitadel, GitHub, Keycloak, ...) — accounts are created on first login, no invites. Members manage their own API keys and see only their own usage and costs; admins see everything, can filter every statistic by account, and can promote, demote, or disable accounts. Disabling an account signs it out and turns off all of its keys instantly.
 - **Cost optimization.** Inject a custom system prompt globally or per key; compress bulky tool output before it reaches the upstream. The console reports what each actually saved.
-- **Built-in observability.** Token and cost KPIs, usage by model / provider / time / caller, and request logs with the full per-attempt routing chain. Any view exports to CSV.
+- **Built-in observability.** Token and cost KPIs, usage by model / provider / time / account / key, and request logs with the full per-attempt routing chain. Any view exports to CSV.
 - **Bilingual console.** English and 简体中文, switchable anywhere; timezone follows the browser.
 - **Self-update.** The binary can check for and apply new releases.
 

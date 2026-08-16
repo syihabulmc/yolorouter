@@ -606,7 +606,7 @@ export default {
   analytics: {
     eyebrow: 'Usage',
     pageTitle: 'Usage Analytics',
-    pageDescription: 'View calls, tokens, and cost by time, API key, model, or provider — export to CSV.',
+    pageDescription: 'View calls, tokens, and cost by account, time, API key, model, or provider — export to CSV.',
     timeRange: 'Time Range',
     user: 'Account',
     apiKey: 'API Key',
