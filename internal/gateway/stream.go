@@ -103,10 +103,13 @@ func writeSSEHeader(w protocols.ClientWriter) error {
 }
 
 func isDataLine(line []byte) bool {
-	// SSE allows "data:" with or without a space after the colon — accept
-	// both so a provider that omits the space isn't misclassified as a
-	// preamble line.
-	return bytes.HasPrefix(bytes.TrimRight(line, "\r\n"), []byte("data:"))
+	// The prefix rule is shared with the decoders, so what counts as a data
+	// line cannot drift between this forwarder and the parsing side. Like
+	// every byte-preserving reader it does not trim leading whitespace off
+	// the line — that is the helper's documented split with the parse-side
+	// reading.
+	_, ok := protocols.SSEDataPayloadStart(bytes.TrimRight(line, "\r\n"))
+	return ok
 }
 
 // writeStreamLine writes one SSE line to the client, rewriting the model

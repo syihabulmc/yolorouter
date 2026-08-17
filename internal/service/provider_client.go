@@ -577,13 +577,16 @@ func scanSSEStream(r io.Reader) (sawValidDelta, cleanTerminate bool) {
 	scanner := bufio.NewScanner(io.LimitReader(r, providerClientMaxBodyBytes))
 	for scanner.Scan() {
 		line := scanner.Text()
-		// SSE makes the space after the colon optional; the TrimSpace takes it
-		// off when the upstream did send one, so `data:{...}` frames count.
-		data, ok := strings.CutPrefix(line, "data:")
+		// Classified with the strict, non-trimming reading — the same one the
+		// live forwarder answers with. This probe persists a capability the
+		// forwarding path then has to honour: accepting an indented line here
+		// that forwarding treats as preamble would record a streaming-capable
+		// endpoint whose real stream never commits a data frame.
+		start, ok := protocols.SSEDataPayloadStart([]byte(line))
 		if !ok {
 			continue // not an SSE data line
 		}
-		data = strings.TrimSpace(data)
+		data := strings.TrimSpace(line[start:])
 		if data == "[DONE]" {
 			return sawValidDelta, true
 		}
