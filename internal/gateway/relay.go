@@ -360,7 +360,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		// Caller disconnect during body upload is terminal 499 (mirrors the
 		// stream/non-stream response paths), not a malformed-request 400.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			s.abandonRequest(rc, "client_disconnected", start)
+			s.abandonRequest(rc, "client_disconnected", start, settleOptions{})
 			return // caller is gone; no response to write
 		}
 		// http.MaxBytesReader (BodySizeLimit middleware) rejects an oversized
@@ -518,7 +518,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 			// The client hung up while this query was in flight — a
 			// context.Canceled from the DB driver here is a disconnect, not
 			// a server-side DB fault; nothing to write back to a gone caller.
-			s.abandonRequest(rc, "client_disconnected", start)
+			s.abandonRequest(rc, "client_disconnected", start, settleOptions{})
 			return
 		}
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -544,7 +544,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 		allowed, err := repository.HasAPIKeyModelAccess(s.db.WithContext(requestCtx), apiKey.ID, m.ID)
 		if err != nil {
 			if isClientDisconnected(c) {
-				s.abandonRequest(rc, "client_disconnected", start)
+				s.abandonRequest(rc, "client_disconnected", start, settleOptions{})
 				return
 			}
 			logger.Error("gateway: allowlist", zap.String("request_id", rc.requestID), zap.Error(err))
@@ -561,7 +561,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	allCandidates, err := repository.ListModelCandidatesByModelID(s.db.WithContext(requestCtx), m.ID)
 	if err != nil {
 		if isClientDisconnected(c) {
-			s.abandonRequest(rc, "client_disconnected", start)
+			s.abandonRequest(rc, "client_disconnected", start, settleOptions{})
 			return
 		}
 		logger.Error("gateway: list candidates", zap.String("request_id", rc.requestID), zap.Error(err))
@@ -794,7 +794,7 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 				// only to land on allCandidatesFailed's 502; record 499
 				// instead, mirroring attemptOne's disconnect handling.
 				rc.recordAttempt(cand, provider, nil, 0, AttemptConnError, "client disconnected")
-				s.abandonRequestAfterAttempt(rc, "client_disconnected", start)
+				s.abandonRequest(rc, "client_disconnected", start, settleOptions{againstRecordedAttempt: true})
 				return
 			}
 			logger.Error("gateway: list provider keys", zap.String("request_id", rc.requestID), zap.Error(err))
@@ -1269,7 +1269,7 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 		// failure class. Any other transport failure is candidate-level.
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
 			rc.recordCurrentAttempt(0, AttemptConnError, "client disconnected")
-			s.abandonRequestAfterAttempt(rc, "client_disconnected", start) // nginx-style 499
+			s.abandonRequest(rc, "client_disconnected", start, settleOptions{againstRecordedAttempt: true}) // nginx-style 499
 			return attemptTerminal, nil
 		}
 		// Reported as the kernel's own fact so the timeline shows the
@@ -1495,8 +1495,8 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 			}
 			WriteIngressError(c, rc.ingress, status, errType, detail, rc.requestID)
 		}
-		s.settleAfterAttempt(rc, fact.Rejected(status, fact.FaultUpstream,
-			observed.FailReason(), nil), start)
+		s.settle(rc, fact.Rejected(status, fact.FaultUpstream,
+			observed.FailReason(), nil), start, settleOptions{againstRecordedAttempt: true})
 		return attemptTerminal, nil
 	case observed.Loop == decision.LoopNextCandidate:
 		return attemptNextCandidate, nil
@@ -1522,7 +1522,7 @@ func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.T
 			status = http.StatusBadGateway
 		}
 		s.settle(rc, fact.Truncated(status, status, fact.FaultUpstream,
-			"partial_then_exhausted", nil), start)
+			"partial_then_exhausted", nil), start, settleOptions{})
 		return
 	}
 	// The chain ended on a verdict somebody thought worth quoting — a payload

@@ -444,27 +444,26 @@ func (s *Service) settleCheckedDelivery(c *gin.Context, rc *Exchange, d fact.Del
 //
 // Use this only when nothing was appended to the attempt list in the same
 // breath — a rejection before any candidate ran, or a chain that ended after
-// the loop had already recorded everything it tried. A settlement that follows
-// its own append belongs in settleAfterAttempt.
-func (s *Service) settle(rc *Exchange, d fact.Delivery, start time.Time) {
-	sink := newExchangeSink(rc)
+// the loop had already recorded everything it tried. A settlement that
+// follows its own append passes settleOptions{againstRecordedAttempt: true}.
+func (s *Service) settle(rc *Exchange, d fact.Delivery, start time.Time, opts settleOptions) {
+	sink := newSettlementSink(rc, opts.againstRecordedAttempt)
 	s.checkAndNote(rc, &d, sink)
 	s.settleChecked(rc, d, sink, start)
 }
 
-// settleAfterAttempt settles a request whose attempt record was appended
-// immediately before the call, so the settlement is filed against that attempt
-// rather than the one that would have come next.
-//
-// The default numbering assumes the record for the attempt in progress does not
-// exist yet, which is what a capability reporting from inside an attempt sees.
-// A settlement that follows its own append sees the opposite, and the request
-// ends there — so the number the default produces belongs to an attempt that
-// never runs.
-func (s *Service) settleAfterAttempt(rc *Exchange, d fact.Delivery, start time.Time) {
-	sink := newExchangeSink(rc).forRecordedAttempt()
-	s.checkAndNote(rc, &d, sink)
-	s.settleChecked(rc, d, sink, start)
+// settleOptions states what a settlement is filed against. The zero value is
+// right whenever no attempt record was appended in the same breath as the
+// settlement; the one option covers the opposite case.
+type settleOptions struct {
+	// againstRecordedAttempt files the settlement against the attempt record
+	// appended immediately before the call, rather than the one that would
+	// come next. The sink's default numbering assumes the record for the
+	// attempt in progress does not exist yet, which is what a capability
+	// reporting from inside an attempt sees. A settlement that follows its
+	// own append sees the opposite, and the request ends there — so the
+	// number the default produces belongs to an attempt that never runs.
+	againstRecordedAttempt bool
 }
 
 // settleChecked settles a delivery that has already been through checkAndNote.
@@ -575,19 +574,15 @@ func (s *Service) checkAndNote(rc *Exchange, d *fact.Delivery, sink *exchangeSin
 // keeping the two the same.
 func (s *Service) rejectRequest(c *gin.Context, rc *Exchange, status int, errType, message, failReason string, at fact.Fault, start time.Time) {
 	WriteIngressError(c, rc.ingress, status, errType, message, rc.requestID)
-	s.settle(rc, fact.Rejected(status, at, failReason, nil), start)
+	s.settle(rc, fact.Rejected(status, at, failReason, nil), start, settleOptions{})
 }
 
 // abandonRequest settles a request whose caller is already gone. Nothing is
-// written, because there is nobody left to write to.
-func (s *Service) abandonRequest(rc *Exchange, failReason string, start time.Time) {
-	s.settle(rc, callerGone(failReason), start)
-}
-
-// abandonRequestAfterAttempt is abandonRequest for the disconnects noticed
-// inside a candidate, which record the attempt they died on before settling.
-func (s *Service) abandonRequestAfterAttempt(rc *Exchange, failReason string, start time.Time) {
-	s.settleAfterAttempt(rc, callerGone(failReason), start)
+// written, because there is nobody left to write to. The disconnects noticed
+// inside a candidate — which record the attempt they died on before
+// settling — pass settleOptions{againstRecordedAttempt: true}.
+func (s *Service) abandonRequest(rc *Exchange, failReason string, start time.Time, opts settleOptions) {
+	s.settle(rc, callerGone(failReason), start, opts)
 }
 
 // callerGone describes a request nobody is waiting for any more: nothing was
