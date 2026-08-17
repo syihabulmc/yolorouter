@@ -535,6 +535,55 @@ func TestOpenAIStreamDecoder_SpacelessDataLines(t *testing.T) {
 	}
 }
 
+// TestOpenAIStreamDecoder_CRLFFrameSeparators: SSE lets a stream use CRLF
+// line endings throughout, which makes the blank frame separator
+// "\r\n\r\n" — a shape with no two consecutive newlines in it. A framer
+// that only looks for "\n\n" never finds a complete frame and drops the
+// whole stream: a completed, billed delivery settles as though the
+// upstream said nothing at all.
+func TestOpenAIStreamDecoder_CRLFFrameSeparators(t *testing.T) {
+	dec := NewStreamDecoder()
+
+	chunks := []string{
+		"data:{\"id\":\"chatcmpl-1\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n\r\n",
+		"data:{\"id\":\"chatcmpl-1\",\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\r\n\r\n",
+		"data:[DONE]\r\n\r\n",
+	}
+
+	var hasText, hasUsage, hasDone bool
+	for _, chunk := range chunks {
+		deltas, err := dec.DecodeChunk(chunk)
+		if err != nil {
+			t.Fatalf("DecodeChunk: %v", err)
+		}
+		for _, d := range deltas {
+			switch v := d.(type) {
+			case protocols.DeltaText:
+				hasText = true
+				if v.Text != "hi" {
+					t.Errorf("Text = %q", v.Text)
+				}
+			case protocols.DeltaUsage:
+				hasUsage = true
+				if v.Usage.PromptTokens != 10 || v.Usage.CompletionTokens != 5 {
+					t.Errorf("usage = %d/%d, want 10/5", v.Usage.PromptTokens, v.Usage.CompletionTokens)
+				}
+			case protocols.DeltaDone:
+				hasDone = true
+			}
+		}
+	}
+	if !hasText {
+		t.Error("Missing protocols.DeltaText")
+	}
+	if !hasUsage {
+		t.Error("Missing protocols.DeltaUsage")
+	}
+	if !hasDone {
+		t.Error("Missing protocols.DeltaDone")
+	}
+}
+
 func TestOpenAIStreamDecoder_Finish(t *testing.T) {
 	dec := NewStreamDecoder()
 

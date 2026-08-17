@@ -359,6 +359,51 @@ func TestGeminiStreamDecoder_SpacelessDataLines(t *testing.T) {
 	}
 }
 
+// TestGeminiStreamDecoder_CRLFFrameSeparators: SSE lets a stream use CRLF
+// line endings throughout, which makes the blank frame separator
+// "\r\n\r\n" — a shape with no two consecutive newlines in it. A framer
+// that only looks for "\n\n" never finds a complete frame and drops the
+// whole stream: a completed, billed delivery settles as though the
+// upstream said nothing at all.
+func TestGeminiStreamDecoder_CRLFFrameSeparators(t *testing.T) {
+	dec := NewStreamDecoder()
+
+	raw := "data:{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello!\"}]}}],\"modelVersion\":\"deepseek-chat\"}\r\n\r\n" +
+		"data:{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":3,\"totalTokenCount\":10}}\r\n\r\n"
+
+	deltas, err := dec.DecodeChunk(raw)
+	if err != nil {
+		t.Fatalf("DecodeChunk: %v", err)
+	}
+
+	hasText, hasUsage, hasDone := false, false, false
+	for _, d := range deltas {
+		switch v := d.(type) {
+		case protocols.DeltaText:
+			hasText = true
+			if v.Text != "Hello!" {
+				t.Errorf("Text = %q", v.Text)
+			}
+		case protocols.DeltaUsage:
+			hasUsage = true
+			if v.Usage.PromptTokens != 7 || v.Usage.CompletionTokens != 3 {
+				t.Errorf("usage = %d/%d, want 7/3", v.Usage.PromptTokens, v.Usage.CompletionTokens)
+			}
+		case protocols.DeltaDone:
+			hasDone = true
+		}
+	}
+	if !hasText {
+		t.Error("Missing protocols.DeltaText")
+	}
+	if !hasUsage {
+		t.Error("Missing protocols.DeltaUsage")
+	}
+	if !hasDone {
+		t.Error("Missing protocols.DeltaDone")
+	}
+}
+
 func TestGeminiStreamDecoder_ThinkingParts(t *testing.T) {
 	dec := NewStreamDecoder()
 
