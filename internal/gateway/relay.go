@@ -382,43 +382,15 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// request_log_bodies row, verbatim (v0.1 does not scrub body content).
 	rc.bodies.SetRequest(body)
 
-	// Two-level resolve for input compression: a per-key override wins
-	// outright (short-circuit so a stalled settings read can't block an
-	// override key); otherwise fall through to the global cached value. On
-	// global read error leave compression disabled — fail-open, never block
-	// the request on a settings hiccup.
-	//
-	// Resolved here rather than further down because the answer is needed
-	// before the body is handed to a modality, and that is the last moment
-	// anything may change those bytes.
-	if apiKey.CompressEnabledOverride {
-		rc.compressEnabled = apiKey.CompressEnabled
-	} else if s.settingsProvider != nil {
-		enabled, _, err := s.settingsProvider.GetInputCompression(c.Request.Context())
-		if err != nil {
-			logger.Warn("gateway: input compression read failed",
-				zap.String("request_id", rc.requestID), zap.Error(err))
-		}
-		rc.compressEnabled = enabled
-	}
-
-	// Vision fallback configuration. (The loopback marker and the caller
-	// credential resolve earlier, before admissions — see the block above
-	// checkKeyStateAndLimits.)
-	if s.settingsProvider != nil {
-		vf, _, err := s.settingsProvider.GetVisionFallback(c.Request.Context())
-		if err != nil {
-			logger.Warn("gateway: vision fallback settings read failed",
-				zap.String("request_id", rc.requestID), zap.Error(err))
-		}
-		// Assigned even on a refresh error: the provider returns its
-		// last-known-good snapshot alongside the error, and a settings
-		// hiccup must not silently flip a configured feature off (which
-		// here would mean stripping images a configured model could have
-		// described) — same fail-open posture as compression above.
-		rc.visionFallbackModel = vf.Model
-		rc.visionFallbackPrompt = vf.Prompt
-	}
+	// Every settings-dependent value this request uses, resolved in one
+	// place: per-key overrides short-circuit the global read, and a failed
+	// global read keeps the provider's last-known-good. Resolved here —
+	// after the key is known and before the first consumer: the ingress
+	// rewriters below read compression and vision through the capability
+	// views, the allowlist reads the fallback model, and the egress prompt
+	// stage reads the prompt — and that is the last moment anything may
+	// change those bytes.
+	rc.settings = resolveRequestSettings(c.Request.Context(), s.settingsProvider, apiKey, rc.requestID)
 
 	// The rewriters run before the request is admitted, not after it is
 	// validated, because the modality admits ONE body and everything
@@ -487,29 +459,6 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// write lands, the sliding per-write deadline takes over. Non-streaming
 	// endpoints keep the server WriteTimeout as a slow-read DoS guard.
 
-	// Resolve the two-level custom system prompt: a per-key override wins
-	// outright (short-circuit so a stalled settings read can't block an
-	// override key); otherwise fall through to the global cached value.
-	// On global read error leave the prompt disabled — fail-open behavior
-	// guidance, never block the request on a settings hiccup.
-	if apiKey.CustomSystemPromptEnabledOverride {
-		rc.customSystemPromptEnabled = apiKey.CustomSystemPromptEnabled
-		rc.customSystemPrompt = apiKey.CustomSystemPrompt
-	} else if s.settingsProvider != nil {
-		g, _, err := s.settingsProvider.CustomSystemPrompt(c.Request.Context())
-		if err != nil {
-			// Fail-open: the service returns last-known-good (or zero/disabled
-			// on cold start) alongside the error; apply it so a transient
-			// settings hiccup never downgrades behavior, and log for
-			// observability. The negative-TTL in the service ensures this
-			// log fires at most once per failure window, not per request.
-			logger.Warn("gateway: custom system prompt read failed",
-				zap.String("request_id", rc.requestID), zap.Error(err))
-		}
-		rc.customSystemPromptEnabled = g.Enabled
-		rc.customSystemPrompt = g.Text
-	}
-
 	// Step 4: model exists and is enabled. A model disabled by an admin
 	// must not route even if its candidates are still enabled.
 	m, err := repository.FindModelByName(s.db.WithContext(requestCtx), rc.originalModel)
@@ -540,7 +489,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// because that target is the admin's choice, not the caller's, so the
 	// code checks exactly that instead of trusting the marker alone; the
 	// marker is process-token-gated on top.
-	if !apiKey.AllowAllModels && (!rc.visionFallbackSubCall || m.Name != rc.visionFallbackModel) {
+	if !apiKey.AllowAllModels && (!rc.visionFallbackSubCall || m.Name != rc.settings.VisionFallbackModel) {
 		allowed, err := repository.HasAPIKeyModelAccess(s.db.WithContext(requestCtx), apiKey.ID, m.ID)
 		if err != nil {
 			if isClientDisconnected(c) {

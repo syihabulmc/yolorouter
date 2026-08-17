@@ -44,26 +44,21 @@ type Exchange struct {
 	// compression gate and the CSP injection gate read this bool instead of
 	// recomputing isChatEndpoint(path) independently.
 	isChatEndpoint bool
-	// customSystemPromptEnabled / CustomSystemPrompt are the two-level-resolved
-	// prompt for this request. Empty or disabled means no injection.
-	customSystemPromptEnabled bool
-	customSystemPrompt        string
-	// compressEnabled is the two-level-resolved input-compression switch for
-	// this request. The kernel resolves it because it is configuration, not an
-	// observation; what the capability does with it is the capability's own
-	// business, and everything that pass produces comes back as a record on
-	// the timeline rather than as fields here.
-	compressEnabled bool
-	// visionFallbackModel / visionFallbackPrompt are the resolved global
-	// vision-fallback configuration (empty model = feature off), resolved by
-	// the kernel for the same reason as compressEnabled. authCredential is
-	// the caller's presented API key, kept ONLY so a capability's loopback
-	// self-call can act as the same caller — it must never reach logs (the
-	// header capture is sanitized separately). visionFallbackSubCall marks a
-	// request the gateway made to itself (loopback token matched): the
-	// capability reads it as its recursion guard.
-	visionFallbackModel   string
-	visionFallbackPrompt  string
+	// settings is every settings-dependent value this request uses — the
+	// compression switch, the custom system prompt, the vision-fallback
+	// configuration — two-level-resolved once at entry: a per-key override
+	// short-circuits the global cached read, and a failed global read keeps
+	// the provider's last-known-good. The kernel resolves it because it is
+	// configuration, not an observation; what a capability does with it is
+	// the capability's own business, and everything a pass produces comes
+	// back as a record on the timeline rather than as fields here.
+	settings requestSettings
+	// authCredential is the caller's presented API key, kept ONLY so a
+	// capability's loopback self-call can act as the same caller — it must
+	// never reach logs (the header capture is sanitized separately).
+	// visionFallbackSubCall marks a request the gateway made to itself
+	// (loopback token matched): the capability reads it as its recursion
+	// guard.
 	authCredential        string
 	visionFallbackSubCall bool
 	// parentRequestID names the caller request a loopback sub-call works
@@ -254,10 +249,10 @@ func (rc *Exchange) TPMLimit() int { return rc.tpmLimit }
 
 // CustomSystemPromptEnabled reports whether a prompt was resolved for this
 // request, from either the global setting or a per-key override.
-func (rc *Exchange) CustomSystemPromptEnabled() bool { return rc.customSystemPromptEnabled }
+func (rc *Exchange) CustomSystemPromptEnabled() bool { return rc.settings.CustomSystemPromptEnabled }
 
 // CustomSystemPrompt returns the resolved prompt text, empty when none applies.
-func (rc *Exchange) CustomSystemPrompt() string { return rc.customSystemPrompt }
+func (rc *Exchange) CustomSystemPrompt() string { return rc.settings.CustomSystemPrompt }
 
 // IsChatEndpoint reports whether the caller's route is one where a system
 // prompt means anything. Computed once from the request path, because the
@@ -314,13 +309,13 @@ func (rc *Exchange) ProviderID() *uint {
 }
 
 // CompressEnabled is the resolved input-compression switch for this request.
-func (rc *Exchange) CompressEnabled() bool { return rc.compressEnabled }
+func (rc *Exchange) CompressEnabled() bool { return rc.settings.CompressEnabled }
 
 // VisionFallbackModel is the resolved global describe model ("" = feature off).
-func (rc *Exchange) VisionFallbackModel() string { return rc.visionFallbackModel }
+func (rc *Exchange) VisionFallbackModel() string { return rc.settings.VisionFallbackModel }
 
 // VisionFallbackPrompt is the resolved describe prompt ("" = built-in default).
-func (rc *Exchange) VisionFallbackPrompt() string { return rc.visionFallbackPrompt }
+func (rc *Exchange) VisionFallbackPrompt() string { return rc.settings.VisionFallbackPrompt }
 
 // AuthCredential is the caller's presented API key, for loopback self-calls
 // only — never for logging.
