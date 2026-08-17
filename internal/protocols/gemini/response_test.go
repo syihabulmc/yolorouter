@@ -316,6 +316,49 @@ func TestGeminiStreamDecoder_Basic(t *testing.T) {
 	}
 }
 
+// TestGeminiStreamDecoder_SpacelessDataLines: SSE makes the space after the
+// colon optional, and an upstream that omits it is still a Gemini stream. A
+// decoder that dropped those frames would read a completed stream as one that
+// said nothing at all — no text, no usage, no finish.
+func TestGeminiStreamDecoder_SpacelessDataLines(t *testing.T) {
+	dec := NewStreamDecoder()
+
+	raw := "data:{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello!\"}]}}],\"modelVersion\":\"deepseek-chat\"}\n\n" +
+		"data:{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":3,\"totalTokenCount\":10}}\n\n"
+
+	deltas, err := dec.DecodeChunk(raw)
+	if err != nil {
+		t.Fatalf("DecodeChunk: %v", err)
+	}
+
+	hasText, hasUsage, hasDone := false, false, false
+	for _, d := range deltas {
+		switch v := d.(type) {
+		case protocols.DeltaText:
+			hasText = true
+			if v.Text != "Hello!" {
+				t.Errorf("Text = %q", v.Text)
+			}
+		case protocols.DeltaUsage:
+			hasUsage = true
+			if v.Usage.PromptTokens != 7 || v.Usage.CompletionTokens != 3 {
+				t.Errorf("usage = %d/%d, want 7/3", v.Usage.PromptTokens, v.Usage.CompletionTokens)
+			}
+		case protocols.DeltaDone:
+			hasDone = true
+		}
+	}
+	if !hasText {
+		t.Error("Missing protocols.DeltaText")
+	}
+	if !hasUsage {
+		t.Error("Missing protocols.DeltaUsage")
+	}
+	if !hasDone {
+		t.Error("Missing protocols.DeltaDone")
+	}
+}
+
 func TestGeminiStreamDecoder_ThinkingParts(t *testing.T) {
 	dec := NewStreamDecoder()
 
