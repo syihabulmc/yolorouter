@@ -1039,7 +1039,7 @@ func (s *Service) recordAndSettle(c *gin.Context, rc *Exchange, adm admitted, d 
 	// because the reason only exists on the substitute. An operator opening
 	// that row to find out what happened is told nothing at all, which is
 	// worse than being told the wrong thing.
-	sink := newExchangeSink(rc)
+	sink := newKernelSink(rc)
 	s.checkAndNote(rc, &d, sink)
 	// A settled, complete delivery is the healthy interaction the table's
 	// upstream-succeeded row resets the breaker for. A settled but
@@ -1361,10 +1361,8 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 		// judgement; the attempt was already charged at the dispatch above,
 		// and the routing (fail over) matches the row while staying explicit
 		// here because the disconnect branch above must keep precedence.
-		sink := newExchangeSink(rc)
-		sink.reporter = kernelReporter
-		sink.Report(fact.Fact{Kind: fact.KindUpstreamTransportFailure})
-		s.executeCircuit(rc, sink.resolve().Circuit)
+		s.executeCircuit(rc,
+			reportKernelFact(rc, fact.Fact{Kind: fact.KindUpstreamTransportFailure}).Circuit)
 		rc.recordCurrentAttempt(0, AttemptConnError,
 			redactedFailure(err, rc.attempt.UpstreamURL()))
 		return attemptNextCandidate, nil
@@ -1486,13 +1484,11 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 			zap.Int("upstream_status", statusCode))
 	}
 	// The kernel's own reading joins the fold only on the decision's say-so,
-	// and joining is also an audit fact: the three steps below append one
-	// timeline entry, and the middle one is what stamps its provenance —
-	// skip it and the entry survives with an empty Reporter.
+	// and joining is also an audit fact: the report appends one timeline
+	// entry, stamped with kernel provenance by construction. The verdict is
+	// discarded — d already folded this reading; only the entry matters here.
 	if d.baselineFolded() {
-		sink := newExchangeSink(rc)
-		sink.reporter = kernelReporter
-		sink.Report(kernelUpstreamFact(statusCode))
+		reportKernelFact(rc, kernelUpstreamFact(statusCode))
 	}
 	// The resolved circuit effect is booked whatever the routing below
 	// decides: the provider's health record describes the provider, not
@@ -1581,12 +1577,10 @@ func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.T
 	// before the allowance ran dry, and that is the answer the caller can
 	// act on.
 	if s.exhaustedBudget(rc) {
-		sink := newExchangeSink(rc)
-		sink.reporter = kernelReporter
 		// Reason is an explicit stable code (persisted, mapped in the
 		// frontend), never derived from the Kind's internal name.
-		sink.Report(fact.Fact{Kind: fact.KindRequestBudgetExhausted, Reason: "request_budget_exhausted"})
-		v := sink.resolve()
+		v := reportKernelFact(rc,
+			fact.Fact{Kind: fact.KindRequestBudgetExhausted, Reason: "request_budget_exhausted"})
 		status, errType := v.CallerFacing(0, "")
 		s.rejectRequest(c, rc, status, errType,
 			"request budget exhausted", v.FailReason(), fact.FaultUpstream, start)

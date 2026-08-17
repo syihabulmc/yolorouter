@@ -58,6 +58,13 @@ func TestBehaviouralGateTestsStillExist(t *testing.T) {
 			},
 		},
 		{
+			file: "internal/gateway/kernel_sink_test.go",
+			tests: []string{
+				"TestReportKernelFactStampsProvenanceAndFolds",
+				"TestSettlementNotesCarryKernelProvenance",
+			},
+		},
+		{
 			file:  "internal/fact/delivery_test.go",
 			tests: []string{"TestValidateRejectsImpossibleDeliveries"},
 		},

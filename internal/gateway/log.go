@@ -268,8 +268,7 @@ func (s *Service) finalize(rc *Exchange, usage *Usage, statusCode int, failReaso
 	// someone consults to find out whether the gateway is slow.
 	duration := time.Since(start)
 
-	sink := newExchangeSink(rc)
-	sink.reporter = "kernel"
+	sink := newKernelSink(rc)
 
 	// Settle the cache convention once, here, before either consumer of the
 	// usage reads it: pricing below and the persisted counts must not be able to
