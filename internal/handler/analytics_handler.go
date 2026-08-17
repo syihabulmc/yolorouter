@@ -196,7 +196,7 @@ func parseAnalyticsFilter(c *gin.Context) (repository.RequestLogFilter, service.
 	}
 	// A member's analytics are pinned to their own rows and never carry
 	// the provider dimension (upstream identities are operator
-	// information): the forced scope overrides any user_id the query
+	// information): the pinned view overrides any user_id the query
 	// smuggled in, and provider-scoped filtering plus the failover scan
 	// are stripped rather than trusted. This block must stay LAST, after
 	// every query-param assignment — stripping before a param is parsed
@@ -204,8 +204,8 @@ func parseAnalyticsFilter(c *gin.Context) (repository.RequestLogFilter, service.
 	// UserID/ProviderID half lives on the filter, the WithFailovers half
 	// on the options — losing the options half would let a member
 	// trigger the full failover scan.
-	if forced := middleware.ForcedUserID(c); forced != nil {
-		filter.UserID = forced
+	if scope := middleware.ViewScopeOf(c); scope.Member {
+		filter.UserID = scope.Resolve(filter.UserID)
 		filter.ProviderID = nil
 		opts.WithFailovers = false
 	}
@@ -248,7 +248,7 @@ func parseDimensionParam(c *gin.Context) (string, bool) {
 		response.ParamError(c, "dimension must be one of: "+service.DimensionList())
 		return "", false
 	}
-	if dimension == service.DimensionProvider && middleware.ForcedUserID(c) != nil {
+	if dimension == service.DimensionProvider && middleware.ViewScopeOf(c).Member {
 		middleware.WriteAdminError(c, http.StatusForbidden, errcode.AccountPageForbidden)
 		return "", false
 	}

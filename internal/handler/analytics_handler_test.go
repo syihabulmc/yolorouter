@@ -1300,7 +1300,8 @@ func TestParseAnalyticsFilterMemberPinStripsFailovers(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet,
 		"/api/admin/analytics/report?with_failovers=1&provider_id=3&user_id=9", nil)
-	c.Set(middleware.ForcedUserIDKey, uint(7))
+	pinned := uint(7)
+	c.Set(middleware.ViewScopeKey, middleware.ViewScope{Member: true, Owner: &pinned})
 
 	filter, opts, ok := parseAnalyticsFilter(c)
 	if !ok {
