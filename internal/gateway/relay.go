@@ -888,11 +888,11 @@ func attemptNoteFor(d fact.Delivery) string {
 // unit it counts, and this is where the kernel decides what to do with them.
 // Nil in, nil out — an attempt that reported nothing is not an attempt that
 // reported zeros, and billing the difference is real money.
-func usageFromReport(u *fact.UsageReported) *Usage {
+func usageFromReport(u *fact.UsageReported) *protocols.IRUsage {
 	if u == nil {
 		return nil
 	}
-	return &Usage{
+	return &protocols.IRUsage{
 		PromptTokens:          u.Prompt,
 		CompletionTokens:      u.Completion,
 		TotalTokens:           u.Total,

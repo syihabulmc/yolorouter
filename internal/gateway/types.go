@@ -369,6 +369,18 @@ func (rc *Exchange) StreamBodyPath() string { return rc.bodies.StreamName() }
 // StreamBodyTruncated reports whether the stream capture hit its cap.
 func (rc *Exchange) StreamBodyTruncated() bool { return rc.bodies.StreamTruncated() }
 
+// clearResponseBodies drops UpstreamResponseBody/ResponseBody before this
+// attempt commits to writing a 2xx response to the client. A prior failed
+// candidate may have stashed a non-2xx error body in these fields
+// (attemptOne's non-2xx path, "last attempt wins"); without this clear, a
+// stale earlier-candidate error body would be persisted as this (successful)
+// request's upstream/response body. Only the success path re-populates them
+// afterward (or, for a stream request, leaves them empty — the sent SSE is
+// captured to the stream capture file instead).
+func (rc *Exchange) clearResponseBodies() {
+	rc.bodies.ClearResponses()
+}
+
 // AttemptRecord is one candidate try (the log keeps every attempt,
 // not just the final one). Outcome is one of the AttemptOutcome* constants.
 type AttemptRecord struct {
@@ -408,62 +420,6 @@ const (
 	// input inspection refused the payload, which another candidate may not.
 	AttemptContentFiltered = "content_filtered"
 )
-
-// Usage is the token usage pulled from an OpenAI-compatible response or
-// final SSE chunk. Prompt/Completion/Total are the
-// always-present totals; CacheWrite/CacheRead are the prompt-cache counts
-// some upstreams report, driving the cache line items in computeCost.
-type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-	// CacheWriteTokens / CacheReadTokens are the prompt-cache counts some
-	// upstreams report (OpenAI exposes cache READ via
-	// prompt_tokens_details.cached_tokens; Anthropic splits cache writes via
-	// cache_creation_input_tokens). They drive the cache line items in
-	// computeCost. Zero when the upstream didn't report them.
-	CacheWriteTokens int `json:"cache_write_tokens"`
-	CacheReadTokens  int `json:"cache_read_tokens"`
-	// CacheIncludedInPrompt marks whether PromptTokens already counts the cache
-	// tokens. OpenAI-shaped upstreams report prompt_tokens inclusive of cache
-	// reads (true); Anthropic's input_tokens is the net non-cached count
-	// (false). It covers the cache WRITE too, which is not the free-standing
-	// count it once was: this gateway both emits and accepts
-	// protocols.CacheWriteAliasField on OpenAI-shaped wires, where the write is
-	// part of the reported prompt.
-	//
-	// As decoded this is only a claim, taken from the wire shape alone — the
-	// OpenAI-compatible upstreams that front an Anthropic model report a net
-	// prompt under an inclusive-looking schema. normalizeCacheConvention
-	// (log.go) settles it once per request, before anything reads a count from
-	// it. netPromptTokens then derives the billable/logged net input, so the
-	// value persisted to request_logs.input_tokens is always the net count
-	// regardless of origin protocol. Not serialized — internal accounting only.
-	CacheIncludedInPrompt bool `json:"-"`
-	// Invalid carries protocols.IRUsage.Invalid across the bridge: an upstream
-	// reported something impossible and no count here may be billed or
-	// persisted. Not serialized — internal accounting only.
-	Invalid bool `json:"-"`
-	// ReasoningTokens carries the IR reasoning-token count across the bridge so
-	// the coherence verdict (run via toIRUsage) can see a negative one. Without
-	// it a record the wire encoder refused (HasNegativeCount sees the negative
-	// reasoning count and emits null) would still bill here, since the bridge
-	// used to drop the field and the billing gate could not re-derive the
-	// verdict.
-	//
-	// It must ALSO survive the delivery round trip (usageReportOf and back):
-	// settlement re-runs the coherence verdict on the copy that travelled with
-	// the delivery, and a hop that drops this field silently un-condemns a
-	// record on its way to being priced. Not serialized — internal accounting
-	// only.
-	ReasoningTokens int `json:"-"`
-	// WebSearchCount carries protocols.IRUsage.WebSearchCount across the bridge.
-	// It is not a token count and nothing prices it, but it is the only record
-	// that the provider ran searches it charges for, and the frames it was read
-	// from do not survive the delivery. Not serialized — internal accounting
-	// only.
-	WebSearchCount int `json:"-"`
-}
 
 // beginUpstreamAttempt drops whatever the previous send left on the exchange,
 // so nothing this attempt did not produce is read as belonging to it.

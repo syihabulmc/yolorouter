@@ -89,11 +89,11 @@ type costBreakdown struct {
 // through that method. Two implementations of one definition is how the
 // input_tokens a client is shown and the input_tokens persisted to request_logs
 // come to disagree about the same request.
-func netPromptTokens(usage *Usage) int {
+func netPromptTokens(usage *protocols.IRUsage) int {
 	if usage == nil {
 		return 0
 	}
-	return usage.toIRUsage().NetPromptTokens()
+	return usage.NetPromptTokens()
 }
 
 // normalizeCacheConvention settles which cache-accounting convention a usage
@@ -111,11 +111,11 @@ func netPromptTokens(usage *Usage) int {
 // read, because the counts are consumed several times below (pricing, the
 // persisted row, the compression denominator) and a partially-normalized record
 // is exactly the inconsistency this exists to prevent.
-func normalizeCacheConvention(u *Usage) {
+func normalizeCacheConvention(u *protocols.IRUsage) {
 	if u == nil {
 		return
 	}
-	if protocols.CacheSitsOutsidePrompt(u.toIRUsage()) {
+	if protocols.CacheSitsOutsidePrompt(*u) {
 		u.CacheIncludedInPrompt = false
 	}
 }
@@ -132,16 +132,15 @@ func normalizeCacheConvention(u *Usage) {
 // Delegates to the single IR-level verdict (protocols.IRUsage.IsIncoherent) so
 // the wire encoders and this billing gate read the SAME answer instead of each
 // re-judging with its own predicate. The verdict was already computed at the
-// decoder exit and carried on Invalid; round-tripping through toIRUsage lets
-// this function evaluate the same predicate the encoder effectively used,
-// catching the records where Merge erased the evidence before the mark was set.
+// decoder exit and carried on Invalid; re-evaluating the same predicate here
+// catches the records where Merge erased the evidence before the mark was set.
 // Both callers run normalizeCacheConvention first, so PromptIncludesCache (which
 // IsIncoherent relies on) has the settled convention to read.
-func usageIsCoherent(u *Usage) bool {
+func usageIsCoherent(u *protocols.IRUsage) bool {
 	if u == nil {
 		return false
 	}
-	return !u.toIRUsage().IsIncoherent()
+	return !u.IsIncoherent()
 }
 
 // compressTokensSaved reads the input-compression estimate back off the
@@ -173,7 +172,7 @@ func compressTokensSaved(t fact.Timeline) int {
 // rate so the saving is reported on the same basis as the billed cost. It is
 // forced to 0 whenever usage/pricing is unknown, matching CostKnown=false.
 // Candidate prices are CNY per million tokens.
-func computeCost(cand *model.ModelCandidate, usage *Usage, compressTokensSaved int) costBreakdown {
+func computeCost(cand *model.ModelCandidate, usage *protocols.IRUsage, compressTokensSaved int) costBreakdown {
 	if cand == nil || !usageIsCoherent(usage) {
 		return costBreakdown{} // Known=false: no cost recorded, no budget consumed
 	}
@@ -257,7 +256,7 @@ func safeUpstreamMessage(status int) string {
 // atomically (repository.IncrementAPIKeyBudgetSpent is a single
 // budget_spent_micros = budget_spent_micros + ? UPDATE) cannot lose updates to
 // each other.
-func (s *Service) finalize(rc *Exchange, usage *Usage, statusCode int, failReason string, start time.Time) {
+func (s *Service) finalize(rc *Exchange, usage *protocols.IRUsage, statusCode int, failReason string, start time.Time) {
 	if rc.logWritten.Swap(true) {
 		return // already finalized (e.g. Handle's panic-recovery defer after a normal finalize)
 	}
@@ -356,7 +355,7 @@ func (s *Service) recordTerminal(rc *Exchange) {
 // negative or impossible count poisons every SUM() the dashboard runs, and the
 // same rejection is applied to pricing, so the stored counts can never disagree
 // with the billing decision.
-func (s *Service) reportUsage(rc *Exchange, usage *Usage, sink fact.Sink) *fact.UsageReported {
+func (s *Service) reportUsage(rc *Exchange, usage *protocols.IRUsage, sink fact.Sink) *fact.UsageReported {
 	if usage == nil {
 		return nil
 	}
