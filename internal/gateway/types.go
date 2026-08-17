@@ -200,11 +200,13 @@ type Exchange struct {
 //
 // This narrows the surface; it does not close it. Capabilities reach an Exchange
 // through a bind function they write themselves, and a bind that hands over the
-// Exchange itself reaches every exported method on it — SetResponseBody and the
-// other body mutators among them, which stay exported because the protocol layer
-// calls them. Nothing here can prevent that. What keeps a capability honest is
-// the narrow view it binds, which is a property of the assembly and not of this
-// file.
+// Exchange itself reaches every exported method on it — which is why Exchange
+// exports readers only: the body mutators that once had to stay exported for
+// the protocol layer's buffer interface are gone (the relay helpers take a
+// small adapter instead), and a gate in internal/gates pins the exported
+// method set so it cannot quietly grow back. What keeps a capability honest
+// is the narrow view it binds, which is a property of the assembly and not of
+// this file.
 // spendBudget books the count budget a resolved decision asks for. One spend
 // point for every call site keeps the cost of a judgement the table's call: a
 // path cannot decide its own price, and nothing ever books a refund.

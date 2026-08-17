@@ -2,61 +2,6 @@ package gateway
 
 import "github.com/yolorouter/yolorouter/internal/protocols"
 
-// var _ protocols.UpstreamBuffer = (*Exchange)(nil) is a compile-time
-// assertion that Exchange satisfies the IR relay layer's minimal
-// upstream-recording interface, so the IR relay helpers
-// (protocols.IRStreamRelay / IRNonStreamRelay / IRStreamRelayJSONLines) can
-// take a *Exchange directly as their buf argument.
-var _ protocols.UpstreamBuffer = (*Exchange)(nil)
-
-// AppendUpstream implements protocols.UpstreamBuffer for the streaming IR
-// relay path. Intentionally a NO-OP in this version: data here is the raw
-// (pre-IR-decode) upstream line, not what the client actually received —
-// persisting it into the per-request <request_id>.stream capture file would
-// interleave un-rewritten upstream content with the real caller-facing bytes
-// (which land in that same file via AppendResponse below), corrupting the
-// "exactly what the client received" contract the capture file is supposed
-// to guarantee. Kept as a method (rather than removed) purely so
-// Exchange still satisfies protocols.UpstreamBuffer; a future version
-// could route this into a separate <request_id>.upstream debug file instead
-// of discarding it, but that is a deliberate scope cut for now, not an
-// oversight.
-func (rc *Exchange) AppendUpstream(data []byte) {
-	_ = data
-}
-
-// AppendResponse implements protocols.UpstreamBuffer for the streaming IR
-// relay path: it appends one already-caller-facing (post-IR-encode) SSE
-// fragment to the per-request stream capture file — the cross-protocol
-// counterpart of SetResponseBody, and the streaming counterpart of
-// AppendUpstream's raw-upstream no-op above. protocols.IRStreamRelay /
-// IRStreamRelayJSONLines call this at every point an encoded event is
-// actually written to the client, so the capture file ends up byte-for-byte
-// identical to what the client received — mirroring the same-protocol
-// passthrough pump's own appendStreamBodyLine(rc, sent) calls.
-// Delegates to the existing appendStreamBodyLine
-// helper rather than reimplementing the capture-file bookkeeping (nil-file
-// no-op, 1GiB anti-OOM backstop) here.
-func (rc *Exchange) AppendResponse(data []byte) {
-	appendStreamBodyLine(rc, data)
-}
-
-// SetBody implements protocols.UpstreamBuffer for the non-streaming IR relay
-// path: it records the raw (pre-IR-decode) upstream response body for the
-// request_log_bodies row, mirroring the non-IR non-stream path's population
-// of UpstreamResponseBody.
-func (rc *Exchange) SetBody(data []byte) {
-	rc.bodies.SetUpstreamResponse(data)
-}
-
-// SetResponseBody implements protocols.UpstreamBuffer for the non-streaming
-// IR relay path: it records the caller-facing (post-IR-encode) response
-// bytes actually written to the client, mirroring how the same-protocol path
-// populates the response-body capture.
-func (rc *Exchange) SetResponseBody(data []byte) {
-	rc.bodies.SetResponse(data)
-}
-
 // clearResponseBodies drops UpstreamResponseBody/ResponseBody before this
 // attempt commits to writing a 2xx response to the client. A prior failed
 // candidate may have stashed a non-2xx error body in these fields
