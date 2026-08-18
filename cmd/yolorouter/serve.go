@@ -17,7 +17,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/pricecatalog"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/router"
-	"github.com/yolorouter/yolorouter/internal/service"
+	"github.com/yolorouter/yolorouter/internal/service/provider"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/database"
 	"github.com/yolorouter/yolorouter/pkg/logger"
@@ -157,7 +157,7 @@ func runServe(ctx context.Context, args []string) error {
 	// independent HTTPProviderClient (its own semaphore + http.Transport)
 	// purely for a startup DB+crypto check — router.New builds the one
 	// real instance that actually serves provider-test traffic.
-	fingerprintSvc := service.NewProviderService(app.DB, crypto.NewSecretBox(masterKey), nil)
+	fingerprintSvc := provider.NewProviderService(app.DB, crypto.NewSecretBox(masterKey), nil)
 	if err := fingerprintSvc.VerifyMasterKeyFingerprint(time.Now().UTC()); err != nil {
 		return fmt.Errorf("startup check failed: %w", err)
 	}

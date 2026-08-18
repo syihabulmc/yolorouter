@@ -1617,7 +1617,7 @@ func filterCandidates(all []model.ModelCandidate) (routable []model.ModelCandida
 		// An enabled-but-unverified candidate is NOT routable. The two states can
 		// coexist — a candidate is stored before its first probe, and a probe can
 		// reset verification without touching enablement — and ModelService's own
-		// routability check (candidateBlockedBy) already rejects these, so the
+		// routability check (modeladmin.CandidateBlockedBy) already rejects these, so the
 		// gateway must match that gate or it routes a mapping known to be
 		// unverified.
 		if c.VerificationStatus != model.ModelVerificationStatusPassed {

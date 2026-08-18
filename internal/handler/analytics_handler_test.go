@@ -26,7 +26,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/router"
-	"github.com/yolorouter/yolorouter/internal/service"
+	"github.com/yolorouter/yolorouter/internal/service/analytics"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 )
 
@@ -143,8 +143,8 @@ func TestGetAnalyticsOverviewAggregatesSeededRows(t *testing.T) {
 		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
 	}
 	var env struct {
-		Code int                 `json:"code"`
-		Data service.OverviewRow `json:"data"`
+		Code int                   `json:"code"`
+		Data analytics.OverviewRow `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -204,7 +204,7 @@ func TestGetAnalyticsOverviewRespectsTimeRange(t *testing.T) {
 		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
 	}
 	var env struct {
-		Data service.OverviewRow `json:"data"`
+		Data analytics.OverviewRow `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -486,8 +486,8 @@ func TestGetAnalyticsReportDefaultsDimensionToModel(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if env.Data.Dimension != service.DimensionModel {
-		t.Fatalf("default dimension = %q, want %q", env.Data.Dimension, service.DimensionModel)
+	if env.Data.Dimension != analytics.DimensionModel {
+		t.Fatalf("default dimension = %q, want %q", env.Data.Dimension, analytics.DimensionModel)
 	}
 }
 
@@ -1331,8 +1331,8 @@ func TestGetCompressStatsLimitParamClampsToMax(t *testing.T) {
 	// No rows seeded — clamp doesn't change row count, but a 1000 must not
 	// 400 (the parser accepts and clamps).
 	data := doCompressStats(t, r, ck, "limit=1000")
-	if len(data.TopAPIKeys) > service.MaxCompressTopN {
-		t.Fatalf("TopAPIKeys len = %d, want <= %d (clamped)", len(data.TopAPIKeys), service.MaxCompressTopN)
+	if len(data.TopAPIKeys) > analytics.MaxCompressTopN {
+		t.Fatalf("TopAPIKeys len = %d, want <= %d (clamped)", len(data.TopAPIKeys), analytics.MaxCompressTopN)
 	}
 }
 

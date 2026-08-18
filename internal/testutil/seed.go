@@ -1,12 +1,16 @@
 package testutil
 
 import (
+	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/pkg/crypto"
 )
 
 // SeedRequestLog inserts one request_logs row with the given shape. The
@@ -99,4 +103,69 @@ func ProviderMasterKey() []byte {
 		key[i] = byte(i)
 	}
 	return key
+}
+
+// ProviderSecrets is ProviderMasterKey boxed for constructors that take the
+// SecretBox custodian; tests that exercise the wire format directly keep
+// using the raw bytes.
+func ProviderSecrets() crypto.SecretBox {
+	return crypto.NewSecretBox(ProviderMasterKey())
+}
+
+// ownerSeq feeds SeedKeyOwner with unique usernames — several keys created
+// in one test each get their own owner without username collisions.
+var ownerSeq uint64
+
+// SeedKeyOwner inserts a user to own a test key. CreateAPIKey refuses an
+// ownerless key, so every create call in the api-key tests names an owner
+// explicitly through this helper.
+func SeedKeyOwner(t *testing.T, db *gorm.DB) uint {
+	t.Helper()
+	now := time.Now().UTC()
+	u := &model.User{
+		Username:  fmt.Sprintf("key-owner-%d", atomic.AddUint64(&ownerSeq, 1)),
+		Role:      model.RoleAdmin,
+		Status:    model.UserStatusEnabled,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Create(u).Error; err != nil {
+		t.Fatalf("seed key owner: %v", err)
+	}
+	return u.ID
+}
+
+// BlockTableWrites installs a SQLite trigger that turns every future
+// statement of the given kind ("UPDATE"/"INSERT"/"DELETE") against table
+// into an error, while leaving every other table (and every other
+// statement kind on the same table) untouched. Used to force a repository
+// call to fail without corrupting the schema outright (as DropTable does),
+// so earlier reads in the same code path still succeed.
+func BlockTableWrites(t *testing.T, db *gorm.DB, table, kind string) {
+	t.Helper()
+	stmt := fmt.Sprintf(
+		"CREATE TRIGGER block_%s_%s BEFORE %s ON %s BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END",
+		strings.ToLower(kind), table, kind, table,
+	)
+	if err := db.Exec(stmt).Error; err != nil {
+		t.Fatalf("create blocking trigger on %s: %v", table, err)
+	}
+}
+
+// DropTable removes a table outright, forcing every subsequent read or
+// write against it to fail — used for the "repository call errors for a
+// reason that isn't gorm.ErrRecordNotFound" branches.
+func DropTable(t *testing.T, db *gorm.DB, table string) {
+	t.Helper()
+	// Disable FK enforcement first: provider_keys.provider_id references
+	// providers(id), and SQLite refuses to drop a table another table's FK
+	// still points at while enforcement is on — tests need to drop just one
+	// side (e.g. providers) while leaving the other (provider_keys) intact
+	// and queryable.
+	if err := db.Exec("PRAGMA foreign_keys = OFF").Error; err != nil {
+		t.Fatalf("disable foreign_keys pragma: %v", err)
+	}
+	if err := db.Exec("DROP TABLE " + table).Error; err != nil {
+		t.Fatalf("drop table %s: %v", table, err)
+	}
 }

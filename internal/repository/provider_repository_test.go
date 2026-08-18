@@ -856,7 +856,7 @@ func TestProviderKeyFingerprintClaimAndGet(t *testing.T) {
 // silently overwrite the earlier one's row — ClaimProviderKeyFingerprintIfAbsent
 // is a DO NOTHING insert, so the first writer's probe always wins and the
 // second caller's own probe is simply discarded (its caller then correctly
-// fails the decrypt-verify step in service.VerifyMasterKeyFingerprint,
+// fails the decrypt-verify step in provider.VerifyMasterKeyFingerprint,
 // covered in its own tests).
 // TestCreateProviderWithKeyFailsWhenProviderNameAlreadyExists covers the
 // tx.Create(provider) error branch with a genuine DB error (a UNIQUE

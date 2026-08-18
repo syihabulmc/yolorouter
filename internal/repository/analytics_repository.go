@@ -1,7 +1,7 @@
 // Package repository provides by-dimension GROUP
 // BY analytics aggregations on top of the shared RequestLogFilter. Pure data-access
 // only: no HTTP shaping, no CSV, no business judgment. The service layer
-// (internal/service/analytics_service.go) composes these into the report
+// (internal/service/analytics) composes these into the report
 // envelope and the CSV export.
 //
 // Reuse pattern: every AggregateBy* function calls f.applyFilter(db) to
@@ -15,7 +15,7 @@
 // (created_at, status_code, ...) and a second table in play makes columns
 // that exist on both (created_at is on both request_logs and providers)
 // ambiguous under Postgres. Names are resolved in a post-fetch batch lookup
-// — the same pattern request_log_service.go's fetchRelatedNames established.
+// — the same pattern requestlog's fetchRelatedNames established.
 package repository
 
 import (

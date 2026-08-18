@@ -24,7 +24,7 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
-	"github.com/yolorouter/yolorouter/internal/service"
+	"github.com/yolorouter/yolorouter/internal/service/requestlog"
 	"github.com/yolorouter/yolorouter/internal/testutil"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
@@ -32,7 +32,7 @@ import (
 // newRequestLogTestRouter wires up the request-log routes over a
 // fresh migrated SQLite DB, using t.TempDir() as the bodies directory. Uses
 // a real RequestLogService — see the package doc comment for why.
-func newRequestLogTestRouter(t *testing.T) (*gin.Engine, *gorm.DB, *service.RequestLogService) {
+func newRequestLogTestRouter(t *testing.T) (*gin.Engine, *gorm.DB, *requestlog.RequestLogService) {
 	t.Helper()
 	r, db, svc, _ := newRequestLogTestRouterWithBodiesDir(t)
 	return r, db, svc
@@ -41,11 +41,11 @@ func newRequestLogTestRouter(t *testing.T) (*gin.Engine, *gorm.DB, *service.Requ
 // newRequestLogTestRouterWithBodiesDir is newRequestLogTestRouter plus the
 // bodiesDir it wired GetRequestLogBodyStream to — the stream-body tests
 // need it to plant a real file on disk at the path a body row references.
-func newRequestLogTestRouterWithBodiesDir(t *testing.T) (*gin.Engine, *gorm.DB, *service.RequestLogService, string) {
+func newRequestLogTestRouterWithBodiesDir(t *testing.T) (*gin.Engine, *gorm.DB, *requestlog.RequestLogService, string) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	db := testutil.NewSQLiteDB(t)
-	svc := service.NewRequestLogService(db)
+	svc := requestlog.NewRequestLogService(db)
 	bodiesDir := t.TempDir()
 	r := gin.New()
 	admin := r.Group("/api/admin")
@@ -159,7 +159,7 @@ func TestListRequestLogsJoinsUsernameAndProviderName(t *testing.T) {
 
 // TestListRequestLogsDerivesStatusClassForEachBucket walks every status
 // bucket (success / partial / cancelled / rejected / failed) and asserts
-// service.DeriveStatusClass maps it correctly in the list response. The
+// requestlog.DeriveStatusClass maps it correctly in the list response. The
 // same derivation powers the detail endpoint, so this is the canonical
 // test for that logic.
 func TestListRequestLogsDerivesStatusClassForEachBucket(t *testing.T) {
