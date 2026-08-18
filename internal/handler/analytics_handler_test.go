@@ -616,7 +616,7 @@ func TestAggregateByTimeWalksDayBucketsInUTC(t *testing.T) {
 
 	// now is deliberately far from the explicit filter window — if it ever
 	// leaked into the windowing, the bucket assertions below would fail.
-	rows, err := repository.AggregateByTime(db, f, loc, repository.TimeBucketDay, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	rows, err := repository.AggregateByTime(t.Context(), db, f, loc, repository.TimeBucketDay, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("AggregateByTime: %v", err)
 	}
@@ -642,9 +642,216 @@ func TestAggregateByTimeWalksDayBucketsInUTC(t *testing.T) {
 
 func TestAggregateByTimeRejectsInvalidBucket(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
-	_, err := repository.AggregateByTime(db, &repository.RequestLogFilter{}, time.UTC, "century", time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	_, err := repository.AggregateByTime(t.Context(), db, &repository.RequestLogFilter{}, time.UTC, "century", time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	if !errors.Is(err, repository.ErrInvalidBucket) {
 		t.Fatalf("expected ErrInvalidBucket, got %v", err)
+	}
+}
+
+// TestAggregateByTimeHourBucketsCrossUTCDay pins the hour-bucket walk in a
+// non-UTC zone whose local buckets straddle a UTC midnight: labels carry the
+// local wall clock plus the UTC offset suffix, empty buckets gap-fill with
+// zeros, the order is newest-first, and no call is lost or double-counted
+// across the UTC day boundary.
+func TestAggregateByTimeHourBucketsCrossUTCDay(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	loc := time.FixedZone("UTC+8", 8*3600)
+
+	// Local window 2026-07-14 23:00 → 2026-07-15 02:00 (+08): three hour
+	// buckets, the last two on the next local day, all inside UTC July 14.
+	start := time.Date(2026, 7, 14, 23, 0, 0, 0, loc)
+	end := start.Add(3 * time.Hour)
+
+	seedRequestLog(t, db, "h0", start.Add(10*time.Minute).UTC(), func(r *model.RequestLog) {
+		r.StatusCode = 200
+		r.InputTokens = 7
+		r.CostKnown = true
+	})
+	seedRequestLog(t, db, "h2-a", start.Add(2*time.Hour+40*time.Minute).UTC(), func(r *model.RequestLog) {
+		r.StatusCode = 200
+		r.CostKnown = true
+	})
+	seedRequestLog(t, db, "h2-b", start.Add(2*time.Hour+50*time.Minute).UTC(), func(r *model.RequestLog) {
+		r.StatusCode = 500
+		r.FailReason = analyticsStrPtr("err")
+		r.CostKnown = true
+	})
+
+	startUTC := start.UTC()
+	endUTC := end.UTC()
+	f := &repository.RequestLogFilter{StartTime: &startUTC, EndTime: &endUTC}
+	rows, err := repository.AggregateByTime(t.Context(), db, f, loc, repository.TimeBucketHour, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("AggregateByTime: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("len(rows) = %d, want 3", len(rows))
+	}
+	wantBuckets := []string{"2026-07-15 01:00 +08:00", "2026-07-15 00:00 +08:00", "2026-07-14 23:00 +08:00"}
+	for i, want := range wantBuckets {
+		if rows[i].Bucket != want {
+			t.Fatalf("rows[%d].Bucket = %q, want %q", i, rows[i].Bucket, want)
+		}
+	}
+	if rows[0].Calls != 2 || rows[0].SuccessCalls != 1 {
+		t.Fatalf("newest bucket = %+v, want Calls=2 SuccessCalls=1", rows[0])
+	}
+	if rows[1].Calls != 0 {
+		t.Fatalf("middle bucket gap-fill Calls = %d, want 0", rows[1].Calls)
+	}
+	if rows[2].Calls != 1 || rows[2].InputTokens != 7 {
+		t.Fatalf("oldest bucket = %+v, want Calls=1 InputTokens=7", rows[2])
+	}
+	if total := rows[0].Calls + rows[1].Calls + rows[2].Calls; total != 3 {
+		t.Fatalf("total calls = %d, want 3 (no loss across the UTC day boundary)", total)
+	}
+}
+
+// TestAggregateByTimeKeepsBucketsAnchoredAtStart pins that buckets stay
+// anchored at the range start rather than snapping to clock boundaries: a
+// window starting at 14:23 produces [14:23, 15:23) and [15:23, 16:23), and
+// two rows that share the 15:00 clock hour land in DIFFERENT buckets because
+// the anchor splits that hour. An implementation that grouped by wall-clock
+// hour would fold them together.
+func TestAggregateByTimeKeepsBucketsAnchoredAtStart(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	start := time.Date(2026, 7, 14, 14, 23, 0, 0, time.UTC)
+	end := start.Add(2 * time.Hour)
+
+	seedRequestLog(t, db, "first-bucket", time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC), func(r *model.RequestLog) {
+		r.StatusCode = 200
+		r.CostKnown = true
+	})
+	seedRequestLog(t, db, "second-bucket", time.Date(2026, 7, 14, 15, 30, 0, 0, time.UTC), func(r *model.RequestLog) {
+		r.StatusCode = 200
+		r.CostKnown = true
+	})
+
+	f := &repository.RequestLogFilter{StartTime: &start, EndTime: &end}
+	rows, err := repository.AggregateByTime(t.Context(), db, f, time.UTC, repository.TimeBucketHour, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("AggregateByTime: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("len(rows) = %d, want 2", len(rows))
+	}
+	if rows[0].Bucket != "2026-07-14 15:23 +00:00" || rows[1].Bucket != "2026-07-14 14:23 +00:00" {
+		t.Fatalf("buckets = %q / %q, want start-anchored 15:23 / 14:23", rows[0].Bucket, rows[1].Bucket)
+	}
+	if rows[1].Calls != 1 || rows[0].Calls != 1 {
+		t.Fatalf("calls = %d / %d, want 1 in each bucket (15:00 belongs to the 14:23 bucket, 15:30 to the 15:23 one)", rows[1].Calls, rows[0].Calls)
+	}
+}
+
+// TestAggregateByTimeSubMinuteStartClampsToFirstBucket pins the sub-minute
+// anchor edge: a range starting mid-minute (14:23:30) floors its first
+// rows' minute group to 14:23:00, which sorts BEFORE the first bucket
+// boundary — those rows are still inside [start, end) and must clamp into
+// the first bucket instead of being dropped or panicking.
+func TestAggregateByTimeSubMinuteStartClampsToFirstBucket(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	start := time.Date(2026, 7, 14, 14, 23, 30, 0, time.UTC)
+	end := start.Add(time.Hour)
+
+	seedRequestLog(t, db, "sub-minute", time.Date(2026, 7, 14, 14, 23, 45, 0, time.UTC), func(r *model.RequestLog) {
+		r.StatusCode = 200
+		r.CostKnown = true
+	})
+	seedRequestLog(t, db, "mid-bucket", time.Date(2026, 7, 14, 14, 50, 0, 0, time.UTC), func(r *model.RequestLog) {
+		r.StatusCode = 200
+		r.CostKnown = true
+	})
+
+	f := &repository.RequestLogFilter{StartTime: &start, EndTime: &end}
+	rows, err := repository.AggregateByTime(t.Context(), db, f, time.UTC, repository.TimeBucketHour, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("AggregateByTime: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("len(rows) = %d, want 1", len(rows))
+	}
+	if rows[0].Calls != 2 {
+		t.Fatalf("Calls = %d, want 2 (the 14:23:45 row must clamp into the first bucket, not vanish)", rows[0].Calls)
+	}
+}
+
+// TestAggregateByTimeDayBucketAcrossDSTTransition pins the day-bucket walk
+// across a spring-forward transition: the transition day is 23 hours long,
+// so the next day's boundary sits at local midnight, NOT 24 clock hours
+// later. A row in the first half hour after that midnight belongs to the
+// post-transition day — a walk advancing by a fixed 24h would misfile it
+// into the transition day.
+func TestAggregateByTimeDayBucketAcrossDSTTransition(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	// America/New_York springs forward on 2026-03-08 (02:00 EST -> 03:00
+	// EDT), making that local day 23 hours long.
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	start := time.Date(2026, 3, 8, 0, 0, 0, 0, loc)
+	end := start.AddDate(0, 0, 2)
+
+	// 03:30 UTC on March 9 = 23:30 EDT on March 8 — late in the transition
+	// day. 04:30 UTC = 00:30 EDT on March 9 — just past the 23-hour
+	// boundary, inside the drift window where a fixed-24h walk misfiles.
+	seedRequestLog(t, db, "transition-day", time.Date(2026, 3, 9, 3, 30, 0, 0, time.UTC), func(r *model.RequestLog) {
+		r.StatusCode = 200
+		r.CostKnown = true
+	})
+	seedRequestLog(t, db, "day-after", time.Date(2026, 3, 9, 4, 30, 0, 0, time.UTC), func(r *model.RequestLog) {
+		r.StatusCode = 200
+		r.CostKnown = true
+	})
+
+	startUTC := start.UTC()
+	endUTC := end.UTC()
+	f := &repository.RequestLogFilter{StartTime: &startUTC, EndTime: &endUTC}
+	rows, err := repository.AggregateByTime(t.Context(), db, f, loc, repository.TimeBucketDay, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("AggregateByTime: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("len(rows) = %d, want 2 (the 23-hour day and the day after)", len(rows))
+	}
+	if rows[0].Bucket != "2026-03-09" || rows[1].Bucket != "2026-03-08" {
+		t.Fatalf("buckets = %q / %q, want 2026-03-09 / 2026-03-08", rows[0].Bucket, rows[1].Bucket)
+	}
+	if rows[1].Calls != 1 || rows[0].Calls != 1 {
+		t.Fatalf("calls = %d / %d, want 1 in each day (00:30 EDT belongs to March 9, not the 23-hour March 8)", rows[1].Calls, rows[0].Calls)
+	}
+}
+
+// TestAggregateByTimeDayBucketNonUTCOffset pins day-bucket assignment in a
+// non-UTC zone: a row late in the UTC evening belongs to the NEXT local
+// calendar day.
+func TestAggregateByTimeDayBucketNonUTCOffset(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	loc := time.FixedZone("UTC+8", 8*3600)
+	start := time.Date(2026, 7, 14, 0, 0, 0, 0, loc)
+	end := start.AddDate(0, 0, 2)
+
+	// 20:00 UTC on July 14 is 04:00 on July 15 in +08:00.
+	seedRequestLog(t, db, "utc-evening", time.Date(2026, 7, 14, 20, 0, 0, 0, time.UTC), func(r *model.RequestLog) {
+		r.StatusCode = 200
+		r.CostKnown = true
+	})
+
+	startUTC := start.UTC()
+	endUTC := end.UTC()
+	f := &repository.RequestLogFilter{StartTime: &startUTC, EndTime: &endUTC}
+	rows, err := repository.AggregateByTime(t.Context(), db, f, loc, repository.TimeBucketDay, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("AggregateByTime: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("len(rows) = %d, want 2", len(rows))
+	}
+	if rows[0].Bucket != "2026-07-15" || rows[0].Calls != 1 {
+		t.Fatalf("rows[0] = %+v, want the 2026-07-15 local day carrying the call", rows[0])
+	}
+	if rows[1].Bucket != "2026-07-14" || rows[1].Calls != 0 {
+		t.Fatalf("rows[1] = %+v, want an empty 2026-07-14 local day", rows[1])
 	}
 }
 

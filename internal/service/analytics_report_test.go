@@ -40,7 +40,7 @@ func TestReportRateAndUnknownCostArithmetic(t *testing.T) {
 	seedReportLog(t, svc, "cancel-1", 499, 0, 0, true) // excluded from ended
 	seedReportLog(t, svc, "priceless", 200, 5, 0, false)
 
-	res, err := svc.GetReport(DimensionModel, "", &repository.RequestLogFilter{}, AnalyticsOptions{}, time.Now().UTC())
+	res, err := svc.GetReport(t.Context(), DimensionModel, "", &repository.RequestLogFilter{}, AnalyticsOptions{}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("GetReport: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestReportCSVColumnOrder(t *testing.T) {
 		DimensionTime:   "bucket," + tail,
 	}
 	for dim, header := range want {
-		headers, records, err := svc.BuildCSVRecords(dim, "", &repository.RequestLogFilter{}, AnalyticsOptions{}, time.Now().UTC())
+		headers, records, err := svc.BuildCSVRecords(t.Context(), dim, "", &repository.RequestLogFilter{}, AnalyticsOptions{}, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("BuildCSVRecords(%s): %v", dim, err)
 		}
@@ -94,7 +94,7 @@ func TestReportCSVColumnOrder(t *testing.T) {
 	// Cell-to-header correspondence, asserted on one dimension with known
 	// seeded values: one 200-status call, 10 input tokens, cost 5 micros.
 	// Swapping any two cells inside the shared tail turns this red.
-	headers, records, err := svc.BuildCSVRecords(DimensionModel, "", &repository.RequestLogFilter{}, AnalyticsOptions{}, time.Now().UTC())
+	headers, records, err := svc.BuildCSVRecords(t.Context(), DimensionModel, "", &repository.RequestLogFilter{}, AnalyticsOptions{}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("BuildCSVRecords(model): %v", err)
 	}
@@ -121,10 +121,10 @@ func TestEveryValidDimensionReportsAndRendersCSV(t *testing.T) {
 	seedReportLog(t, svc, "ok-1", 200, 10, 5, true)
 
 	for _, dim := range validDimensions {
-		if _, err := svc.GetReport(dim, "", &repository.RequestLogFilter{}, AnalyticsOptions{}, time.Now().UTC()); err != nil {
+		if _, err := svc.GetReport(t.Context(), dim, "", &repository.RequestLogFilter{}, AnalyticsOptions{}, time.Now().UTC()); err != nil {
 			t.Fatalf("GetReport(%s): %v", dim, err)
 		}
-		headers, _, err := svc.BuildCSVRecords(dim, "", &repository.RequestLogFilter{}, AnalyticsOptions{}, time.Now().UTC())
+		headers, _, err := svc.BuildCSVRecords(t.Context(), dim, "", &repository.RequestLogFilter{}, AnalyticsOptions{}, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("BuildCSVRecords(%s): %v", dim, err)
 		}

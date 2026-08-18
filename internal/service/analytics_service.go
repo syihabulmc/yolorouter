@@ -220,8 +220,8 @@ func (s *AnalyticsService) GetOverview(filter *repository.RequestLogFilter, opts
 // Returns ErrInvalidDimension for an unrecognized dimension and
 // repository.ErrInvalidBucket for an unrecognized bucket; the handler maps
 // both to 400.
-func (s *AnalyticsService) GetReport(dimension, bucket string, filter *repository.RequestLogFilter, opts AnalyticsOptions, now time.Time) (*ReportResult, error) {
-	rows, err := s.runReport(dimension, bucket, filter, opts, now)
+func (s *AnalyticsService) GetReport(ctx context.Context, dimension, bucket string, filter *repository.RequestLogFilter, opts AnalyticsOptions, now time.Time) (*ReportResult, error) {
+	rows, err := s.runReport(ctx, dimension, bucket, filter, opts, now)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +235,7 @@ func (s *AnalyticsService) GetReport(dimension, bucket string, filter *repositor
 // success — same pattern as request_log's BuildExportRows + WriteCSVRows.
 // Buffering the whole thing is fine: analytics exports are bounded by the
 // lookback cap (90d day / 30d hour).
-func (s *AnalyticsService) BuildCSVRecords(dimension, bucket string, filter *repository.RequestLogFilter, opts AnalyticsOptions, now time.Time) ([]string, [][]string, error) {
+func (s *AnalyticsService) BuildCSVRecords(ctx context.Context, dimension, bucket string, filter *repository.RequestLogFilter, opts AnalyticsOptions, now time.Time) ([]string, [][]string, error) {
 	// The CSV is the analytics report in file form; its provider sheet has a
 	// failovers column, so the data is always computed here regardless of
 	// what the querying page asked for on screen. opts is a value copy, so
@@ -243,7 +243,7 @@ func (s *AnalyticsService) BuildCSVRecords(dimension, bucket string, filter *rep
 	if dimension == DimensionProvider {
 		opts.WithFailovers = true
 	}
-	rows, err := s.runReport(dimension, bucket, filter, opts, now)
+	rows, err := s.runReport(ctx, dimension, bucket, filter, opts, now)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -253,29 +253,29 @@ func (s *AnalyticsService) BuildCSVRecords(dimension, bucket string, filter *rep
 // runReport dispatches to the right repository function and returns the
 // typed row slice (caller-facing type chosen by dimension). The switch is
 // the single point that maps dimension → row type.
-func (s *AnalyticsService) runReport(dimension, bucket string, filter *repository.RequestLogFilter, opts AnalyticsOptions, now time.Time) (interface{}, error) {
+func (s *AnalyticsService) runReport(ctx context.Context, dimension, bucket string, filter *repository.RequestLogFilter, opts AnalyticsOptions, now time.Time) (interface{}, error) {
 	// Resolve the window once for every dimension (day cap by default; the
 	// time dimension uses the caller's bucket cap) so overview, model/
 	// provider/caller, and time reports all see the same [start, end).
 	resolveEffectiveRange(filter, opts, bucketForDimension(dimension, bucket), now)
 	switch dimension {
 	case DimensionModel:
-		return repository.AggregateByModel(s.db, filter)
+		return repository.AggregateByModel(ctx, s.db, filter)
 	case DimensionProvider:
-		rows, err := repository.AggregateByProvider(s.db, filter)
+		rows, err := repository.AggregateByProvider(ctx, s.db, filter)
 		if err != nil {
 			return nil, err
 		}
 		if opts.WithFailovers {
-			return repository.AttachProviderFailovers(s.db, filter, rows)
+			return repository.AttachProviderFailovers(ctx, s.db, filter, rows)
 		}
 		return rows, nil
 	case DimensionCaller:
-		return repository.AggregateByCaller(s.db, filter)
+		return repository.AggregateByCaller(ctx, s.db, filter)
 	case DimensionUser:
-		return repository.AggregateByUser(s.db, filter)
+		return repository.AggregateByUser(ctx, s.db, filter)
 	case DimensionTime:
-		return repository.AggregateByTime(s.db, filter, opts.location(), bucket, now)
+		return repository.AggregateByTime(ctx, s.db, filter, opts.location(), bucket, now)
 	}
 	return nil, ErrInvalidDimension
 }
