@@ -98,25 +98,45 @@ func validateEmbeddedFrontend(distFS fs.FS) error {
 	return nil
 }
 
+// Deps carries everything the router assembly needs. One struct instead of a
+// positional list: several of these dependencies share a type, and a list
+// that long is a silent-swap waiting to happen at every call site.
+type Deps struct {
+	DB *gorm.DB
+	// ProviderMasterKey is the already-decoded 32-byte AES-256-GCM key
+	// (cmd/yolorouter/serve.go decodes it via crypto.KeyFromBase64 before
+	// calling New) — passed here rather than read from a global so
+	// provider_service.go's dependencies stay explicit, same as DB.
+	ProviderMasterKey []byte
+	// BodiesDir is the absolute data/bodies/ directory (already created by
+	// cmd/yolorouter/serve.go at boot) that the gateway's stream body capture
+	// appends sent-SSE files under. The gateway package has no direct access
+	// to app config — passing the resolved absolute path down and stashing it
+	// on every request's gin.Context is how it crosses that boundary without
+	// an import cycle.
+	BodiesDir string
+	// Update carries the version-update settings the system-info endpoint
+	// resolves its GitHub release source from.
+	Update config.UpdateConfig
+	// AllowPrivateUpstreams (config.SecurityConfig.AllowPrivateUpstreams) is
+	// forwarded to the provider-test and gateway-relay clients' SSRF
+	// transport, letting a self-hosted operator reach a LAN/localhost model
+	// server.
+	AllowPrivateUpstreams bool
+	// Gateway carries the relay timeouts and limits, threaded through so the
+	// wiring stays identical to production instead of a zero struct.
+	Gateway config.GatewayConfig
+	// LoopbackBase is the server's own base URL, which the gateway's
+	// vision-fallback capability calls back into.
+	LoopbackBase string
+	// ExternalURL is the public base URL OAuth providers redirect back to.
+	ExternalURL string
+}
+
 // New builds the router against the real embedded frontend (web.DistFS,
 // selected at compile time by the embed build tag — see web/embed_real.go
-// / web/embed_stub.go). providerMasterKey is the already-decoded 32-byte
-// AES-256-GCM key (cmd/yolorouter/serve.go decodes it via
-// crypto.KeyFromBase64 before calling this) — passed here rather than read
-// from a global so provider_service.go's dependencies stay explicit, same
-// as db.
-// bodiesDir is the absolute data/bodies/ directory (already created by
-// cmd/yolorouter/serve.go at boot) that the gateway's stream body
-// capture (internal/gateway/stream.go) appends sent-SSE files under. The
-// gateway package has no direct access to app config — passing the
-// resolved absolute path down through New/newWithDistFS and stashing it on
-// every request's gin.Context (below) is how it crosses that boundary
-// without an import cycle. updateCfg carries the version-update settings the
-// system-info endpoint resolves its GitHub release source from.
-// allowPrivateUpstreams (config.SecurityConfig.AllowPrivateUpstreams) is
-// forwarded to the provider-test and gateway-relay clients' SSRF transport,
-// letting a self-hosted operator reach a LAN/localhost model server.
-func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig, loopbackBase, externalURL string) (*gin.Engine, error) {
+// / web/embed_stub.go).
+func New(deps Deps) (*gin.Engine, error) {
 	// fs.Sub never actually errors here, in either build variant: it only
 	// validates that "dist" is a syntactically-valid path string, not that
 	// it exists in web.DistFS (confirmed against io/fs's Sub implementation
@@ -126,10 +146,14 @@ func New(db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg conf
 	// fs.Stat call at each call site below, which correctly reports
 	// "not found" for every path against an empty embedded FS.
 	distFS, _ := fs.Sub(web.DistFS, "dist")
-	return newWithDistFS(distFS, db, providerMasterKey, bodiesDir, updateCfg, allowPrivateUpstreams, gatewayCfg, loopbackBase, externalURL)
+	return newWithDistFS(distFS, deps)
 }
 
-func newWithDistFS(distFS fs.FS, db *gorm.DB, providerMasterKey []byte, bodiesDir string, updateCfg config.UpdateConfig, allowPrivateUpstreams bool, gatewayCfg config.GatewayConfig, loopbackBase, externalURL string) (*gin.Engine, error) {
+func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
+	db, providerMasterKey := deps.DB, deps.ProviderMasterKey
+	bodiesDir, updateCfg := deps.BodiesDir, deps.Update
+	allowPrivateUpstreams, gatewayCfg := deps.AllowPrivateUpstreams, deps.Gateway
+	loopbackBase, externalURL := deps.LoopbackBase, deps.ExternalURL
 	if err := validateEmbeddedFrontend(distFS); err != nil {
 		return nil, err
 	}

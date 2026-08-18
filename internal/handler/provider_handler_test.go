@@ -36,11 +36,7 @@ func newProviderTestRouterWithClient(t *testing.T, client service.ProviderClient
 		t.Fatalf("RegisterValidators failed: %v", err)
 	}
 	db := testutil.NewSQLiteDB(t)
-	masterKey := make([]byte, 32)
-	for i := range masterKey {
-		masterKey[i] = byte(i)
-	}
-	svc := service.NewProviderService(db, masterKey, client)
+	svc := service.NewProviderService(db, testutil.ProviderMasterKey(), client)
 
 	r := gin.New()
 	admin := r.Group("/api/admin")

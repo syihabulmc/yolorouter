@@ -27,11 +27,7 @@ func newModelTestRouterWithClient(t *testing.T, client service.ProviderClient) (
 		t.Fatalf("RegisterValidators failed: %v", err)
 	}
 	db := testutil.NewSQLiteDB(t)
-	masterKey := make([]byte, 32)
-	for i := range masterKey {
-		masterKey[i] = byte(i)
-	}
-	svc := service.NewModelService(db, masterKey, client)
+	svc := service.NewModelService(db, testutil.ProviderMasterKey(), client)
 
 	r := gin.New()
 	admin := r.Group("/api/admin")
@@ -287,11 +283,7 @@ func newModelTestRouterSharingProviderDB(t *testing.T, db *gorm.DB, client servi
 }
 
 func testHandlerMasterKey() []byte {
-	masterKey := make([]byte, 32)
-	for i := range masterKey {
-		masterKey[i] = byte(i)
-	}
-	return masterKey
+	return testutil.ProviderMasterKey()
 }
 
 func TestPostModelCandidateCreatesCandidate(t *testing.T) {

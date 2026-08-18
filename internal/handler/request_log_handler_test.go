@@ -59,85 +59,23 @@ func newRequestLogTestRouterWithBodiesDir(t *testing.T) (*gin.Engine, *gorm.DB, 
 	return r, db, svc, bodiesDir
 }
 
-// seedUser inserts a users row with the given username and returns its ID.
-// api_keys.user_id and request_logs.user_id both reference it, so tests can
-// assert the username the list / detail / export paths resolve.
-func seedUser(t *testing.T, db *gorm.DB, username string) uint {
-	t.Helper()
-	now := time.Now().UTC()
-	u := model.User{
-		Username:  username,
-		Role:      model.RoleMember,
-		Status:    model.UserStatusEnabled,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := db.Create(&u).Error; err != nil {
-		t.Fatalf("seed user %q: %v", username, err)
-	}
-	return u.ID
-}
-
-// seedAPIKey inserts an account named owner plus a minimal api_keys row it
-// owns (unique key_hash), returning the key ID and the owner's user ID.
-// request_logs.api_key_id / user_id reference the pair so the list and
-// detail handlers can be tested with a populated username.
+// seedAPIKey / seedProvider delegate to the shared testutil seeders; kept
+// as local names so this package's many call sites read unchanged.
 func seedAPIKey(t *testing.T, db *gorm.DB, owner string) (uint, uint) {
 	t.Helper()
-	now := time.Now().UTC()
-	userID := seedUser(t, db, owner)
-	ak := model.APIKey{
-		KeyHash:   "test-hash-" + owner + "-" + now.Format("150405.000000000"),
-		KeyPrefix: "sk-xx-",
-		UserID:    userID,
-		Status:    model.APIKeyStatusActive,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := db.Create(&ak).Error; err != nil {
-		t.Fatalf("seed api_key %q: %v", owner, err)
-	}
-	return ak.ID, userID
+	return testutil.SeedAPIKey(t, db, owner)
 }
 
-// seedProvider inserts a providers row and returns its ID, so provider_id
-// on request_logs can JOIN to a real provider_name in list/detail tests.
 func seedProvider(t *testing.T, db *gorm.DB, name string) uint {
 	t.Helper()
-	p := model.Provider{
-		Name: name, ProviderType: "openai", BaseURL: "https://example.com/v1",
-		ManagementStatus: model.ProviderStatusEnabled,
-	}
-	if err := db.Create(&p).Error; err != nil {
-		t.Fatalf("seed provider %q: %v", name, err)
-	}
-	return p.ID
+	return testutil.SeedProvider(t, db, name)
 }
 
-// seedRequestLog inserts one request_logs row with the given shape. The
-// mutator applies test-specific overrides (status, fail_reason, attempts,
-// attempts_detail, FKs) after the sensible defaults are filled in.
+// seedRequestLog delegates to the shared testutil seeder; kept as a local
+// name so this file's forty call sites read unchanged.
 func seedRequestLog(t *testing.T, db *gorm.DB, requestID string, ts time.Time, mut func(*model.RequestLog)) {
 	t.Helper()
-	row := model.RequestLog{
-		RequestID:    requestID,
-		ModelName:    "gpt-4o-mini",
-		IsStream:     false,
-		StatusCode:   200,
-		InputTokens:  10,
-		OutputTokens: 20,
-		CostMicros:   100,
-		CostKnown:    true,
-		Attempts:     1,
-		DurationMs:   42,
-		CreatedAt:    ts.UTC(),
-	}
-	if mut != nil {
-		mut(&row)
-	}
-	if err := repository.CreateRequestLog(db, &row); err != nil {
-		t.Fatalf("seedRequestLog %q: %v", requestID, err)
-	}
+	testutil.SeedRequestLog(t, db, requestID, ts, mut)
 }
 
 // listItem mirrors RequestLogListItem's JSON shape — kept as a local

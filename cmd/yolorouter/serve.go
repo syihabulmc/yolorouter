@@ -119,7 +119,16 @@ func runServe(ctx context.Context, args []string) error {
 	// own API; the loopback base is derived from the same port the server is
 	// about to listen on.
 	loopbackBase := fmt.Sprintf("http://localhost:%d", app.Config.Server.Port)
-	r, err := router.New(app.DB, masterKey, bodiesDir, app.Config.Update, app.Config.Security.AllowPrivateUpstreams, app.Config.Gateway, loopbackBase, app.Config.Server.ExternalURL)
+	r, err := router.New(router.Deps{
+		DB:                    app.DB,
+		ProviderMasterKey:     masterKey,
+		BodiesDir:             bodiesDir,
+		Update:                app.Config.Update,
+		AllowPrivateUpstreams: app.Config.Security.AllowPrivateUpstreams,
+		Gateway:               app.Config.Gateway,
+		LoopbackBase:          loopbackBase,
+		ExternalURL:           app.Config.Server.ExternalURL,
+	})
 	if err != nil {
 		return fmt.Errorf("build router: %w", err)
 	}
