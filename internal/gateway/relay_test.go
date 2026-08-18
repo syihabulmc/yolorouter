@@ -52,6 +52,7 @@ func TestFilterCandidatesIgnoresCapabilityFlags(t *testing.T) {
 			ID:                      1,
 			ManagementStatus:        model.ModelCandidateStatusEnabled,
 			VerificationStatus:      model.ModelVerificationStatusPassed,
+			Provider:                &model.Provider{ManagementStatus: model.ProviderStatusEnabled},
 			SupportsStreaming:       streaming,
 			SupportsFunctionCalling: functionCalling,
 		}
@@ -76,25 +77,37 @@ func TestFilterCandidatesIgnoresCapabilityFlags(t *testing.T) {
 	}
 }
 
-// The two gates that DO apply, so removing the capability check does not quietly
-// widen routing beyond what was intended.
+// The gates that DO apply, so removing the capability check does not quietly
+// widen routing beyond what was intended. A nil provider mirrors the
+// repository contract: production always preloads, so nil marks a broken
+// association, and it must fail closed like a switched-off provider.
 func TestFilterCandidatesRequiresEnabledAndVerified(t *testing.T) {
+	enabledProvider := &model.Provider{ManagementStatus: model.ProviderStatusEnabled}
 	for _, tc := range []struct {
 		name           string
+		provider       *model.Provider
 		management     int
 		verification   int
 		wantRoutable   bool
 		wantAnyEnabled bool
 	}{
-		{name: "enabled and verified", management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusPassed, wantRoutable: true, wantAnyEnabled: true},
-		{name: "enabled but unverified", management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusUntested, wantRoutable: false, wantAnyEnabled: true},
-		{name: "enabled but failed", management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusFailed, wantRoutable: false, wantAnyEnabled: true},
-		{name: "disabled though verified", management: model.ModelCandidateStatusDisabled, verification: model.ModelVerificationStatusPassed, wantRoutable: false, wantAnyEnabled: false},
+		{name: "enabled and verified", provider: enabledProvider, management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusPassed, wantRoutable: true, wantAnyEnabled: true},
+		{name: "enabled but unverified", provider: enabledProvider, management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusUntested, wantRoutable: false, wantAnyEnabled: true},
+		{name: "enabled but failed", provider: enabledProvider, management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusFailed, wantRoutable: false, wantAnyEnabled: true},
+		{name: "disabled though verified", provider: enabledProvider, management: model.ModelCandidateStatusDisabled, verification: model.ModelVerificationStatusPassed, wantRoutable: false, wantAnyEnabled: false},
+		// A switched-off provider keeps its candidates out of the chain and
+		// out of anyEnabled alike: the state is configuration an operator
+		// turned down — the "no enabled route" answer — not a route waiting
+		// on verification.
+		{name: "provider disabled though candidate on", provider: &model.Provider{ManagementStatus: model.ProviderStatusDisabled}, management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusPassed, wantRoutable: false, wantAnyEnabled: false},
+		{name: "provider not preloaded", provider: nil, management: model.ModelCandidateStatusEnabled, verification: model.ModelVerificationStatusPassed, wantRoutable: false, wantAnyEnabled: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			routable, anyEnabled := filterCandidates([]model.ModelCandidate{{
-				ID: 1, ManagementStatus: tc.management, VerificationStatus: tc.verification,
-			}})
+			cand := model.ModelCandidate{
+				ID: 1, Provider: tc.provider,
+				ManagementStatus: tc.management, VerificationStatus: tc.verification,
+			}
+			routable, anyEnabled := filterCandidates([]model.ModelCandidate{cand})
 			if got := len(routable) == 1; got != tc.wantRoutable {
 				t.Fatalf("expected routable=%v, got %v", tc.wantRoutable, got)
 			}
@@ -268,6 +281,17 @@ func createProvider(t *testing.T, db *gorm.DB, name, baseURL string) *model.Prov
 		t.Fatalf("seed provider: %v", err)
 	}
 	return p
+}
+
+// disableProvider flips a seeded provider's management status to disabled —
+// the state the provider page's switch writes, which must take the
+// provider's candidates out of routing (see filterCandidates).
+func disableProvider(t *testing.T, db *gorm.DB, id uint) {
+	t.Helper()
+	if err := db.Model(&model.Provider{}).Where("id = ?", id).
+		Update("management_status", model.ProviderStatusDisabled).Error; err != nil {
+		t.Fatalf("disable provider: %v", err)
+	}
 }
 
 func createProviderKey(t *testing.T, db *gorm.DB, secrets ycrypto.SecretBox, providerID uint, plaintext, label string, order int, enabled bool) {
@@ -2195,13 +2219,18 @@ func TestRelayQuotaExhausted429MarksKeyPlainRateLimitDoesNot(t *testing.T) {
 // available" that hides the difference from whoever reports the problem.
 func TestRelayModelUnavailableSaysWhy(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		enabled     bool
-		verified    int
-		wantMessage string
+		name             string
+		enabled          bool
+		verified         int
+		providerDisabled bool
+		wantMessage      string
 	}{
-		{"all routes disabled", false, model.ModelVerificationStatusPassed, "model is not available: no enabled route"},
-		{"enabled but unverified", true, model.ModelVerificationStatusUntested, "model is not available: routes not verified yet"},
+		{"all routes disabled", false, model.ModelVerificationStatusPassed, false, "model is not available: no enabled route"},
+		{"enabled but unverified", true, model.ModelVerificationStatusUntested, false, "model is not available: routes not verified yet"},
+		// A provider switched off reads the same way as a candidate switched
+		// off: configuration an operator turned down, addressed by re-enabling
+		// — not by waiting out verification, and not an upstream outage.
+		{"all providers disabled", true, model.ModelVerificationStatusPassed, true, "model is not available: no enabled route"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := testutil.NewSQLiteDB(t)
@@ -2212,6 +2241,9 @@ func TestRelayModelUnavailableSaysWhy(t *testing.T) {
 			status := model.ModelCandidateStatusEnabled
 			if !tc.enabled {
 				status = model.ModelCandidateStatusDisabled
+			}
+			if tc.providerDisabled {
+				disableProvider(t, db, p.ID)
 			}
 			if err := db.Model(&model.ModelCandidate{}).Where("model_id = ?", m.ID).
 				Updates(map[string]any{"management_status": status, "verification_status": tc.verified}).Error; err != nil {

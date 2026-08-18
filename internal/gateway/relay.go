@@ -713,6 +713,11 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// which is what the audit row is supposed to show.
 		rc.attempt.BeginCandidate(&cand)
 
+		// Guard, not gate: filterCandidates already keeps candidates without a
+		// provider, or on a switched-off one, out of the chain this loop
+		// walks. The checks stay for callers that hand relayCandidates an
+		// unfiltered slice — TestRelayCandidatesGuardsUnfilteredSlice does,
+		// and pins both skip rows — and cost nothing when idle.
 		provider := cand.Provider
 		if provider == nil {
 			skipCandidate(cand, nil, AttemptBadStatus, "provider missing (preload)")
@@ -1591,9 +1596,9 @@ func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.T
 }
 
 // filterCandidates returns the subset of candidates eligible for this request:
-// management-enabled and verification-passed. Order is preserved (sort_order was
-// applied by the repository) so failover still walks the chain in the admin's
-// configured order.
+// on an enabled provider, management-enabled, verification-passed. Order is
+// preserved (sort_order was applied by the repository) so failover still walks
+// the chain in the admin's configured order.
 //
 // It deliberately does NOT consult the streaming / function-calling capability
 // flags. Those are recorded for the admin UI only. Filtering on them looks
@@ -1607,9 +1612,24 @@ func (s *Service) allCandidatesFailed(c *gin.Context, rc *Exchange, start time.T
 // self-inflicted outages.
 //
 // anyEnabled is reported in the same pass so the caller can tell "all disabled"
-// apart from "enabled but unverified" without walking the slice twice.
+// apart from "enabled but unverified" without walking the slice twice. A
+// candidate on a switched-off provider counts toward neither: it is
+// configuration an operator turned down — the "no enabled route" answer — not
+// a route waiting on verification.
 func filterCandidates(all []model.ModelCandidate) (routable []model.ModelCandidate, anyEnabled bool) {
 	for _, c := range all {
+		// The provider gate comes first, as it does in
+		// modeladmin.CandidateBlockedBy, which also rules on the provider
+		// before the candidate's own state. A candidate whose provider is
+		// switched off must not enter the chain at all: a chain position is
+		// not free — walking it later costs a probe of the request budget and
+		// a "provider disabled" attempt row — and enough of them sorted ahead
+		// of a live provider can spend the whole budget before the request
+		// reaches the provider that would have served it. A nil provider
+		// (broken association, a missed preload) falls to the same gate.
+		if c.Provider == nil || c.Provider.ManagementStatus != model.ProviderStatusEnabled {
+			continue
+		}
 		if c.ManagementStatus != model.ModelCandidateStatusEnabled {
 			continue
 		}
@@ -1651,6 +1671,18 @@ func filterEnabledKeys(keys []model.ProviderKey) (out []model.ProviderKey, anyEn
 	return out, anyEnabled
 }
 
+// recordCurrentAttempt records the attempt rc.attempt currently describes —
+// the form every post-BeginCandidate path uses, so the identity on the row
+// and the identity on the state cannot disagree. The explicit recordAttempt
+// below stays for the loop's pre-bind skip rows, which deliberately name a
+// provider the state never bound (a provider missing or switched off is on
+// the row so the operator sees who was skipped — a guard path now that
+// filterCandidates excludes such candidates before the chain — and off the
+// state so finalize never reports it as the final hit).
+func (rc *Exchange) recordCurrentAttempt(status int, outcome, failReason string) {
+	rc.recordAttempt(*rc.attempt.Candidate(), rc.attempt.Provider(), rc.attempt.Key(), status, outcome, failReason)
+}
+
 // recordAttempt builds one AttemptRecord and appends it to the exchange's
 // attempt log — the one place that log grows, so every recorded try passes
 // through the same construction. provider and key are nil-able: nil provider
@@ -1664,17 +1696,6 @@ func filterEnabledKeys(keys []model.ProviderKey) (out []model.ProviderKey, anyEn
 // per candidate in relayCandidates and set in attemptOne, so it reflects the
 // current attempt: empty for attempts that failed before any request was
 // sent.
-// recordCurrentAttempt records the attempt rc.attempt currently describes —
-// the form every post-BeginCandidate path uses, so the identity on the row
-// and the identity on the state cannot disagree. The explicit recordAttempt
-// below stays for the loop's pre-bind skip rows, which deliberately name a
-// provider the state never bound (a disabled provider is on the row so the
-// operator sees who was skipped, and off the state so finalize never reports
-// it as the final hit).
-func (rc *Exchange) recordCurrentAttempt(status int, outcome, failReason string) {
-	rc.recordAttempt(*rc.attempt.Candidate(), rc.attempt.Provider(), rc.attempt.Key(), status, outcome, failReason)
-}
-
 func (rc *Exchange) recordAttempt(cand model.ModelCandidate, provider *model.Provider, key *model.ProviderKey, status int, outcome, failReason string) {
 	rec := AttemptRecord{
 		CandidateID:       cand.ID,
