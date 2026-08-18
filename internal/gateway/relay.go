@@ -304,7 +304,7 @@ func (s *Service) Handle(c *gin.Context, apiKey *model.APIKey) {
 	// Compute once so the compression gate and the CSP injection gate read
 	// the bool instead of recomputing IsChatEndpoint(path) per call site.
 	rc.isChatEndpoint = IsChatEndpoint(rc.ingressPath)
-	// Put rc on the gin context so WriteOpenAIError*
+	// Put rc on the gin context so WriteIngressError
 	// (called from many exit paths below, and potentially from further down
 	// the chain) can stash the local error JSON into the response-body capture without
 	// every call site threading an *Exchange parameter through.
