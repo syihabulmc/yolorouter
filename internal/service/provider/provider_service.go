@@ -85,10 +85,33 @@ type ProviderService struct {
 	db      *gorm.DB
 	secrets crypto.SecretBox
 	client  providerclient.ProviderClient
+	// onKeyRetestPassed, when set, is told about every committed retest
+	// that PROVED the key works (verification overwritten to passed) — the
+	// gateway's key pool listens so a proven recovery releases the key's
+	// rate-limit bench. Claimed or inconclusive retests never fire it.
+	// observedAt is stamped BEFORE the probe ran: state recorded between
+	// the probe and this callback is newer than the proof and must win.
+	onKeyRetestPassed func(keyID uint, configVersion int, observedAt time.Time)
 }
 
 func NewProviderService(db *gorm.DB, secrets crypto.SecretBox, client providerclient.ProviderClient) *ProviderService {
 	return &ProviderService{db: db, secrets: secrets, client: client}
+}
+
+// SetKeyRetestPassedListener wires the proven-recovery signal to a
+// listener; call before serving traffic.
+func (s *ProviderService) SetKeyRetestPassedListener(fn func(keyID uint, configVersion int, observedAt time.Time)) {
+	s.onKeyRetestPassed = fn
+}
+
+// noteRetestCommitted fires the proven-recovery listener when a committed
+// retest actually proved the key: applied, and classification overwrote
+// verification to passed. Anything else — lost CAS, inconclusive probe,
+// proven failure — is not recovery and stays silent.
+func (s *ProviderService) noteRetestCommitted(keyID uint, configVersion int, observedAt time.Time, applied, overwrite bool, verificationStatus int) {
+	if s.onKeyRetestPassed != nil && applied && overwrite && verificationStatus == model.VerificationStatusPassed {
+		s.onKeyRetestPassed(keyID, configVersion, observedAt)
+	}
 }
 
 // VerifyMasterKeyFingerprint runs the startup master-key check: on a
@@ -1078,6 +1101,9 @@ func (s *ProviderService) TestProviderKey(ctx context.Context, providerID, keyID
 		return nil, fmt.Errorf("decrypt key: %w", err)
 	}
 
+	// Stamped before the probe: state recorded while the probe, commit, and
+	// listener run is newer than this proof and must not be overridden by it.
+	probeObserved := time.Now().UTC()
 	result, testErr := s.verifyKeyAllDestinations(ctx, provider, plaintext, key.TestModel)
 	if testErr != nil {
 		// The client itself refused this call (e.g. concurrency cap
@@ -1092,6 +1118,7 @@ func (s *ProviderService) TestProviderKey(ctx context.Context, providerID, keyID
 	if commitErr != nil {
 		return nil, fmt.Errorf("record test result: %w", commitErr)
 	}
+	s.noteRetestCommitted(keyID, configVersion, probeObserved, applied, overwrite, verificationStatus)
 	if !applied {
 		// The network test ran, but a concurrent plaintext/config edit bumped
 		// config_version between BeginProviderKeyRetest and this write, so the
@@ -1199,6 +1226,8 @@ func (s *ProviderService) TestAllProviderKeys(ctx context.Context, providerID ui
 			continue
 		}
 
+		// Stamped before the probe, same as the single-key retest above.
+		probeObserved := time.Now().UTC()
 		result, testErr := s.verifyKeyAllDestinations(ctx, provider, plaintext, key.TestModel)
 		if testErr != nil {
 			// The client itself refused this call (e.g. concurrency cap
@@ -1220,6 +1249,9 @@ func (s *ProviderService) TestAllProviderKeys(ctx context.Context, providerID ui
 		verificationStatus, overwrite, lastTestResult := classifyTestResult(result)
 		applied, commitErr := repository.CommitProviderKeyRetestResult(s.db, key.ID, configVersion, testGeneration,
 			overwrite, verificationStatus, lastTestResult, key.TestModel, result.DurationMs, now)
+		if commitErr == nil {
+			s.noteRetestCommitted(key.ID, configVersion, probeObserved, applied, overwrite, verificationStatus)
+		}
 
 		outcomeInt := int(result.Outcome)
 		results = append(results, BatchTestResult{

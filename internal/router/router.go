@@ -448,6 +448,10 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	// path (gateway.IngressProtocol) to pick the caller's actual wire
 	// protocol.
 	relaySvc := gateway.NewService(db, secrets, allowPrivateUpstreams, settingsSvc, gatewayCfg)
+	// A retest that PROVES a key works releases the key pool's rate-limit
+	// bench — the only reliable recovery signal, since a merely claimed or
+	// inconclusive retest proves nothing.
+	providerSvc.SetKeyRetestPassedListener(relaySvc.NoteKeyRetestPassed)
 
 	registerCapabilities(relaySvc, db, loopbackBase)
 

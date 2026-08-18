@@ -2,7 +2,7 @@
 
 # Yolorouter
 
-**A free, self-hosted LLM gateway that speaks four wire protocols, fails over across providers, rotates upstream keys, and ships with a multi-user admin console in one binary.**
+**Run Claude Code (or any AI CLI) on any provider — a free, self-hosted LLM gateway in one binary that speaks four wire protocols, fails over across providers, pools upstream keys, and ships with a multi-user admin console.**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/yolorouter/yolorouter/actions/workflows/ci.yml/badge.svg)](https://github.com/yolorouter/yolorouter/actions/workflows/ci.yml)
@@ -14,7 +14,7 @@ English · [简体中文](README_zh.md)
 
 [Quick start](#quick-start) · [Protocols](#protocols) · [Cost optimization](#cost-optimization) · [Documentation](#documentation) · [Contributing](#contributing)
 
-⚡ **Low-overhead streaming proxy** · 🔀 **Any protocol in, any protocol out** · 🆓 **Free & open-source** · 📦 **Single binary, zero external deps** · 🔁 **Automatic failover + key rotation** · 👥 **Multi-user with SSO** · 💰 **Cost analytics & optimization**
+⚡ **Low-overhead streaming proxy** · 🔀 **Any protocol in, any protocol out** · 🆓 **Free & open-source** · 📦 **Single binary, zero external deps** · 🔁 **Automatic failover + key pool** · 👥 **Multi-user with SSO** · 💰 **Cost analytics & optimization**
 
 </div>
 
@@ -42,7 +42,7 @@ the box; switch to PostgreSQL when you want it.
 **Routing**
 
 - **Multi-provider failover.** Map one public model name (e.g. `smart`) to an ordered list of provider candidates. When one is down, requests fail over to the next; the caller never sees a different model name.
-- **Upstream key rotation.** Give each provider a pool of upstream keys. Rate-limited, unauthorized, or quota-exhausted keys are skipped automatically.
+- **Upstream key pool.** Give each provider a pool of upstream keys and load spreads across it round-robin. A rate-limited key is benched for its `Retry-After` window (later requests walk healthier keys first); unauthorized or quota-exhausted keys are taken out until a retest passes.
 - **Model aliasing.** Callers request a stable public name; each provider candidate maps it to whatever model id that provider actually expects. Candidate mappings are probed against the real upstream when you save them, so a typo is caught at configuration time, not at 3 a.m.
 - **Vision fallback.** Let text-only models "see". Mark a model as unable to read images and pick a vision model in the console; images in incoming requests are described by the vision model and forwarded as text, transparently to the caller, on every ingress protocol. With no vision model configured, images degrade to a clear placeholder instead of an upstream error.
 - **Streaming done right.** Key rotation and failover happen *before* the first byte reaches the client; once streaming starts, the provider is locked in. Content from two providers is never stitched into one response.

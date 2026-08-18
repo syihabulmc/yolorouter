@@ -122,6 +122,12 @@ type Service struct {
 	// walking a candidate.
 	breaker *circuit.Breaker
 
+	// keyPool is the per-provider key rotation cursor and per-key rate-limit
+	// bench: it decides the ORDER tryKeys walks a provider's keys in — spread
+	// across the pool rather than always through its first key. The
+	// demotion-not-exclusion guarantee lives with the type (keypool.go).
+	keyPool *keyPool
+
 	// secondaryFetch is the shared client for downloading responses an upstream
 	// referred to rather than returned. Built once, on first use: a transport
 	// per request would pool connections nobody ever reuses or closes.
@@ -199,6 +205,9 @@ func NewService(db *gorm.DB, secrets crypto.SecretBox, allowPrivate bool, sp Set
 	if gatewayCfg.CircuitOpenTimeout <= 0 {
 		gatewayCfg.CircuitOpenTimeout = config.DefaultCircuitOpenTimeout
 	}
+	if gatewayCfg.KeyRateLimitCooldown <= 0 {
+		gatewayCfg.KeyRateLimitCooldown = config.DefaultKeyRateLimitCooldown
+	}
 	return &Service{
 		db:               db,
 		secrets:          secrets,
@@ -210,6 +219,7 @@ func NewService(db *gorm.DB, secrets crypto.SecretBox, allowPrivate bool, sp Set
 			SuccessThreshold: gatewayCfg.CircuitSuccessThreshold,
 			OpenTimeout:      gatewayCfg.CircuitOpenTimeout,
 		}),
+		keyPool: newKeyPool(time.Now),
 	}
 }
 
@@ -635,6 +645,10 @@ func (s *Service) executeCircuit(rc *Exchange, eff decision.CircuitEffect) {
 
 	case decision.CircuitReset:
 		s.breaker.RecordSuccess(p.ID, rc.circuitGen)
+		// The key's bench is NOT released here: that already happened on
+		// the 2xx status line in attemptOne, where the acceptance is known
+		// minutes before this delivery verdict — and is known even when the
+		// delivery never concludes cleanly.
 	}
 }
 
@@ -764,6 +778,54 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 			skipCandidate(cand, provider, AttemptBadStatus, reason)
 			continue
 		}
+		// Destination-version guard (credential-scope mechanism): a key is
+		// only authorized for the provider destination it was verified
+		// against. When an admin changes BaseURL, DestinationVersion bumps
+		// while existing keys keep their old AuthorizedDestinationVersion —
+		// decrypting and sending such a key would exfiltrate the credential
+		// to an unapproved destination. Filtered here, BEFORE rotation, like
+		// disabled and unverified keys: a stale key occupying a cursor slot
+		// would hand its every turn to the same following key and
+		// concentrate traffic there instead of round-robining.
+		n := 0
+		for _, k := range enabled {
+			if k.AuthorizedDestinationVersion == provider.DestinationVersion {
+				enabled[n] = k
+				n++
+			}
+		}
+		if n == 0 {
+			skipCandidate(cand, provider, AttemptAuthFailed, "destination version mismatch")
+			continue
+		}
+		enabled = enabled[:n]
+		// An enabled, verified, destination-authorized key whose ciphertext
+		// will not decrypt — corruption, a rotated master secret — is
+		// unroutable all the same, and is filtered here with the rest:
+		// letting it into the walk would burn a cursor slot on a key that
+		// can never dispatch and hand its every turn to the same neighbour.
+		// Decryption is deterministic, so this is also the ONLY decrypt:
+		// the plaintexts ride alongside into tryKeys, keyed by ID because
+		// the walk below reorders the slice. The map lives and dies in this
+		// frame — credentials still never park on the Exchange.
+		plain := make(map[uint]string, n)
+		n = 0
+		for _, k := range enabled {
+			pt, derr := s.secrets.Decrypt(k.EncryptedKey)
+			if derr != nil {
+				logger.Warn("gateway: decrypt provider key failed",
+					zap.Uint("key_id", k.ID), zap.String("request_id", rc.requestID), zap.Error(derr))
+				continue
+			}
+			plain[k.ID] = pt
+			enabled[n] = k
+			n++
+		}
+		if n == 0 {
+			skipCandidate(cand, provider, AttemptBadStatus, "no decryptable key")
+			continue
+		}
+		enabled = enabled[:n]
 
 		// Step 9: negotiate the wire protocol to speak to this candidate's
 		// provider — the ingress protocol when the provider accepts it
@@ -839,8 +901,17 @@ func (s *Service) relayCandidates(c *gin.Context, rc *Exchange, adm admitted, ca
 		// a candidate is charged the same one probe as any other pre-dispatch
 		// abandonment. Without this, a pool full of stale keys would repeat
 		// database and decryption work bounded by nothing but the wall clock.
+		// The pool decides the order these keys are walked in: rotation
+		// spreads load across the pool, benched keys trail healthy ones.
+		// Semantics and guarantees live with the type (keypool.go). Ordered
+		// HERE, after every pre-dispatch skip above — negotiation, modality
+		// refusal, request build, egress-rewrite verdicts — because the
+		// cursor advances per walk: consuming a turn for a candidate that
+		// then never reaches its keys would skew consecutive real dispatches
+		// onto the same key.
+		enabled = s.keyPool.walkOrder(provider.ID, enabled)
 		attemptsBefore := rc.attemptsSpent
-		if s.tryKeys(c, rc, adm, enabled, egress, outBody, url, start) == outcomeDone {
+		if s.tryKeys(c, rc, adm, enabled, plain, egress, outBody, url, start) == outcomeDone {
 			return
 		}
 		if rc.attemptsSpent == attemptsBefore {
@@ -925,7 +996,7 @@ const (
 // has been written to the client, or outcomeNextCandidate when every key on
 // this provider failed with a key-rotation error and the chain should move
 // to the next candidate (same-provider no usable key, THEN failover).
-func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, keys []model.ProviderKey, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
+func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, keys []model.ProviderKey, plain map[uint]string, egress *EgressDecision, outBody []byte, url string, start time.Time) relayOutcome {
 	provider := rc.attempt.Provider()
 	// Indexed by hand because one iteration can legitimately not advance: a
 	// repaired-body retry re-enters the same key with the new body. One
@@ -955,39 +1026,16 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, keys []mod
 			return outcomeNextCandidate
 		}
 		pk := keys[i]
-		// Cleared before the skip checks below, not inside attemptOne, because
-		// a key can be passed over without ever getting there — an unauthorized
-		// destination version, a key that will not decrypt. Left to attemptOne,
-		// the previous key's verdict would survive those paths and, if the
-		// chain then ran out, be reported as what ended the request: a rate
-		// limit one key hit, quoted for a request that actually died with no
-		// usable key at all.
+		// Cleared and bound as each key is ENTERED, not inside attemptOne,
+		// so the budget/breaker exits above always report the last entered
+		// key and its own verdict — never an earlier key's.
 		rc.attempt.ClearVerdict()
-		// Bound before the skip checks for the same reason the verdict is
-		// cleared before them: a skipped key's audit row must name the key
-		// that was passed over, not the previous one.
 		rc.attempt.BindKey(&pk)
-		// Destination-version guard (credential-scope mechanism): a key
-		// is only authorized for the provider destination it was verified
-		// against. When an admin changes BaseURL, DestinationVersion bumps
-		// while existing keys keep their old AuthorizedDestinationVersion —
-		// decrypting and sending such a key would exfiltrate the credential
-		// to an unapproved destination. Skip and rotate to the next key,
-		// matching the destination-matched select in provider_repository.go.
-		if pk.AuthorizedDestinationVersion != provider.DestinationVersion {
-			rc.recordCurrentAttempt(0, AttemptAuthFailed, "destination version mismatch")
-			i++
-			continue
-		}
-		plaintext, derr := s.secrets.Decrypt(pk.EncryptedKey)
-		if derr != nil {
-			logger.Warn("gateway: decrypt provider key failed",
-				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID), zap.Error(derr))
-			rc.recordCurrentAttempt(0, AttemptBadStatus, "decrypt failed")
-			i++
-			continue
-		}
-		result, repaired := s.attemptOne(c, rc, adm, plaintext, egress, outBody, url, start, repairsUsed == 0)
+		// No per-key skip checks remain here: unroutable keys — disabled,
+		// unverified, destination-stale, undecryptable — are all filtered
+		// before rotation, which is also why this lookup cannot miss: every
+		// walked key decrypted in that filter.
+		result, repaired := s.attemptOne(c, rc, adm, plain[pk.ID], egress, outBody, url, start, repairsUsed == 0)
 		if result == attemptSuccess || result == attemptTerminal {
 			return outcomeDone
 		}
@@ -1268,6 +1316,18 @@ func foldUpstreamDecision(observed decision.Resolved, statusCode int, hasRepair,
 // and pre-first-byte stream failures are candidate-level (failover); 401/429
 // are key-level (rotate); 2xx is success; other 4xx is terminal (caller's
 // problem).
+// NoteKeyRetestPassed records a completed, PASSED retest of a provider key:
+// proof of recovery, delivered by the provider service's commit path (the
+// only place proof exists — TestGeneration alone advances when a retest is
+// merely claimed, and an inconclusive probe proves nothing). Booked as a
+// success observed at observedAt — the caller stamps it BEFORE its probe
+// runs, not at callback time, so a 429 that benches the key between the
+// probe and this delayed callback stays the newer evidence: like a served
+// request, the proof releases only benches older than itself.
+func (s *Service) NoteKeyRetestPassed(keyID uint, configVersion int, observedAt time.Time) {
+	s.keyPool.clearKey(keyID, configVersion, observedAt)
+}
+
 // markProviderKeyForRetest persists a key-scoped upstream rejection as a
 // verification failure, so routing stops offering the key and the console
 // shows it needs a retest. The CAS uses a context deliberately detached from
@@ -1280,14 +1340,30 @@ func foldUpstreamDecision(observed decision.Resolved, statusCode int, hasRepair,
 // version guard (expectedDestinationVersion) already protects against
 // concurrent edits, so the detached context is safe.
 func (s *Service) markProviderKeyForRetest(ctx context.Context, rc *Exchange, pk *model.ProviderKey, provider *model.Provider) {
+	// The invalidation's observation time, taken before the CAS: should this
+	// goroutine stall through the DB write, a retest, and fresh verdicts on
+	// the recovered key, the late dropKey below must count against the
+	// moment the invalidating response was seen, not against now-at-last.
+	observed := s.keyPool.stamp()
 	casCtx, casCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer casCancel()
 	if applied, mErr := repository.MarkProviderKeyVerificationFailedIfCurrent(s.db.WithContext(casCtx), pk.ID, provider.DestinationVersion, pk.ConfigVersion, pk.TestGeneration, time.Now()); mErr != nil {
 		logger.Warn("gateway: mark provider key failed",
 			zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID), zap.Error(mErr))
 	} else if !applied {
+		// A lost CAS must NOT touch the bench: "lost" can mean a retest
+		// already refreshed this key, and a fresh bench installed after that
+		// recovery would be deleted here by a stale in-flight response. The
+		// winning invalidation owns the bench.
 		logger.Debug("gateway: provider key invalidation CAS lost race",
 			zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID))
+	} else {
+		// The key left rotation for the retest path, so its transient bench
+		// is dropped: retest keeps ConfigVersion, and a leftover bench would
+		// still match after a successful retest and demote the recovered key
+		// until expiry. On a DB error the key stays routable — and possibly
+		// still rate-limited — so the bench stays too.
+		s.keyPool.dropKey(pk.ID, pk.ConfigVersion, observed)
 	}
 }
 
@@ -1300,6 +1376,10 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	pk := rc.attempt.Key()
 	provider := rc.attempt.Provider()
 	rc.beginUpstreamAttempt()
+	// Stamped from the pool's clock, before the send: if a bench lands on
+	// this key between here and the response, the stamp already predates it
+	// and this attempt's success cannot release it.
+	rc.keyDispatchedAt = s.keyPool.stamp()
 
 	// Per-attempt deadline = min(attempt_timeout, remaining request budget).
 	// The request-level budget (RequestDeadline, set at Handle entry) spans
@@ -1416,6 +1496,14 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// The upstream accepted this key: release its bench NOW, on the
+		// status line, not on the delivery verdict — a long response would
+		// hold the release for its whole duration, and a delivery that
+		// never concludes cleanly (client disconnect mid-stream) would skip
+		// it entirely, keeping a key the upstream just accepted demoted.
+		// Acceptance already refutes a rate limit; how delivery ends
+		// cannot un-refute it.
+		s.keyPool.clearKey(pk.ID, pk.ConfigVersion, rc.keyDispatchedAt)
 		return s.deliverAndSettle(c, rc, adm, resp, start), nil
 	}
 
@@ -1426,6 +1514,19 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	// cut short by a disconnect.
 	if statusCode == http.StatusUnauthorized {
 		s.markProviderKeyForRetest(ctx, rc, pk, provider)
+	}
+
+	// A 429's bench is likewise booked from the headers, BEFORE the error
+	// body is read: the status line and Retry-After carry the whole verdict,
+	// and the bounded body read below can still take the full
+	// errorBodyTotalBudget against a slow-trickle upstream — waiting would
+	// leave concurrent requests dispatching the limited key for that whole
+	// window and then start the stated Retry-After late. If the body then
+	// reveals an exhausted quota, the invalidation path below drops this
+	// bench again — that key is leaving rotation entirely.
+	if statusCode == http.StatusTooManyRequests {
+		s.keyPool.coolKey(pk.ID, pk.ConfigVersion, rc.keyDispatchedAt,
+			cooldownFromRetryAfter(resp.Header.Get("Retry-After"), s.keyPool.stamp(), s.gateway.KeyRateLimitCooldown))
 	}
 
 	// Capture the obtainable upstream error body before close, verbatim.
@@ -1447,9 +1548,13 @@ func (s *Service) attemptOne(c *gin.Context, rc *Exchange, adm admitted, plainte
 	// transient rate limit its status pretends to be: the key keeps failing
 	// until the account is topped up. Mark it for retest exactly as a 401
 	// is — rotation already carries this request to the next key — so
-	// routing stops burning attempts on a key that cannot pay. A plain
-	// rate-limit 429 stays unmarked: it heals on its own, and flagging it
-	// would take a healthy key out of rotation.
+	// routing stops burning attempts on a key that cannot pay. The
+	// invalidation also drops the bench booked from the headers above: the
+	// key is leaving rotation, and a leftover bench would outlive the
+	// retest. A plain rate-limit 429 keeps that bench and stays unmarked —
+	// it heals on its own, and flagging it would take a healthy key out of
+	// rotation. The current request keeps rotating per the table; the bench
+	// only reorders later walks.
 	if statusCode == http.StatusTooManyRequests && quotaExhaustedBody(errBody) {
 		s.markProviderKeyForRetest(ctx, rc, pk, provider)
 	}

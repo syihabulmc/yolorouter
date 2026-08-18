@@ -1672,6 +1672,50 @@ func TestTestProviderKeyRetestsAndUpdatesStatus(t *testing.T) {
 	}
 }
 
+// The proven-recovery listener fires exactly when a committed retest
+// overwrote verification to passed — and stays silent for an inconclusive
+// probe, which proves nothing about the key.
+func TestKeyRetestPassedListenerFiresOnProofOnly(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	client.Result = providerclient.TestResult{Outcome: providerclient.TestSuccess}
+	now := time.Now().UTC()
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k1", KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+	keyID := provider.Keys[0].ID
+
+	var fired []uint
+	var observedAt time.Time
+	svc.SetKeyRetestPassedListener(func(id uint, configVersion int, observed time.Time) {
+		fired = append(fired, id)
+		observedAt = observed
+	})
+
+	// Inconclusive probe: a rate-limited retest proves nothing — no signal.
+	client.Result = providerclient.TestResult{Outcome: providerclient.TestRateLimited}
+	if _, err := svc.TestProviderKey(context.Background(), provider.ID, keyID, now); err != nil {
+		t.Fatalf("TestProviderKey (rate limited) failed: %v", err)
+	}
+	if len(fired) != 0 {
+		t.Fatalf("listener fired on an inconclusive retest: %v", fired)
+	}
+
+	// Passed probe: verification overwritten to passed — proof, one signal.
+	client.Result = providerclient.TestResult{Outcome: providerclient.TestSuccess}
+	if _, err := svc.TestProviderKey(context.Background(), provider.ID, keyID, now); err != nil {
+		t.Fatalf("TestProviderKey (success) failed: %v", err)
+	}
+	if len(fired) != 1 || fired[0] != keyID {
+		t.Fatalf("listener fired %v, want exactly one call for key %d", fired, keyID)
+	}
+	if observedAt.IsZero() || observedAt.After(time.Now().UTC()) {
+		t.Fatalf("observedAt = %v, want a real pre-commit stamp", observedAt)
+	}
+}
+
 func TestTestProviderKeyNotFound(t *testing.T) {
 	svc, _, _ := newTestProviderService(t)
 	if _, err := svc.TestProviderKey(context.Background(), 9999, 9999, time.Now().UTC()); !errors.Is(err, errcode.ErrProviderKeyNotFound) {
