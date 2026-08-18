@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -350,7 +349,7 @@ func (s *ProviderService) CreateProvider(ctx context.Context, input CreateProvid
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := repository.CreateProviderWithKey(s.db, provider, key); err != nil {
-		if isUniqueViolation(err) {
+		if repository.IsUniqueViolation(err) {
 			return nil, errcode.ErrProviderNameTaken
 		}
 		return nil, err
@@ -387,24 +386,6 @@ func validatePlaintextLength(plaintext string) error {
 		return fmt.Errorf("%w: key plaintext must be at least %d characters", errcode.ErrProviderKeyTooShort, minKeyPlaintextLength)
 	}
 	return nil
-}
-
-func isUniqueViolation(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint") || strings.Contains(msg, "duplicate key value violates unique constraint")
-}
-
-// isSortOrderUniqueViolation narrows isUniqueViolation to specifically the
-// sort_order constraint, as opposed to the other UNIQUE on the same table —
-// UNIQUE(provider_id, label) on provider_keys, UNIQUE(model_id, provider_id) on
-// model_candidates, which both layers need to report differently. Both SQLite and Postgres
-// name unnamed multi-column UNIQUE constraint violations after their
-// columns — SQLite: "UNIQUE constraint failed: provider_keys.provider_id,
-// provider_keys.sort_order"; Postgres: constraint
-// "provider_keys_provider_id_sort_order_key" — so a plain substring check
-// on "sort_order" reliably identifies this one across both drivers.
-func isSortOrderUniqueViolation(err error) bool {
-	return isUniqueViolation(err) && strings.Contains(err.Error(), "sort_order")
 }
 
 // UpdateProvider handles name/note (no version bump), base_url, and
@@ -485,7 +466,7 @@ func (s *ProviderService) UpdateProvider(id uint, input UpdateProviderInput, now
 			}
 		}
 		if err := repository.UpdateProviderNameNote(tx, id, input.Name, note, now); err != nil {
-			if isUniqueViolation(err) {
+			if repository.IsUniqueViolation(err) {
 				return errcode.ErrProviderNameTaken
 			}
 			return err
@@ -586,7 +567,7 @@ func (s *ProviderService) CreateProviderKey(ctx context.Context, providerID uint
 		if err == nil {
 			break
 		}
-		// Checked BEFORE the generic isUniqueViolation fallback below — the
+		// Checked BEFORE the generic IsUniqueViolation fallback below — the
 		// original version fell
 		// through to ErrProviderKeyLabelTaken once retries were exhausted,
 		// reintroducing the exact "sort_order collision misreported as a
@@ -594,13 +575,13 @@ func (s *ProviderService) CreateProviderKey(ctx context.Context, providerID uint
 		// already confirmed available above via FindProviderKeyByLabel, so
 		// any sort_order-specific violation reaching this point is never a
 		// real label conflict, retries exhausted or not.
-		if isSortOrderUniqueViolation(err) {
+		if repository.IsSortOrderUniqueViolation(err) {
 			if attempt < maxSortOrderRetries {
 				continue
 			}
 			return nil, fmt.Errorf("could not allocate a unique key position after %d attempts due to concurrent writes, please retry: %w", maxSortOrderRetries, err)
 		}
-		if isUniqueViolation(err) {
+		if repository.IsUniqueViolation(err) {
 			return nil, errcode.ErrProviderKeyLabelTaken
 		}
 		return nil, err
@@ -863,7 +844,7 @@ func (s *ProviderService) UpdateProviderKey(ctx context.Context, providerID, key
 			applied, err := repository.UpdateProviderKeyLabelAndStatusIfVerified(s.db, keyID, input.Label, input.TestModel, managementStatus,
 				model.VerificationStatusPassed, provider.DestinationVersion, now)
 			if err != nil {
-				if isUniqueViolation(err) {
+				if repository.IsUniqueViolation(err) {
 					return nil, errcode.ErrProviderKeyLabelTaken
 				}
 				return nil, err
@@ -872,7 +853,7 @@ func (s *ProviderService) UpdateProviderKey(ctx context.Context, providerID, key
 				return nil, errcode.ErrProviderKeyNeedsReentry
 			}
 		} else if err := repository.UpdateProviderKeyLabelAndStatus(s.db, keyID, input.Label, input.TestModel, managementStatus, now); err != nil {
-			if isUniqueViolation(err) {
+			if repository.IsUniqueViolation(err) {
 				return nil, errcode.ErrProviderKeyLabelTaken
 			}
 			return nil, err
@@ -906,7 +887,7 @@ func (s *ProviderService) UpdateProviderKey(ctx context.Context, providerID, key
 	configVersion, testGeneration, snapshotVersion, err := repository.SwapProviderKeyPlaintext(s.db, keyID,
 		input.Label, input.TestModel, encryptedKey, keyPrefixFor(*input.Plaintext), model.ProviderKeyStatusDisabled, now)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if repository.IsUniqueViolation(err) {
 			return nil, errcode.ErrProviderKeyLabelTaken
 		}
 		return nil, err

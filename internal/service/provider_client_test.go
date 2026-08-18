@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/protocols/chat"
@@ -1335,5 +1336,33 @@ func TestListModelsFollowsGeminiPagination(t *testing.T) {
 	result, _ := c.ListModels(context.Background(), protocols.ProtocolGemini, srv.URL, "sk-test")
 	if len(result.Models) != 2 || result.Models[0] != "gemini-a" || result.Models[1] != "gemini-b" {
 		t.Fatalf("expected [gemini-a gemini-b] across two pages, got %v", result.Models)
+	}
+}
+
+// TestTruncateRuneSafeBacksOffPartialRune pins the rune-boundary backoff:
+// a cut that lands inside a multi-byte rune must retreat to the previous
+// boundary so upstream error details never end in a broken sequence.
+func TestTruncateRuneSafeBacksOffPartialRune(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		maxBytes int
+		want     string
+	}{
+		{"under limit unchanged", "héllo", 100, "héllo"},
+		{"cut mid-rune backs off", "aé", 2, "a"}, // é is 2 bytes; cutting at 2 splits it
+		{"cut on boundary keeps rune", "aé", 3, "aé"},
+		{"multibyte CJK backs off", "日本", 4, "日"}, // each rune is 3 bytes
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := truncateRuneSafe(c.in, c.maxBytes)
+			if got != c.want {
+				t.Fatalf("truncateRuneSafe(%q, %d) = %q, want %q", c.in, c.maxBytes, got, c.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("result %q is not valid UTF-8", got)
+			}
+		})
 	}
 }

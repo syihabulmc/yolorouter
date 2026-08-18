@@ -107,10 +107,23 @@ func KeyFromBase64(encoded string) ([]byte, error) {
 // HashToken returns the SHA-256 hex digest of a token. API keys and session
 // tokens use this for at-rest lookup: the token is already a high-entropy
 // random value, so a fast indexable hash suffices (not bcrypt). This is the
-// single source of truth for that recipe — service.hashToken,
+// single source of truth for that recipe — the service layer,
 // repository.hashSessionToken, the bearer-key auth middleware, and the gateway
-// test helper all delegate here rather than carrying their own copies.
+// test helper all call here rather than carrying their own copies.
 func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+// GenerateRandomToken generates n cryptographically secure random bytes,
+// base64 URL-safe (no padding) encoded, with an optional prefix. Session
+// tokens, API keys, OAuth state/verifier values, and any future "random
+// token + hashed storage" feature all use this same recipe — this is the
+// one place it's implemented.
+func GenerateRandomToken(n int, prefix string) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return prefix + base64.RawURLEncoding.EncodeToString(buf), nil
 }

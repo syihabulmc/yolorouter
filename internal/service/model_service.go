@@ -298,7 +298,7 @@ func (s *ModelService) CreateModel(input CreateModelInput, now time.Time) (*Mode
 	}
 	m := &model.Model{Name: input.Name, ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
 	if err := repository.CreateModel(s.db, m); err != nil {
-		if isUniqueViolation(err) {
+		if repository.IsUniqueViolation(err) {
 			return nil, errcode.ErrModelNameTaken
 		}
 		return nil, err
@@ -802,7 +802,7 @@ const candidateSortOrderInsertAttempts = 3
 // and can take tens of seconds, so two admins adding candidates to one model
 // read the same "next" value with a very wide window between the read and the
 // insert. Without the retry the loser hit UNIQUE(model_id, sort_order) and —
-// because isUniqueViolation is a blanket match — was told its provider was
+// because IsUniqueViolation is a blanket match — was told its provider was
 // already used by this model, which is both untrue and not something they could
 // act on. The two constraints on the table are told apart so that message is
 // only produced for a genuine duplicate provider.
@@ -818,12 +818,12 @@ func (s *ModelService) insertCandidateWithSortOrder(candidate *model.ModelCandid
 		if err == nil {
 			return nil
 		}
-		if isSortOrderUniqueViolation(err) {
+		if repository.IsSortOrderUniqueViolation(err) {
 			// Someone else took this position; re-read and append after them.
 			lastErr = err
 			continue
 		}
-		if isUniqueViolation(err) {
+		if repository.IsUniqueViolation(err) {
 			return errcode.ErrModelCandidateProviderTaken
 		}
 		return err
@@ -1241,7 +1241,7 @@ func (s *ModelService) UpdateModelNameStatus(id uint, name string, imageInputSet
 		if errors.Is(err, errcode.ErrModelNotFound) {
 			return nil, err
 		}
-		if isUniqueViolation(err) {
+		if repository.IsUniqueViolation(err) {
 			return nil, errcode.ErrModelNameTaken
 		}
 		return nil, err

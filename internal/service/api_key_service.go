@@ -241,7 +241,7 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 		return nil, err
 	}
 	key := &model.APIKey{
-		KeyHash:                           hashToken(rawKey),
+		KeyHash:                           crypto.HashToken(rawKey),
 		EncryptedKey:                      encryptedKey,
 		KeyPrefix:                         truncatePrefix(rawKey),
 		UserID:                            input.UserID,
@@ -511,9 +511,9 @@ func computeAPIKeyDisplayStatus(k model.APIKey, now time.Time) string {
 
 // generateAPIKey produces a new plaintext key: 32 random bytes, base64
 // URL-safe encoded, with the sk-yr- prefix. Reuses the same
-// generateRandomToken recipe as session tokens — one implementation, not two.
+// crypto.GenerateRandomToken recipe as session tokens — one implementation, not two.
 func generateAPIKey() (string, error) {
-	return generateRandomToken(randKeyBytes, apiKeyPrefixTag)
+	return crypto.GenerateRandomToken(randKeyBytes, apiKeyPrefixTag)
 }
 
 // truncatePrefix takes the first apiKeyDisplayChars chars of the raw key as

@@ -436,10 +436,10 @@ func TestChangePasswordErrorsWhenPasswordHashUpdateFails(t *testing.T) {
 	}
 }
 
-// createSession's generateRandomToken error branch is not exercised here —
-// see token_helpers_test.go: since Go 1.24, crypto/rand.Read cannot be made
-// to return an error from a test (it crashes the program instead), so that
-// branch is unreachable dead code under this project's Go version.
+// CreateSession's crypto.GenerateRandomToken error branch is not exercised
+// here — see pkg/crypto's own tests: since Go 1.24, crypto/rand.Read cannot
+// be made to return an error from a test (it crashes the program instead),
+// so that branch is unreachable dead code under this project's Go version.
 
 func TestCreateSessionErrorsWhenInsertFails(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
@@ -450,7 +450,7 @@ func TestCreateSessionErrorsWhenInsertFails(t *testing.T) {
 	}
 	blockTableWrites(t, db, "user_sessions", "INSERT")
 
-	if _, err := createSession(db, admin.ID, now); err == nil {
+	if _, err := CreateSession(db, admin.ID, now); err == nil {
 		t.Fatalf("expected an error when the user_sessions INSERT fails")
 	}
 }

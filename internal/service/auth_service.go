@@ -8,6 +8,7 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
+	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
 
@@ -84,7 +85,7 @@ func Setup(db *gorm.DB, username, password string, now time.Time) (*model.User, 
 			return err
 		}
 		var sessErr error
-		sessionID, sessErr = createSession(tx, user.ID, now)
+		sessionID, sessErr = CreateSession(tx, user.ID, now)
 		return sessErr
 	})
 	if txErr != nil {
@@ -151,7 +152,7 @@ func Login(db *gorm.DB, username, password string, now time.Time) (*model.User, 
 		return nil, "", errcode.ErrAccountDisabled
 	}
 
-	// RecordLoginSuccess (clearing the lockout state) and createSession
+	// RecordLoginSuccess (clearing the lockout state) and CreateSession
 	// (issuing the new session) run in one transaction — same reasoning as
 	// Setup/ChangePassword: a partial failure here must not leave the
 	// lockout cleared with no session actually issued. DeleteExpiredSessions
@@ -167,7 +168,7 @@ func Login(db *gorm.DB, username, password string, now time.Time) (*model.User, 
 			return err
 		}
 		var sessErr error
-		sessionID, sessErr = createSession(tx, user.ID, now)
+		sessionID, sessErr = CreateSession(tx, user.ID, now)
 		return sessErr
 	}); err != nil {
 		return nil, "", err
@@ -223,11 +224,13 @@ func ChangePassword(db *gorm.DB, userID uint, currentPassword, newPassword strin
 	})
 }
 
-// createSession generates a fresh opaque token and persists it with a
+// CreateSession generates a fresh opaque token and persists it with a
 // SessionTTL expiry. The raw token is the exact value stored as both
-// user_sessions.id (hashed) and the session cookie's value.
-func createSession(db *gorm.DB, userID uint, now time.Time) (string, error) {
-	sessionID, err := generateRandomToken(32, "")
+// user_sessions.id (hashed) and the session cookie's value. This is the one
+// session-minting recipe: password login and the OAuth callback both issue
+// their sessions here, so the two flows stay indistinguishable.
+func CreateSession(db *gorm.DB, userID uint, now time.Time) (string, error) {
+	sessionID, err := crypto.GenerateRandomToken(32, "")
 	if err != nil {
 		return "", err
 	}

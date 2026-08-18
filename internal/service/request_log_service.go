@@ -14,6 +14,7 @@ import (
 	"io"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -162,10 +163,24 @@ func truncateInlineBody(s string) string {
 	if len(s) <= maxInlineBodyBytes {
 		return s
 	}
-	// truncateRuneSafe (provider_client.go) caps to the byte limit and backs
-	// off a partial rune at the boundary; append a byte-count marker on top.
-	cut := truncateRuneSafe(s, maxInlineBodyBytes)
+	cut := truncateBodyRuneSafe(s, maxInlineBodyBytes)
 	return cut + fmt.Sprintf("\n\n… [truncated: showing first %d of %d bytes]", len(cut), len(s))
+}
+
+// truncateBodyRuneSafe returns s truncated to at most maxBytes bytes, backing
+// off any partial UTF-8 rune left at the cut so the result never ends in a
+// broken multi-byte sequence.
+func truncateBodyRuneSafe(s string, maxBytes int) string {
+	if len(s) > maxBytes {
+		s = s[:maxBytes]
+	}
+	for len(s) > 0 {
+		if r, size := utf8.DecodeLastRuneInString(s); r != utf8.RuneError || size > 1 {
+			break
+		}
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // ListRequestLogs returns one page of rows (newest first) plus the total

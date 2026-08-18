@@ -1090,7 +1090,7 @@ func TestCreateProviderKeyErrorsWhenProviderLookupFails(t *testing.T) {
 // column list — also implicitly reads sort_order) intact, short of
 // dependency-injecting the repository layer, which is out of this task's
 // scope. Same reasoning applies to CreateProviderKeyPendingTest's
-// isUniqueViolation branch a few lines below (a label-uniqueness TOCTOU
+// IsUniqueViolation branch a few lines below (a label-uniqueness TOCTOU
 // race exactly like TestCreateProviderConcurrentSameNameHitsUniqueViolationBranch's,
 // and subject to the same single-connection-pool serialization that
 // prevented that one from reliably triggering either).
@@ -2404,7 +2404,7 @@ func TestCreateProviderErrorsWhenNameLookupFails(t *testing.T) {
 }
 
 // TestCreateProviderConcurrentSameNameHitsUniqueViolationBranch documents
-// (and guards, at the outcome level) the TOCTOU race isUniqueViolation's
+// (and guards, at the outcome level) the TOCTOU race IsUniqueViolation's
 // call site inside CreateProvider exists to catch: two goroutines could
 // both pass the up-front FindProviderByName check before either commits its
 // insert, in which case the real backstop is the UNIQUE constraint
@@ -2462,25 +2462,6 @@ func TestCreateProviderConcurrentSameNameHitsUniqueViolationBranch(t *testing.T)
 	}
 	if nameTaken != attempts-1 {
 		t.Fatalf("expected the other %d attempts to see ErrProviderNameTaken, got %d", attempts-1, nameTaken)
-	}
-}
-
-func TestIsUniqueViolationDetectsKnownDatabaseMessages(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"sqlite", errors.New("UNIQUE constraint failed: providers.name"), true},
-		{"postgres", errors.New(`duplicate key value violates unique constraint "providers_name_key"`), true},
-		{"unrelated", errors.New("some other database error"), false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := isUniqueViolation(c.err); got != c.want {
-				t.Fatalf("isUniqueViolation(%q) = %v, want %v", c.err, got, c.want)
-			}
-		})
 	}
 }
 

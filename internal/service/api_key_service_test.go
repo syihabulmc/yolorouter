@@ -308,7 +308,7 @@ func TestGetAPIKeyPlaintextUnavailableForLegacyRow(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	now := time.Now().UTC()
 	legacy := &model.APIKey{
-		KeyHash: hashToken("sk-yr-legacy-key"), KeyPrefix: "sk-yr-legacy000",
+		KeyHash: crypto.HashToken("sk-yr-legacy-key"), KeyPrefix: "sk-yr-legacy000",
 		Status: model.APIKeyStatusActive, CreatedAt: now, UpdatedAt: now,
 		// EncryptedKey intentionally left empty — a pre-00021 row.
 	}
@@ -455,7 +455,7 @@ func TestDisplayStatusExpiredForPastExpiry(t *testing.T) {
 	past := time.Now().UTC().Add(-time.Hour)
 	now := time.Now().UTC()
 	key := &model.APIKey{
-		KeyHash:   hashToken("sk-yr-seed-value"),
+		KeyHash:   crypto.HashToken("sk-yr-seed-value"),
 		KeyPrefix: "sk-yr-seed000000",
 		Status:    model.APIKeyStatusActive, ExpiresAt: &past,
 		CreatedAt: now, UpdatedAt: now,
@@ -498,10 +498,10 @@ func TestListAPIKeysFiltersByDisplayStatus(t *testing.T) {
 	// disagree, so it's what makes this an equivalence test rather than four
 	// isolated predicate checks.
 	seeds := []*model.APIKey{
-		{KeyHash: hashToken("sk-yr-expired"), KeyPrefix: "sk-yr-expired00", Status: model.APIKeyStatusActive, ExpiresAt: &past, CreatedAt: now, UpdatedAt: now},
-		{KeyHash: hashToken("sk-yr-revoked"), KeyPrefix: "sk-yr-revoked00", Status: model.APIKeyStatusRevoked, CreatedAt: now, UpdatedAt: now},
-		{KeyHash: hashToken("sk-yr-budget"), KeyPrefix: "sk-yr-budget000", Status: model.APIKeyStatusActive, ExpiresAt: &future, BudgetLimitMicros: &limit, BudgetSpentMicros: limit, CreatedAt: now, UpdatedAt: now},
-		{KeyHash: hashToken("sk-yr-exp-budget"), KeyPrefix: "sk-yr-expbudget", Status: model.APIKeyStatusActive, ExpiresAt: &past, BudgetLimitMicros: &limit, BudgetSpentMicros: limit, CreatedAt: now, UpdatedAt: now},
+		{KeyHash: crypto.HashToken("sk-yr-expired"), KeyPrefix: "sk-yr-expired00", Status: model.APIKeyStatusActive, ExpiresAt: &past, CreatedAt: now, UpdatedAt: now},
+		{KeyHash: crypto.HashToken("sk-yr-revoked"), KeyPrefix: "sk-yr-revoked00", Status: model.APIKeyStatusRevoked, CreatedAt: now, UpdatedAt: now},
+		{KeyHash: crypto.HashToken("sk-yr-budget"), KeyPrefix: "sk-yr-budget000", Status: model.APIKeyStatusActive, ExpiresAt: &future, BudgetLimitMicros: &limit, BudgetSpentMicros: limit, CreatedAt: now, UpdatedAt: now},
+		{KeyHash: crypto.HashToken("sk-yr-exp-budget"), KeyPrefix: "sk-yr-expbudget", Status: model.APIKeyStatusActive, ExpiresAt: &past, BudgetLimitMicros: &limit, BudgetSpentMicros: limit, CreatedAt: now, UpdatedAt: now},
 	}
 	for _, k := range seeds {
 		if err := db.Create(k).Error; err != nil {

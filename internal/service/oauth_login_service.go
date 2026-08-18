@@ -81,11 +81,11 @@ func (s *OAuthLoginService) BeginLogin(slug, redirectURI string, now time.Time) 
 		return "", "", err
 	}
 
-	stateToken, err = generateRandomToken(32, "")
+	stateToken, err = crypto.GenerateRandomToken(32, "")
 	if err != nil {
 		return "", "", err
 	}
-	codeVerifier, err := generateRandomToken(32, "")
+	codeVerifier, err := crypto.GenerateRandomToken(32, "")
 	if err != nil {
 		return "", "", err
 	}
@@ -161,7 +161,7 @@ func (s *OAuthLoginService) HandleCallback(ctx context.Context, slug, state, cod
 			return err
 		}
 		var sessErr error
-		sessionID, sessErr = createSession(tx, user.ID, now)
+		sessionID, sessErr = CreateSession(tx, user.ID, now)
 		return sessErr
 	}); err != nil {
 		return "", err
@@ -401,7 +401,7 @@ func (s *OAuthLoginService) pickUsername(tx *gorm.DB, id *oauthIdentity, slug st
 	}
 	// Pathological collision run — fall back to a random tail, which the
 	// unique index makes effectively conflict-free.
-	tail, err := generateRandomToken(4, "")
+	tail, err := crypto.GenerateRandomToken(4, "")
 	if err != nil {
 		return "", err
 	}

@@ -6,6 +6,7 @@ package service
 import (
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/repository"
@@ -188,5 +189,33 @@ func TestRequestLogRowsCarryOwnerUsername(t *testing.T) {
 		if it.RequestID == "req-owned" && rec[col] != "carol" {
 			t.Fatalf("csv username cell: want carol, got %q", rec[col])
 		}
+	}
+}
+
+// TestTruncateBodyRuneSafeBacksOffPartialRune pins the requestlog module's
+// own copy of the rune-boundary backoff — the inline-body cap must never
+// hand the detail page a string ending in a broken multi-byte sequence.
+func TestTruncateBodyRuneSafeBacksOffPartialRune(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		maxBytes int
+		want     string
+	}{
+		{"under limit unchanged", "héllo", 100, "héllo"},
+		{"cut mid-rune backs off", "aé", 2, "a"},
+		{"cut on boundary keeps rune", "aé", 3, "aé"},
+		{"multibyte CJK backs off", "日本", 4, "日"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := truncateBodyRuneSafe(c.in, c.maxBytes)
+			if got != c.want {
+				t.Fatalf("truncateBodyRuneSafe(%q, %d) = %q, want %q", c.in, c.maxBytes, got, c.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("result %q is not valid UTF-8", got)
+			}
+		})
 	}
 }
