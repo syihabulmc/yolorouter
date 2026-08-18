@@ -17,6 +17,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/testutil"
+	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
 
@@ -190,6 +191,12 @@ func testMasterKey() []byte {
 	return key
 }
 
+// testSecrets is testMasterKey boxed for the constructors; tests that
+// exercise the wire format directly keep using the raw bytes.
+func testSecrets() crypto.SecretBox {
+	return crypto.NewSecretBox(testMasterKey())
+}
+
 // strptr returns a pointer to s, for populating UpdateProviderInput's
 // *string fields (ProviderType/ProtocolEndpoints) where a non-nil pointer —
 // even to an empty string — is the "field present, apply it" signal, as
@@ -202,7 +209,7 @@ func newTestProviderService(t *testing.T) (*ProviderService, *gorm.DB, *fakeProv
 	t.Helper()
 	db := testutil.NewSQLiteDB(t)
 	client := &fakeProviderClient{result: TestResult{Outcome: TestSuccess, DurationMs: 10}}
-	svc := NewProviderService(db, testMasterKey(), client)
+	svc := NewProviderService(db, testSecrets(), client)
 	return svc, db, client
 }
 
@@ -214,7 +221,7 @@ func newTestProviderServiceWithInvalidMasterKey(t *testing.T) (*ProviderService,
 	t.Helper()
 	db := testutil.NewSQLiteDB(t)
 	client := &fakeProviderClient{result: TestResult{Outcome: TestSuccess, DurationMs: 10}}
-	svc := NewProviderService(db, []byte("too-short-for-aes"), client)
+	svc := NewProviderService(db, crypto.NewSecretBox([]byte("too-short-for-aes")), client)
 	return svc, db, client
 }
 
@@ -240,7 +247,7 @@ func TestVerifyMasterKeyFingerprintFailsOnMismatchedKey(t *testing.T) {
 	for i := range otherKey {
 		otherKey[i] = byte(255 - i)
 	}
-	svcWithDifferentKey := NewProviderService(db, otherKey, &fakeProviderClient{})
+	svcWithDifferentKey := NewProviderService(db, crypto.NewSecretBox(otherKey), &fakeProviderClient{})
 	if err := svcWithDifferentKey.VerifyMasterKeyFingerprint(time.Now()); err == nil {
 		t.Fatalf("expected a mismatched master key to fail the fingerprint check")
 	}
@@ -2706,7 +2713,7 @@ func TestCreateProviderKeyHitsRealAnthropicProtocolEndpointHost(t *testing.T) {
 	realClient.httpClient = &http.Client{Transport: http.DefaultTransport, CheckRedirect: realClient.httpClient.CheckRedirect}
 
 	db := testutil.NewSQLiteDB(t)
-	svc := NewProviderService(db, testMasterKey(), realClient)
+	svc := NewProviderService(db, testSecrets(), realClient)
 	now := time.Now().UTC()
 
 	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
@@ -3115,7 +3122,7 @@ func TestProviderImpactFlagsModelsLosingTheirLastRoutableSource(t *testing.T) {
 	providerB := seedEnabledProviderForModelTest(t, providerService, "provider-b")
 	providerIdle := seedEnabledProviderForModelTest(t, providerService, "provider-idle")
 
-	modelSvc := NewModelService(db, testMasterKey(), client)
+	modelSvc := NewModelService(db, testSecrets(), client)
 	client.result = TestResult{Outcome: TestSuccess}
 	survivor, err := modelSvc.CreateModel(CreateModelInput{Name: "survivor"}, now)
 	if err != nil {
@@ -3173,7 +3180,7 @@ func TestProviderImpactIgnoresUnroutableFallbackCandidates(t *testing.T) {
 	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 	providerB := seedEnabledProviderForModelTest(t, providerService, "provider-b")
 
-	modelSvc := NewModelService(db, testMasterKey(), client)
+	modelSvc := NewModelService(db, testSecrets(), client)
 	client.result = TestResult{Outcome: TestSuccess}
 	m, err := modelSvc.CreateModel(CreateModelInput{Name: "fragile"}, now)
 	if err != nil {
@@ -3220,7 +3227,7 @@ func TestProviderImpactDoesNotBlameAlreadyDeadModelsOnThisProvider(t *testing.T)
 	now := time.Now().UTC()
 	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	modelSvc := NewModelService(db, testMasterKey(), client)
+	modelSvc := NewModelService(db, testSecrets(), client)
 	client.result = TestResult{Outcome: TestSuccess}
 	dead, err := modelSvc.CreateModel(CreateModelInput{Name: "already-dead"}, now)
 	if err != nil {
@@ -3257,7 +3264,7 @@ func TestProviderImpactDoesNotBlameDisabledModels(t *testing.T) {
 	now := time.Now().UTC()
 	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	modelSvc := NewModelService(db, testMasterKey(), client)
+	modelSvc := NewModelService(db, testSecrets(), client)
 	client.result = TestResult{Outcome: TestSuccess}
 	m, err := modelSvc.CreateModel(CreateModelInput{Name: "switched-off"}, now)
 	if err != nil {
@@ -3294,7 +3301,7 @@ func TestProviderImpactNamesKeysOnlyThroughStrandedModels(t *testing.T) {
 	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 	providerB := seedEnabledProviderForModelTest(t, providerService, "provider-b")
 
-	modelSvc := NewModelService(db, testMasterKey(), client)
+	modelSvc := NewModelService(db, testSecrets(), client)
 	client.result = TestResult{Outcome: TestSuccess}
 	makeModel := func(name string, providers ...*ProviderView) uint {
 		t.Helper()
@@ -3316,7 +3323,7 @@ func TestProviderImpactNamesKeysOnlyThroughStrandedModels(t *testing.T) {
 	stranded2 := makeModel("stranded-2", providerA)
 	survivor := makeModel("survivor", providerA, providerB)
 
-	keySvc := NewAPIKeyService(db, testMasterKey())
+	keySvc := NewAPIKeyService(db, testSecrets())
 	both, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{stranded1, stranded2}}, now)
 	if err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)

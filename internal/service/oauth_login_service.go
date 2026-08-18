@@ -28,16 +28,16 @@ const AuthStateTTL = 10 * time.Minute
 // OAuthLoginService drives the authorization-code + PKCE login flow
 // against any configured provider.
 type OAuthLoginService struct {
-	db        *gorm.DB
-	masterKey []byte
+	db      *gorm.DB
+	secrets crypto.SecretBox
 	// httpClient talks to the provider's token and userinfo endpoints.
 	// These URLs are admin-supplied configuration (see
 	// OAuthProviderService.httpClient for the trust rationale).
 	httpClient *http.Client
 }
 
-func NewOAuthLoginService(db *gorm.DB, masterKey []byte) *OAuthLoginService {
-	return &OAuthLoginService{db: db, masterKey: masterKey, httpClient: &http.Client{Timeout: 15 * time.Second}}
+func NewOAuthLoginService(db *gorm.DB, secrets crypto.SecretBox) *OAuthLoginService {
+	return &OAuthLoginService{db: db, secrets: secrets, httpClient: &http.Client{Timeout: 15 * time.Second}}
 }
 
 // PublicProviderView is what the login page sees: enough to render a
@@ -190,7 +190,7 @@ func (s *OAuthLoginService) findEnabledProvider(slug string) (*model.OAuthProvid
 // unless asked otherwise; Accept: application/json asks, the fallback
 // covers providers that ignore it).
 func (s *OAuthLoginService) exchangeCode(ctx context.Context, p *model.OAuthProvider, code, codeVerifier, redirectURI string) (string, error) {
-	secret, err := crypto.Decrypt(s.masterKey, p.EncryptedClientSecret)
+	secret, err := s.secrets.Decrypt(p.EncryptedClientSecret)
 	if err != nil {
 		return "", fmt.Errorf("%w: decrypt client secret: %v", errcode.ErrOAuthExchangeFailed, err)
 	}

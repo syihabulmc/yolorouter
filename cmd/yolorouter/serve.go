@@ -153,11 +153,11 @@ func runServe(ctx context.Context, args []string) error {
 	}
 
 	// nil ProviderClient: VerifyMasterKeyFingerprint only touches s.db/
-	// s.masterKey, never s.client, so this avoids allocating a second,
+	// s.secrets, never s.client, so this avoids allocating a second,
 	// independent HTTPProviderClient (its own semaphore + http.Transport)
 	// purely for a startup DB+crypto check — router.New builds the one
 	// real instance that actually serves provider-test traffic.
-	fingerprintSvc := service.NewProviderService(app.DB, masterKey, nil)
+	fingerprintSvc := service.NewProviderService(app.DB, crypto.NewSecretBox(masterKey), nil)
 	if err := fingerprintSvc.VerifyMasterKeyFingerprint(time.Now().UTC()); err != nil {
 		return fmt.Errorf("startup check failed: %w", err)
 	}

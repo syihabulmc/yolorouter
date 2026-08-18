@@ -105,7 +105,7 @@ func seedProviderForIdP(t *testing.T, db *gorm.DB, f *fakeIdP, slug string) *mod
 func newOAuthLoginServiceForTest(t *testing.T) (*OAuthLoginService, *gorm.DB) {
 	t.Helper()
 	db := testutil.NewSQLiteDB(t)
-	return NewOAuthLoginService(db, testMasterKey()), db
+	return NewOAuthLoginService(db, testSecrets()), db
 }
 
 // beginAndExtractState runs BeginLogin and pulls the raw state token back

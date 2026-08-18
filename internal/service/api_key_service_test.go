@@ -12,6 +12,7 @@ import (
 
 	"github.com/yolorouter/yolorouter/internal/model"
 	"github.com/yolorouter/yolorouter/internal/testutil"
+	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
 
@@ -20,7 +21,7 @@ func newAPIKeyServiceForTest(t *testing.T) (*APIKeyService, *gorm.DB) {
 	db := testutil.NewSQLiteDB(t)
 	// testMasterKey is defined in provider_service_test.go (same package); reuse
 	// it rather than carrying a second 32-byte key recipe here.
-	return NewAPIKeyService(db, testMasterKey()), db
+	return NewAPIKeyService(db, testSecrets()), db
 }
 
 func seedModelForAPIKeyTest(t *testing.T, db *gorm.DB, name string) uint {
@@ -282,7 +283,7 @@ func TestGetAPIKeyNotFound(t *testing.T) {
 // TestGetAPIKeyPlaintextRoundTripsTheCreatePlaintext verifies the reveal path
 // decrypts back exactly the plaintext handed out at create time — the
 // encrypted_key column must round-trip through AES-GCM with the service's
-// masterKey. This is the core contract the list-page copy button depends on.
+// secrets box. This is the core contract the list-page copy button depends on.
 func TestGetAPIKeyPlaintextRoundTripsTheCreatePlaintext(t *testing.T) {
 	svc, db := newAPIKeyServiceForTest(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
@@ -330,14 +331,15 @@ func TestGetAPIKeyPlaintextNotFound(t *testing.T) {
 	}
 }
 
-// TestGetAPIKeyPlaintextFailsWithDifferentMasterKey builds a service with a
-// different masterKey than the one that encrypted the row, and asserts the
+// TestGetAPIKeyPlaintextFailsWithDifferentMasterKey builds a service whose
+// secrets box holds a different master key than the one that encrypted the
+// row, and asserts the
 // reveal surfaces a decrypt error (not a silent wrong plaintext) — the AES-GCM
 // auth tag guarantees a tampered/wrong-key ciphertext fails to open.
 func TestGetAPIKeyPlaintextFailsWithDifferentMasterKey(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	mid := seedModelForAPIKeyTest(t, db, "m1")
-	encryptSvc := NewAPIKeyService(db, testMasterKey())
+	encryptSvc := NewAPIKeyService(db, testSecrets())
 	result, err := encryptSvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), ModelIDs: []uint{mid}}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
@@ -347,7 +349,7 @@ func TestGetAPIKeyPlaintextFailsWithDifferentMasterKey(t *testing.T) {
 	for i := range otherKey {
 		otherKey[i] = byte(i + 99)
 	}
-	decryptSvc := NewAPIKeyService(db, otherKey)
+	decryptSvc := NewAPIKeyService(db, crypto.NewSecretBox(otherKey))
 	if _, err := decryptSvc.GetAPIKeyPlaintext(result.APIKey.ID, nil); err == nil {
 		t.Fatalf("expected a decrypt error when the masterKey differs, got nil")
 	}

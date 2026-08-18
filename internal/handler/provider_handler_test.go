@@ -18,6 +18,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/internal/testutil"
+	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
 
@@ -36,7 +37,7 @@ func newProviderTestRouterWithClient(t *testing.T, client service.ProviderClient
 		t.Fatalf("RegisterValidators failed: %v", err)
 	}
 	db := testutil.NewSQLiteDB(t)
-	svc := service.NewProviderService(db, testutil.ProviderMasterKey(), client)
+	svc := service.NewProviderService(db, crypto.NewSecretBox(testutil.ProviderMasterKey()), client)
 
 	r := gin.New()
 	admin := r.Group("/api/admin")

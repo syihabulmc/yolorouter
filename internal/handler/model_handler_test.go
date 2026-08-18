@@ -13,6 +13,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/internal/testutil"
+	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 )
 
@@ -27,7 +28,7 @@ func newModelTestRouterWithClient(t *testing.T, client service.ProviderClient) (
 		t.Fatalf("RegisterValidators failed: %v", err)
 	}
 	db := testutil.NewSQLiteDB(t)
-	svc := service.NewModelService(db, testutil.ProviderMasterKey(), client)
+	svc := service.NewModelService(db, crypto.NewSecretBox(testutil.ProviderMasterKey()), client)
 
 	r := gin.New()
 	admin := r.Group("/api/admin")
@@ -266,7 +267,7 @@ func createProviderAndKeyForModelTest(t *testing.T, r *gin.Engine) uint {
 
 func newModelTestRouterSharingProviderDB(t *testing.T, db *gorm.DB, client service.ProviderClient) *gin.Engine {
 	t.Helper()
-	svc := service.NewModelService(db, testHandlerMasterKey(), client)
+	svc := service.NewModelService(db, crypto.NewSecretBox(testHandlerMasterKey()), client)
 	r := gin.New()
 	admin := r.Group("/api/admin")
 	admin.POST("/models", PostModel(svc))

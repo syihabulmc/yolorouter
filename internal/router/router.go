@@ -22,6 +22,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/selfupdate"
 	"github.com/yolorouter/yolorouter/internal/service"
 	"github.com/yolorouter/yolorouter/internal/version"
+	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/errcode"
 	"github.com/yolorouter/yolorouter/web"
 )
@@ -150,7 +151,7 @@ func New(deps Deps) (*gin.Engine, error) {
 }
 
 func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
-	db, providerMasterKey := deps.DB, deps.ProviderMasterKey
+	db, secrets := deps.DB, crypto.NewSecretBox(deps.ProviderMasterKey)
 	bodiesDir, updateCfg := deps.BodiesDir, deps.Update
 	allowPrivateUpstreams, gatewayCfg := deps.AllowPrivateUpstreams, deps.Gateway
 	loopbackBase, externalURL := deps.LoopbackBase, deps.ExternalURL
@@ -264,7 +265,7 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	// both expose nothing beyond what the login page must render, and the
 	// browser-facing callback lives at the root (it is a navigation target
 	// the identity provider redirects to, not an API call).
-	oauthLoginSvc := service.NewOAuthLoginService(db, providerMasterKey)
+	oauthLoginSvc := service.NewOAuthLoginService(db, secrets)
 	admin.GET("/auth/oauth/providers", handler.GetPublicOAuthProviders(oauthLoginSvc))
 	// Rate shape: a generous global ceiling (600/min) so the endpoint can
 	// never grow auth_states unboundedly, plus a per-client budget
@@ -305,7 +306,7 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	protected.PATCH("/users/:id/status", handler.PatchUserStatus(db))
 	protected.PATCH("/users/:id/role", handler.PatchUserRole(db))
 
-	providerSvc := service.NewProviderService(db, providerMasterKey, service.NewHTTPProviderClient(allowPrivateUpstreams))
+	providerSvc := service.NewProviderService(db, secrets, service.NewHTTPProviderClient(allowPrivateUpstreams))
 	protected.GET("/providers", handler.GetProviders(providerSvc))
 	protected.POST("/providers", handler.PostProvider(providerSvc))
 	protected.POST("/providers/test-key", handler.PostProviderTestKey(providerSvc))
@@ -322,7 +323,7 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	protected.POST("/providers/:id/keys/:keyId/test", handler.PostProviderKeyTest(providerSvc))
 	protected.POST("/providers/:id/keys/test-all", handler.PostProviderKeysTestAll(providerSvc))
 
-	modelSvc := service.NewModelService(db, providerMasterKey, service.NewHTTPProviderClient(allowPrivateUpstreams))
+	modelSvc := service.NewModelService(db, secrets, service.NewHTTPProviderClient(allowPrivateUpstreams))
 	protected.GET("/models", handler.GetModels(modelSvc))
 	protected.POST("/models", handler.PostModel(modelSvc))
 	protected.POST("/models/batch", handler.PostModelsBatch(modelSvc))
@@ -342,7 +343,7 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	protected.POST("/models/:id/candidates/:candidateId/test", handler.PostModelCandidateTest(modelSvc))
 	protected.DELETE("/models/:id/candidates/:candidateId", handler.DeleteModelCandidate(modelSvc))
 
-	apiKeySvc := service.NewAPIKeyService(db, providerMasterKey)
+	apiKeySvc := service.NewAPIKeyService(db, secrets)
 	scoped.GET("/api-keys", handler.GetAPIKeys(apiKeySvc))
 	scoped.POST("/api-keys", handler.PostAPIKey(apiKeySvc))
 	scoped.GET("/api-keys/:id", handler.GetAPIKey(apiKeySvc))
@@ -354,7 +355,7 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	// DB state; PUT uses CAS on version. Registered alongside the other admin
 	// resources under the session-protected group.
 	settingsSvc := service.NewSystemSettingsService(db)
-	oauthProviderSvc := service.NewOAuthProviderService(db, providerMasterKey)
+	oauthProviderSvc := service.NewOAuthProviderService(db, secrets)
 	protected.GET("/oauth-providers", handler.GetOAuthProviders(oauthProviderSvc, externalURL))
 	protected.POST("/oauth-providers", handler.PostOAuthProvider(oauthProviderSvc))
 	protected.PATCH("/oauth-providers/:id", handler.PatchOAuthProvider(oauthProviderSvc))
@@ -437,7 +438,7 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	// gateway.PostChatCompletions/Service.Handle dispatch by request
 	// path (gateway.IngressProtocol) to pick the caller's actual wire
 	// protocol.
-	relaySvc := gateway.NewService(db, providerMasterKey, allowPrivateUpstreams, settingsSvc, gatewayCfg)
+	relaySvc := gateway.NewService(db, secrets, allowPrivateUpstreams, settingsSvc, gatewayCfg)
 
 	registerCapabilities(relaySvc, db, loopbackBase)
 

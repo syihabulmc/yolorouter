@@ -23,8 +23,8 @@ import (
 // Client secrets are AES-GCM encrypted under the same master key as
 // upstream provider keys and never leave the server once written.
 type OAuthProviderService struct {
-	db        *gorm.DB
-	masterKey []byte
+	db      *gorm.DB
+	secrets crypto.SecretBox
 	// httpClient performs the OIDC discovery fetch. Provider endpoints are
 	// admin-supplied configuration behind RequireAdmin — a self-hosted IdP
 	// on a private address is the primary use case, so no private-address
@@ -33,10 +33,10 @@ type OAuthProviderService struct {
 	httpClient *http.Client
 }
 
-func NewOAuthProviderService(db *gorm.DB, masterKey []byte) *OAuthProviderService {
+func NewOAuthProviderService(db *gorm.DB, secrets crypto.SecretBox) *OAuthProviderService {
 	return &OAuthProviderService{
 		db:         db,
-		masterKey:  masterKey,
+		secrets:    secrets,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
@@ -176,7 +176,7 @@ func (s *OAuthProviderService) CreateProvider(in CreateOAuthProviderInput, now t
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
-	encrypted, err := crypto.Encrypt(s.masterKey, in.ClientSecret)
+	encrypted, err := s.secrets.Encrypt(in.ClientSecret)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +278,7 @@ func (s *OAuthProviderService) UpdateProvider(id uint, in UpdateOAuthProviderInp
 		updates["auth_style"] = normalizeAuthStyle(*in.AuthStyle)
 	}
 	if in.ClientSecret != nil {
-		encrypted, err := crypto.Encrypt(s.masterKey, *in.ClientSecret)
+		encrypted, err := s.secrets.Encrypt(*in.ClientSecret)
 		if err != nil {
 			return nil, err
 		}

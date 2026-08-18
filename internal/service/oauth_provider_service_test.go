@@ -18,7 +18,7 @@ import (
 func newOAuthProviderServiceForTest(t *testing.T) (*OAuthProviderService, *OAuthLoginService) {
 	t.Helper()
 	db := testutil.NewSQLiteDB(t)
-	return NewOAuthProviderService(db, testMasterKey()), NewOAuthLoginService(db, testMasterKey())
+	return NewOAuthProviderService(db, testSecrets()), NewOAuthLoginService(db, testSecrets())
 }
 
 func minimalProviderInput(slug string) CreateOAuthProviderInput {

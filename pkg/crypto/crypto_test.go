@@ -152,3 +152,30 @@ func TestEncryptFailsWhenRandReaderErrors(t *testing.T) {
 		t.Fatalf("expected error when rand.Reader fails, got nil")
 	}
 }
+
+// TestSecretBoxInteropWithBareFunctions pins that SecretBox is a handle,
+// not a format: ciphertext sealed by either API opens under the other.
+// Every stored secret in the database was written by one of the two, so a
+// SecretBox that diverged in nonce layout or encoding would strand
+// existing rows.
+func TestSecretBoxInteropWithBareFunctions(t *testing.T) {
+	key := testKey(t)
+	box := NewSecretBox(key)
+	const plaintext = "sk-interop-secret"
+
+	boxed, err := box.Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("box.Encrypt: %v", err)
+	}
+	if got, err := Decrypt(key, boxed); err != nil || got != plaintext {
+		t.Fatalf("bare Decrypt of box ciphertext = %q, %v; want %q", got, err, plaintext)
+	}
+
+	bare, err := Encrypt(key, plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if got, err := box.Decrypt(bare); err != nil || got != plaintext {
+		t.Fatalf("box.Decrypt of bare ciphertext = %q, %v; want %q", got, err, plaintext)
+	}
+}

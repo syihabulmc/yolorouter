@@ -6,6 +6,7 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -58,6 +59,37 @@ func Decrypt(key []byte, encoded string) (string, error) {
 		return "", fmt.Errorf("decrypt: %w", err)
 	}
 	return string(plaintext), nil
+}
+
+// SecretBox is the one holder of the master key for at-rest secret fields
+// (provider upstream keys, API-key plaintext copies, OAuth client secrets).
+// Modules that persist or read an encrypted field carry a SecretBox instead
+// of the raw key bytes, so the key material itself has a single owner and
+// the encrypt/decrypt recipe cannot fork per call site.
+//
+// The wire format is exactly Encrypt/Decrypt's: AES-256-GCM, nonce
+// prepended, base64-encoded. Ciphertext written by either API is readable
+// by the other — SecretBox is a handle, not a new format.
+type SecretBox struct {
+	key []byte
+}
+
+// NewSecretBox wraps an already-decoded 32-byte AES-256-GCM key. The key is
+// copied, so a caller that later overwrites its slice cannot silently change
+// what every holder of the box encrypts with.
+func NewSecretBox(key []byte) SecretBox {
+	return SecretBox{key: bytes.Clone(key)}
+}
+
+// Encrypt seals plaintext under the boxed key. Same output format as the
+// package-level Encrypt.
+func (b SecretBox) Encrypt(plaintext string) (string, error) {
+	return Encrypt(b.key, plaintext)
+}
+
+// Decrypt opens a ciphertext produced by Encrypt (either API).
+func (b SecretBox) Decrypt(encoded string) (string, error) {
+	return Decrypt(b.key, encoded)
 }
 
 // KeyFromBase64 decodes a base64-encoded 32-byte key string.

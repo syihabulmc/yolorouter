@@ -65,7 +65,7 @@ func newOAuthTestStack(t *testing.T) (*gin.Engine, *gorm.DB, *httptest.Server) {
 		t.Fatalf("seed provider: %v", err)
 	}
 
-	svc := service.NewOAuthLoginService(db, oauthTestMasterKey())
+	svc := service.NewOAuthLoginService(db, crypto.NewSecretBox(oauthTestMasterKey()))
 	r := gin.New()
 	r.GET("/api/admin/auth/oauth/providers", GetPublicOAuthProviders(svc))
 	r.POST("/api/admin/auth/oauth/state", PostOAuthState(svc, middleware.NewSemaphore(8),
@@ -275,7 +275,7 @@ func TestCallbackURLPrefersConfiguredExternalURL(t *testing.T) {
 func TestAdminProviderListCarriesCallbackBase(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := testutil.NewSQLiteDB(t)
-	svc := service.NewOAuthProviderService(db, oauthTestMasterKey())
+	svc := service.NewOAuthProviderService(db, crypto.NewSecretBox(oauthTestMasterKey()))
 
 	fetchBase := func(externalURL string) string {
 		r := gin.New()

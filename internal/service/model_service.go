@@ -33,13 +33,13 @@ const (
 var modelNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 type ModelService struct {
-	db        *gorm.DB
-	masterKey []byte
-	client    ProviderClient
+	db      *gorm.DB
+	secrets crypto.SecretBox
+	client  ProviderClient
 }
 
-func NewModelService(db *gorm.DB, masterKey []byte, client ProviderClient) *ModelService {
-	return &ModelService{db: db, masterKey: masterKey, client: client}
+func NewModelService(db *gorm.DB, secrets crypto.SecretBox, client ProviderClient) *ModelService {
+	return &ModelService{db: db, secrets: secrets, client: client}
 }
 
 type CandidateView struct {
@@ -477,7 +477,7 @@ func (s *ModelService) decryptHighestPriorityAvailableKey(keys []model.ProviderK
 		if k.AuthorizedDestinationVersion != destinationVersion {
 			continue
 		}
-		return crypto.Decrypt(s.masterKey, k.EncryptedKey)
+		return s.secrets.Decrypt(k.EncryptedKey)
 	}
 	return "", errcode.ErrProviderNoTestableModel
 }

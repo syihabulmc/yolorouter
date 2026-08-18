@@ -81,13 +81,13 @@ const providerKeyFingerprintProbe = "yolorouter-provider-key-fingerprint-probe-v
 const minKeyPlaintextLength = 8
 
 type ProviderService struct {
-	db        *gorm.DB
-	masterKey []byte
-	client    ProviderClient
+	db      *gorm.DB
+	secrets crypto.SecretBox
+	client  ProviderClient
 }
 
-func NewProviderService(db *gorm.DB, masterKey []byte, client ProviderClient) *ProviderService {
-	return &ProviderService{db: db, masterKey: masterKey, client: client}
+func NewProviderService(db *gorm.DB, secrets crypto.SecretBox, client ProviderClient) *ProviderService {
+	return &ProviderService{db: db, secrets: secrets, client: client}
 }
 
 // VerifyMasterKeyFingerprint runs the startup master-key check: on a
@@ -111,7 +111,7 @@ func NewProviderService(db *gorm.DB, masterKey []byte, client ProviderClient) *P
 // then correctly fails this verification instead of silently believing it
 // succeeded.
 func (s *ProviderService) VerifyMasterKeyFingerprint(now time.Time) error {
-	encrypted, encErr := crypto.Encrypt(s.masterKey, providerKeyFingerprintProbe)
+	encrypted, encErr := s.secrets.Encrypt(providerKeyFingerprintProbe)
 	if encErr != nil {
 		return fmt.Errorf("encrypt fingerprint probe: %w", encErr)
 	}
@@ -123,7 +123,7 @@ func (s *ProviderService) VerifyMasterKeyFingerprint(now time.Time) error {
 	if err != nil {
 		return fmt.Errorf("read fingerprint row: %w", err)
 	}
-	decrypted, decErr := crypto.Decrypt(s.masterKey, fp.EncryptedProbe)
+	decrypted, decErr := s.secrets.Decrypt(fp.EncryptedProbe)
 	if decErr != nil || decrypted != providerKeyFingerprintProbe {
 		return fmt.Errorf("provider_master_key does not match the key used to encrypt existing provider data; " +
 			"if this is a database restore, restore its matching config.yaml as well")
@@ -331,7 +331,7 @@ func (s *ProviderService) CreateProvider(ctx context.Context, input CreateProvid
 		return nil, err
 	}
 
-	encryptedKey, err := crypto.Encrypt(s.masterKey, input.KeyPlaintext)
+	encryptedKey, err := s.secrets.Encrypt(input.KeyPlaintext)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt key: %w", err)
 	}
@@ -554,7 +554,7 @@ func (s *ProviderService) CreateProviderKey(ctx context.Context, providerID uint
 		return nil, err
 	}
 
-	encryptedKey, err := crypto.Encrypt(s.masterKey, input.Plaintext)
+	encryptedKey, err := s.secrets.Encrypt(input.Plaintext)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt key: %w", err)
 	}
@@ -888,7 +888,7 @@ func (s *ProviderService) UpdateProviderKey(ctx context.Context, providerID, key
 	if err := validatePlaintextLength(*input.Plaintext); err != nil {
 		return nil, err
 	}
-	encryptedKey, err := crypto.Encrypt(s.masterKey, *input.Plaintext)
+	encryptedKey, err := s.secrets.Encrypt(*input.Plaintext)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt key: %w", err)
 	}
@@ -1024,7 +1024,7 @@ func (s *ProviderService) ListModelsForProvider(ctx context.Context, providerID 
 	if key == nil {
 		return ListModelsResult{Outcome: TestAuthFailed}, nil
 	}
-	plaintext, err := crypto.Decrypt(s.masterKey, key.EncryptedKey)
+	plaintext, err := s.secrets.Decrypt(key.EncryptedKey)
 	if err != nil {
 		return ListModelsResult{}, fmt.Errorf("decrypt key: %w", err)
 	}
@@ -1090,7 +1090,7 @@ func (s *ProviderService) TestProviderKey(ctx context.Context, providerID, keyID
 	if err != nil {
 		return nil, err
 	}
-	plaintext, err := crypto.Decrypt(s.masterKey, encryptedKeySnapshot)
+	plaintext, err := s.secrets.Decrypt(encryptedKeySnapshot)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt key: %w", err)
 	}
@@ -1210,7 +1210,7 @@ func (s *ProviderService) TestAllProviderKeys(ctx context.Context, providerID ui
 			results = append(results, BatchTestResult{KeyID: key.ID, Label: key.Label, Skipped: true})
 			continue
 		}
-		plaintext, decErr := crypto.Decrypt(s.masterKey, encryptedKeySnapshot)
+		plaintext, decErr := s.secrets.Decrypt(encryptedKeySnapshot)
 		if decErr != nil {
 			results = append(results, BatchTestResult{KeyID: key.ID, Label: key.Label, Skipped: true})
 			continue

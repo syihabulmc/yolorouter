@@ -19,7 +19,7 @@ func newTestModelService(t *testing.T) (*ModelService, *gorm.DB, *fakeProviderCl
 	t.Helper()
 	providerService, db, client := newTestProviderService(t)
 	_ = providerService
-	return NewModelService(db, testMasterKey(), client), db, client
+	return NewModelService(db, testSecrets(), client), db, client
 }
 
 func TestCreateModelSucceeds(t *testing.T) {
@@ -164,7 +164,7 @@ func TestModelRunningStatusTransitionsFromNotConfiguredToPending(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -189,7 +189,7 @@ func TestCreateModelCandidateEnablesWhenServerReverifyPasses(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -216,7 +216,7 @@ func TestCreateModelCandidateDefaultsProviderModelNameToModelNameWhenBlank(t *te
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -238,7 +238,7 @@ func TestUpdateModelCandidateDefaultsProviderModelNameToModelNameWhenBlank(t *te
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -266,7 +266,7 @@ func TestTestAndCreateCandidateDefaultsProviderModelNameToModelNameWhenBlank(t *
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -289,7 +289,7 @@ func TestCreateModelCandidateFallsBackToDisabledWhenServerReverifyFails(t *testi
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -321,7 +321,7 @@ func TestCreateModelCandidateRecordsFailedWhenServerReverifyIsDecisive(t *testin
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -349,7 +349,7 @@ func TestCreateModelCandidateSavesDisabledWithoutServerReverifyWhenNotRequesting
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 	callsBefore := client.calls
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -373,7 +373,7 @@ func TestCreateModelCandidateRejectsDuplicateProviderOnSameModel(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -396,7 +396,7 @@ func TestSetCandidateStatusRejectsEnablingUnverifiedCandidate(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -418,7 +418,7 @@ func TestSetCandidateStatusEnablesAfterPassingTest(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -444,7 +444,7 @@ func TestSetCandidateStatusDisableDoesNotRequireVerification(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -472,7 +472,7 @@ func TestTestModelCandidateBasicRecordsVerificationStatus(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -518,7 +518,7 @@ func TestRetestModelCandidateRunsAllThreeProbesAndRecordsCapabilities(t *testing
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedCandidateForRetest(t, svc, provider.ID, now)
 
 	// Measured as a delta: seeding an enabled provider already ran a key
@@ -557,7 +557,7 @@ func TestRetestModelCandidateSkipsCapabilityProbesWhenBasicFails(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedCandidateForRetest(t, svc, provider.ID, now)
 
 	client.result = TestResult{Outcome: TestModelNotFound}
@@ -626,7 +626,7 @@ func TestRetestModelCandidateKeepsEarnedCapabilityWhenProbeIsUnconfirmed(t *test
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedCandidateForRetest(t, svc, provider.ID, now)
 
 	// The verdict has to be EARNED first, or the assertions below cannot tell
@@ -669,7 +669,7 @@ func TestRetestModelCandidateKeepsVerificationWhenBasicProbeIsInconclusive(t *te
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedEnabledCandidate(t, svc, client, provider.ID, now)
 
 	for _, tc := range []struct {
@@ -710,7 +710,7 @@ func TestRetestModelCandidateDiscardsVerdictWhenTargetChangedMidProbe(t *testing
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedCandidateForRetest(t, svc, provider.ID, now)
 
 	// Stand in for a concurrent PATCH landing while the probe is in flight.
@@ -740,7 +740,7 @@ func TestUpdateModelCandidateDoesNotReEnableAfterConcurrentDisable(t *testing.T)
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedEnabledCandidate(t, svc, client, provider.ID, now)
 
 	client.sideEffect = func() {
@@ -770,7 +770,7 @@ func TestRetestModelCandidateDemotesOnDecisiveBasicFailure(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedEnabledCandidate(t, svc, client, provider.ID, now)
 
 	client.result = TestResult{Outcome: TestModelNotFound}
@@ -802,7 +802,7 @@ func TestTestAndCreateCandidateDoesNotPersistWhenEnableRequestedAndBasicFails(t 
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -845,7 +845,7 @@ func TestTestAndCreateCandidatePersistsDisabledEvenWhenBasicFails(t *testing.T) 
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -878,7 +878,7 @@ func TestTestAndCreateCandidateStoresEnabledWithCapabilitiesWhenAllProbesPass(t 
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -990,7 +990,7 @@ func TestCreateModelCandidateDisabledSkipsProbing(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1021,7 +1021,7 @@ func TestUpdateModelCandidate(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1049,7 +1049,7 @@ func TestUpdateModelCandidateResetsVerificationWhenModelNameChanges(t *testing.T
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1155,7 +1155,7 @@ func TestUpdateModelCandidateHonoursDisableWhenTargetAlsoChanged(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedEnabledCandidate(t, svc, client, provider.ID, now)
 
 	result, err := svc.UpdateModelCandidate(context.Background(), candidate.ID, UpdateCandidateInput{
@@ -1180,7 +1180,7 @@ func TestUpdateModelCandidateLeavesEnablementAloneWhenNotRequested(t *testing.T)
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedEnabledCandidate(t, svc, client, provider.ID, now)
 
 	result, err := svc.UpdateModelCandidate(context.Background(), candidate.ID, UpdateCandidateInput{
@@ -1205,7 +1205,7 @@ func TestUpdateModelCandidateDemotesWhenReprobeFailsOnEnabledCandidate(t *testin
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedEnabledCandidate(t, svc, client, provider.ID, now)
 
 	client.result = TestResult{Outcome: TestModelNotFound}
@@ -1231,7 +1231,7 @@ func TestUpdateModelCandidateReprobesAfterModelNameChange(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedCandidateForRetest(t, svc, provider.ID, now)
 
 	client.result = TestResult{Outcome: TestSuccess}
@@ -1260,7 +1260,7 @@ func TestUpdateModelCandidatePersistsFieldsEvenWhenReprobeFails(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	candidate := seedCandidateForRetest(t, svc, provider.ID, now)
 
 	client.result = TestResult{Outcome: TestUnreachable}
@@ -1292,7 +1292,7 @@ func TestReorderModelCandidateSwapsOrder(t *testing.T) {
 	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 	providerB := seedEnabledProviderForModelTest(t, providerService, "provider-b")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1342,7 +1342,7 @@ func TestDeleteModelCandidateSucceeds(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1571,7 +1571,7 @@ func TestModelRunningStatusAvailableEndToEnd(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1651,7 +1651,7 @@ func TestTestAndCreateCandidateErrorsWhenNoTestableKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProvider failed: %v", err)
 	}
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1679,7 +1679,7 @@ func TestCreateModelCandidateStaysDisabledWhenNoTestableKeyForServerReverify(t *
 	if err != nil {
 		t.Fatalf("CreateProvider failed: %v", err)
 	}
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1700,7 +1700,7 @@ func TestUpdateModelCandidateErrorsWhenUpdateFailsForNonUniqueReason(t *testing.
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1721,7 +1721,7 @@ func TestDeleteModelCandidateErrorsWhenDeleteFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1780,7 +1780,7 @@ func TestToModelViewErrorsWhenProviderKeyLookupFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1820,7 +1820,7 @@ func TestListModelsErrorsWhenProviderKeyLookupFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1861,7 +1861,7 @@ func TestTestAndCreateCandidateErrorsWhenKeyLookupFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1880,7 +1880,7 @@ func TestCreateModelCandidateErrorsWhenSortOrderLookupFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1898,7 +1898,7 @@ func TestCreateModelCandidateErrorsWhenInsertFailsForNonUniqueReason(t *testing.
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1916,7 +1916,7 @@ func TestToCandidateViewErrorsWhenProviderKeyLookupFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1938,7 +1938,7 @@ func TestUpdateModelCandidateErrorsWhenReloadFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1968,7 +1968,7 @@ func TestTestModelCandidateErrorsWhenProviderLookupFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -1991,7 +1991,7 @@ func TestTestModelCandidateErrorsWhenCommitFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -2014,7 +2014,7 @@ func TestTestModelCandidateStreamingErrorsWhenCommitFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -2096,7 +2096,7 @@ func TestCreateModelCandidateSilentlySkipsReverifyWhenClientErrors(t *testing.T)
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -2119,7 +2119,7 @@ func TestCreateModelCandidateSilentlySkipsReverifyWhenCommitFails(t *testing.T) 
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -2139,7 +2139,7 @@ func TestToCandidateViewErrorsWhenProviderLookupFailsForNonNotFoundReason(t *tes
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -2162,7 +2162,7 @@ func TestSetCandidateStatusErrorsWhenCASWriteFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -2196,7 +2196,7 @@ func TestTestModelCandidateErrorsWhenProviderKeyLookupFails(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -2226,7 +2226,7 @@ func TestTestModelCandidateErrorsWhenNoTestableKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProvider failed: %v", err)
 	}
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -2248,7 +2248,7 @@ func TestListModelsAvoidsNPlusOneCandidateQueries(t *testing.T) {
 	now := time.Now().UTC()
 	provider := seedEnabledProviderForModelTest(t, providerService, "provider-a")
 
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	for _, name := range []string{"smart", "fast"} {
 		modelView, err := svc.CreateModel(CreateModelInput{Name: name}, now)
 		if err != nil {
@@ -2307,7 +2307,7 @@ func catalogSeededModel(t *testing.T) string {
 func TestSuggestCandidatePriceFallsBackToSeedCatalog(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	provider := seedProviderWithBaseURL(t, providerService, "deepseek", catalogSeededHost)
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	name := catalogSeededModel(t)
 
 	got, err := svc.SuggestCandidatePrice(provider.ID, name)
@@ -2332,7 +2332,7 @@ func TestSuggestCandidatePricePrefersHistoryOverSeedCatalog(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedProviderWithBaseURL(t, providerService, "deepseek", catalogSeededHost)
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	name := catalogSeededModel(t)
 
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "negotiated"}, now)
@@ -2361,7 +2361,7 @@ func TestSuggestCandidatePriceMatchesHistoryCaseInsensitively(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedProviderWithBaseURL(t, providerService, "provider-a", "https://a.example.com")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "alias"}, now)
 	if err != nil {
@@ -2386,7 +2386,7 @@ func TestSuggestCandidatePriceReturnsEmptyWhenNothingMatches(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	// A host the seed catalog does not carry, with no candidate saved for it.
 	provider := seedProviderWithBaseURL(t, providerService, "self-hosted", "https://llm.internal.example")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 
 	got, err := svc.SuggestCandidatePrice(provider.ID, "some-local-model")
 	if err != nil {
@@ -2402,7 +2402,7 @@ func TestSuggestCandidatePriceReturnsEmptyWhenNothingMatches(t *testing.T) {
 func TestSuggestCandidatePriceReturnsEmptyForBlankModelName(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	provider := seedProviderWithBaseURL(t, providerService, "deepseek", catalogSeededHost)
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 
 	for _, name := range []string{"", "   "} {
 		got, err := svc.SuggestCandidatePrice(provider.ID, name)
@@ -2417,7 +2417,7 @@ func TestSuggestCandidatePriceReturnsEmptyForBlankModelName(t *testing.T) {
 
 func TestSuggestCandidatePriceReturnsProviderNotFound(t *testing.T) {
 	_, db, client := newTestProviderService(t)
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 
 	if _, err := svc.SuggestCandidatePrice(999999, "deepseek-v4-flash"); !errors.Is(err, errcode.ErrProviderNotFound) {
 		t.Fatalf("expected ErrProviderNotFound, got %v", err)
@@ -2427,7 +2427,7 @@ func TestSuggestCandidatePriceReturnsProviderNotFound(t *testing.T) {
 func TestSuggestCandidatePriceReturnsErrorWhenDBUnavailable(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	provider := seedProviderWithBaseURL(t, providerService, "deepseek", catalogSeededHost)
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	testutil.CloseDB(t, db)
 
 	if _, err := svc.SuggestCandidatePrice(provider.ID, "deepseek-v4-flash"); err == nil {
@@ -2443,7 +2443,7 @@ func TestUpdateModelCandidateRetargetWinsTheNextSuggestion(t *testing.T) {
 	providerService, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
 	provider := seedProviderWithBaseURL(t, providerService, "provider-a", "https://a.example.com")
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 
 	incumbent, err := svc.CreateModel(CreateModelInput{Name: "incumbent"}, now)
 	if err != nil {
@@ -2489,7 +2489,7 @@ func TestUpdateModelCandidateRetargetWinsTheNextSuggestion(t *testing.T) {
 func TestModelImpactNamesOnlyKeysThatCanStillCall(t *testing.T) {
 	_, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -2499,7 +2499,7 @@ func TestModelImpactNamesOnlyKeysThatCanStillCall(t *testing.T) {
 		t.Fatalf("CreateModel failed: %v", err)
 	}
 
-	keySvc := NewAPIKeyService(db, testMasterKey())
+	keySvc := NewAPIKeyService(db, testSecrets())
 	callable, err := keySvc.CreateAPIKey(CreateAPIKeyInput{UserID: seedKeyOwner(t, db), Remark: "alice's laptop", ModelIDs: []uint{modelView.ID}}, now)
 	if err != nil {
 		t.Fatalf("CreateAPIKey failed: %v", err)
@@ -2548,7 +2548,7 @@ func TestModelImpactNamesOnlyKeysThatCanStillCall(t *testing.T) {
 func TestModelImpactCountsOnlyRecentTrafficForThisName(t *testing.T) {
 	_, db, client := newTestProviderService(t)
 	now := time.Now().UTC()
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	modelView, err := svc.CreateModel(CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
@@ -2577,7 +2577,7 @@ func TestModelImpactCountsOnlyRecentTrafficForThisName(t *testing.T) {
 
 func TestModelImpactUnknownModel(t *testing.T) {
 	_, db, client := newTestProviderService(t)
-	svc := NewModelService(db, testMasterKey(), client)
+	svc := NewModelService(db, testSecrets(), client)
 	if _, err := svc.GetModelImpact(9999, time.Now().UTC()); !errors.Is(err, errcode.ErrModelNotFound) {
 		t.Fatalf("err = %v, want ErrModelNotFound", err)
 	}

@@ -103,9 +103,9 @@ var testHookHandleDone func(*Exchange)
 // for decrypting provider keys, an upstream HTTP client, and the in-memory
 // rate limiter.
 type Service struct {
-	db        *gorm.DB
-	masterKey []byte
-	client    *UpstreamClient
+	db      *gorm.DB
+	secrets crypto.SecretBox
+	client  *UpstreamClient
 	// settingsProvider is the read-only window into the cached global custom
 	// system prompt. Nil when no provider is wired in (router passes nil until
 	// the system settings service is registered); Handle nil-checks before
@@ -180,7 +180,7 @@ type Service struct {
 // the upstream transport's TCP dial bound and its HeaderTimeout seeds the
 // ResponseHeaderTimeout, while the remaining fields are read by the
 // per-attempt timeout orchestration.
-func NewService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp SettingsProvider, gatewayCfg config.GatewayConfig) *Service {
+func NewService(db *gorm.DB, secrets crypto.SecretBox, allowPrivate bool, sp SettingsProvider, gatewayCfg config.GatewayConfig) *Service {
 	// Normalise the count budgets here rather than at every read: a config
 	// assembled without them (unit tests, older config files) means the
 	// defaults, not a request that stops before its first dispatch.
@@ -201,7 +201,7 @@ func NewService(db *gorm.DB, masterKey []byte, allowPrivate bool, sp SettingsPro
 	}
 	return &Service{
 		db:               db,
-		masterKey:        masterKey,
+		secrets:          secrets,
 		client:           NewUpstreamClient(allowPrivate, gatewayCfg.HeaderTimeout, gatewayCfg.ConnectTimeout, gatewayCfg.TLSHandshakeTimeout),
 		settingsProvider: sp,
 		gateway:          gatewayCfg,
@@ -974,7 +974,7 @@ func (s *Service) tryKeys(c *gin.Context, rc *Exchange, adm admitted, keys []mod
 			i++
 			continue
 		}
-		plaintext, derr := crypto.Decrypt(s.masterKey, pk.EncryptedKey)
+		plaintext, derr := s.secrets.Decrypt(pk.EncryptedKey)
 		if derr != nil {
 			logger.Warn("gateway: decrypt provider key failed",
 				zap.Uint("key_id", pk.ID), zap.String("request_id", rc.requestID), zap.Error(derr))

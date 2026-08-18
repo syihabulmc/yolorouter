@@ -37,12 +37,12 @@ const (
 )
 
 type APIKeyService struct {
-	db        *gorm.DB
-	masterKey []byte
+	db      *gorm.DB
+	secrets crypto.SecretBox
 }
 
-func NewAPIKeyService(db *gorm.DB, masterKey []byte) *APIKeyService {
-	return &APIKeyService{db: db, masterKey: masterKey}
+func NewAPIKeyService(db *gorm.DB, secrets crypto.SecretBox) *APIKeyService {
+	return &APIKeyService{db: db, secrets: secrets}
 }
 
 // APIKeyView is the API-facing shape. Status is the stored active/revoked
@@ -236,7 +236,7 @@ func (s *APIKeyService) CreateAPIKey(input CreateAPIKeyInput, now time.Time) (*C
 	// Persist an AES-GCM ciphertext of the plaintext so the full key can be
 	// revealed again from the list page. The auth path never touches this —
 	// it still looks the key up by key_hash. Mirrors the provider-key model.
-	encryptedKey, err := crypto.Encrypt(s.masterKey, rawKey)
+	encryptedKey, err := s.secrets.Encrypt(rawKey)
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +328,7 @@ func (s *APIKeyService) GetAPIKeyPlaintext(id uint, requiredOwner *uint) (string
 	if key.EncryptedKey == "" {
 		return "", errcode.ErrAPIKeyPlaintextUnavailable
 	}
-	plaintext, err := crypto.Decrypt(s.masterKey, key.EncryptedKey)
+	plaintext, err := s.secrets.Decrypt(key.EncryptedKey)
 	if err != nil {
 		return "", err
 	}

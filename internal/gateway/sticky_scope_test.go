@@ -230,8 +230,8 @@ func TestAVerdictDoesNotOutliveTheKeyThatEarnedIt(t *testing.T) {
 	// Two keys on ONE provider, so the second attempt is a key rotation rather
 	// than a failover to a different candidate.
 	p1 := createProvider(t, db, "p1", upstream.URL)
-	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-1", "k1", 1, true)
-	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-2", "k2", 2, true)
+	createProviderKey(t, db, svc.secrets, p1.ID, "sk-1", "k1", 1, true)
+	createProviderKey(t, db, svc.secrets, p1.ID, "sk-2", "k2", 2, true)
 	apiKey := seedModelOnProvider(t, db, p1)
 
 	c, w := newCtx([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
@@ -270,8 +270,8 @@ func TestAVerdictDoesNotOutliveAKeyThatWasNeverTried(t *testing.T) {
 	}, func(*Exchange) struct{} { return struct{}{} })
 
 	p1 := createProvider(t, db, "p1", upstream.URL)
-	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-1", "k1", 1, true)
-	createProviderKey(t, db, svc.masterKey, p1.ID, "sk-2", "k2", 2, true)
+	createProviderKey(t, db, svc.secrets, p1.ID, "sk-1", "k1", 1, true)
+	createProviderKey(t, db, svc.secrets, p1.ID, "sk-2", "k2", 2, true)
 	// The second key is authorized for a destination the provider no longer
 	// has, so it is skipped without ever being dispatched.
 	if err := db.Model(&model.ProviderKey{}).Where("label = ?", "k2").
