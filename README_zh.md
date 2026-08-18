@@ -75,8 +75,41 @@ docker run -d --name yolorouter --restart unless-stopped \
 
 容器写的所有东西都在挂载的这一个目录里：自动生成的 `configs/config.yaml`
 （含加密上游 Key 的主密钥）和 SQLite 数据库。备份这个目录就是备份整个部署。
-升级执行 `docker compose pull && docker compose up -d`；直接 `docker run` 的话，
-拉新镜像、删掉容器、再跑同一条命令即可——状态都在挂载目录里，不随容器丢失。
+
+**docker compose 方式升级：**
+
+```bash
+docker compose pull   # 下载最新镜像；正在运行的容器不受影响
+docker compose up -d  # 用新镜像重建容器（已是最新则什么也不做）
+```
+
+**直接 `docker run` 方式升级**分三步。这样做是安全的，因为容器的文件系统本来
+就是一次性的：你的状态都不在容器里——配置和数据库存在宿主机的挂载目录中，
+删掉容器它们原地不动。
+
+```bash
+# 1. 下载最新镜像。正在运行的容器照常服务——这一步只是把新镜像下载到本机。
+docker pull ghcr.io/yolorouter/yolorouter:latest
+
+# 2. 停止并删除旧容器。你的数据不在容器里：全部在宿主机挂载目录中，不会丢。
+docker rm -f yolorouter
+
+# 3. 启动新容器——和第一次部署时完全相同的命令、挂载同一个目录，
+#    它会自动使用第 1 步拉下来的新镜像。
+docker run -d --name yolorouter --restart unless-stopped \
+  -p 8080:8080 -v "$PWD/yolorouter:/yolorouter" \
+  ghcr.io/yolorouter/yolorouter:latest
+```
+
+两个值得知道的细节：
+
+- 第 3 步要**在当初启动容器的同一个目录下执行**——`-v "$PWD/yolorouter:/yolorouter"`
+  这个挂载是相对当前目录解析的，换个目录跑就等于挂了一个空数据目录，会看到
+  全新的初始化界面。`-v` 里直接写绝对路径可以彻底避开这个坑。
+- 新版本第一次启动时会自动执行待应用的数据库迁移，然后照常服务。如果在迁移
+  已经执行之后想退回旧版本，请用升级前的备份恢复数据目录，而不是直接换回旧
+  镜像启动——旧二进制可能不认识新 schema。想固定在某个版本不自动跟进，用带
+  版本号的 tag（如 `...:v0.1.6`）代替 `:latest` 即可。
 
 > **🇨🇳 国内拉取镜像**：`ghcr.io` 在大陆直连不畅时，可用 GHCR 镜像加速站拉取后改名，
 > 例如南京大学镜像站：

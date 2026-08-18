@@ -80,9 +80,48 @@ Images are published for amd64 and arm64 with every release.
 Everything the container writes lives in the one mounted folder: the generated
 `configs/config.yaml` (including the key that encrypts your upstream keys) and
 the SQLite database. Back up that folder and you have backed up the deployment.
-Upgrade with `docker compose pull && docker compose up -d`; with plain
-`docker run`, pull the image, remove the container, and run the same command
-again — the mounted folder carries everything over.
+
+**Upgrading with docker compose:**
+
+```bash
+docker compose pull   # download the newest image; the running container is untouched
+docker compose up -d  # recreate the container on the new image (does nothing if already newest)
+```
+
+**Upgrading with plain `docker run`** takes three steps. This is safe because a
+container's filesystem is disposable by design: none of your state lives inside
+the container — config and database sit in the mounted folder on the host and
+survive the container being deleted.
+
+```bash
+# 1. Download the newest image. The running container keeps serving meanwhile —
+#    this only fetches bytes to the local image store.
+docker pull ghcr.io/yolorouter/yolorouter:latest
+
+# 2. Stop and delete the old container. Your data is NOT in it: everything
+#    lives in the mounted folder on the host and stays put.
+docker rm -f yolorouter
+
+# 3. Start a new container — the exact same command as the first run, mounting
+#    the same folder. It picks up the image pulled in step 1.
+docker run -d --name yolorouter --restart unless-stopped \
+  -p 8080:8080 -v "$PWD/yolorouter:/yolorouter" \
+  ghcr.io/yolorouter/yolorouter:latest
+```
+
+Two details worth knowing:
+
+- Run step 3 **from the same directory** you originally started the container
+  in — the `-v "$PWD/yolorouter:/yolorouter"` mount resolves relative to your
+  current directory, and a different directory means an empty data folder and a
+  fresh setup screen. Using an absolute path in `-v` avoids the pitfall
+  entirely.
+- On its first start the new version applies any pending database migrations
+  automatically, then serves as before. If you ever need to go back to an older
+  version *after* it has migrated the database, restore the data folder from a
+  backup taken before the upgrade rather than just starting an older image — an
+  old binary may not understand the newer schema. To stay on a fixed version in
+  the first place, use a pinned tag (e.g. `...:v0.1.6`) instead of `:latest`.
 
 ### Install as a system service
 
