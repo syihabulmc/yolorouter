@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-08-17",
+  "updated_at": "2026-08-18",
   "currency": "CNY",
   "unit": "per_million_tokens",
   "prices": {
@@ -44,6 +44,12 @@
       }
     },
     "open.bigmodel.cn": {
+      "glm-5.3": {
+        "input": 8,
+        "output": 28,
+        "cacheWrite": null,
+        "cacheRead": 2
+      },
       "glm-5.2": {
         "input": 8,
         "output": 28,
