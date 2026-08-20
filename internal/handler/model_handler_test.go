@@ -47,6 +47,8 @@ func newModelTestRouterWithClient(t *testing.T, client providerclient.ProviderCl
 	admin.POST("/models/:id/candidates/:candidateId/test", PostModelCandidateTest(svc))
 	admin.GET("/models/candidates/suggest-price", GetCandidateSuggestPrice(svc))
 	admin.DELETE("/models/:id/candidates/:candidateId", DeleteModelCandidate(svc))
+	admin.POST("/providers/:id/models/import", PostProviderModelsImport(svc))
+	admin.POST("/providers/:id/models/suggest-prices", PostProviderSuggestPrices(svc))
 	return r, db
 }
 

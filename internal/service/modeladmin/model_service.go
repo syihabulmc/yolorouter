@@ -31,7 +31,16 @@ const (
 	ModelRunningStatusUnavailable   = "unavailable"
 )
 
-var modelNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+// Slashes are allowed as SEGMENT SEPARATORS because upstream catalogs
+// routinely namespace model ids (Qwen/Qwen3-..., deepseek-ai/DeepSeek-...) and
+// bulk import keeps the external name equal to the upstream name. Leading,
+// trailing, and doubled slashes are rejected: no real upstream id has them,
+// and the discovery route trims boundary slashes from its catch-all parameter,
+// so a name like "foo/" could never be retrieved as itself. Known limit: a
+// slash-named model cannot be addressed through the Gemini-native ingress,
+// whose URL shape embeds the model name in a path segment — such models are
+// called via the JSON-body protocols.
+var modelNamePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+(?:/[a-zA-Z0-9._-]+)*$`)
 
 type ModelService struct {
 	db      *gorm.DB
@@ -290,7 +299,7 @@ func isValidModelName(name string) bool {
 
 func (s *ModelService) CreateModel(input CreateModelInput, now time.Time) (*ModelView, error) {
 	if !isValidModelName(input.Name) {
-		return nil, fmt.Errorf("%w: model name must contain only letters, digits, dots, hyphens, and underscores", errcode.ErrModelNameTaken)
+		return nil, fmt.Errorf("%w: model name must be slash-separated segments of letters, digits, dots, hyphens, and underscores", errcode.ErrModelNameTaken)
 	}
 	if _, err := repository.FindModelByName(s.db, input.Name); err == nil {
 		return nil, errcode.ErrModelNameTaken
@@ -384,6 +393,12 @@ type CreateCandidateInput struct {
 	ManagementStatus  int // requested target status; only ==Enabled triggers the server-side retest
 }
 
+// Where a suggested price came from; empty ("") means nothing matched.
+const (
+	PriceSourceHistory = "history"
+	PriceSourceSeed    = "seed"
+)
+
 // SuggestedPrice is one auto-fill result for a provider+model pair. The four
 // price slots mirror model.ModelCandidate; Source records where the value came
 // from so the UI can tell the admin ("from history" vs "from official catalog")
@@ -429,7 +444,7 @@ func (s *ModelService) SuggestCandidatePrice(providerID uint, providerModelName 
 			OutputPrice:     hist.OutputPrice,
 			CacheWritePrice: hist.CacheWritePrice,
 			CacheReadPrice:  hist.CacheReadPrice,
-			Source:          "history",
+			Source:          PriceSourceHistory,
 		}, nil
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return SuggestedPrice{}, err
@@ -449,7 +464,7 @@ func (s *ModelService) SuggestCandidatePrice(providerID uint, providerModelName 
 			OutputPrice:      p.Output,
 			CacheWritePrice:  p.CacheWrite,
 			CacheReadPrice:   p.CacheRead,
-			Source:           "seed",
+			Source:           PriceSourceSeed,
 			CatalogUpdatedAt: pricecatalog.UpdatedAt(),
 		}, nil
 	}
@@ -1220,7 +1235,7 @@ func (s *ModelService) DeleteModelCandidate(id uint) error {
 // unconverted, which is the feature's normal degrade mode.
 func (s *ModelService) UpdateModelNameStatus(id uint, name string, imageInputSet bool, imageInput *bool, now time.Time) (*ModelView, error) {
 	if !isValidModelName(name) {
-		return nil, fmt.Errorf("%w: model name must contain only letters, digits, dots, hyphens, and underscores", errcode.ErrModelNameTaken)
+		return nil, fmt.Errorf("%w: model name must be slash-separated segments of letters, digits, dots, hyphens, and underscores", errcode.ErrModelNameTaken)
 	}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		m, err := repository.FindModelByID(tx, id)

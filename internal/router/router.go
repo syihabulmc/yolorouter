@@ -346,6 +346,11 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	// does not exist yet — there is no :candidateId to scope it to.
 	protected.GET("/models/candidates/suggest-price", handler.GetCandidateSuggestPrice(modelSvc))
 	protected.POST("/models/:id/candidates/test-and-create", handler.PostModelCandidateTestAndCreate(modelSvc))
+	// Bulk import routes live under /providers/:id because their subject is
+	// "this provider's upstream catalog", but they are model-domain operations
+	// (they create models and candidates), hence the model service.
+	protected.POST("/providers/:id/models/import", handler.PostProviderModelsImport(modelSvc))
+	protected.POST("/providers/:id/models/suggest-prices", handler.PostProviderSuggestPrices(modelSvc))
 	protected.PATCH("/models/:id/candidates/:candidateId", handler.PatchModelCandidate(modelSvc))
 	protected.PATCH("/models/:id/candidates/:candidateId/order", handler.PatchModelCandidateOrder(modelSvc))
 	protected.PATCH("/models/:id/candidates/:candidateId/status", handler.PatchModelCandidateStatus(modelSvc))
@@ -464,7 +469,11 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	// They reuse the same APIKeyAuth + body-cap chain the relay POSTs above
 	// use, so a caller presents the same key as for a completion request.
 	v1.GET("/models", gateway.ListModels(db))
-	v1.GET("/models/:model", gateway.RetrieveModel(db))
+	// A catch-all (not ":model") because model ids may be slash-namespaced
+	// (deepseek-ai/DeepSeek-V4): net/http decodes "%2F" in URL.Path before
+	// gin matches, so a single-segment param can never see such a name. The
+	// handler strips the leading "/" gin includes in a catch-all value.
+	v1.GET("/models/*model", gateway.RetrieveModel(db))
 
 	v1beta := gatewayGroup(r, "/v1beta", bodiesDir, db)
 	// :modelaction captures the whole "{model}:{action}" path segment (a

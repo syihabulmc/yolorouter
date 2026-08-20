@@ -74,6 +74,87 @@ func ListModelCandidatesByModelIDs(db *gorm.DB, modelIDs []uint) ([]model.ModelC
 	return candidates, nil
 }
 
+// ListModelsByNames resolves a set of names in one query — the bulk-import
+// preload that replaces a per-name FindModelByName loop.
+func ListModelsByNames(db *gorm.DB, names []string) ([]model.Model, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	var models []model.Model
+	if err := db.Where("name IN ?", names).Find(&models).Error; err != nil {
+		return nil, err
+	}
+	return models, nil
+}
+
+// bulkInsertBatchSize caps rows per INSERT so the widest table stays far below
+// SQLite's 32,766 bind-variable limit (ModelCandidate maps ~20 columns; one
+// unchunked 2,000-row insert would need ~40,000 variables and fail). The
+// batches still run inside whatever transaction the caller opened, so
+// atomicity is unchanged.
+const bulkInsertBatchSize = 500
+
+// CreateModelsBulk inserts the rows in bounded batches. GORM fills the primary
+// keys back on both supported backends; per-row hooks still run.
+func CreateModelsBulk(db *gorm.DB, models []*model.Model) error {
+	if len(models) == 0 {
+		return nil
+	}
+	return db.CreateInBatches(models, bulkInsertBatchSize).Error
+}
+
+// CreateModelCandidatesBulk is CreateModelsBulk for candidates; BeforeCreate
+// runs per row, so the folded-name and price-clock guarantees hold for bulk
+// inserts too.
+func CreateModelCandidatesBulk(db *gorm.DB, candidates []*model.ModelCandidate) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	return db.CreateInBatches(candidates, bulkInsertBatchSize).Error
+}
+
+// ListMappedModelIDs returns which of the given models already have a mapping
+// for this provider — one membership query instead of a per-model existence
+// check.
+func ListMappedModelIDs(db *gorm.DB, providerID uint, modelIDs []uint) (map[uint]bool, error) {
+	if len(modelIDs) == 0 {
+		return map[uint]bool{}, nil
+	}
+	var ids []uint
+	if err := db.Model(&model.ModelCandidate{}).Where("provider_id = ? AND model_id IN ?", providerID, modelIDs).
+		Pluck("model_id", &ids).Error; err != nil {
+		return nil, err
+	}
+	mapped := make(map[uint]bool, len(ids))
+	for _, id := range ids {
+		mapped[id] = true
+	}
+	return mapped, nil
+}
+
+// MaxCandidateSortOrders returns each model's current highest sort_order in
+// one grouped query; models with no candidates are simply absent (treat as 0).
+func MaxCandidateSortOrders(db *gorm.DB, modelIDs []uint) (map[uint]int, error) {
+	if len(modelIDs) == 0 {
+		return map[uint]int{}, nil
+	}
+	var rows []struct {
+		ModelID  uint
+		MaxOrder int
+	}
+	if err := db.Model(&model.ModelCandidate{}).
+		Select("model_id, COALESCE(MAX(sort_order), 0) AS max_order").
+		Where("model_id IN ?", modelIDs).Group("model_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	orders := make(map[uint]int, len(rows))
+	for _, r := range rows {
+		orders[r.ModelID] = r.MaxOrder
+	}
+	return orders, nil
+}
+
 func FindModelCandidateByID(db *gorm.DB, id uint) (*model.ModelCandidate, error) {
 	var c model.ModelCandidate
 	if err := db.Where("id = ?", id).First(&c).Error; err != nil {
@@ -166,6 +247,34 @@ func SetModelCandidateManagementStatus(db *gorm.DB, id uint, status int, now tim
 // Only the columns needed to answer the question are selected; the row is a
 // price carrier, not a full candidate, so everything else stays zero-valued and
 // must not be relied on.
+// FindLatestCandidatePricesByFoldedNames is the batch form of
+// FindLatestCandidatePrice: one query for a whole import dialog instead of one
+// per row. Keys of the returned map are folded names; a name with no history
+// is simply absent. The recency rule is identical to the single look-up
+// (price_updated_at DESC, id DESC): rows arrive in that order and the first
+// row seen per folded name wins.
+func FindLatestCandidatePricesByFoldedNames(db *gorm.DB, providerID uint, foldedNames []string) (map[string]model.ModelCandidate, error) {
+	if len(foldedNames) == 0 {
+		return map[string]model.ModelCandidate{}, nil
+	}
+	var rows []model.ModelCandidate
+	err := db.
+		Select("input_price", "output_price", "cache_write_price", "cache_read_price", "price_updated_at", "provider_model_name_folded").
+		Where("provider_id = ? AND provider_model_name_folded IN ?", providerID, foldedNames).
+		Order("price_updated_at DESC, id DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	latest := make(map[string]model.ModelCandidate, len(rows))
+	for _, r := range rows {
+		if _, seen := latest[r.ProviderModelNameFolded]; !seen {
+			latest[r.ProviderModelNameFolded] = r
+		}
+	}
+	return latest, nil
+}
+
 func FindLatestCandidatePrice(db *gorm.DB, providerID uint, providerModelName string) (*model.ModelCandidate, error) {
 	folded := model.FoldModelName(providerModelName)
 	if folded == "" {

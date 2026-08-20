@@ -5,8 +5,8 @@ export default {
   listEmpty: '暂无模型，点击右上角新建',
   createButton: '新建模型',
   name: '对外模型名称',
-  name_tip: '对外暴露的模型名称，客户端请求时使用，只允许字母、数字、短横线、下划线和点',
-  nameHint: '只允许字母、数字、短横线、下划线和点',
+  name_tip: '对外暴露的模型名称，客户端请求时使用，只允许字母、数字、短横线、下划线和点，可用斜杠分隔命名空间（斜杠不能出现在首尾或连续出现）',
+  nameHint: '只允许字母、数字、短横线、下划线和点，斜杠仅可作分隔符',
   managementStatusColumn: '管理状态',
   managementStatusColumn_tip: '管理员手动设置的启用/停用状态，停用后该模型拒绝全部新请求',
   runningStatusColumn: '运行状态',
@@ -157,6 +157,6 @@ export default {
   cancel: '取消',
   save: '保存',
   fieldRequired: '该字段为必填项',
-  nameInvalid: '只允许字母、数字、短横线、下划线和点',
+  nameInvalid: '只允许字母、数字、短横线、下划线和点，斜杠仅可作分隔符（不能位于首尾或连续出现）',
   priceNonNegative: '成本不能为负数',
 }

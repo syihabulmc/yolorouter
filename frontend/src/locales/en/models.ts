@@ -5,8 +5,8 @@ export default {
   listEmpty: 'No models yet — click "New Model" to create one',
   createButton: 'New Model',
   name: 'External Model Name',
-  name_tip: 'Externally exposed model name used by client requests. Only letters, digits, hyphens, underscores, and dots are allowed',
-  nameHint: 'Only letters, digits, hyphens, underscores, and dots are allowed',
+  name_tip: 'Externally exposed model name used by client requests. Letters, digits, hyphens, underscores, and dots, with slashes as namespace separators (not leading, trailing, or doubled)',
+  nameHint: 'Letters, digits, hyphens, underscores, and dots; slashes as separators only',
   managementStatusColumn: 'Status',
   managementStatusColumn_tip: 'Manually set enabled/disabled status. When disabled, this model rejects all new requests',
   runningStatusColumn: 'Running Status',
@@ -157,6 +157,6 @@ export default {
   cancel: 'Cancel',
   save: 'Save',
   fieldRequired: 'This field is required',
-  nameInvalid: 'Only letters, digits, hyphens, underscores, and dots are allowed',
+  nameInvalid: 'Letters, digits, hyphens, underscores, and dots only; slashes may only separate segments (not leading, trailing, or doubled)',
   priceNonNegative: 'Price cannot be negative',
 }
