@@ -114,6 +114,7 @@ import VisionFallbackModal from '../../components/models/VisionFallbackModal.vue
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
 import ResponsiveDropdown from '../../components/common/ResponsiveDropdown.vue'
 import FilterSelectField from '../../components/common/FilterSelectField.vue'
+import { ccsProfileName } from '../../utils/format'
 import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
 
 const { t, te } = useI18n()
@@ -414,7 +415,7 @@ const sharedColumns = computed<DataTableColumns<Model>>(() => [
                 if (key === 'edit') openEditModel(row)
                 else if (key === 'viewCost') router.push(modelCostDetailLocation(row.name))
                 else if (key === 'importCCSImport')
-                  importToCCS({ name: `YoloRouter${row.name ? ` - ${row.name}` : ''}`, model: row.name })
+                  importToCCS({ name: ccsProfileName(row.name), model: row.name })
               },
             },
             {

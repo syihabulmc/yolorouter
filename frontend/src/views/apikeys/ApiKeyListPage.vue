@@ -92,7 +92,7 @@ import { useAuthStore } from '../../store/auth'
 import { displayMessage, errorCodeOf } from '../../api/client'
 import { columnTitle, STATUS_COL_WIDTH } from '../../utils/columnTitle'
 import { formatMicros } from '../../utils/money'
-import { callerDisplay } from '../../utils/format'
+import { ccsProfileName } from '../../utils/format'
 import { useCCSwitchImport } from '../../composables/useCCSwitchImport'
 import { useUserOptions } from '../../composables/useUserOptions'
 import { copyToClipboard } from '../../utils/clipboard'
@@ -386,10 +386,12 @@ async function importKeyToCCS(row: APIKey) {
   if (importingId.value !== null) return
   importingId.value = row.id
   try {
-    // Owner + key prefix, so several keys of one account import as
-    // distinguishable CC-Switch profiles instead of identical names.
-    const identity = callerDisplay(row.owner_username, row.key_prefix)
-    const name = `YoloRouter${identity ? ` - ${identity}` : ''}`
+    // Owner + key id, so several keys of one account import as
+    // distinguishable CC-Switch profiles instead of identical names. The id
+    // is unique per key; two distinct keys can share a truncated 16-char
+    // prefix, so it would not.
+    const identity = row.owner_username ? `${row.owner_username} (#${row.id})` : `#${row.id}`
+    const name = ccsProfileName(identity)
     let plaintext: string | undefined
     try {
       plaintext = (await store.fetchPlaintext(row.id)).plaintext_key

@@ -25,3 +25,11 @@ export function callerDisplay(username: string, keyPrefix: string): string {
   if (keyPrefix) return `${keyPrefix}…`
   return ''
 }
+
+// ccsProfileName renders the provider name the CC-Switch import deep link
+// carries: the fixed "YoloRouter" brand plus the importing entry's identity
+// (a model name on the models page, owner + key id on the API-keys page).
+// An empty identity still yields a valid, brand-only name.
+export function ccsProfileName(identity?: string): string {
+  return `YoloRouter${identity ? ` - ${identity}` : ''}`
+}
