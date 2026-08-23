@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,11 +158,16 @@ func TestImportProviderModelsSkipsExistingMappingInvalidNameAndInBatchDuplicate(
 		t.Fatalf("seed CreateModelCandidate failed: %v", err)
 	}
 
+	// The 151-char name pins the public-model length limit as a PER-ITEM skip:
+	// bulk import publishes the upstream id as the model name (capped at 100),
+	// and an over-long id must not fail the whole batch.
+	overlong := strings.Repeat("x", 151)
 	result, err := svc.ImportProviderModels(p.ID, []modeladmin.ImportModelItem{
 		{ProviderModelName: "already-mapped", InputPrice: 1, OutputPrice: 2},
 		{ProviderModelName: "bad name!", InputPrice: 1, OutputPrice: 2},
 		{ProviderModelName: "fresh-one", InputPrice: 1, OutputPrice: 2},
 		{ProviderModelName: "fresh-one", InputPrice: 9, OutputPrice: 9},
+		{ProviderModelName: overlong, InputPrice: 1, OutputPrice: 2},
 	}, now)
 	if err != nil {
 		t.Fatalf("ImportProviderModels failed: %v", err)
@@ -175,6 +181,7 @@ func TestImportProviderModelsSkipsExistingMappingInvalidNameAndInBatchDuplicate(
 	want := []string{
 		modeladmin.ImportStatusSkipped, modeladmin.ImportStatusSkipped,
 		modeladmin.ImportStatusCreated, modeladmin.ImportStatusSkipped,
+		modeladmin.ImportStatusSkipped,
 	}
 	for i, w := range want {
 		if statuses[i] != w {
@@ -190,9 +197,83 @@ func TestImportProviderModelsSkipsExistingMappingInvalidNameAndInBatchDuplicate(
 	if reasons[3] != modeladmin.BatchSkipReasonExists {
 		t.Fatalf("in-batch duplicate must skip as exists, got %q", reasons[3])
 	}
-	if result.Created != 1 || result.Appended != 0 || result.Skipped != 3 {
+	if reasons[4] != modeladmin.BatchSkipReasonInvalid {
+		t.Fatalf("an over-long name must skip as invalid per item, got %q", reasons[4])
+	}
+	if result.Created != 1 || result.Appended != 0 || result.Skipped != 4 {
 		t.Fatalf("summary counts must mirror the per-item statuses, got created=%d appended=%d skipped=%d",
 			result.Created, result.Appended, result.Skipped)
+	}
+}
+
+// Re-importing a name whose mapping exists but was never decisively probed
+// must surface that mapping's id so the caller can requeue it — this is the
+// promised recovery path for probes lost to a restart (the queue is not
+// durable; the candidate rows are the state of record). A mapping that already
+// holds a verdict is genuinely done and stays id-less, so nothing re-probes it
+// behind the operator's back.
+func TestImportProviderModelsReturnsUnfinishedMappingIDsForRequeue(t *testing.T) {
+	svc, db, _ := newTestModelService(t)
+	now := time.Now().UTC()
+	p := seedEnabledProvider(t, db, "prov-a")
+
+	// One unfinished (untested) mapping, one settled (passed+enabled) mapping.
+	unfinishedModel, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "unfinished-model"}, now)
+	if err != nil {
+		t.Fatalf("seed CreateModel failed: %v", err)
+	}
+	unfinished, err := svc.CreateModelCandidate(context.Background(), unfinishedModel.ID, modeladmin.CreateCandidateInput{
+		ProviderID: p.ID, InputPrice: 1, OutputPrice: 2,
+	}, now)
+	if err != nil {
+		t.Fatalf("seed unfinished candidate failed: %v", err)
+	}
+	// The unfinished mapping carries the residue of an earlier inconclusive
+	// attempt. The requeue must clear it: last_tested_at is what pollers on
+	// OTHER instances (which cannot see this instance's in-memory queue) use
+	// to tell "attempted, settled" from "waiting for its probe" — leaving the
+	// stale stamp would make them declare the requeued row done mid-probe.
+	staleDetail := "HTTP 429: rate limited"
+	if err := db.Model(&model.ModelCandidate{}).Where("id = ?", unfinished.ID).
+		Updates(map[string]interface{}{"last_tested_at": now.Add(-time.Hour), "last_test_error": staleDetail}).Error; err != nil {
+		t.Fatalf("seed stale attempt residue failed: %v", err)
+	}
+	settledModel, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "settled-model"}, now)
+	if err != nil {
+		t.Fatalf("seed CreateModel failed: %v", err)
+	}
+	settled, err := svc.CreateModelCandidate(context.Background(), settledModel.ID, modeladmin.CreateCandidateInput{
+		ProviderID: p.ID, InputPrice: 1, OutputPrice: 2,
+	}, now)
+	if err != nil {
+		t.Fatalf("seed settled candidate failed: %v", err)
+	}
+	if err := db.Model(&model.ModelCandidate{}).Where("id = ?", settled.ID).
+		Update("verification_status", model.ModelVerificationStatusPassed).Error; err != nil {
+		t.Fatalf("seed settled verdict failed: %v", err)
+	}
+
+	result, err := svc.ImportProviderModels(p.ID, []modeladmin.ImportModelItem{
+		{ProviderModelName: "unfinished-model", InputPrice: 1, OutputPrice: 2},
+		{ProviderModelName: "settled-model", InputPrice: 1, OutputPrice: 2},
+	}, now)
+	if err != nil {
+		t.Fatalf("ImportProviderModels failed: %v", err)
+	}
+	if result.Items[0].Status != modeladmin.ImportStatusSkipped || result.Items[0].CandidateID != unfinished.ID {
+		t.Fatalf("expected the unfinished mapping to skip WITH its candidate id %d for requeue, got %+v", unfinished.ID, result.Items[0])
+	}
+	if result.Items[1].Status != modeladmin.ImportStatusSkipped || result.Items[1].CandidateID != 0 {
+		t.Fatalf("expected the settled mapping to skip WITHOUT a candidate id, got %+v", result.Items[1])
+	}
+
+	var requeued model.ModelCandidate
+	if err := db.First(&requeued, unfinished.ID).Error; err != nil {
+		t.Fatalf("load requeued candidate: %v", err)
+	}
+	if requeued.LastTestedAt != nil || requeued.LastTestError != nil {
+		t.Fatalf("expected the requeue to clear the stale attempt residue, got tested_at=%v error=%v",
+			requeued.LastTestedAt, requeued.LastTestError)
 	}
 }
 

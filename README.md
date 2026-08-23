@@ -43,6 +43,7 @@ the box; switch to PostgreSQL when you want it.
 
 - **Multi-provider failover.** Map one public model name (e.g. `smart`) to an ordered list of provider candidates. When one is down, requests fail over to the next; the caller never sees a different model name.
 - **Upstream key pool.** Give each provider a pool of upstream keys and load spreads across it round-robin. A rate-limited key is benched for its `Retry-After` window (later requests walk healthier keys first); unauthorized or quota-exhausted keys are taken out until a retest passes.
+- **One-click model import.** After you add a provider, the gateway fetches its live model catalogue — tick the models you want and import them all at once. Every imported mapping is verified against the real upstream in the background and auto-enabled when it passes; failures keep their diagnostic for a one-click retest. Models found in the built-in price catalog come pre-priced.
 - **Model aliasing.** Callers request a stable public name; each provider candidate maps it to whatever model id that provider actually expects. Candidate mappings are probed against the real upstream when you save them, so a typo is caught at configuration time, not at 3 a.m.
 - **Vision fallback.** Let text-only models "see". Mark a model as unable to read images and pick a vision model in the console; images in incoming requests are described by the vision model and forwarded as text, transparently to the caller, on every ingress protocol. With no vision model configured, images degrade to a clear placeholder instead of an upstream error.
 - **Streaming done right.** Key rotation and failover happen *before* the first byte reaches the client; once streaming starts, the provider is locked in. Content from two providers is never stitched into one response.
@@ -155,8 +156,11 @@ the database is backed up first. Prefer a plain binary? Grab a
 
 Whichever way you start it, the first run generates `configs/config.yaml`,
 applies migrations and starts the console on port 8080. Create the first admin
-account, then follow the guided flow: add providers and upstream keys, create
-models with their provider candidates, and issue API keys.
+account, then follow the guided flow: add a provider with its upstream key —
+the console then fetches that provider's model catalogue so you can import the
+models you want in one click. Each imported model is verified against the real
+upstream in the background and enabled automatically once it passes. Finally,
+issue an API key and start calling.
 
 → **Full installation guide for every platform, including building from source:**
 [yolorouter.com/help?p=self-hosted/installation](https://yolorouter.com/help?p=self-hosted/installation&utm_source=oss-readme&utm_medium=repo)

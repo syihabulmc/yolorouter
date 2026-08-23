@@ -301,12 +301,25 @@ func PostModelCandidateTest(svc *modeladmin.ModelService) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		view, err := svc.RetestModelCandidate(c.Request.Context(), candidateID, timeNow())
+		view, applied, err := svc.RetestModelCandidate(c.Request.Context(), candidateID, timeNow())
 		if err != nil {
 			writeServiceError(c, err)
 			return
 		}
-		response.Success(c, view)
+		// applied=false means a concurrent probe or edit won the commit race and
+		// the view reflects the competitor's result — the client needs the flag
+		// to avoid announcing another probe's outcome as this retest's.
+		//
+		// The embedded view keeps the candidate's fields at the TOP level of
+		// data alongside the nested form: this endpoint used to return the
+		// bare candidate, and browser tabs loaded before a server upgrade
+		// still read it that way — for them a shape-only change would turn
+		// every successful retest into a warning.
+		response.Success(c, struct {
+			*modeladmin.CandidateView
+			Candidate *modeladmin.CandidateView `json:"candidate"`
+			Applied   bool                      `json:"applied"`
+		}{CandidateView: view, Candidate: view, Applied: applied})
 	}
 }
 

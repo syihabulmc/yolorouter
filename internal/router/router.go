@@ -133,6 +133,11 @@ type Deps struct {
 	// transport, letting a self-hosted operator reach a LAN/localhost model
 	// server.
 	AllowPrivateUpstreams bool
+	// ProbeQueue receives the candidates a bulk import stores, for background
+	// verification. The server owns its lifecycle (start/stop with serve's own
+	// context) and passes it in; a nil queue — router tests that never
+	// exercise imports — simply skips enqueueing.
+	ProbeQueue *modeladmin.ProbeQueue
 	// Gateway carries the relay timeouts and limits, threaded through so the
 	// wiring stays identical to production instead of a zero struct.
 	Gateway config.GatewayConfig
@@ -349,8 +354,9 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	// Bulk import routes live under /providers/:id because their subject is
 	// "this provider's upstream catalog", but they are model-domain operations
 	// (they create models and candidates), hence the model service.
-	protected.POST("/providers/:id/models/import", handler.PostProviderModelsImport(modelSvc))
+	protected.POST("/providers/:id/models/import", handler.PostProviderModelsImport(modelSvc, deps.ProbeQueue))
 	protected.POST("/providers/:id/models/suggest-prices", handler.PostProviderSuggestPrices(modelSvc))
+	protected.GET("/providers/:id/candidates", handler.GetProviderCandidates(modelSvc, deps.ProbeQueue))
 	protected.PATCH("/models/:id/candidates/:candidateId", handler.PatchModelCandidate(modelSvc))
 	protected.PATCH("/models/:id/candidates/:candidateId/order", handler.PatchModelCandidateOrder(modelSvc))
 	protected.PATCH("/models/:id/candidates/:candidateId/status", handler.PatchModelCandidateStatus(modelSvc))

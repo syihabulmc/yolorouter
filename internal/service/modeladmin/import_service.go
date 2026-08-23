@@ -155,7 +155,7 @@ func (s *ModelService) importProviderModelsOnce(providerID uint, items []ImportM
 			for _, name := range names {
 				modelIDs = append(modelIDs, modelsByName[name].ID)
 			}
-			mapped, err := repository.ListMappedModelIDs(tx, providerID, modelIDs)
+			mapped, err := repository.ListProviderMappingsByModelIDs(tx, providerID, modelIDs)
 			if err != nil {
 				return err
 			}
@@ -166,10 +166,21 @@ func (s *ModelService) importProviderModelsOnce(providerID uint, items []ImportM
 
 			newCandidates := make([]*model.ModelCandidate, 0, len(names))
 			candidateNames := make([]string, 0, len(names))
+			requeueIDs := make([]uint, 0)
 			for _, name := range names {
 				m := modelsByName[name]
-				if mapped[m.ID] {
-					results[firstIndex[name]] = ImportItemResult{Name: name, Status: ImportStatusSkipped, Reason: BatchSkipReasonExists, ModelID: m.ID}
+				if existing, ok := mapped[m.ID]; ok {
+					skip := ImportItemResult{Name: name, Status: ImportStatusSkipped, Reason: BatchSkipReasonExists, ModelID: m.ID}
+					// An existing mapping still waiting on a verdict surfaces its
+					// id so the caller can requeue it — re-import is the promised
+					// recovery for probes lost to a restart (the queue is not
+					// durable). A mapping that already holds a verdict is done;
+					// leaving its id out keeps it from being re-probed unasked.
+					if existing.VerificationStatus == model.ModelVerificationStatusUntested {
+						skip.CandidateID = existing.ID
+						requeueIDs = append(requeueIDs, existing.ID)
+					}
+					results[firstIndex[name]] = skip
 					continue
 				}
 				item := items[firstIndex[name]]
@@ -180,6 +191,14 @@ func (s *ModelService) importProviderModelsOnce(providerID uint, items []ImportM
 					MaxOutput:          item.MaxOutput,
 					ManagementStatus:   model.ModelCandidateStatusDisabled,
 					VerificationStatus: model.ModelVerificationStatusUntested,
+					// The import's auto-enable promise, persisted so the queue
+					// can honor it at commit time and an explicit disable can
+					// revoke it in between. ArmedAt equals this row's
+					// UpdatedAt on purpose: the probe commit's enable checks
+					// that alignment, and any later write — by any binary
+					// version — bumps updated_at and thereby blocks it.
+					AutoEnableOnPass: true,
+					ArmedAt:          &now,
 					// Each model appears once per batch (per-name dedup above),
 					// so max+1 cannot collide within the batch itself.
 					SortOrder: maxOrders[m.ID] + 1,
@@ -189,6 +208,37 @@ func (s *ModelService) importProviderModelsOnce(providerID uint, items []ImportM
 			}
 			if err := repository.CreateModelCandidatesBulk(tx, newCandidates); err != nil {
 				return err
+			}
+			// Requeued mappings shed their previous attempt's record inside the
+			// same transaction: the fresh probe supersedes it, and the cleared
+			// last_tested_at is what keeps pollers on OTHER instances (blind to
+			// this process's in-memory queue) treating the row as still waiting
+			// rather than settled-inconclusive. The advanced probe token makes
+			// every probe already in flight for these rows miss its commit.
+			//
+			// The clear is conditional (Untested guard), so the response may
+			// only report the rows it ACTUALLY re-armed — identified by the
+			// requeue token. A row a concurrent probe settled between the
+			// read above and this UPDATE keeps its own token; announcing it
+			// as requeued would make the caller enqueue a probe for a row
+			// that is done and whose enable promise was never renewed.
+			requeueToken := newRequeueRunID()
+			if err := repository.ClearCandidatesProbeResidue(tx, requeueIDs, requeueToken, now); err != nil {
+				return err
+			}
+			hitIDs, err := repository.ListCandidateIDsByProbeRunID(tx, requeueIDs, requeueToken)
+			if err != nil {
+				return err
+			}
+			hit := make(map[uint]bool, len(hitIDs))
+			for _, id := range hitIDs {
+				hit[id] = true
+			}
+			for i := range results {
+				r := &results[i]
+				if r.Status == ImportStatusSkipped && r.CandidateID != 0 && !hit[r.CandidateID] {
+					r.CandidateID = 0
+				}
 			}
 			for j, c := range newCandidates {
 				name := candidateNames[j]

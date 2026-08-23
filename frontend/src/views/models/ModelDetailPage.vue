@@ -82,6 +82,7 @@ import { displayMessage } from '../../api/client'
 import { useConfirmedStatusToggle } from '../../composables/useConfirmedStatusToggle'
 import { modelDisableCopy, modelImpactOverview } from '../../utils/impactSummary'
 import { candidateTestResultText, capabilityState, modelRunningStatusDisplay, routableMark } from '../../utils/modelStatusDisplay'
+import { redirectIfSessionExpired } from '../../utils/sessionExpiredRedirect'
 import { isTestSuccess } from '../../utils/testOutcomeDisplay'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import { getModelImpact, type Model, type ModelCandidate, type ModelImpact } from '../../api/models'
@@ -177,8 +178,15 @@ function onEditCandidate(candidate: ModelCandidate) {
 async function onRetestCandidate(candidateId: number) {
   testingCandidateId.value = candidateId
   try {
-    const updated = await store.retestCandidate(modelId, candidateId)
+    const { candidate: updated, applied } = await store.retestCandidate(modelId, candidateId)
     await reload()
+    if (!applied) {
+      // A concurrent probe won the commit race, so the row now carries ITS
+      // result; announcing it as this click's could state the opposite of
+      // what this run observed.
+      message.info(t('providers.retestSuperseded'))
+      return
+    }
     // Two-tier feedback so the click is never silent: pass (green) vs. the
     // specific outcome reason (yellow).
     //
@@ -189,6 +197,7 @@ async function onRetestCandidate(candidateId: number) {
     const passed = updated.last_test_result !== null && isTestSuccess(updated.last_test_result)
     message[passed ? 'success' : 'warning'](candidateTestResultText(t, passed, updated.last_test_result))
   } catch (err) {
+    if (redirectIfSessionExpired(err, router)) return
     message.error(displayMessage(err, t))
   } finally {
     testingCandidateId.value = null

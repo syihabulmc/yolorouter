@@ -82,7 +82,7 @@ export const useModelsStore = defineStore('models', {
     async setCandidateStatus(modelId: number, candidateId: number, enabled: boolean) {
       await modelsApi.setCandidateStatus(modelId, candidateId, enabled)
     },
-    async retestCandidate(modelId: number, candidateId: number): Promise<ModelCandidate> {
+    async retestCandidate(modelId: number, candidateId: number): Promise<modelsApi.RetestCandidateResult> {
       return modelsApi.retestCandidate(modelId, candidateId)
     },
     async deleteCandidate(modelId: number, candidateId: number) {

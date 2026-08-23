@@ -44,6 +44,7 @@ func TestMemberScopeRouteConformance(t *testing.T) {
 		"/api/admin/oauth-providers",
 		"/api/admin/providers",
 		"/api/admin/providers/:id",
+		"/api/admin/providers/:id/candidates",
 		"/api/admin/providers/:id/impact",
 		"/api/admin/providers/:id/models",
 		"/api/admin/request-logs",

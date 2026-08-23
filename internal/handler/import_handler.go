@@ -28,9 +28,13 @@ type suggestPricesRequest struct {
 }
 
 // PostProviderModelsImport bulk-imports upstream models as model+candidate
-// pairs for one provider. Imported mappings are stored disabled and untested;
-// verification happens asynchronously afterwards.
-func PostProviderModelsImport(svc *modeladmin.ModelService) gin.HandlerFunc {
+// pairs for one provider. Imported mappings are stored disabled and untested,
+// then handed to the probe queue, which verifies each one against the real
+// upstream and auto-enables the ones that pass.
+//
+// queue may be nil only in tests that exercise the storage semantics alone;
+// the server always wires the real queue.
+func PostProviderModelsImport(svc *modeladmin.ModelService, queue *modeladmin.ProbeQueue) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		providerID, ok := parseUintParam(c, "id")
 		if !ok {
@@ -54,7 +58,35 @@ func PostProviderModelsImport(svc *modeladmin.ModelService) gin.HandlerFunc {
 			writeServiceError(c, err)
 			return
 		}
+		if queue != nil {
+			ids := make([]uint, 0, len(result.Items))
+			for _, item := range result.Items {
+				if item.CandidateID != 0 {
+					ids = append(ids, item.CandidateID)
+				}
+			}
+			queue.Enqueue(ids...)
+		}
 		response.Success(c, result)
+	}
+}
+
+// GetProviderCandidates lists every mapping a provider serves with its
+// verification state — the poll target for import progress and the data source
+// of the provider detail page's model tab. The consistency dance (queue-state
+// stamping, torn-snapshot re-read) lives in the service.
+func GetProviderCandidates(svc *modeladmin.ModelService, queue *modeladmin.ProbeQueue) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		providerID, ok := parseUintParam(c, "id")
+		if !ok {
+			return
+		}
+		list, err := svc.ListProviderCandidatesWithQueueStates(providerID, queue)
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		response.Success(c, gin.H{"list": list})
 	}
 }
 

@@ -82,8 +82,35 @@ type ModelCandidate struct {
 	LastTestResult          *int       `gorm:"column:last_test_result" json:"last_test_result"`
 	LastTestDurationMs      *int64     `gorm:"column:last_test_duration_ms" json:"last_test_duration_ms"`
 	LastTestedAt            *time.Time `gorm:"column:last_tested_at" json:"last_tested_at"`
-	CreatedAt               time.Time  `gorm:"column:created_at" json:"created_at"`
-	UpdatedAt               time.Time  `gorm:"column:updated_at" json:"updated_at"`
+	// LastTestError is the diagnostic of the most recent probe that ran and
+	// failed; a passing probe clears it. Nil when no probe has failed (or none
+	// has run). It exists so asynchronous (post-import) probe failures keep an
+	// actionable reason after the request that queued them has returned.
+	LastTestError *string `gorm:"column:last_test_error" json:"last_test_error"`
+	// LastProbeRunID identifies the probe run that last wrote this row's probe
+	// outcome ("" = never probed). It is the ownership token concurrent probes
+	// compare-and-set on: unlike a timestamp, ids never collide or order
+	// ambiguously, and a run can recognize its own already-applied write after
+	// a lost acknowledgment by reading the id back. Storage detail, not API.
+	LastProbeRunID string `gorm:"column:last_probe_run_id" json:"-"`
+	// AutoEnableOnPass is the import flow's standing promise: armed by bulk
+	// import (and re-armed by a requeue), it lets the background probe queue
+	// enable the row on a pass — checked inside the commit statement, so an
+	// admin's explicit disable (which clears it) wins whether the probe is
+	// still queued or mid-flight. A pass consumes it either way: fulfilled
+	// when the row was still aligned (see ArmedAt), revoked when it was not.
+	// Storage detail, not API.
+	AutoEnableOnPass bool `gorm:"column:auto_enable_on_pass" json:"-"`
+	// ArmedAt pins when the promise was armed: arming writes it equal to the
+	// same statement's updated_at, and the enable requires the equality to
+	// still hold at commit time. Every writer of this table bumps updated_at
+	// — including binaries too old to know the armed columns — so any write
+	// after arming breaks the alignment and blocks the auto-enable. The row
+	// itself carries the revocation signal an old binary's disable could not
+	// otherwise leave. Storage detail, not API.
+	ArmedAt   *time.Time `gorm:"column:armed_at" json:"-"`
+	CreatedAt time.Time  `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt time.Time  `gorm:"column:updated_at" json:"updated_at"`
 	// PriceUpdatedAt is when one of the four price columns was last written.
 	// UpdatedAt cannot answer that: enabling, disabling, retesting and probing
 	// all bump it without touching a price, so ordering price history by it
