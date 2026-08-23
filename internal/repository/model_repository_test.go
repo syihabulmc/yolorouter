@@ -70,7 +70,7 @@ func TestListModelsOrdersByID(t *testing.T) {
 	}
 }
 
-func TestUpdateModelNameStatus(t *testing.T) {
+func TestUpdateModel(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	m := &model.Model{Name: "smart", ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
@@ -78,8 +78,8 @@ func TestUpdateModelNameStatus(t *testing.T) {
 		t.Fatalf("CreateModel failed: %v", err)
 	}
 
-	if err := UpdateModelNameStatus(db, m.ID, "smart-v2", model.ModelStatusDisabled, false, nil, now); err != nil {
-		t.Fatalf("UpdateModelNameStatus failed: %v", err)
+	if err := UpdateModel(db, m.ID, ModelUpdate{Name: "smart-v2", Status: model.ModelStatusDisabled}, now); err != nil {
+		t.Fatalf("UpdateModel failed: %v", err)
 	}
 	reloaded, err := FindModelByID(db, m.ID)
 	if err != nil {

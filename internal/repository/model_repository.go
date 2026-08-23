@@ -38,16 +38,31 @@ func CreateModel(db *gorm.DB, m *model.Model) error {
 	return db.Create(m).Error
 }
 
-// UpdateModelNameStatus writes name/status — and, when imageInputSet is
-// true, the tri-state image-input declaration — in ONE statement, so a
-// concurrent PATCH can never interleave the fields into a row neither
-// caller submitted. imageInput nil with imageInputSet=true stores NULL
-// (clearing a previous declaration); imageInputSet=false leaves the column
+// ModelUpdate carries one PATCH's writes to a model row. Name and Status are
+// always written; the optional fields keep "absent, leave the column alone"
+// distinguishable from a submitted value. ImageInput needs the explicit
+// set-flag because its value is itself tri-state: nil with ImageInputSet=true
+// stores NULL (clearing a previous declaration). SchedulingMode has no NULL
+// state, so the pointer alone carries set-ness: nil leaves the column
 // untouched.
-func UpdateModelNameStatus(db *gorm.DB, id uint, name string, status int, imageInputSet bool, imageInput *bool, now time.Time) error {
-	updates := map[string]interface{}{"name": name, "management_status": status, "updated_at": now}
-	if imageInputSet {
-		updates["supports_image_input"] = imageInput
+type ModelUpdate struct {
+	Name           string
+	Status         int
+	ImageInputSet  bool
+	ImageInput     *bool
+	SchedulingMode *model.SchedulingMode
+}
+
+// UpdateModel writes every submitted field of u in ONE statement,
+// so a concurrent PATCH can never interleave the fields into a row neither
+// caller submitted.
+func UpdateModel(db *gorm.DB, id uint, u ModelUpdate, now time.Time) error {
+	updates := map[string]interface{}{"name": u.Name, "management_status": u.Status, "updated_at": now}
+	if u.ImageInputSet {
+		updates["supports_image_input"] = u.ImageInput
+	}
+	if u.SchedulingMode != nil {
+		updates["scheduling_mode"] = *u.SchedulingMode
 	}
 	return db.Model(&model.Model{}).Where("id = ?", id).Updates(updates).Error
 }

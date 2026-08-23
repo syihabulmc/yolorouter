@@ -25,13 +25,26 @@ export interface ModelCandidate {
   last_test_result: number | null
   last_test_duration_ms: number | null
   last_tested_at: string | null
+  /**
+   * How many caller API keys the gateway currently has pinned to this
+   * candidate's provider for this model (balanced scheduling only; always 0
+   * for failover). Populated only by the model-detail endpoint — a 0 in any
+   * other response means "not collected", not "nobody bound". A momentary
+   * in-memory snapshot that a restart resets.
+   */
+  binding_count: number
 }
+
+/** How the gateway orders a model's candidate chain: which candidate leads. */
+export type SchedulingMode = 'failover' | 'balanced'
 
 export interface Model {
   id: number
   name: string
   management_status: number
   running_status: string
+  /** Which candidate leads each request; 'failover' for pre-upgrade rows. */
+  scheduling_mode: SchedulingMode
   /**
    * Tri-state image-input declaration: null = undeclared (the gateway leaves
    * images alone), true/false = the admin's statement of whether this model
@@ -100,8 +113,19 @@ export function listModels(): Promise<{ list: Model[] }> {
   return apiFetch('/api/admin/models')
 }
 
-export function createModel(name: string): Promise<Model> {
-  return apiFetch('/api/admin/models', { method: 'POST', body: JSON.stringify({ name }) })
+// compactBody serialises the given fields, dropping the ones the caller did
+// not submit — an absent optional stays absent on the wire, which the update
+// endpoint's "present switches, absent keeps" contract depends on.
+function compactBody(fields: Record<string, unknown>): string {
+  const body: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined) body[key] = value
+  }
+  return JSON.stringify(body)
+}
+
+export function createModel(name: string, schedulingMode?: SchedulingMode): Promise<Model> {
+  return apiFetch('/api/admin/models', { method: 'POST', body: compactBody({ name, scheduling_mode: schedulingMode }) })
 }
 
 export interface BatchSkippedModel {
@@ -114,8 +138,8 @@ export interface BatchCreateModelsResult {
   skipped: BatchSkippedModel[]
 }
 
-export function createModelsBatch(names: string[]): Promise<BatchCreateModelsResult> {
-  return apiFetch('/api/admin/models/batch', { method: 'POST', body: JSON.stringify({ names }) })
+export function createModelsBatch(names: string[], schedulingMode?: SchedulingMode): Promise<BatchCreateModelsResult> {
+  return apiFetch('/api/admin/models/batch', { method: 'POST', body: compactBody({ names, scheduling_mode: schedulingMode }) })
 }
 
 export function getModel(id: number): Promise<Model> {
@@ -125,10 +149,19 @@ export function getModel(id: number): Promise<Model> {
 /** The wire form of the tri-state declaration ("unknown" maps to null). */
 export type ImageInputChoice = 'unknown' | 'yes' | 'no'
 
-export function updateModel(id: number, name: string, imageInput?: ImageInputChoice): Promise<Model> {
-  const body: Record<string, unknown> = { name }
-  if (imageInput !== undefined) body.image_input = imageInput
-  return apiFetch(`/api/admin/models/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+// ModelPatch is one PATCH's submitted fields; optional fields left undefined
+// are omitted from the request and keep their current server-side value.
+export interface ModelPatch {
+  name: string
+  imageInput?: ImageInputChoice
+  schedulingMode?: SchedulingMode
+}
+
+export function updateModel(id: number, patch: ModelPatch): Promise<Model> {
+  return apiFetch(`/api/admin/models/${id}`, {
+    method: 'PATCH',
+    body: compactBody({ name: patch.name, image_input: patch.imageInput, scheduling_mode: patch.schedulingMode }),
+  })
 }
 
 export function setModelStatus(id: number, enabled: boolean): Promise<void> {

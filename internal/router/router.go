@@ -459,6 +459,11 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	// path (gateway.IngressProtocol) to pick the caller's actual wire
 	// protocol.
 	relaySvc := gateway.NewService(db, secrets, allowPrivateUpstreams, settingsSvc, gatewayCfg)
+	// The model detail view shows per-candidate sticky-binding counts for
+	// balanced models; both sides must read the registry the relay actually
+	// routes through, so the gateway's instance is handed over rather than a
+	// second one built here.
+	modelSvc.SetBindingCounter(relaySvc.Bindings())
 	// A retest that PROVES a key works releases the key pool's rate-limit
 	// bench — the only reliable recovery signal, since a merely claimed or
 	// inconclusive retest proves nothing.

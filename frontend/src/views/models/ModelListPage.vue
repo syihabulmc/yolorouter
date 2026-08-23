@@ -100,6 +100,7 @@ import { useConfirmedStatusToggle } from '../../composables/useConfirmedStatusTo
 import { modelDisableCopy } from '../../utils/impactSummary'
 import { modelRunningStatusDisplay, MODEL_RUNNING_STATUS_DISPLAY, routableMark } from '../../utils/modelStatusDisplay'
 import { columnTitle } from '../../utils/columnTitle'
+import { isBalancedModel } from '../../utils/schedulingMode'
 import { modelCostDetailLocation } from '../../utils/modelCostLocation'
 import { useClientPagination } from '../../composables/useClientPagination'
 import { useIsMobile } from '../../composables/useIsMobile'
@@ -349,18 +350,25 @@ const sharedColumns = computed<DataTableColumns<Model>>(() => [
     key: 'first_route',
     minWidth: 200,
     render: (row) => {
+      // A balanced model has no fixed primary: each caller key enters the
+      // chain at its own bound provider, so the cell names the mode instead
+      // of candidates[0].
+      const balanced = isBalancedModel(row)
       const first = row.candidates[0]
-      const firstText = first ? `${first.provider_name} / ${first.provider_model_name}` : '-'
+      const head = balanced
+        ? h(NTag, { size: 'small', bordered: false }, { default: () => t('models.firstRouteBalanced') })
+        : first
+          ? `${first.provider_name} / ${first.provider_model_name}`
+          : '-'
       // With a provider filter active, a row can match through a candidate
-      // that is not the preferred route — the very thing that makes the row
+      // that is not the one shown here — the very thing that makes the row
       // look wrong ("why did Zhipu surface a deepseek model?"). Name the
-      // matching candidate so the connection is visible.
+      // matching candidate so the connection stays visible in both modes.
       const pid = applied.provider
-      if (pid === null) return firstText
-      const matched = row.candidates.find((c) => c.provider_id === pid)
-      if (!matched || matched === first) return firstText
+      const matched = pid === null ? undefined : row.candidates.find((c) => c.provider_id === pid)
+      if (!matched || (!balanced && matched === first)) return head
       return h('div', [
-        h('div', firstText),
+        h('div', [head]),
         h(
           'div',
           { style: 'font-size: 12px; color: #999;' },

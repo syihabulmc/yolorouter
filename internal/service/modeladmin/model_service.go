@@ -48,6 +48,25 @@ type ModelService struct {
 	db      *gorm.DB
 	secrets crypto.SecretBox
 	client  providerclient.ProviderClient
+	// bindingCounts, when wired by the assembly layer, supplies the
+	// per-candidate sticky-binding counts the model detail view shows for
+	// balanced models. Nil (tests, embedders) reads as "no bindings".
+	bindingCounts BindingCounter
+}
+
+// BindingCounter is the read-only window into the gateway's sticky-binding
+// registry: how many caller keys are currently pinned to each provider for
+// one model. An interface rather than the concrete registry so this package
+// stays independent of the gateway's internals and tests can stub it.
+type BindingCounter interface {
+	BindingCounts(modelID uint) map[uint]int
+}
+
+// SetBindingCounter wires the binding-count source, shared with the gateway
+// so the admin view and the router read the same registry. Call once at
+// assembly; a second call replaces the first, which only tests do.
+func (s *ModelService) SetBindingCounter(bc BindingCounter) {
+	s.bindingCounts = bc
 }
 
 func NewModelService(db *gorm.DB, secrets crypto.SecretBox, client providerclient.ProviderClient) *ModelService {
@@ -80,13 +99,25 @@ type CandidateView struct {
 	LastTestResult     *int       `json:"last_test_result"`
 	LastTestDurationMs *int64     `json:"last_test_duration_ms"`
 	LastTestedAt       *time.Time `json:"last_tested_at"`
+	// BindingCount is how many caller API keys the gateway currently has
+	// pinned to this candidate's provider for THIS model — the balanced
+	// scheduling's evenness gauge. POPULATED ONLY by the model-detail
+	// endpoint (the count scan takes the registry lock, a cost the list and
+	// mutation responses do not pay), so a 0 anywhere else means "not
+	// collected here", not "nobody bound". A momentary in-memory number a
+	// restart resets; nothing but display should read it.
+	BindingCount int `json:"binding_count"`
 }
 
 type ModelView struct {
 	ID               uint   `json:"id"`
 	Name             string `json:"name"`
 	ManagementStatus int    `json:"management_status"`
-	RunningStatus    string `json:"running_status"`
+	// SchedulingMode is how the gateway orders this model's candidate chain:
+	// failover (sort_order priority) or balanced (per-caller-key spread).
+	// Normalized to failover for rows stored before the column existed.
+	SchedulingMode model.SchedulingMode `json:"scheduling_mode"`
+	RunningStatus  string               `json:"running_status"`
 	// SupportsImageInput mirrors the admin's tri-state declaration (nil =
 	// undeclared): whether this model can read images, driving the vision
 	// fallback and strip behaviors in the gateway.
@@ -139,29 +170,43 @@ func CandidateBlockedBy(c model.ModelCandidate, providerEnabled, providerHasAvai
 	}
 }
 
-func computeModelRunningStatus(candidates []CandidateView) string {
+// computeModelRunningStatus aggregates candidate routability into one status.
+// The two schedulers read "degraded" differently. Failover has a designated
+// head: a healthy head is available regardless of the tail, and a dead head
+// with a live backup means traffic failed over. Balanced has no head — each
+// caller key enters at its own bound candidate — so any dead candidate among
+// live ones means part of the spread is failing over, and swapping
+// sort_order must never change the verdict.
+func computeModelRunningStatus(mode model.SchedulingMode, candidates []CandidateView) string {
 	if len(candidates) == 0 {
 		return ModelRunningStatusNotConfigured
 	}
 	anyVerified := false
+	routableCount := 0
 	for _, c := range candidates {
 		if c.VerificationStatus == model.ModelVerificationStatusPassed {
 			anyVerified = true
-			break
+		}
+		if c.Routable {
+			routableCount++
 		}
 	}
 	if !anyVerified {
 		return ModelRunningStatusPending
 	}
+	if routableCount == 0 {
+		return ModelRunningStatusUnavailable
+	}
+	if mode.Normalized() == model.ModelSchedulingModeBalanced {
+		if routableCount == len(candidates) {
+			return ModelRunningStatusAvailable
+		}
+		return ModelRunningStatusDegraded
+	}
 	if candidates[0].Routable {
 		return ModelRunningStatusAvailable
 	}
-	for _, c := range candidates[1:] {
-		if c.Routable {
-			return ModelRunningStatusDegraded
-		}
-	}
-	return ModelRunningStatusUnavailable
+	return ModelRunningStatusDegraded
 }
 
 // ProviderHasAvailableKey applies the same "available key" rule
@@ -200,6 +245,35 @@ func buildCandidateView(c model.ModelCandidate, providerName string, blockedBy s
 // the caller via repository.ListProviderKeysByProviderIDs) so that listing
 // many models doesn't turn into one key query per candidate.
 func (s *ModelService) toModelView(m model.Model, candidates []model.ModelCandidate, keysByProvider map[uint][]model.ProviderKey) ModelView {
+	views := s.buildCandidateViews(candidates, keysByProvider)
+	return ModelView{
+		ID: m.ID, Name: m.Name, ManagementStatus: m.ManagementStatus, SupportsImageInput: m.SupportsImageInput,
+		SchedulingMode: m.SchedulingMode.Normalized(),
+		RunningStatus:  computeModelRunningStatus(m.SchedulingMode, views), Candidates: views, CreatedAt: m.CreatedAt,
+	}
+}
+
+// toModelDetailView is toModelView plus the per-candidate sticky-binding
+// counts, which only the detail endpoint serves: the count lookup takes the
+// registry's lock and scans it, fine once per request but not as a per-model
+// cost inside a list response — and the list UI shows no such column.
+//
+// Counts are a balanced-model concern: failover chains have no bindings to
+// count, and showing zeros there would read as "balanced but nobody bound" —
+// a state that model cannot even be in.
+func (s *ModelService) toModelDetailView(m model.Model, candidates []model.ModelCandidate, keysByProvider map[uint][]model.ProviderKey) ModelView {
+	view := s.toModelView(m, candidates, keysByProvider)
+	if !m.IsBalanced() || s.bindingCounts == nil {
+		return view
+	}
+	counts := s.bindingCounts.BindingCounts(m.ID)
+	for i := range view.Candidates {
+		view.Candidates[i].BindingCount = counts[view.Candidates[i].ProviderID]
+	}
+	return view
+}
+
+func (s *ModelService) buildCandidateViews(candidates []model.ModelCandidate, keysByProvider map[uint][]model.ProviderKey) []CandidateView {
 	views := make([]CandidateView, 0, len(candidates))
 	for _, c := range candidates {
 		providerEnabled := false
@@ -213,10 +287,7 @@ func (s *ModelService) toModelView(m model.Model, candidates []model.ModelCandid
 		blockedBy := CandidateBlockedBy(c, providerEnabled, hasAvailableKey)
 		views = append(views, buildCandidateView(c, providerName, blockedBy))
 	}
-	return ModelView{
-		ID: m.ID, Name: m.Name, ManagementStatus: m.ManagementStatus, SupportsImageInput: m.SupportsImageInput,
-		RunningStatus: computeModelRunningStatus(views), Candidates: views, CreatedAt: m.CreatedAt,
-	}
+	return views
 }
 
 // KeysByProviderForCandidates batches the provider-keys lookup for every
@@ -287,28 +358,49 @@ func (s *ModelService) GetModelDetail(id uint) (*ModelView, error) {
 	if err != nil {
 		return nil, err
 	}
-	view := s.toModelView(*m, candidates, keysByProvider)
+	view := s.toModelDetailView(*m, candidates, keysByProvider)
 	return &view, nil
 }
 
 type CreateModelInput struct {
 	Name string
+	// SchedulingMode is optional: the empty value means the default
+	// (failover). Any other value must be one of the two modes.
+	SchedulingMode model.SchedulingMode
 }
 
 func isValidModelName(name string) bool {
 	return len(name) > 0 && len(name) <= 100 && modelNamePattern.MatchString(name)
 }
 
+// resolveSchedulingMode validates a creation-submitted mode and maps the
+// empty value onto the default: a create request that never mentions the
+// field gets failover. Updates do NOT share this mapping — there "present but
+// empty" is an invalid value, not a request for the default.
+func resolveSchedulingMode(mode model.SchedulingMode) (model.SchedulingMode, error) {
+	if mode == "" {
+		return model.ModelSchedulingModeFailover, nil
+	}
+	if !mode.Valid() {
+		return "", errcode.ErrModelSchedulingModeInvalid
+	}
+	return mode, nil
+}
+
 func (s *ModelService) CreateModel(input CreateModelInput, now time.Time) (*ModelView, error) {
 	if !isValidModelName(input.Name) {
 		return nil, fmt.Errorf("%w: model name must be slash-separated segments of letters, digits, dots, hyphens, and underscores", errcode.ErrModelNameTaken)
+	}
+	schedulingMode, err := resolveSchedulingMode(input.SchedulingMode)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := repository.FindModelByName(s.db, input.Name); err == nil {
 		return nil, errcode.ErrModelNameTaken
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
-	m := &model.Model{Name: input.Name, ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+	m := &model.Model{Name: input.Name, ManagementStatus: model.ModelStatusEnabled, SchedulingMode: schedulingMode, CreatedAt: now, UpdatedAt: now}
 	if err := repository.CreateModel(s.db, m); err != nil {
 		if repository.IsUniqueViolation(err) {
 			return nil, errcode.ErrModelNameTaken
@@ -336,6 +428,15 @@ type BatchCreateModelsResult struct {
 	Skipped []BatchSkippedModel `json:"skipped"`
 }
 
+// CreateModelsBatchInput is CreateModelInput's batch sibling. SchedulingMode
+// applies to every created row (empty = the failover default) — the batch
+// endpoint is the create dialog's preset quick-add, and a mode chosen there
+// is a statement about the whole submission, not one name.
+type CreateModelsBatchInput struct {
+	Names          []string
+	SchedulingMode model.SchedulingMode
+}
+
 // CreateModelsBatch creates each requested name best-effort: invalid names and
 // names that already exist are skipped and reported, the rest are created. A
 // name repeated within the batch is created once; later occurrences skip as
@@ -347,10 +448,14 @@ type BatchCreateModelsResult struct {
 // models silently committed while it sees a total failure (which would make a
 // retry report those committed names as already-existing). Invalid/duplicate
 // names are skips, not errors, so they never abort the transaction.
-func (s *ModelService) CreateModelsBatch(names []string, now time.Time) (*BatchCreateModelsResult, error) {
+func (s *ModelService) CreateModelsBatch(in CreateModelsBatchInput, now time.Time) (*BatchCreateModelsResult, error) {
+	resolvedMode, err := resolveSchedulingMode(in.SchedulingMode)
+	if err != nil {
+		return nil, err
+	}
 	result := &BatchCreateModelsResult{Created: []ModelView{}, Skipped: []BatchSkippedModel{}}
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		for _, name := range names {
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		for _, name := range in.Names {
 			if !isValidModelName(name) {
 				result.Skipped = append(result.Skipped, BatchSkippedModel{Name: name, Reason: BatchSkipReasonInvalid})
 				continue
@@ -361,7 +466,7 @@ func (s *ModelService) CreateModelsBatch(names []string, now time.Time) (*BatchC
 			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
-			m := &model.Model{Name: name, ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now}
+			m := &model.Model{Name: name, ManagementStatus: model.ModelStatusEnabled, SchedulingMode: resolvedMode, CreatedAt: now, UpdatedAt: now}
 			if err := repository.CreateModel(tx, m); err != nil {
 				// A unique violation here means a concurrent request claimed
 				// the name between the lookup above and this insert; roll the
@@ -378,8 +483,8 @@ func (s *ModelService) CreateModelsBatch(names []string, now time.Time) (*BatchC
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
+	if txErr != nil {
+		return nil, txErr
 	}
 	return result, nil
 }
@@ -1620,9 +1725,22 @@ func (s *ModelService) DeleteModelCandidate(id uint) error {
 	return repository.DeleteModelCandidate(s.db, id)
 }
 
-// UpdateModelNameStatus saves the model's name — and, when imageInputSet is
-// true, the tri-state image-input declaration in the same statement, so
-// concurrent PATCHes cannot interleave the two fields. A rename also follows
+// UpdateModelInput carries one PATCH's submitted fields. ImageInput pairs a
+// set-flag with a tri-state value (nil with ImageInputSet=true clears the
+// declaration). SchedulingMode's pointer alone carries set-ness: nil keeps
+// the current scheduler, and a present value must be one of the two modes —
+// an empty string is rejected, never read as "the default", so no caller can
+// reset a model's scheduler by submitting nothing.
+type UpdateModelInput struct {
+	Name           string
+	ImageInputSet  bool
+	ImageInput     *bool
+	SchedulingMode *model.SchedulingMode
+}
+
+// UpdateModel saves the model's name and every submitted optional field in
+// one statement, so concurrent PATCHes cannot interleave the fields. A
+// rename also follows
 // through to the vision-fallback setting when the renamed model is the
 // configured describe model: the setting stores the public name, and leaving
 // the old name behind would silently disable the feature at describe time.
@@ -1631,9 +1749,12 @@ func (s *ModelService) DeleteModelCandidate(id uint) error {
 // gateway's settings cache picks the renamed reference up within its 30s
 // TTL; in that window a describe lookup misses and the image passes through
 // unconverted, which is the feature's normal degrade mode.
-func (s *ModelService) UpdateModelNameStatus(id uint, name string, imageInputSet bool, imageInput *bool, now time.Time) (*ModelView, error) {
-	if !isValidModelName(name) {
+func (s *ModelService) UpdateModel(id uint, in UpdateModelInput, now time.Time) (*ModelView, error) {
+	if !isValidModelName(in.Name) {
 		return nil, fmt.Errorf("%w: model name must be slash-separated segments of letters, digits, dots, hyphens, and underscores", errcode.ErrModelNameTaken)
+	}
+	if in.SchedulingMode != nil && !in.SchedulingMode.Valid() {
+		return nil, errcode.ErrModelSchedulingModeInvalid
 	}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		m, err := repository.FindModelByID(tx, id)
@@ -1643,11 +1764,16 @@ func (s *ModelService) UpdateModelNameStatus(id uint, name string, imageInputSet
 			}
 			return err
 		}
-		if err := repository.UpdateModelNameStatus(tx, id, name, m.ManagementStatus, imageInputSet, imageInput, now); err != nil {
+		update := repository.ModelUpdate{
+			Name: in.Name, Status: m.ManagementStatus,
+			ImageInputSet: in.ImageInputSet, ImageInput: in.ImageInput,
+			SchedulingMode: in.SchedulingMode,
+		}
+		if err := repository.UpdateModel(tx, id, update, now); err != nil {
 			return err
 		}
-		if name != m.Name {
-			return repository.RenameVisionFallbackModel(tx, m.Name, name)
+		if in.Name != m.Name {
+			return repository.RenameVisionFallbackModel(tx, m.Name, in.Name)
 		}
 		return nil
 	})
@@ -1675,7 +1801,7 @@ func (s *ModelService) SetModelStatus(id uint, enabled bool, now time.Time) erro
 	if enabled {
 		status = model.ModelStatusEnabled
 	}
-	return repository.UpdateModelNameStatus(s.db, id, m.Name, status, false, nil, now)
+	return repository.UpdateModel(s.db, id, repository.ModelUpdate{Name: m.Name, Status: status}, now)
 }
 
 // modelImpactRecentWindow is how far back the impact preview counts live

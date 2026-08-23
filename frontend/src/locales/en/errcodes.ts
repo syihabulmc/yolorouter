@@ -38,6 +38,7 @@ export const errcodes: Record<number, string> = {
   12103: 'Model candidate not found',
   12104: 'This provider is already a candidate for this model',
   12105: 'This candidate has not passed the basic test — run "Basic Text" from the candidate row "..." menu first',
+  12107: 'Scheduling mode must be failover or balanced',
   14005: 'Request log not found or has been cleaned up',
   15001: 'In-place update is not available in this runtime',
   15002: 'Update failed; see the server log for details',

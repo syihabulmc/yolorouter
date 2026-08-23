@@ -42,6 +42,7 @@ the box; switch to PostgreSQL when you want it.
 **Routing**
 
 - **Multi-provider failover.** Map one public model name (e.g. `smart`) to an ordered list of provider candidates. When one is down, requests fail over to the next; the caller never sees a different model name.
+- **Per-model scheduling mode: failover / balanced.** Failover (the default) is primary-first — the top candidate takes all traffic. Switch a model to balanced and caller API keys are spread evenly across providers, each key sticking to one provider so upstream prompt caches stay warm. See [Scheduling modes](#scheduling-modes).
 - **Upstream key pool.** Give each provider a pool of upstream keys and load spreads across it round-robin. A rate-limited key is benched for its `Retry-After` window (later requests walk healthier keys first); unauthorized or quota-exhausted keys are taken out until a retest passes.
 - **One-click model import.** After you add a provider, the gateway fetches its live model catalogue — tick the models you want and import them all at once. Every imported mapping is verified against the real upstream in the background and auto-enabled when it passes; failures keep their diagnostic for a one-click retest. Models found in the built-in price catalog come pre-priced.
 - **Model aliasing.** Callers request a stable public name; each provider candidate maps it to whatever model id that provider actually expects. Candidate mappings are probed against the real upstream when you save them, so a typo is caught at configuration time, not at 3 a.m.
@@ -214,6 +215,44 @@ claude
 → **Per-protocol request examples and setup guides for 19 agent tools**
 (Claude Code, Cursor, Codex CLI, Cherry Studio, Gemini CLI, opencode …):
 [yolorouter.com/help](https://yolorouter.com/help?utm_source=oss-readme&utm_medium=repo)
+
+## Scheduling modes
+
+Every model routes through an ordered list of provider candidates; its
+scheduling mode decides which candidate a request enters first.
+
+- **Failover** (the default) is primary-first: the head of your configured
+  order takes all traffic, and the rest of the chain exists for when it
+  fails. Every model works this way until you switch it.
+- **Balanced** spreads caller API keys evenly across providers. Each key is
+  assigned to the provider currently holding the fewest keys, then sticks to
+  it: multi-turn conversations from one key keep hitting the same provider,
+  so upstream prompt caches stay warm — hopping providers mid-conversation
+  would re-bill every cached token. (What the gateway guarantees is provider
+  affinity; whether a cache hit follows also depends on the provider's key
+  pool — upstream keys from different upstream accounts do not share a
+  cache.) When a bound provider trips the circuit
+  breaker, keys that send requests during the outage re-bind elsewhere
+  (dormant keys keep their old spot until they next call); a recovered
+  provider therefore holds fewer bindings and attracts new assignments
+  first, healing the spread without a rebalancer. The model detail page
+  shows the current per-provider binding counts (a point-in-time snapshot,
+  refreshed when the page loads).
+
+Everything else — failure handling, key rotation, circuit breaking, budgets —
+is identical in both modes.
+
+**Known limitation:** bindings live in process memory. A restart simply
+reassigns keys (converging back to the same even spread), and in a
+multi-instance deployment each instance computes its own spread — there is no
+cross-instance binding table. During a rolling upgrade from a version
+without scheduling modes, not-yet-upgraded instances run every model as
+failover — switch a model to balanced after the whole fleet is upgraded.
+The binding table holds up to 4096
+(key, model) pairs across all models; beyond that, the least-recently-used
+binding is evicted and its key reassigned on its next request, so extremely
+wide deployments (hundreds of keys times dozens of balanced models) trade
+some stickiness at the margin.
 
 ## Cost optimization
 

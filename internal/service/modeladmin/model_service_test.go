@@ -86,7 +86,7 @@ func TestCreateModelsBatchCreatesValidAndSkipsExistingAndInvalid(t *testing.T) {
 	// skip(invalid); the repeated "claude-sonnet-5" is created once, the
 	// second occurrence skips(exists).
 	result, err := svc.CreateModelsBatch(
-		[]string{"gpt-5.6", "claude-sonnet-5", "bad name!", "claude-sonnet-5", "deepseek-v4-flash"},
+		modeladmin.CreateModelsBatchInput{Names: []string{"gpt-5.6", "claude-sonnet-5", "bad name!", "claude-sonnet-5", "deepseek-v4-flash"}},
 		now,
 	)
 	if err != nil {
@@ -140,7 +140,7 @@ func TestCreateModelsBatchRollsBackOnMidBatchFailure(t *testing.T) {
 		t.Fatalf("register callback: %v", err)
 	}
 
-	if _, err := svc.CreateModelsBatch([]string{"alpha", "boom", "gamma"}, now); err == nil {
+	if _, err := svc.CreateModelsBatch(modeladmin.CreateModelsBatchInput{Names: []string{"alpha", "boom", "gamma"}}, now); err == nil {
 		t.Fatalf("expected an error from the injected mid-batch failure")
 	}
 
@@ -2411,23 +2411,23 @@ func TestDeleteModelCandidateReturnsNotFoundForUnknownID(t *testing.T) {
 	}
 }
 
-func TestUpdateModelNameStatusRenamesModel(t *testing.T) {
+func TestUpdateModelRenamesModel(t *testing.T) {
 	svc, _, _ := newTestModelService(t)
 	now := time.Now().UTC()
 	modelView, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
 	}
-	updated, err := svc.UpdateModelNameStatus(modelView.ID, "smart-v2", false, nil, now)
+	updated, err := svc.UpdateModel(modelView.ID, modeladmin.UpdateModelInput{Name: "smart-v2"}, now)
 	if err != nil {
-		t.Fatalf("UpdateModelNameStatus failed: %v", err)
+		t.Fatalf("UpdateModel failed: %v", err)
 	}
 	if updated.Name != "smart-v2" {
 		t.Fatalf("expected name 'smart-v2', got %q", updated.Name)
 	}
 }
 
-func TestUpdateModelNameStatusRejectsDuplicateName(t *testing.T) {
+func TestUpdateModelRejectsDuplicateName(t *testing.T) {
 	svc, _, _ := newTestModelService(t)
 	now := time.Now().UTC()
 	if _, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "taken"}, now); err != nil {
@@ -2437,15 +2437,15 @@ func TestUpdateModelNameStatusRejectsDuplicateName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateModel(other) failed: %v", err)
 	}
-	_, err = svc.UpdateModelNameStatus(other.ID, "taken", false, nil, now)
+	_, err = svc.UpdateModel(other.ID, modeladmin.UpdateModelInput{Name: "taken"}, now)
 	if !errors.Is(err, errcode.ErrModelNameTaken) {
 		t.Fatalf("expected ErrModelNameTaken, got %v", err)
 	}
 }
 
-func TestUpdateModelNameStatusReturnsNotFoundForUnknownID(t *testing.T) {
+func TestUpdateModelReturnsNotFoundForUnknownID(t *testing.T) {
 	svc, _, _ := newTestModelService(t)
-	_, err := svc.UpdateModelNameStatus(999999, "whatever", false, nil, time.Now().UTC())
+	_, err := svc.UpdateModel(999999, modeladmin.UpdateModelInput{Name: "whatever"}, time.Now().UTC())
 	if !errors.Is(err, errcode.ErrModelNotFound) {
 		t.Fatalf("expected ErrModelNotFound, got %v", err)
 	}
@@ -2730,19 +2730,19 @@ func TestDeleteModelCandidateErrorsWhenDeleteFails(t *testing.T) {
 	}
 }
 
-func TestUpdateModelNameStatusRejectsInvalidCharacters(t *testing.T) {
+func TestUpdateModelRejectsInvalidCharacters(t *testing.T) {
 	svc, _, _ := newTestModelService(t)
 	now := time.Now().UTC()
 	modelView, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "smart"}, now)
 	if err != nil {
 		t.Fatalf("CreateModel failed: %v", err)
 	}
-	if _, err := svc.UpdateModelNameStatus(modelView.ID, "bad name!", false, nil, now); err == nil {
+	if _, err := svc.UpdateModel(modelView.ID, modeladmin.UpdateModelInput{Name: "bad name!"}, now); err == nil {
 		t.Fatalf("expected an error for an invalid model name")
 	}
 }
 
-func TestUpdateModelNameStatusErrorsWhenUpdateFailsForNonUniqueReason(t *testing.T) {
+func TestUpdateModelErrorsWhenUpdateFailsForNonUniqueReason(t *testing.T) {
 	svc, db, _ := newTestModelService(t)
 	now := time.Now().UTC()
 	modelView, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "smart"}, now)
@@ -2750,7 +2750,7 @@ func TestUpdateModelNameStatusErrorsWhenUpdateFailsForNonUniqueReason(t *testing
 		t.Fatalf("CreateModel failed: %v", err)
 	}
 	testutil.BlockTableWrites(t, db, "models", "UPDATE")
-	if _, err := svc.UpdateModelNameStatus(modelView.ID, "smart-v2", false, nil, now); err == nil {
+	if _, err := svc.UpdateModel(modelView.ID, modeladmin.UpdateModelInput{Name: "smart-v2"}, now); err == nil {
 		t.Fatalf("expected an error when the UPDATE statement fails")
 	}
 }
@@ -3041,10 +3041,10 @@ func TestDeleteModelCandidateErrorsWhenLookupFailsForNonNotFoundReason(t *testin
 	}
 }
 
-func TestUpdateModelNameStatusErrorsWhenLookupFailsForNonNotFoundReason(t *testing.T) {
+func TestUpdateModelErrorsWhenLookupFailsForNonNotFoundReason(t *testing.T) {
 	svc, db, _ := newTestModelService(t)
 	testutil.DropTable(t, db, "models")
-	if _, err := svc.UpdateModelNameStatus(1, "smart", false, nil, time.Now().UTC()); err == nil {
+	if _, err := svc.UpdateModel(1, modeladmin.UpdateModelInput{Name: "smart"}, time.Now().UTC()); err == nil {
 		t.Fatalf("expected an error when the models table is missing")
 	}
 }
@@ -3572,5 +3572,167 @@ func TestModelImpactUnknownModel(t *testing.T) {
 	svc := modeladmin.NewModelService(db, testutil.ProviderSecrets(), client)
 	if _, err := svc.GetModelImpact(9999, time.Now().UTC()); !errors.Is(err, errcode.ErrModelNotFound) {
 		t.Fatalf("err = %v, want ErrModelNotFound", err)
+	}
+}
+
+func TestCreateModelSchedulingModeDefaultBalancedAndInvalid(t *testing.T) {
+	_, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	svc := modeladmin.NewModelService(db, testutil.ProviderSecrets(), client)
+
+	plain, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "plain"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	if plain.SchedulingMode != model.ModelSchedulingModeFailover {
+		t.Fatalf("plain create scheduling mode = %q, want failover default", plain.SchedulingMode)
+	}
+	var stored model.Model
+	if err := db.Where("id = ?", plain.ID).First(&stored).Error; err != nil {
+		t.Fatalf("re-read model row: %v", err)
+	}
+	if stored.SchedulingMode != model.ModelSchedulingModeFailover {
+		t.Fatalf("stored scheduling mode = %q, want failover written explicitly (empty insert would bypass the column default)", stored.SchedulingMode)
+	}
+
+	balanced, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "spread", SchedulingMode: model.ModelSchedulingModeBalanced}, now)
+	if err != nil {
+		t.Fatalf("CreateModel balanced failed: %v", err)
+	}
+	if balanced.SchedulingMode != model.ModelSchedulingModeBalanced {
+		t.Fatalf("balanced create scheduling mode = %q, want balanced", balanced.SchedulingMode)
+	}
+
+	if _, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "broken", SchedulingMode: "round-robin"}, now); !errors.Is(err, errcode.ErrModelSchedulingModeInvalid) {
+		t.Fatalf("invalid mode err = %v, want ErrModelSchedulingModeInvalid", err)
+	}
+}
+
+func TestUpdateModelSchedulingMode(t *testing.T) {
+	_, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	svc := modeladmin.NewModelService(db, testutil.ProviderSecrets(), client)
+	created, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "smart"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+
+	balanced := model.ModelSchedulingModeBalanced
+	updated, err := svc.UpdateModel(created.ID, modeladmin.UpdateModelInput{Name: "smart", SchedulingMode: &balanced}, now)
+	if err != nil {
+		t.Fatalf("UpdateModel failed: %v", err)
+	}
+	if updated.SchedulingMode != model.ModelSchedulingModeBalanced {
+		t.Fatalf("scheduling mode = %q, want balanced after patch", updated.SchedulingMode)
+	}
+
+	// An update that does not set the mode must leave it alone.
+	renamed, err := svc.UpdateModel(created.ID, modeladmin.UpdateModelInput{Name: "smart-v2"}, now)
+	if err != nil {
+		t.Fatalf("UpdateModel rename failed: %v", err)
+	}
+	if renamed.SchedulingMode != model.ModelSchedulingModeBalanced {
+		t.Fatalf("scheduling mode = %q after mode-less patch, want balanced preserved", renamed.SchedulingMode)
+	}
+
+	weighted := model.SchedulingMode("weighted")
+	if _, err := svc.UpdateModel(created.ID, modeladmin.UpdateModelInput{Name: "smart-v2", SchedulingMode: &weighted}, now); !errors.Is(err, errcode.ErrModelSchedulingModeInvalid) {
+		t.Fatalf("invalid mode err = %v, want ErrModelSchedulingModeInvalid", err)
+	}
+
+	// A PRESENT empty mode is an invalid value, not "keep" and not "the
+	// default": mapping it onto failover would let a caller that submits
+	// nothing silently reset a balanced model.
+	empty := model.SchedulingMode("")
+	if _, err := svc.UpdateModel(created.ID, modeladmin.UpdateModelInput{Name: "smart-v2", SchedulingMode: &empty}, now); !errors.Is(err, errcode.ErrModelSchedulingModeInvalid) {
+		t.Fatalf("empty mode err = %v, want ErrModelSchedulingModeInvalid", err)
+	}
+	unchanged, err := svc.GetModelDetail(created.ID)
+	if err != nil {
+		t.Fatalf("GetModelDetail failed: %v", err)
+	}
+	if unchanged.SchedulingMode != model.ModelSchedulingModeBalanced {
+		t.Fatalf("scheduling mode = %q after rejected empty patch, want balanced preserved", unchanged.SchedulingMode)
+	}
+}
+
+func TestCreateModelsBatchDefaultsToFailover(t *testing.T) {
+	_, db, client := newTestProviderService(t)
+	svc := modeladmin.NewModelService(db, testutil.ProviderSecrets(), client)
+	result, err := svc.CreateModelsBatch(modeladmin.CreateModelsBatchInput{Names: []string{"one", "two"}}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("CreateModelsBatch failed: %v", err)
+	}
+	if len(result.Created) != 2 {
+		t.Fatalf("created = %d, want 2", len(result.Created))
+	}
+	for _, v := range result.Created {
+		if v.SchedulingMode != model.ModelSchedulingModeFailover {
+			t.Fatalf("batch-created %q scheduling mode = %q, want failover", v.Name, v.SchedulingMode)
+		}
+	}
+}
+
+type fakeBindingCounter struct {
+	counts map[uint]map[uint]int // modelID → providerID → count
+}
+
+func (f fakeBindingCounter) BindingCounts(modelID uint) map[uint]int {
+	return f.counts[modelID]
+}
+
+func TestGetModelDetailExposesBindingCountsForBalancedModels(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	pa := seedEnabledProviderForModelTest(t, providerService, "provider-a")
+	pb := seedEnabledProviderForModelTest(t, providerService, "provider-b")
+
+	svc := modeladmin.NewModelService(db, testutil.ProviderSecrets(), client)
+	balanced, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "spread", SchedulingMode: model.ModelSchedulingModeBalanced}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	for _, p := range []uint{pa.ID, pb.ID} {
+		if _, err := svc.CreateModelCandidate(context.Background(), balanced.ID, modeladmin.CreateCandidateInput{
+			ProviderID: p, ProviderModelName: "gpt-4o", InputPrice: 1, OutputPrice: 2,
+		}, now); err != nil {
+			t.Fatalf("CreateModelCandidate failed: %v", err)
+		}
+	}
+	legacy, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "legacy"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	if _, err := svc.CreateModelCandidate(context.Background(), legacy.ID, modeladmin.CreateCandidateInput{
+		ProviderID: pa.ID, ProviderModelName: "gpt-4o", InputPrice: 1, OutputPrice: 2,
+	}, now); err != nil {
+		t.Fatalf("CreateModelCandidate failed: %v", err)
+	}
+
+	svc.SetBindingCounter(fakeBindingCounter{counts: map[uint]map[uint]int{
+		balanced.ID: {pa.ID: 2, pb.ID: 1},
+		legacy.ID:   {pa.ID: 9}, // must never surface: legacy is failover
+	}})
+
+	detail, err := svc.GetModelDetail(balanced.ID)
+	if err != nil {
+		t.Fatalf("GetModelDetail failed: %v", err)
+	}
+	got := map[uint]int{}
+	for _, c := range detail.Candidates {
+		got[c.ProviderID] = c.BindingCount
+	}
+	if got[pa.ID] != 2 || got[pb.ID] != 1 {
+		t.Fatalf("balanced model binding counts = %v, want provider-a:2 provider-b:1", got)
+	}
+
+	legacyDetail, err := svc.GetModelDetail(legacy.ID)
+	if err != nil {
+		t.Fatalf("GetModelDetail failed: %v", err)
+	}
+	for _, c := range legacyDetail.Candidates {
+		if c.BindingCount != 0 {
+			t.Fatalf("failover candidate shows binding count %d; failover models have no bindings", c.BindingCount)
+		}
 	}
 }

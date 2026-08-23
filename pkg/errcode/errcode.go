@@ -80,6 +80,8 @@ const (
 	// and is fundamentally unreachable; this dead branch was removed rather
 	// than kept as an error code that can never fire.
 
+	ModelSchedulingModeInvalid = 12107 // scheduling_mode is not one of failover/balanced
+
 	// === User group errors (13xxx) — user group serving three roles at once ===
 	UserGroupNotFound       = 13001
 	UserGroupNameTaken      = 13002
@@ -186,6 +188,7 @@ var ErrorMessages = map[int]string{
 	ModelCandidateNotFound:      "model candidate not found",
 	ModelCandidateProviderTaken: "this provider is already a candidate for this model",
 	ModelCandidateNotVerified:   "cannot enable a candidate that has not passed the basic test",
+	ModelSchedulingModeInvalid:  "scheduling mode must be failover or balanced",
 
 	UserGroupNotFound:       "user group not found",
 	UserGroupNameTaken:      "user group name already taken",
@@ -273,6 +276,7 @@ var (
 	ErrModelCandidateNotFound      = errors.New(ErrorMessages[ModelCandidateNotFound])
 	ErrModelCandidateProviderTaken = errors.New(ErrorMessages[ModelCandidateProviderTaken])
 	ErrModelCandidateNotVerified   = errors.New(ErrorMessages[ModelCandidateNotVerified])
+	ErrModelSchedulingModeInvalid  = errors.New(ErrorMessages[ModelSchedulingModeInvalid])
 
 	ErrUserGroupNotFound       = errors.New(ErrorMessages[UserGroupNotFound])
 	ErrUserGroupNameTaken      = errors.New(ErrorMessages[UserGroupNameTaken])

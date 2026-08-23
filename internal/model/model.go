@@ -42,6 +42,13 @@ type Model struct {
 	ID               uint   `gorm:"column:id;primaryKey" json:"id"`
 	Name             string `gorm:"column:name" json:"name"`
 	ManagementStatus int    `gorm:"column:management_status" json:"management_status"`
+	// SchedulingMode decides how the candidate chain picks its first
+	// candidate per request: failover always starts at the head of
+	// sort_order, balanced spreads caller API keys across providers with
+	// per-key sticky bindings. Set explicitly at every row-creation site —
+	// GORM inserts all mapped columns, so an unset field would store the
+	// empty string rather than let the column default apply.
+	SchedulingMode SchedulingMode `gorm:"column:scheduling_mode" json:"scheduling_mode"`
 	// SupportsImageInput is the admin's declaration of whether this model can
 	// read images. Tri-state: nil = undeclared, and the gateway must not
 	// touch images at all (neither describe nor strip) — a missing
@@ -52,6 +59,41 @@ type Model struct {
 }
 
 func (Model) TableName() string { return "models" }
+
+// SchedulingMode is how the gateway orders a model's candidate chain. It is
+// its own string type so the two-value vocabulary travels with the value
+// instead of every consumer re-validating a bare string.
+type SchedulingMode string
+
+// Failover is the historical behaviour and the default for every model that
+// never chose one, so an empty value reads as failover wherever the column
+// is interpreted.
+const (
+	ModelSchedulingModeFailover SchedulingMode = "failover"
+	ModelSchedulingModeBalanced SchedulingMode = "balanced"
+)
+
+// Normalized maps a stored or submitted scheduling mode onto the valid
+// vocabulary: empty becomes failover (pre-migration rows, callers that never
+// sent the field). Anything else passes through unchanged and must be
+// validated separately via Valid.
+func (m SchedulingMode) Normalized() SchedulingMode {
+	if m == "" {
+		return ModelSchedulingModeFailover
+	}
+	return m
+}
+
+// Valid reports whether the mode is one of the two schedulers.
+func (m SchedulingMode) Valid() bool {
+	return m == ModelSchedulingModeFailover || m == ModelSchedulingModeBalanced
+}
+
+// IsBalanced reports whether the model uses the balanced scheduler; the
+// empty pre-migration value normalizes to failover.
+func (m Model) IsBalanced() bool {
+	return m.SchedulingMode.Normalized() == ModelSchedulingModeBalanced
+}
 
 // ModelCandidate is one provider's offering of a Model — the external name
 // resolves to this candidate's ProviderModelName when routed.

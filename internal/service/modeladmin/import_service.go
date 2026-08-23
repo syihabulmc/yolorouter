@@ -137,7 +137,7 @@ func (s *ModelService) importProviderModelsOnce(providerID uint, items []ImportM
 				if _, ok := modelsByName[name]; ok {
 					continue
 				}
-				newModels = append(newModels, &model.Model{Name: name, ManagementStatus: model.ModelStatusEnabled, CreatedAt: now, UpdatedAt: now})
+				newModels = append(newModels, &model.Model{Name: name, ManagementStatus: model.ModelStatusEnabled, SchedulingMode: model.ModelSchedulingModeFailover, CreatedAt: now, UpdatedAt: now})
 			}
 			// A unique violation here means a concurrent request claimed a name
 			// between the preload and this insert; the whole batch rolls back
