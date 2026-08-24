@@ -23,10 +23,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
 	"gorm.io/gorm"
+
+	"github.com/yolorouter/yolorouter/internal/model"
 )
 
 // === Dimensions / buckets ================================================
@@ -1070,4 +1073,121 @@ func ResolveTimeRange(f *RequestLogFilter, loc *time.Location, bucket string, no
 		}
 	}
 	return end, start
+}
+
+// === Concise-output projection ===========================================
+//
+// Feeds the cost-optimization banner's projected-savings figure: how much
+// the concise-output switch is estimated to save per month. Output spend is
+// recomputed from token counts x CURRENT candidate prices rather than read
+// from the stored cost_micros, because the stored figure is a per-request
+// total with no input/output split and a write-time split column would only
+// cover rows written after it existed. Prices therefore reflect the latest
+// edits, an acceptable drift for a figure that is explicitly non-financial.
+
+// PricedOutputVolume is the priced roll-up of output tokens for a filter.
+type PricedOutputVolume struct {
+	// OutputRows counts rows with output_tokens > 0 — the coverage
+	// denominator. Rows that resolve to no candidate, or whose candidate's
+	// output_price is 0 (unpriced), count here but not in PricedRows.
+	OutputRows int64
+	// PricedRows counts rows that contributed to OutputSpendMicros.
+	PricedRows int64
+	// PricedOutputTokens is the output-token total over the priced rows —
+	// the denominator that turns the spend into a per-million-token rate.
+	PricedOutputTokens int64
+	// OutputSpendMicros is SUM(output_tokens x output_price) over the
+	// priced rows, in int64 micros (1 CNY = 1e6). Per-million-token pricing
+	// and the micros scale cancel, so the tokens x price product is already
+	// micros; summed as float and rounded once at the end so group-level
+	// products don't each truncate before the total.
+	OutputSpendMicros int64
+}
+
+// AggregatePricedOutputVolume groups the filtered rows with
+// output_tokens > 0 by (model_name, provider_id) and prices each group
+// against the CURRENT model_candidates rows. Prices resolve post-fetch via
+// batched SELECTs (models by name, then candidates by model id) instead of
+// a JOIN: applyFilter emits unqualified WHERE columns and a second table in
+// play would make them ambiguous under Postgres — the same reason the
+// provider/caller dimensions resolve their names after the fetch. Rows
+// whose provider never routed (NULL provider_id) cannot be priced and count
+// toward coverage only.
+func AggregatePricedOutputVolume(ctx context.Context, db *gorm.DB, f *RequestLogFilter) (*PricedOutputVolume, error) {
+	type outputVolumeRow struct {
+		ModelName    string `gorm:"column:model_name"`
+		ProviderID   *uint  `gorm:"column:provider_id"`
+		OutputTokens int64  `gorm:"column:output_tokens"`
+		Calls        int64  `gorm:"column:calls"`
+	}
+	var rows []outputVolumeRow
+	err := f.applyFilter(db.WithContext(ctx)).Select(`
+		model_name,
+		provider_id,
+		COALESCE(SUM(output_tokens), 0) AS output_tokens,
+		COUNT(*) AS calls
+	`[1:]).Where("output_tokens > 0").Group("model_name, provider_id").Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	volume := &PricedOutputVolume{}
+	if len(rows) == 0 {
+		return volume, nil
+	}
+
+	names := make([]string, 0, len(rows))
+	seen := make(map[string]struct{}, len(rows))
+	for _, r := range rows {
+		if _, ok := seen[r.ModelName]; !ok {
+			seen[r.ModelName] = struct{}{}
+			names = append(names, r.ModelName)
+		}
+	}
+	var models []model.Model
+	if err := db.WithContext(ctx).Where("name IN ?", names).Find(&models).Error; err != nil {
+		return nil, err
+	}
+	modelIDByName := make(map[string]uint, len(models))
+	for _, m := range models {
+		modelIDByName[m.Name] = m.ID
+	}
+	ids := make([]uint, 0, len(modelIDByName))
+	for _, id := range modelIDByName {
+		ids = append(ids, id)
+	}
+	var candidates []model.ModelCandidate
+	if len(ids) > 0 {
+		if err := db.WithContext(ctx).Where("model_id IN ?", ids).Find(&candidates).Error; err != nil {
+			return nil, err
+		}
+	}
+	type candidateKey struct {
+		modelID    uint
+		providerID uint
+	}
+	outputPrice := make(map[candidateKey]float64, len(candidates))
+	for _, c := range candidates {
+		outputPrice[candidateKey{c.ModelID, c.ProviderID}] = c.OutputPrice
+	}
+
+	spend := 0.0
+	for _, r := range rows {
+		volume.OutputRows += r.Calls
+		if r.ProviderID == nil {
+			continue
+		}
+		id, ok := modelIDByName[r.ModelName]
+		if !ok {
+			continue
+		}
+		price, ok := outputPrice[candidateKey{id, *r.ProviderID}]
+		if !ok || price <= 0 {
+			continue
+		}
+		volume.PricedRows += r.Calls
+		volume.PricedOutputTokens += r.OutputTokens
+		spend += float64(r.OutputTokens) * price
+	}
+	volume.OutputSpendMicros = int64(math.Round(spend))
+	return volume, nil
 }

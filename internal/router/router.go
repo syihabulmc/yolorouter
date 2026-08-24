@@ -407,6 +407,7 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	scoped.GET("/analytics/report", handler.GetAnalyticsReport(analyticsSvc))
 	scoped.GET("/analytics/export", handler.ExportAnalyticsCSV(analyticsSvc))
 	protected.GET("/analytics/compress-stats", handler.GetCompressStats(analyticsSvc))
+	protected.GET("/analytics/concise-output-projection", handler.GetConciseOutputProjection(analyticsSvc))
 
 	requestLogSvc := requestlog.NewRequestLogService(db)
 	protected.GET("/request-logs", handler.GetRequestLogs(requestLogSvc))

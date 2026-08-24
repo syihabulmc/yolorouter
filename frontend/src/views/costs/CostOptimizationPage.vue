@@ -9,11 +9,15 @@
      Uses the same reloadSeq stale-guard as AnalyticsPage so rapid filter
      changes never leave stale financial data on screen. The settings-enabled
      GETs run in parallel on mount and gate the CTA banner so it never flashes
-     a false "off" state before the real values arrive. -->
+     a false "off" state before the real values arrive.
+
+     Savings render as two group cards, one per optimization switch: the
+     measured input-compression roll-up on the left, and the projected
+     concise-output unit rate (per 1M output tokens) on the right. -->
 <template>
   <div class="common-page">
     <PageHeader
-      class="new-line" 
+      class="new-line"
       :eyebrow="t('costOptimization.eyebrow')"
       :title="t('costOptimization.title')"
       :description="t('costOptimization.pageDescription')"
@@ -52,37 +56,81 @@
         </NButton>
       </div>
     </div>
-    <!-- KPI metric tiles. All cost figures are ESTIMATED (see tips). -->
-    <div class="metric-row">
-      <div class="metric">
-        <div class="metric__label">
-          <HelpLabel :tip="t('costOptimization.metricTokensSaved_tip')">{{ t('costOptimization.metricTokensSaved') }}</HelpLabel>
+    <!-- Two savings groups, one per optimization switch: the measured
+         compression roll-up on the left, the projected concise-output unit
+         rate on the right. The banner above stays a pure switch CTA. -->
+    <div class="savings-groups">
+      <div class="section-card">
+        <div class="section-card__head group-head">
+          <HelpLabel :tip="t('costOptimization.inputCompression.titleTip')">
+            {{ t('costOptimization.groupCompress') }}
+          </HelpLabel>
+          <span class="status-pill" :class="icEnabled ? 'status-pill--on' : 'status-pill--off'">
+            {{ icEnabled ? t('costOptimization.statusOn') : t('costOptimization.statusOff') }}
+          </span>
         </div>
-        <div class="metric__value">{{ formatNumber(totals.tokens_saved) }}</div>
+        <div class="group-metrics">
+          <div class="metric-cell">
+            <div class="metric__label">
+              <HelpLabel :tip="t('costOptimization.metricTokensSaved_tip')">{{ t('costOptimization.metricTokensSaved') }}</HelpLabel>
+            </div>
+            <div class="metric__value">{{ formatNumber(totals.tokens_saved) }}</div>
+          </div>
+          <div class="metric-cell">
+            <div class="metric__label">
+              <HelpLabel :tip="t('costOptimization.metricCostSaved_tip')">{{ t('costOptimization.metricCostSaved') }}</HelpLabel>
+            </div>
+            <div class="metric__value">¥{{ formatMicros(totals.cost_saved_micros, 2) }}</div>
+          </div>
+          <div class="metric-cell">
+            <div class="metric__label">
+              <HelpLabel :tip="t('costOptimization.metricCompressRate_tip')">{{ t('costOptimization.metricCompressRate') }}</HelpLabel>
+            </div>
+            <div class="metric__value">{{ formatRate(compressRate) }}</div>
+          </div>
+          <div class="metric-cell">
+            <div class="metric__label">
+              <HelpLabel :tip="t('costOptimization.metricCompressedCalls_tip')">{{ t('costOptimization.metricCompressedCalls') }}</HelpLabel>
+            </div>
+            <div class="metric__value">{{ formatNumber(totals.compressed_calls) }}</div>
+          </div>
+        </div>
       </div>
-      <div class="metric">
-        <div class="metric__label">
-          <HelpLabel :tip="t('costOptimization.metricCostSaved_tip')">{{ t('costOptimization.metricCostSaved') }}</HelpLabel>
+
+      <div class="section-card">
+        <div class="section-card__head group-head">
+          <HelpLabel :tip="t('costOptimization.projection_tip')">{{ t('costOptimization.groupConcise') }}</HelpLabel>
+          <span class="status-pill" :class="cspEnabled ? 'status-pill--on' : 'status-pill--off'">
+            {{ cspEnabled ? t('costOptimization.statusOn') : t('costOptimization.statusOff') }}
+          </span>
         </div>
-        <div class="metric__value">¥{{ formatMicros(totals.cost_saved_micros,2) }}</div>
-      </div>
-      <div class="metric">
-        <div class="metric__label">
-          <HelpLabel :tip="t('costOptimization.metricCompressRate_tip')">{{ t('costOptimization.metricCompressRate') }}</HelpLabel>
+        <div class="group-metrics">
+          <div class="metric-cell">
+            <div class="metric__label">
+              <HelpLabel :tip="t('costOptimization.concisePerMillion_tip')">{{ t('costOptimization.concisePerMillion') }}</HelpLabel>
+            </div>
+            <div class="metric__value">{{ projectionValue }}</div>
+          </div>
+          <div class="metric-cell">
+            <div class="metric__label">
+              <HelpLabel :tip="t('costOptimization.conciseCoefficient_tip')">{{ t('costOptimization.conciseCoefficient') }}</HelpLabel>
+            </div>
+            <div class="metric__value">{{ projection ? formatRate(projection.coefficient) : '—' }}</div>
+          </div>
+          <div class="metric-cell">
+            <div class="metric__label">
+              <HelpLabel :tip="t('costOptimization.concisePricedTokens_tip')">{{ t('costOptimization.concisePricedTokens') }}</HelpLabel>
+            </div>
+            <div class="metric__value">{{ projection ? formatNumber(projection.priced_output_tokens) : '—' }}</div>
+          </div>
+          <div class="metric-cell">
+            <div class="metric__label">
+              <HelpLabel :tip="t('costOptimization.conciseCoverage_tip')">{{ t('costOptimization.conciseCoverage') }}</HelpLabel>
+            </div>
+            <div class="metric__value">{{ coverageRate }}</div>
+          </div>
         </div>
-        <div class="metric__value">{{ formatRate(compressRate) }}</div>
-      </div>
-      <div class="metric">
-        <div class="metric__label">
-          <HelpLabel :tip="t('costOptimization.metricCompressedCalls_tip')">{{ t('costOptimization.metricCompressedCalls') }}</HelpLabel>
-        </div>
-        <div class="metric__value">{{ formatNumber(totals.compressed_calls) }}</div>
-      </div>
-      <div class="metric">
-        <div class="metric__label">
-          <HelpLabel :tip="t('costOptimization.metricAvgSaved_tip')">{{ t('costOptimization.metricAvgSaved') }}</HelpLabel>
-        </div>
-        <div class="metric__value">{{ formatNumber(avgSaved) }}</div>
+        <div v-if="projectionNote" class="group-footnote">{{ projectionNote }}</div>
       </div>
     </div>
 
@@ -202,10 +250,12 @@ import { useUserFilter } from '../../composables/useUserFilter'
 import UserFilterSelect from '../../components/common/UserFilterSelect.vue'
 import {
   getCompressStats,
+  getConciseOutputProjection,
   type AnalyticsFilter,
   type CompressSkipReasonRow,
   type CompressStatsResult,
   type CompressorHitRow,
+  type ConciseOutputProjection,
 } from '../../api/analytics'
 
 const { t } = useI18n()
@@ -254,6 +304,10 @@ const timeRange = ref<TimeRange>(initialLast7DaysRange())
 
 // === Stats state ==========================================================
 const stats = ref<CompressStatsResult | null>(null)
+// Concise-output projection for the banner sentence — same filter, same
+// stale-guard, fetched alongside the stats in one reload so the banner
+// figure and the dashboard below can never disagree on the window.
+const projection = ref<ConciseOutputProjection | null>(null)
 const loading = ref(false)
 
 // Totals accessor: returns zeros when stats hasn't loaded yet so the metric
@@ -282,11 +336,41 @@ const compressRate = computed(() => {
   return rate
 })
 
-// avgSaved = mean tokens saved per compressed request.
-const avgSaved = computed(() => {
-  const calls = totals.value.compressed_calls
-  if (!calls) return 0
-  return Math.round(totals.value.tokens_saved / calls)
+// avgSaved (mean saved per compressed request) retired with the five-tile
+// KPI row: the two group cards hold four metrics each for symmetry, and the
+// mean is derivable as tokens saved ÷ compressed calls.
+
+// === Concise-output projection card =======================================
+// The figure is a per-1M-output-token unit rate (traffic-weighted output
+// price x coefficient), so it stays meaningful on a lightly-used instance
+// instead of reading as cents per month. No-traffic and all-unpriced
+// windows render an em-dash value plus an explanatory note rather than a
+// ¥0.00 figure; a missing projection (still loading / failed) renders
+// em-dashes only — the card never blocks the rest of the page.
+const projectionValue = computed(() => {
+  const p = projection.value
+  if (!p || p.output_rows === 0 || p.priced_rows === 0) return '—'
+  return `¥${formatMicros(p.projected_savings_per_million_tokens_micros, 2)}`
+})
+
+// coverageRate = priced requests / requests with output traffic in the
+// window; '—' until the projection lands or when there is nothing to cover.
+const coverageRate = computed(() => {
+  const p = projection.value
+  if (!p || p.output_rows === 0) return '—'
+  return formatRate(p.priced_rows / p.output_rows)
+})
+
+// Card footnote: the pricing basis once a figure exists, the empty /
+// all-unpriced explanation when it does not.
+const projectionNote = computed(() => {
+  const p = projection.value
+  if (!p) return ''
+  if (p.output_rows === 0) return t('costOptimization.projectionEmpty')
+  if (p.priced_rows === 0) return t('costOptimization.projectionUnpricedAll')
+  let note = t('costOptimization.projectionFootnote')
+  if (p.priced_rows < p.output_rows) note += ` · ${t('costOptimization.projectionUnpriced')}`
+  return note
 })
 
 // Dimension card data. Each card consumes one breakdown array from the
@@ -328,11 +412,13 @@ async function reload() {
   // financial data on screen. The user sees a brief loading state rather
   // than the previous filter's numbers; on error the results stay cleared.
   stats.value = null
+  projection.value = null
   try {
     const filter: AnalyticsFilter = { start: timeRange.value.start, end: timeRange.value.end, user_id: selectedUserId.value }
-    const result = await getCompressStats(filter)
+    const [result, proj] = await Promise.all([getCompressStats(filter), getConciseOutputProjection(filter)])
     if (mySeq !== reloadSeq) return // a newer reload started; discard this one
     stats.value = result
+    projection.value = proj
   } catch (err) {
     if (mySeq !== reloadSeq) return
     message.error(displayMessage(err, t))
@@ -430,17 +516,36 @@ const skipReasonColumns = computed<DataTableColumns<CompressSkipReasonRow>>(() =
 </script>
 
 <style scoped lang="less">
-/* Metric row: 5 KPI tiles. The base .metric-row/.metric/.metric__*
-   classes live in global.less; each page only sets its own column count. */
-.metric-row {
-  grid-template-columns: repeat(5, 1fr);
-}
-
 /* CTA banner — a flat card sitting right under the header. */
 .cta-banner {
   display: flex;
   align-items: center;
   padding: var(--space-4) var(--space-5);
+}
+
+/* Two savings groups (measured compression / projected concise output):
+   one section-card per optimization switch, each holding a 2x2 metric
+   grid that reuses the global .metric__label / .metric__value atoms. */
+.savings-groups {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-6);
+}
+
+.group-head {
+  justify-content: space-between;
+}
+
+.group-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4) var(--space-5);
+}
+
+.group-footnote {
+  margin-top: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
 }
 
 .cta-banner__quiet {
@@ -534,8 +639,8 @@ const skipReasonColumns = computed<DataTableColumns<CompressSkipReasonRow>>(() =
 }
 
 @media (max-width: 1100px) {
-  .metric-row {
-    grid-template-columns: repeat(2, 1fr);
+  .savings-groups {
+    grid-template-columns: 1fr;
   }
   .chart-grid {
     grid-template-columns: 1fr;

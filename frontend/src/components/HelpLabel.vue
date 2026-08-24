@@ -2,7 +2,8 @@
 <!-- Label text + an inline "?" tooltip. Used directly in form-item #label
      slots and via columnTitle() for table headers. This is the SINGLE
      implementation source for the "?" glyph (NIcon + lucide CircleHelp +
-     NTooltip) — do not inline it elsewhere. -->
+     NTooltip) — do not inline it elsewhere. The tooltip caps at 320px so a
+     long tip wraps instead of stretching past the viewport on one line. -->
 <template>
   <span class="help-label">
     <slot />
@@ -18,7 +19,7 @@
     >
       <CircleHelp />
     </NIcon>
-    <NTooltip v-else trigger="hover" placement="top">
+    <NTooltip v-else trigger="hover" placement="top" :max-width="320">
       <template #trigger>
         <!-- Clicks stop here: a help icon inside a clickable card must not
              trigger the card's navigation. -->

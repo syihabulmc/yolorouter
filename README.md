@@ -262,7 +262,10 @@ overridable per API key.
 **Custom system prompt injection.** Append house rules to every request's system
 prompt without touching client code. The injection follows the caller's own protocol
 shape and is deterministic, so repeated requests produce byte-identical system
-content and still hit upstream prompt caches.
+content and still hit upstream prompt caches. The console's projected per-1M-token
+saving for this feature is backed by a published paired on/off benchmark — the
+method and all 150 raw measurement pairs live in
+[docs/concise-output-benchmark.md](docs/concise-output-benchmark.md).
 
 **Input compression.** Coding agents send back huge, highly redundant tool output.
 Yolorouter recognizes what each content block is (`go test` output, git diffs,
