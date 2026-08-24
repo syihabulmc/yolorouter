@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Admins can provision local username/password accounts straight from the
+  Users page — the new "Add user" dialog creates an enabled member that
+  signs in with the ordinary login form, with an optional display name and
+  a hand-typed or randomly generated initial password (the admin hands it
+  to the user out of band; only the bcrypt hash is stored). The
+  first-run-setup account is now marked as the bootstrap account (new
+  `is_bootstrap` flag, migration 00032): it stays the one account that can
+  never be disabled or demoted — the OAuth-failure escape hatch — while
+  every other local account is fully manageable (promote, demote,
+  disable) like any externally-provisioned one. Previously the local
+  password account was unique by schema and admins had no way to create
+  one. The create dialog also takes an optional, informational email
+  (recorded for the directory; no mail is ever sent), and the bootstrap
+  administrator can reset another local account's password from the same
+  page — promoted admins manage roles and status but never credentials,
+  and a reset ends every live session of the target.
+
+- The API Keys page now shows where to point clients at: the gateway base
+  URL in both its OpenAI-compatible (`{base}/v1`) and Anthropic-compatible
+  forms, plus a copy-ready example request. The address is resolved
+  server-side — the configured `server.external_url` when set, derived from
+  the request otherwise — so it stays right on reverse-proxied, LAN and
+  container deployments where the console's own origin is not the gateway's.
+  The create-key dialog repeats it on the one-time plaintext step with the
+  fresh key already filled into the example, and CC-Switch profile exports
+  now carry the same resolved address instead of the console's own origin.
+  Previously the address the keys were for appeared nowhere in the console,
+  and an exported profile could point somewhere the gateway does not answer.
+
 ## [0.1.7] - 2026-08-19
 
 ### Added

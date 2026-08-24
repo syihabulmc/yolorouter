@@ -299,6 +299,9 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	sessionOnly.POST("/auth/logout", handler.PostLogout(db))
 	sessionOnly.GET("/auth/me", handler.GetMe(db))
 	sessionOnly.PUT("/auth/password", handler.PutPassword(db))
+	// The gateway address is readable by any signed-in account, unlike the
+	// admin-only build info above — GetSystemEndpoint owns the rationale.
+	sessionOnly.GET("/system/endpoint", handler.GetSystemEndpoint(externalURL))
 
 	// Ownership-scoped routes: reachable by members, but every query a
 	// non-admin makes through them is pinned to their own rows by
