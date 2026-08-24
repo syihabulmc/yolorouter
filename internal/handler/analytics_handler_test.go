@@ -2029,8 +2029,10 @@ func TestProviderReportSurvivesMalformedAttemptDetail(t *testing.T) {
 
 // TestGetAnalyticsReportByUserGroupsAcrossKeys: dimension=user must merge
 // every key an account owns into one row (usage per person, not per
-// credential), resolve the account's username, and keep keyless
-// auth-rejected traffic in its own NULL bucket.
+// credential), resolve the account's username, and omit keyless
+// auth-rejected traffic entirely — this report answers "who spent what",
+// and traffic that never reached an account has no account to answer for.
+// The u3 seed below is that traffic: it must not produce a row.
 func TestGetAnalyticsReportByUserGroupsAcrossKeys(t *testing.T) {
 	r, db, ck := newAnalyticsFixture(t)
 	key1, userID := seedAPIKey(t, db, "carol")
@@ -2080,25 +2082,22 @@ func TestGetAnalyticsReportByUserGroupsAcrossKeys(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(env.Data.Rows) != 2 {
-		t.Fatalf("expected carol + NULL bucket = 2 rows, got %d: %s", len(env.Data.Rows), w.Body.String())
+	if len(env.Data.Rows) != 1 {
+		t.Fatalf("expected carol alone (u3 is accountless), got %d rows: %s", len(env.Data.Rows), w.Body.String())
 	}
-	var carol, nullBucket bool
+	var carol bool
 	for _, row := range env.Data.Rows {
-		if row.UserID != nil && *row.UserID == userID {
+		if row.UserID == nil {
+			t.Fatalf("accountless traffic must not produce a row, got %+v", row)
+		}
+		if *row.UserID == userID {
 			carol = true
 			if row.Username != "carol" || row.Calls != 2 || row.InputTokens != 17 || row.CostMicros != 7 {
 				t.Fatalf("carol row must merge both keys' traffic, got %+v", row)
 			}
 		}
-		if row.UserID == nil {
-			nullBucket = true
-			if row.Username != "" || row.Calls != 1 {
-				t.Fatalf("NULL bucket must stay unattributed, got %+v", row)
-			}
-		}
 	}
-	if !carol || !nullBucket {
-		t.Fatalf("missing expected rows: carol=%v null=%v", carol, nullBucket)
+	if !carol {
+		t.Fatalf("missing carol's row: %s", w.Body.String())
 	}
 }

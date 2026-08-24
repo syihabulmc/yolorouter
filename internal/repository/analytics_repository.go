@@ -136,9 +136,9 @@ type CallerReportRow struct {
 // UserReportRow is one row of the dimension=user report — the same
 // aggregates as the caller report but grouped by owning account, so an
 // admin can read usage per person regardless of how many keys each person
-// spreads their traffic over. UserID nil = the bucket for rows with NULL
-// user_id (auth-rejected requests never tied to an account). Username
-// resolved post-fetch.
+// spreads their traffic over. UserID is never nil in practice: AggregateByUser
+// drops the NULL user_id group, and the pointer stays only because the column
+// itself is nullable. Username resolved post-fetch.
 type UserReportRow struct {
 	UserID          *uint  `json:"user_id" gorm:"column:user_id"`
 	Username        string `json:"username" gorm:"-"`
@@ -187,10 +187,12 @@ const tokenCostSumCols = `
 // selectExpr's ? placeholders — passing them explicitly (rather than
 // assuming one cost_known bind) keeps a dimension with a different
 // placeholder count from silently binding wrong. where / having / limit are
-// optional (empty string / zero = absent): the report dimensions group the
-// whole filtered set, while the Top-N breakdowns gate rows before the
-// aggregate, exclude their unattributed bucket per group, and rank into a
-// bounded window.
+// optional (empty string / zero = absent): report dimensions group the whole
+// filtered set and mostly leave all three unset, while the Top-N breakdowns
+// gate rows before the aggregate and rank into a bounded window. having is
+// how a caller drops a whole group after aggregating — the Top-N breakdowns
+// use it so their unattributed bucket cannot occupy a LIMIT slot, and the
+// user dimension uses it to leave that bucket out of the report entirely.
 type groupedQuery[R any] struct {
 	selectExpr string
 	selectArgs []any
@@ -411,15 +413,23 @@ func AggregateByCaller(ctx context.Context, db *gorm.DB, f *RequestLogFilter) ([
 }
 
 // AggregateByUser groups the same aggregates by owning account
-// (request_logs.user_id). Rows with NULL user_id form their own bucket
-// (auth-rejected traffic never tied to an account). Ordered by spend for
-// the same reason as the caller report.
+// (request_logs.user_id). Ordered by spend for the same reason as the caller
+// report.
+//
+// The NULL user_id group (auth-rejected traffic never tied to an account) is
+// dropped here via HAVING rather than by each consumer: the JSON report and
+// the CSV export share this one query, so excluding it at the SQL layer is
+// what keeps the two from disagreeing about whether that row exists. The
+// caller and provider reports deliberately keep their own NULL buckets —
+// unrouted traffic is meaningful per provider, whereas an account report
+// that lists a non-account is not.
 func AggregateByUser(ctx context.Context, db *gorm.DB, f *RequestLogFilter) ([]UserReportRow, error) {
 	return runGroupedAggregate(ctx, db, f, groupedQuery[UserReportRow]{
 		selectExpr: `
 		user_id,`[1:] + successEndedCols + `,` + tokenCostSumCols,
 		selectArgs: []any{false},
 		groupCol:   "user_id",
+		having:     "user_id IS NOT NULL",
 		orderExpr:  "cost_micros DESC",
 		resolve:    resolveAccountUsernames,
 		finalize:   (*UserReportRow).finalizeRate,

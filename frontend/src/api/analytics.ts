@@ -167,8 +167,10 @@ export interface ProviderReportRow {
 }
 
 // Mirrors repository.UserReportRow (dimension=user): the caller aggregates
-// merged per owning account. user_id null = the unattributed bucket
-// (auth-rejected traffic tied to no account).
+// merged per owning account. Current servers drop the NULL user_id group
+// (auth-rejected traffic tied to no account), but the field stays nullable:
+// the column is, and a rolling upgrade can serve this UI from an older
+// binary that still emits that row.
 export interface UserReportRow {
   user_id: number | null
   username: string
