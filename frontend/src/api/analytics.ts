@@ -383,8 +383,8 @@ export function getCompressStats(
 // === Concise-output projection ====================================
 
 // Mirrors internal/service/analytics's ConciseOutputProjection — the priced
-// output-volume roll-up plus projected monthly saving behind the
-// cost-optimization banner's estimated-savings figure.
+// output-volume roll-up plus projected per-million-token saving behind the
+// cost-optimization page's concise-output card.
 export interface ConciseOutputWindow {
   start: string
   end: string
@@ -396,8 +396,12 @@ export interface ConciseOutputProjection {
   // SUM(output_tokens × current output_price) over rows whose
   // (model_name, provider_id) resolves to a priced candidate, in micros.
   output_spend_micros: number
-  // Rows with output_tokens > 0 — the coverage denominator.
+  // Rows with output_tokens > 0.
   output_rows: number
+  // Output-token total over those rows, priced or not — the coverage
+  // denominator. Tokens rather than requests, because that is the basis the
+  // rate itself is weighted on.
+  output_tokens: number
   // Rows that actually contributed to output_spend_micros. Lower than
   // output_rows means some output traffic was unpriced and is excluded
   // from the figure.
@@ -406,15 +410,17 @@ export interface ConciseOutputProjection {
   // per-million rate.
   priced_output_tokens: number
   // spend × coefficient, normalized to 1M output tokens (micros). A unit
-  // rate, deliberately independent of the instance's traffic volume.
-  projected_savings_per_million_tokens_micros: number
+  // rate, deliberately independent of the instance's traffic volume. null
+  // when the backend could not compute one — never 0 standing in for that,
+  // which would read as a real "saves nothing".
+  projected_savings_per_million_tokens_micros: number | null
   // The factory coefficient behind the figure, echoed so the UI renders
   // the rate's basis from the backend's single source of truth.
   coefficient: number
 }
 
-// getConciseOutputProjection fetches the banner projection for the same
-// filter the dashboard below it uses.
+// getConciseOutputProjection fetches the concise-output card's projection
+// for the same filter the rest of the page uses.
 export function getConciseOutputProjection(filter: AnalyticsFilter): Promise<ConciseOutputProjection> {
   const params = buildAnalyticsQuery(filter)
   return apiFetch(`/api/admin/analytics/concise-output-projection?${params.toString()}`)

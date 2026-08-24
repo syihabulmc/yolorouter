@@ -2101,3 +2101,94 @@ func TestGetAnalyticsReportByUserGroupsAcrossKeys(t *testing.T) {
 		t.Fatalf("missing carol's row: %s", w.Body.String())
 	}
 }
+
+// === Concise-output projection handler ===================================
+
+// TestGetConciseOutputProjectionReturnsPricedVolumeAndRate drives the new
+// endpoint through the real route table and decodes the JSON envelope by
+// wire field name, so a rename or a mis-wired struct field fails here rather
+// than silently reaching the console as an em-dash.
+//
+// Every number in the fixture is deliberately distinct: unit price is not 1,
+// and the window mixes priced with heavy unpriced traffic, so total tokens,
+// priced tokens and spend can never coincide. Swapping any two of them —
+// output_tokens for priced_output_tokens in particular, which is what the
+// coverage ratio divides — turns this red.
+func TestGetConciseOutputProjectionReturnsPricedVolumeAndRate(t *testing.T) {
+	r, db, ck := newAnalyticsFixture(t)
+	now := time.Now().UTC()
+	providerID := seedProvider(t, db, "concise-provider")
+	m := model.Model{Name: "concise-model", ManagementStatus: model.ModelStatusEnabled,
+		SchedulingMode: model.ModelSchedulingModeFailover}
+	if err := db.Create(&m).Error; err != nil {
+		t.Fatalf("seed model: %v", err)
+	}
+	cand := model.ModelCandidate{ModelID: m.ID, ProviderID: providerID,
+		ProviderModelName: "upstream/concise-model", OutputPrice: 4.0}
+	if err := db.Create(&cand).Error; err != nil {
+		t.Fatalf("seed candidate: %v", err)
+	}
+	// 250K priced output tokens at 4 CNY/M = 1,000,000 micros of spend.
+	seedRequestLog(t, db, "cp1", now, func(l *model.RequestLog) {
+		l.ModelName = "concise-model"
+		l.ProviderID = &providerID
+		l.StatusCode = 200
+		l.OutputTokens = 250_000
+	})
+	// Same model, but never routed — unpriced, and far heavier, so a
+	// request-share coverage would read 50% where the token share is 20%.
+	seedRequestLog(t, db, "cu1", now, func(l *model.RequestLog) {
+		l.ModelName = "concise-model"
+		l.ProviderID = nil
+		l.StatusCode = 200
+		l.OutputTokens = 1_000_000
+	})
+
+	w, _ := doJSON(t, r, http.MethodGet, "/api/admin/analytics/concise-output-projection", nil, ck)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	// Decoded by wire name rather than into the service struct, so a changed
+	// json tag is caught too.
+	var env struct {
+		Code int `json:"code"`
+		Data struct {
+			OutputSpendMicros  int64 `json:"output_spend_micros"`
+			OutputRows         int64 `json:"output_rows"`
+			OutputTokens       int64 `json:"output_tokens"`
+			PricedRows         int64 `json:"priced_rows"`
+			PricedOutputTokens int64 `json:"priced_output_tokens"`
+			// Pointer, so a null on the wire is distinguishable from a
+			// zero saving — the contract the console relies on.
+			PerMillionMicros *int64  `json:"projected_savings_per_million_tokens_micros"`
+			Coefficient      float64 `json:"coefficient"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	d := env.Data
+	if d.OutputRows != 2 || d.PricedRows != 1 {
+		t.Errorf("rows = %d total / %d priced, want 2/1", d.OutputRows, d.PricedRows)
+	}
+	if d.OutputTokens != 1_250_000 {
+		t.Errorf("output_tokens = %d, want 1250000 (priced + unpriced)", d.OutputTokens)
+	}
+	if d.PricedOutputTokens != 250_000 {
+		t.Errorf("priced_output_tokens = %d, want 250000", d.PricedOutputTokens)
+	}
+	if d.OutputSpendMicros != 1_000_000 {
+		t.Errorf("output_spend_micros = %d, want 1000000 (250K x 4 CNY/M)", d.OutputSpendMicros)
+	}
+	// 4 CNY per million output tokens x the coefficient.
+	want := int64(4 * analytics.ConciseOutputCoefficient * 1e6)
+	if d.PerMillionMicros == nil {
+		t.Fatalf("projected_savings_per_million_tokens_micros is null, want %d", want)
+	}
+	if *d.PerMillionMicros != want {
+		t.Errorf("projected_savings_per_million_tokens_micros = %d, want %d", *d.PerMillionMicros, want)
+	}
+	if d.Coefficient != analytics.ConciseOutputCoefficient {
+		t.Errorf("coefficient = %v, want %v", d.Coefficient, analytics.ConciseOutputCoefficient)
+	}
+}

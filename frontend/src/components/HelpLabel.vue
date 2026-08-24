@@ -19,7 +19,7 @@
     >
       <CircleHelp />
     </NIcon>
-    <NTooltip v-else trigger="hover" placement="top" :max-width="320">
+    <NTooltip v-else trigger="hover" placement="top" :max-width="TIP_MAX_WIDTH">
       <template #trigger>
         <!-- Clicks stop here: a help icon inside a clickable card must not
              trigger the card's navigation. -->
@@ -39,6 +39,10 @@
 import { NTooltip, NIcon, useMessage } from 'naive-ui'
 import { CircleHelp } from '@lucide/vue'
 import { useIsMobile } from '../composables/useIsMobile'
+
+// Bubble cap for every desktop tooltip: long tips wrap instead of
+// stretching past the viewport on one line.
+const TIP_MAX_WIDTH = 320
 
 const props = defineProps<{ tip: string }>()
 

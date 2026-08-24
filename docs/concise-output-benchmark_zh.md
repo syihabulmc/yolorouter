@@ -1,54 +1,45 @@
-# Concise-output benchmark
+# 输出精简基准实验
 
-[中文版](concise-output-benchmark_zh.md)
+[English](concise-output-benchmark.md)
 
-The cost-optimization page estimates what the Concise Output switch saves
-(a global system prompt that asks models to keep replies short). The
-estimate is an amount per 1M output tokens: the weighted output price of
-your priced traffic, times a fixed coefficient of **12.6%**. This file
-records how that 12.6% was measured. The complete raw data is at the
-bottom.
+成本优化页会给「输出精简」开关估一个节省金额（这个开关就是全局系统提示词，
+要求模型回答简洁）。口径是每 100 万输出 token：取已定价流量的加权输出单价，
+乘一个固定系数 **12.6%**。本文件记录这个 12.6% 是怎么测出来的，全部原始数据
+附在文末。
 
-## How it was measured
+## 测法
 
-10 fixed questions (listed below), 3 rounds each, on five models:
-claude-opus-4-7, deepseek-v4-flash, deepseek-v4-pro, glm-5.1,
-qwen3.5-flash. Each model ran all 30 questions with the switch off, then the
-switch was flipped through the console's own setting API and the same 30 ran
-again. 300 calls in total, none failed, which gives 150 on/off pairs — one
-per (model, question, round).
+10 个固定问题（见下），每题 3 轮，模型 5 个：claude-opus-4-7、
+deepseek-v4-flash、deepseek-v4-pro、glm-5.1、qwen3.5-flash。每个模型先关着
+开关把 30 道题跑完，然后通过后台自己的设置接口把开关打开，同样的 30 道再跑一
+遍。共 300 次调用，无一失败，配成 150 对——每对对应一组（模型，题目，轮次）。
 
-The ON runs installed exactly what the console installs when you turn the
-switch on, verbatim:
+开的那次装的就是后台打开开关时写入的原文，一字未改：
 
 > 回答请保持简洁，去掉客套话和不必要的铺垫，保留完整语法和技术细节。优先复用标准库和平台已有能力，非必要不引入新的抽象或依赖，用最短的可行改动解决问题。
 
-Both sentences, because the switch writes both — the second one, about
-preferring existing platform capabilities and the smallest viable change,
-shortens code answers as much as the first one shortens prose. The console
-writes them in its own language, so an English console installs the English
-wording; that wording is not what was measured here.
+两句都装，因为开关本来就两句都写。第二句讲的是「优先复用已有平台能力、用最短的
+可行改动解决问题」，它压缩代码类回答的力度不比第一句压缩行文的力度小。后台按自
+身语言写入，所以英文后台装的是英文措辞——那套措辞不在这次测量里。
 
-Sampling parameters were whatever each model defaults to. For each pair,
-`r = (off_tokens − on_tokens) / off_tokens`, where the token counts are
-the upstream-reported `completion_tokens`. On reasoning models this
-includes the thinking tokens, because those are billed too. The shipped
-coefficient is the median of all 150 ratios.
+采样参数用各模型默认值。每对算 `r = (off_tokens − on_tokens) / off_tokens`，
+token 数取上游回报的 `completion_tokens`。推理模型的思考 token 也在内，因为
+那部分照样计费。出厂系数取全部 150 对 r 的中位数。
 
-Measured on 2026-08-24.
+测量日期：2026-08-24。
 
-## Results
+## 结果
 
 | | |
 | --- | --- |
-| Median (the shipped coefficient) | **+12.6%** |
-| 25th / 75th percentile | −4.0% / +27.2% |
-| Min / max | −192.8% / +87.2% |
-| Negative pairs | 44 of 150 |
+| 中位数（出厂系数） | **+12.6%** |
+| 25 / 75 分位 | −4.0% / +27.2% |
+| 最小 / 最大 | −192.8% / +87.2% |
+| 负值对 | 150 对中 44 对 |
 
-Per-model medians:
+按模型的中位数：
 
-| Model | Median |
+| 模型 | 中位数 |
 | --- | --- |
 | claude-opus-4-7 | +3.6% |
 | deepseek-v4-flash | +18.6% |
@@ -56,86 +47,35 @@ Per-model medians:
 | glm-5.1 | +11.3% |
 | qwen3.5-flash | +10.6% |
 
-Every model came out ahead, but the spread inside each one is wide and it
-is not noise you can average away by looking harder. 44 of the 150 pairs are
-negative — the prompt made that particular answer longer. Individual pairs
-swing hard: the same model on the same question landed at −193% in one round
-and +46% in another. Expect the figure to hold across a month of traffic,
-not on any single request.
+五个模型都是正的，但每个模型内部的离散度都很大，而且不是多测几次就能抹平的
+噪声。150 对里有 44 对是负的——那一次提示词把回答弄长了。单对之间摆动很凶：
+同一模型同一题，一轮 −193%，另一轮 +46%。这个数该按「一个月的流量」去理解，
+不是按单次请求。
 
-We ship one global number, not a per-model table. Models change faster than
-such a table stays useful, and the page labels the figure as an estimate.
-The number also assumes the switch is left on the prompt it installs;
-replacing that text through the API with something unrelated voids it.
+只发一个全局系数，不做分模型表——模型迭代比表格保鲜期快，页面上也标了这是估算。
+另外这个数的前提是开关装的就是它自己写入的那段提示词；如果你通过 API 把文本换成
+了不相干的内容，这个数就不适用了。
 
-## The questions
+## 题目
 
-Frozen; the same set is used every time. The runs were made in Chinese —
-the questions below are translations, kept here so the mix is readable.
-Question length and language both move the token counts, so reproducing
-these numbers means sending the Chinese originals verbatim: they are in the
-[Chinese edition](concise-output-benchmark_zh.md#题目). (Embedded code, SQL
-and log samples are identical in both.)
+固定不变，每次同一套。
 
-1. **[codegen]** Implement in Go a function `WordCount(text string, topN int)`
-   that counts case-insensitively how often each word appears in an English
-   text and returns the top `topN` `(word, count)` pairs by descending
-   count. Provide complete runnable code including imports and a small
-   `main` example.
-2. **[codegen]** Write a Python CLI script that recursively walks a given
-   directory, finds files larger than 10 MB modified within the last 7
-   days, and prints their paths and sizes (human-readable) in descending
-   size order. Provide complete code and usage instructions.
-3. **[code-explain]** Explain what this SQL does and point out possible
-   performance problems and improvements:
-   `SELECT u.id, u.username, u.email, COUNT(o.id) AS order_count, SUM(o.amount) AS total FROM users u LEFT JOIN orders o ON o.user_id = u.id AND o.status = 'paid' WHERE u.created_at > '2026-01-01' AND u.status <> 'deleted' GROUP BY u.id, u.username, u.email HAVING COUNT(o.id) > 5 ORDER BY order_count DESC LIMIT 100;`
-4. **[code-review]** Review this Go code and list every problem you find
-   (error handling, resource leaks, edge cases):
-   `func readConfig(path string) ([]byte, error) { f, err := os.Open(path); if err != nil { return nil, err } b, err := io.ReadAll(f); return b, err }`
-5. **[log-analysis]** Given this one-hour sample of API access logs
-   (format: `time method path status latency_ms`), analyze the traffic
-   pattern, surface anomalies, and give operational recommendations:
-   `10:01 GET /v1/models 200 12; 10:01 POST /v1/chat/completions 200 3421; 10:02 POST /v1/chat/completions 429 5; 10:02 POST /v1/chat/completions 200 5410; 10:03 GET /v1/models 200 9; 10:03 POST /v1/chat/completions 500 78; 10:04 POST /v1/chat/completions 200 4102; 10:05 GET /health 200 1; 10:05 POST /v1/chat/completions 200 6230; 10:06 POST /v1/chat/completions 429 4; 10:07 POST /v1/chat/completions 200 3871; 10:08 GET /v1/models 200 11; 10:09 POST /v1/chat/completions 200 5540; 10:10 POST /v1/chat/completions 502 120`
-6. **[summary]** Read the product introduction below and produce a
-   structured summary (target users, core features, pricing model,
-   differentiation — at most three bullets each): “YoloRouter is a
-   developer-facing AI model routing gateway. It aggregates multiple
-   upstream model services behind one OpenAI-compatible endpoint; callers
-   switch models by pointing base_url at the gateway. Provider-level
-   failover is built in: one model can map to several providers and
-   requests degrade automatically to the next one, invisibly to the
-   caller. It also provides API key management, per-account usage
-   analytics and budget caps. Deployment is a single binary with SQLite
-   built in, or PostgreSQL. Pricing is upstream cost + 5%, no monthly
-   fee.”
-7. **[knowledge]** Why does TCP need a three-way handshake rather than two?
-   Explain from the protocol's design goals (preventing historical
-   connections, synchronizing initial sequence numbers, confirming
-   two-way communication) and what breaks with two.
-8. **[knowledge]** Explain the four database transaction isolation levels:
-   what each solves, which anomalies remain (dirty read, non-repeatable
-   read, phantom read), and MySQL InnoDB's default level and how it is
-   implemented.
-9. **[translate]** Translate this English technical documentation into
-   Chinese, preserving terminology: “The gateway normalizes every inbound
-   request into an intermediate representation before dispatching it to an
-   upstream provider. This decouples the ingress protocol spoken by the
-   caller from the egress protocol spoken by the provider, so a new
-   provider can be added without touching any caller-side code. Streaming
-   responses are relayed chunk-by-chunk with backpressure, and usage
-   reported by the upstream is reconciled into the audit log at settlement
-   time.”
-10. **[rewrite]** Rewrite this rambling email to be concise and
-    professional, keeping every key fact (time, place, agenda, prep
-    work): “hi 大家好，是这样的，我们本来定在下周三下午的开会时间，因为会议室被占了，所以现在改到周四上午十点了，地点还是老地方 B 栋 301。这次会议主要想跟大家同步一下二季度的进度，然后讨论一下下个季度的计划，另外呢，麻烦大家提前把自己负责模块的数据准备好，最好是能发我一份，我在会上统一汇总，谢谢大家配合，有什么问题随时找我。”
+1. **[代码生成]** 用 Go 实现一个函数 WordCount(text string, topN int)，统计一段英文文本中每个单词出现的次数，忽略大小写，返回按出现次数降序排列的前 topN 个 (word, count)。请给出完整可运行的代码，包含必要的 import 和一个简单的 main 示例。
+2. **[代码生成]** 用 Python 写一个命令行脚本，递归遍历指定的目录，找出最近 7 天内被修改过且大小超过 10MB 的文件，按大小降序打印它们的路径和大小（人类可读格式）。请给出完整代码和使用说明。
+3. **[代码解释]** 请解释下面这段 SQL 做了什么，并指出它可能存在的性能问题与改进方法：SELECT u.id, u.username, u.email, COUNT(o.id) AS order_count, SUM(o.amount) AS total FROM users u LEFT JOIN orders o ON o.user_id = u.id AND o.status = 'paid' WHERE u.created_at > '2026-01-01' AND u.status <> 'deleted' GROUP BY u.id, u.username, u.email HAVING COUNT(o.id) > 5 ORDER BY order_count DESC LIMIT 100;
+4. **[代码审查]** 请审查下面这段 Go 代码，指出所有你发现的问题（错误处理、资源泄漏、边界条件等）：func readConfig(path string) ([]byte, error) { f, err := os.Open(path); if err != nil { return nil, err } b, err := io.ReadAll(f); return b, err }
+5. **[日志分析]** 以下是某个 API 服务一小时内的访问日志采样（格式：时间 方法 路径 状态码 耗时ms）。请分析流量特征、发现异常并给出运营建议：10:01 GET /v1/models 200 12；10:01 POST /v1/chat/completions 200 3421；10:02 POST /v1/chat/completions 429 5；10:02 POST /v1/chat/completions 200 5410；10:03 GET /v1/models 200 9；10:03 POST /v1/chat/completions 500 78；10:04 POST /v1/chat/completions 200 4102；10:05 GET /health 200 1；10:05 POST /v1/chat/completions 200 6230；10:06 POST /v1/chat/completions 429 4；10:07 POST /v1/chat/completions 200 3871；10:08 GET /v1/models 200 11；10:09 POST /v1/chat/completions 200 5540；10:10 POST /v1/chat/completions 502 120
+6. **[长文总结]** 请阅读下面这段产品介绍并输出结构化要点总结（目标用户、核心功能、定价模式、差异化优势各不超过三条）：『YoloRouter 是一个面向开发者的 AI 模型路由网关。它把多家上游模型服务聚合在一个 OpenAI 兼容接口后面，调用方只需要把 base_url 指向网关即可切换模型。网关内置了供应商级故障转移：同一个模型可以配置多个供应商映射，请求失败时自动降级到下一家，调用方无感知。它还提供 API Key 管理、按账号的用量统计和预算限额，团队可以给每个成员发独立的 key 并设置月度预算。部署形态是单个二进制文件，内置 SQLite，开箱即用，也支持 PostgreSQL。价格按上游成本加收 5% 服务费，没有月费。』
+7. **[知识问答]** 为什么 TCP 建立连接需要三次握手而不是两次？请从协议设计的目标（防止历史连接、同步双方初始序列号、确认双向通信能力）出发解释，并说明两次握手会出什么问题。
+8. **[知识问答]** 请解释数据库事务的四个隔离级别，每个级别分别解决了什么问题、还存在什么异常（脏读、不可重复读、幻读），并说明 MySQL InnoDB 的默认级别及其实现方式。
+9. **[翻译]** 请把下面这段英文技术文档翻译成中文，保留术语准确性：『The gateway normalizes every inbound request into an intermediate representation before dispatching it to an upstream provider. This decouples the ingress protocol spoken by the caller from the egress protocol spoken by the provider, so a new provider can be added without touching any caller-side code. Streaming responses are relayed chunk-by-chunk with backpressure, and usage reported by the upstream is reconciled into the audit log at settlement time.』
+10. **[改写]** 请把下面这封邮件改写得简洁专业，保留全部关键信息（时间、地点、议程、需要的准备）：『hi 大家好，是这样的，我们本来定在下周三下午的开会时间，因为会议室被占了，所以现在改到周四上午十点了，地点还是老地方 B 栋 301。这次会议主要想跟大家同步一下二季度的进度，然后讨论一下下个季度的计划，另外呢，麻烦大家提前把自己负责模块的数据准备好，最好是能发我一份，我在会上统一汇总，谢谢大家配合，有什么问题随时找我。』
 
-## Raw data — all 150 pairs
+## 原始数据——全部 150 对
 
-`off` / `on` are the upstream-reported `completion_tokens` (thinking tokens
-included); `r = (off − on) / off`. Positive `r` means the concise prompt
-shortened the output.
+`off` / `on` 为上游回报的 `completion_tokens`（含思考 token）；`r = (off − on) / off`。r 为正表示提示词让输出变短了。
 
-| Model | Question | Round | off | on | r |
+| 模型 | 题目 | 轮次 | off | on | r |
 | --- | --- | --- | --- | --- | --- |
 | claude-opus-4-7 | q1-codegen-wordcount | 1 | 615 | 617 | -0.3% |
 | claude-opus-4-7 | q1-codegen-wordcount | 2 | 590 | 592 | -0.3% |
@@ -288,11 +228,8 @@ shortened the output.
 | qwen3.5-flash | q10-rewrite-email | 2 | 1145 | 1934 | -68.9% |
 | qwen3.5-flash | q10-rewrite-email | 3 | 2148 | 1918 | 10.7% |
 
-## Reproducing
+## 复现
 
-Run the frozen questions on your own instance — in the original Chinese, as
-above — 3 rounds each: all of them with the switch off, then all of them
-again with it on. Take the median of the pair ratios. Your numbers will not
-match ours — models drift — but the shape should: a positive median with a
-wide spread around it, and a meaningful minority of pairs coming out
-negative.
+在自己实例上按同样流程跑：题目固定 10 道、3 轮，先关着开关全跑一遍，再打开
+开关全跑一遍，最后取配对比值的中位数。具体数字肯定对不上（模型一直在变），但
+形态应该一致：中位数为正，但周围分布很宽，且有相当一部分对是负的。

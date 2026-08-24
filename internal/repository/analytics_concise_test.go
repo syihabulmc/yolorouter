@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -69,13 +70,16 @@ func TestAggregatePricedOutputVolumeCoverageAndSpend(t *testing.T) {
 	db := testutil.NewSQLiteDB(t)
 	seedConciseModel(t, db, "m-priced", 1, 2.5)
 	seedConciseModel(t, db, "m-zero", 2, 0)
-	seedConciseModel(t, db, "m-orphan", 3, 0) // providerID 0 = no candidate
-	// Provider 9 exists but serves no candidate for m-priced — the
-	// realistic "wrong provider" case (request_logs.provider_id has an FK
-	// to providers, so the row needs the provider to exist at all).
-	p9 := model.Provider{ID: 9, Name: "provider-9", ProviderType: "openai"}
-	if err := db.Create(&p9).Error; err != nil {
-		t.Fatalf("create provider 9: %v", err)
+	seedConciseModel(t, db, "m-orphan", 0, 0) // 0 = model exists, no candidate at all
+	// Providers 3 and 9 exist but serve no candidate for the model each of
+	// their rows names: 3 is the orphan model's route, 9 is a priced model
+	// routed through a provider that never offered it. Both have to exist as
+	// rows because request_logs.provider_id carries an FK to providers.
+	for _, id := range []uint{3, 9} {
+		p := model.Provider{ID: id, Name: "provider-" + fmt.Sprint(id), ProviderType: "openai"}
+		if err := db.Create(&p).Error; err != nil {
+			t.Fatalf("create provider %d: %v", id, err)
+		}
 	}
 	now := time.Now().UTC()
 
@@ -93,6 +97,11 @@ func TestAggregatePricedOutputVolumeCoverageAndSpend(t *testing.T) {
 	}
 	if v.OutputRows != 6 {
 		t.Errorf("OutputRows = %d, want 6 (all rows with output_tokens > 0)", v.OutputRows)
+	}
+	// Coverage denominator counts TOKENS over every one of those rows, not
+	// requests: 1.5M priced + four 100-token unpriced rows.
+	if v.OutputTokens != 1_500_400 {
+		t.Errorf("OutputTokens = %d, want 1500400 (priced + unpriced output tokens)", v.OutputTokens)
 	}
 	if v.PricedRows != 2 {
 		t.Errorf("PricedRows = %d, want 2 (p1, p2)", v.PricedRows)
@@ -125,6 +134,60 @@ func TestAggregatePricedOutputVolumeRoundsOnce(t *testing.T) {
 	// would give 3+3=6; rounding once after the sum gives 5.
 	if v.OutputSpendMicros != 5 {
 		t.Errorf("OutputSpendMicros = %d, want 5 (round after summing)", v.OutputSpendMicros)
+	}
+}
+
+// TestAggregatePricedOutputVolumeKeepsExactSpend pins that the unrounded
+// total survives alongside the rounded one: a window holding a few sub-micro
+// tokens rounds to 0 micros, and the per-million rate divides by the token
+// count, so dropping the exact figure would collapse a real unit rate to
+// zero on a lightly-used instance.
+func TestAggregatePricedOutputVolumeKeepsExactSpend(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedConciseModel(t, db, "m-cheap", 1, 0.4)
+	now := time.Now().UTC()
+	seedConciseLog(t, db, "c1", "m-cheap", 1, 1, now)
+
+	v, err := AggregatePricedOutputVolume(context.Background(), db, &RequestLogFilter{})
+	if err != nil {
+		t.Fatalf("AggregatePricedOutputVolume: %v", err)
+	}
+	// 1 token x 0.4 CNY/M = 0.4 micros: rounds to zero, exact keeps the 0.4.
+	if v.OutputSpendMicros != 0 {
+		t.Errorf("OutputSpendMicros = %d, want 0 (0.4 rounds down)", v.OutputSpendMicros)
+	}
+	if math.Abs(v.OutputSpendMicrosExact-0.4) > 1e-9 {
+		t.Errorf("OutputSpendMicrosExact = %v, want 0.4 (the pre-rounding total)", v.OutputSpendMicrosExact)
+	}
+}
+
+// TestAggregatePricedOutputVolumeSkipsOutOfRangePrice pins the overflow
+// guard: unit prices are only validated as non-negative, and an absurd one
+// times a real token count leaves the int64 micros range — where a float64
+// conversion is undefined in Go and can yield a negative saving. Such a
+// group must be treated like a missing price: out of the spend, still in the
+// coverage denominator.
+func TestAggregatePricedOutputVolumeSkipsOutOfRangePrice(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	seedConciseModel(t, db, "m-absurd", 1, 1e300)
+	seedConciseModel(t, db, "m-sane", 2, 2.0)
+	now := time.Now().UTC()
+	seedConciseLog(t, db, "a1", "m-absurd", 1, 1_000_000, now)
+	seedConciseLog(t, db, "s1", "m-sane", 2, 1_000_000, now)
+
+	v, err := AggregatePricedOutputVolume(context.Background(), db, &RequestLogFilter{})
+	if err != nil {
+		t.Fatalf("AggregatePricedOutputVolume: %v", err)
+	}
+	if v.OutputSpendMicros != 2_000_000 {
+		t.Errorf("OutputSpendMicros = %d, want 2000000 (only the sane group)", v.OutputSpendMicros)
+	}
+	if v.PricedRows != 1 || v.PricedOutputTokens != 1_000_000 {
+		t.Errorf("priced totals: got rows=%d tokens=%d, want 1/1000000", v.PricedRows, v.PricedOutputTokens)
+	}
+	if v.OutputRows != 2 || v.OutputTokens != 2_000_000 {
+		t.Errorf("coverage denominator: got rows=%d tokens=%d, want 2/2000000 (the skipped group still counts toward coverage)",
+			v.OutputRows, v.OutputTokens)
 	}
 }
 

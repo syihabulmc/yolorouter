@@ -8,7 +8,8 @@
 //   - GET /api/admin/analytics/export          CSV stream of the same report
 //   - GET /api/admin/analytics/compress-stats  input-compression roll-up
 //   - GET /api/admin/analytics/concise-output-projection  priced output
-//     volume + projected monthly saving for the cost-optimization banner
+//     volume + projected per-million-token saving for the cost-optimization
+//     page's concise-output card
 //
 // Filter shape is identical across the five (start/end/api_key_id/model_name/
 // provider_id/status); ?dimension selects the report aggregate, ?bucket
@@ -158,8 +159,8 @@ func GetCompressStats(svc *analytics.AnalyticsService) gin.HandlerFunc {
 
 // GetConciseOutputProjection handles GET /api/admin/analytics/
 // concise-output-projection — the priced output-volume roll-up and
-// projected monthly saving behind the cost-optimization banner's
-// estimated-savings figure. Shares the analytics filter shape; no extra
+// projected per-million-token saving behind the cost-optimization page's
+// concise-output card. Shares the analytics filter shape; no extra
 // params.
 func GetConciseOutputProjection(svc *analytics.AnalyticsService) gin.HandlerFunc {
 	return func(c *gin.Context) {

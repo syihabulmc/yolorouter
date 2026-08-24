@@ -1077,21 +1077,36 @@ func ResolveTimeRange(f *RequestLogFilter, loc *time.Location, bucket string, no
 
 // === Concise-output projection ===========================================
 //
-// Feeds the cost-optimization banner's projected-savings figure: how much
-// the concise-output switch is estimated to save per month. Output spend is
+// Feeds the cost-optimization page's concise-output card: the unit rate the
+// switch is estimated to save per million output tokens. Output spend is
 // recomputed from token counts x CURRENT candidate prices rather than read
 // from the stored cost_micros, because the stored figure is a per-request
 // total with no input/output split and a write-time split column would only
 // cover rows written after it existed. Prices therefore reflect the latest
 // edits, an acceptable drift for a figure that is explicitly non-financial.
+//
+// Pricing keys off the historical model_name, the only model identity a
+// request_logs row carries. A model renamed since the window was recorded no
+// longer resolves, so its traffic falls into the unpriced bucket and shows up
+// as a coverage shortfall. The one case that does go wrong quietly is a
+// renamed model whose old name is later given to a DIFFERENT model: the old
+// traffic then prices against the new model's candidates. Closing that needs
+// a stable model id on the log row, which no historical row has.
 
 // PricedOutputVolume is the priced roll-up of output tokens for a filter.
 type PricedOutputVolume struct {
-	// OutputRows counts rows with output_tokens > 0 — the coverage
-	// denominator. Rows that resolve to no candidate, or whose candidate's
-	// output_price is 0 (unpriced), count here but not in PricedRows.
+	// OutputRows counts rows with output_tokens > 0. Rows that resolve to no
+	// candidate, or whose candidate's output_price is 0 (unpriced), count
+	// here but not in PricedRows.
 	OutputRows int64
-	// PricedRows counts rows that contributed to OutputSpendMicros.
+	// OutputTokens is the output-token total over ALL of those rows, priced
+	// or not — the coverage denominator. Coverage is measured in tokens
+	// rather than requests because the rate it qualifies is token-weighted:
+	// 99 priced one-token requests next to one unpriced million-token
+	// request is 99% of requests but ~0.01% of the volume the rate speaks
+	// for, and a request-share figure would read as near-total coverage.
+	OutputTokens int64
+	// PricedRows counts rows that contributed to the spend totals.
 	PricedRows int64
 	// PricedOutputTokens is the output-token total over the priced rows —
 	// the denominator that turns the spend into a per-million-token rate.
@@ -1102,17 +1117,28 @@ type PricedOutputVolume struct {
 	// micros; summed as float and rounded once at the end so group-level
 	// products don't each truncate before the total.
 	OutputSpendMicros int64
+	// OutputSpendMicrosExact is the same total before that final rounding.
+	// The per-million rate divides the spend by the priced token count, which
+	// re-amplifies whatever the rounding threw away: on a window holding a
+	// handful of sub-micro tokens the rounded total is 0 and the unit rate
+	// would collapse to zero, contradicting the whole point of a rate that
+	// does not depend on how much traffic the instance has seen.
+	OutputSpendMicrosExact float64
 }
 
 // AggregatePricedOutputVolume groups the filtered rows with
-// output_tokens > 0 by (model_name, provider_id) and prices each group
-// against the CURRENT model_candidates rows. Prices resolve post-fetch via
-// batched SELECTs (models by name, then candidates by model id) instead of
-// a JOIN: applyFilter emits unqualified WHERE columns and a second table in
-// play would make them ambiguous under Postgres — the same reason the
-// provider/caller dimensions resolve their names after the fetch. Rows
-// whose provider never routed (NULL provider_id) cannot be priced and count
-// toward coverage only.
+// output_tokens > 0 by (model_name, provider_id) — through the same
+// runGroupedAggregate pipeline as every other grouped aggregate here — and
+// prices each group against the CURRENT model_candidates rows. Unlike the
+// report dimensions it returns one rolled-up struct rather than the group
+// rows, because the caller wants the window's totals, not a breakdown.
+//
+// Prices resolve post-fetch via batched SELECTs (models by name, then
+// candidates by model id) instead of a JOIN: applyFilter emits unqualified
+// WHERE columns and a second table in play would make them ambiguous under
+// Postgres — the same reason the provider/caller dimensions resolve their
+// names after the fetch. Rows whose provider never routed (NULL provider_id)
+// cannot be priced and count toward coverage only.
 func AggregatePricedOutputVolume(ctx context.Context, db *gorm.DB, f *RequestLogFilter) (*PricedOutputVolume, error) {
 	type outputVolumeRow struct {
 		ModelName    string `gorm:"column:model_name"`
@@ -1120,13 +1146,18 @@ func AggregatePricedOutputVolume(ctx context.Context, db *gorm.DB, f *RequestLog
 		OutputTokens int64  `gorm:"column:output_tokens"`
 		Calls        int64  `gorm:"column:calls"`
 	}
-	var rows []outputVolumeRow
-	err := f.applyFilter(db.WithContext(ctx)).Select(`
+	rows, err := runGroupedAggregate(ctx, db, f, groupedQuery[outputVolumeRow]{
+		selectExpr: `
 		model_name,
 		provider_id,
 		COALESCE(SUM(output_tokens), 0) AS output_tokens,
-		COUNT(*) AS calls
-	`[1:]).Where("output_tokens > 0").Group("model_name, provider_id").Scan(&rows).Error
+		COUNT(*) AS calls`[1:],
+		where:    "output_tokens > 0",
+		groupCol: "model_name, provider_id",
+		// No ranking to express, but the summation below adds float products
+		// in row order: a deterministic order keeps the total reproducible.
+		orderExpr: "model_name, provider_id",
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1143,8 +1174,8 @@ func AggregatePricedOutputVolume(ctx context.Context, db *gorm.DB, f *RequestLog
 			names = append(names, r.ModelName)
 		}
 	}
-	var models []model.Model
-	if err := db.WithContext(ctx).Where("name IN ?", names).Find(&models).Error; err != nil {
+	models, err := ListModelsByNames(db.WithContext(ctx), names)
+	if err != nil {
 		return nil, err
 	}
 	modelIDByName := make(map[string]uint, len(models))
@@ -1173,6 +1204,7 @@ func AggregatePricedOutputVolume(ctx context.Context, db *gorm.DB, f *RequestLog
 	spend := 0.0
 	for _, r := range rows {
 		volume.OutputRows += r.Calls
+		volume.OutputTokens += r.OutputTokens
 		if r.ProviderID == nil {
 			continue
 		}
@@ -1184,10 +1216,21 @@ func AggregatePricedOutputVolume(ctx context.Context, db *gorm.DB, f *RequestLog
 		if !ok || price <= 0 {
 			continue
 		}
+		// Unit prices are only validated as non-negative, so an absurd one
+		// times a real token count can leave the int64 micros range — and
+		// converting an out-of-range float64 to int64 is undefined in Go,
+		// which would surface as an arbitrary (possibly negative) saving.
+		// Such a group is treated exactly like a missing price: excluded
+		// from the spend, still counted toward coverage.
+		next := spend + float64(r.OutputTokens)*price
+		if math.IsNaN(next) || next >= math.MaxInt64 {
+			continue
+		}
 		volume.PricedRows += r.Calls
 		volume.PricedOutputTokens += r.OutputTokens
-		spend += float64(r.OutputTokens) * price
+		spend = next
 	}
+	volume.OutputSpendMicrosExact = spend
 	volume.OutputSpendMicros = int64(math.Round(spend))
 	return volume, nil
 }
