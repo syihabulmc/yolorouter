@@ -53,7 +53,7 @@ the box; switch to PostgreSQL when you want it.
 **Control & cost**
 
 - **Per-key access control.** Model allowlists, rate and concurrency limits, cumulative budget caps, optional expiry, instant revocation.
-- **Multi-user with SSO.** Team members sign in through any OAuth2/OIDC provider (Zitadel, GitHub, Keycloak, ...) — accounts are created on first login, no invites. Members manage their own API keys and see only their own usage and costs; admins see everything, can filter every statistic by account, and can promote, demote, or disable accounts. Disabling an account signs it out and turns off all of its keys instantly.
+- **Multi-user with SSO.** Team members sign in through any OAuth2/OIDC provider (Zitadel, GitHub, Keycloak, ...) with accounts created on first login, or an admin provisions local username/password accounts straight from the console — no invites either way. Members manage their own API keys and see only their own usage and costs; admins see everything, can filter every statistic by account, and can create, promote, demote, or disable accounts. Disabling an account signs it out and turns off all of its keys instantly.
 - **Cost optimization.** Inject a custom system prompt globally or per key; compress bulky tool output before it reaches the upstream. The console reports what each actually saved.
 - **Built-in observability.** Token and cost KPIs, usage by model / provider / time / account / key, and request logs with the full per-attempt routing chain. Any view exports to CSV.
 - **Bilingual console.** English and 简体中文, switchable anywhere; timezone follows the browser.

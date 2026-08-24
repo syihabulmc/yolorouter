@@ -97,6 +97,9 @@ func TestMemberScopeRouteConformance(t *testing.T) {
 		"/api/admin/auth/me":              {needsSession: true},
 		"/api/admin/auth/oauth/providers": {needsSession: false},
 		"/api/admin/auth/state":           {needsSession: false},
+		// This deployment's own public address — member-readable by design
+		// (rationale on GetSystemEndpoint); carries no account data.
+		"/api/admin/system/endpoint": {needsSession: true},
 	}
 
 	// bob's sentinel: his username or request id anywhere in a
