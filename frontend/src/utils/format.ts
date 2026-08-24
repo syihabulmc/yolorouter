@@ -8,7 +8,7 @@ export function formatNumber(n: number): string {
   return n.toLocaleString()
 }
 
-// formatNumber renders a [0,1] ratio as a percentage string with one decimal
+// formatRate renders a [0,1] ratio as a percentage string with one decimal
 // place (e.g. 0.875 -> "87.5%"). One decimal keeps column width stable.
 export function formatRate(r: number): string {
   return `${(r * 100).toFixed(1)}%`
