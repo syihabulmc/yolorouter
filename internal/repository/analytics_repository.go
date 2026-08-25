@@ -1077,10 +1077,10 @@ func ResolveTimeRange(f *RequestLogFilter, loc *time.Location, bucket string, no
 
 // === Concise-output projection ===========================================
 //
-// Feeds the cost-optimization page's concise-output card: the unit rate the
-// switch is estimated to save per million output tokens. Output spend is
-// recomputed from token counts x CURRENT candidate prices rather than read
-// from the stored cost_micros, because the stored figure is a per-request
+// Feeds the cost-optimization page's concise-output card: the cost and
+// output tokens the switch is estimated to save over the window. Output
+// spend is recomputed from token counts x CURRENT candidate prices rather
+// than read from the stored cost_micros, because the stored figure is a per-request
 // total with no input/output split and a write-time split column would only
 // cover rows written after it existed. Prices therefore reflect the latest
 // edits, an acceptable drift for a figure that is explicitly non-financial.
@@ -1101,15 +1101,16 @@ type PricedOutputVolume struct {
 	OutputRows int64
 	// OutputTokens is the output-token total over ALL of those rows, priced
 	// or not — the coverage denominator. Coverage is measured in tokens
-	// rather than requests because the rate it qualifies is token-weighted:
-	// 99 priced one-token requests next to one unpriced million-token
-	// request is 99% of requests but ~0.01% of the volume the rate speaks
-	// for, and a request-share figure would read as near-total coverage.
+	// rather than requests because the figures it qualifies are
+	// token-weighted: 99 priced one-token requests next to one unpriced
+	// million-token request is 99% of requests but ~0.01% of the volume the
+	// estimate speaks for, and a request-share figure would read as
+	// near-total coverage.
 	OutputTokens int64
 	// PricedRows counts rows that contributed to the spend totals.
 	PricedRows int64
 	// PricedOutputTokens is the output-token total over the priced rows —
-	// the denominator that turns the spend into a per-million-token rate.
+	// the basis of the projected saved-token figure.
 	PricedOutputTokens int64
 	// OutputSpendMicros is SUM(output_tokens x output_price) over the
 	// priced rows, in int64 micros (1 CNY = 1e6). Per-million-token pricing
@@ -1118,11 +1119,10 @@ type PricedOutputVolume struct {
 	// products don't each truncate before the total.
 	OutputSpendMicros int64
 	// OutputSpendMicrosExact is the same total before that final rounding.
-	// The per-million rate divides the spend by the priced token count, which
-	// re-amplifies whatever the rounding threw away: on a window holding a
-	// handful of sub-micro tokens the rounded total is 0 and the unit rate
-	// would collapse to zero, contradicting the whole point of a rate that
-	// does not depend on how much traffic the instance has seen.
+	// The projected saved cost scales this spend by the savings coefficient;
+	// scaling the rounded total instead would bake the discarded fraction
+	// into the figure — on a window holding a handful of sub-micro tokens
+	// the rounded total is already 0 while the exact one is not.
 	OutputSpendMicrosExact float64
 }
 

@@ -383,8 +383,8 @@ export function getCompressStats(
 // === Concise-output projection ====================================
 
 // Mirrors internal/service/analytics's ConciseOutputProjection — the priced
-// output-volume roll-up plus projected per-million-token saving behind the
-// cost-optimization page's concise-output card.
+// output-volume roll-up plus the window's projected saved cost and saved
+// output tokens behind the cost-optimization page's concise-output card.
 export interface ConciseOutputWindow {
   start: string
   end: string
@@ -404,18 +404,24 @@ export interface ConciseOutputProjection {
   output_tokens: number
   // Rows that actually contributed to output_spend_micros. Lower than
   // output_rows means some output traffic was unpriced and is excluded
-  // from the figure.
+  // from the figures.
   priced_rows: number
-  // Output-token total over the priced rows — the denominator behind the
-  // per-million rate.
+  // Output-token total over the priced rows — the basis of the saved-token
+  // figure.
   priced_output_tokens: number
-  // spend × coefficient, normalized to 1M output tokens (micros). A unit
-  // rate, deliberately independent of the instance's traffic volume. null
-  // when the backend could not compute one — never 0 standing in for that,
-  // which would read as a real "saves nothing".
-  projected_savings_per_million_tokens_micros: number | null
-  // The factory coefficient behind the figure, echoed so the UI renders
-  // the rate's basis from the backend's single source of truth.
+  // The window's priced output spend × coefficient, in micros — the period
+  // total the card's cost cell renders.
+  projected_saved_cost_micros: number
+  // The window's priced output tokens × coefficient — the volume
+  // counterpart of the cost figure, on the same priced-only basis.
+  projected_saved_output_tokens: number
+  // Deprecated: the per-million unit rate this card rendered before the
+  // period totals. The backend still emits it for tabs loaded before an
+  // upgrade; nothing here reads it anymore.
+  projected_savings_per_million_tokens_micros?: number | null
+  // The factory coefficient behind the figures, echoed so the UI renders
+  // their basis from the backend's single source of truth (the console
+  // labels it the savings ratio).
   coefficient: number
 }
 
