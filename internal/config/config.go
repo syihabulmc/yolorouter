@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -423,11 +425,11 @@ func loadResolved(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// An existing config is never regenerated, so a mirror installer upgrading a
-	// prior direct install can't seed the proxy at generation time. Fill it from
-	// the env the installer injects into the service unit — only when the file
-	// leaves it empty, so an explicit value in the config still wins.
-	applyUpdateProxyEnv(cfg)
+	// Env vars fill any field the YAML left at its zero value. This is the
+	// primary config mechanism for container platforms (Railway, Render, …)
+	// that inject DATABASE_URL, PROVIDER_MASTER_KEY, etc. as env vars.
+	// Explicit YAML values always win — env only fills gaps.
+	applyAllEnvOverrides(cfg)
 	return cfg, nil
 }
 
@@ -442,19 +444,131 @@ func applyUpdateProxyEnv(cfg *Config) {
 	}
 }
 
+// applyDatabaseURLEnv fills database connection fields from DATABASE_URL when
+// the config leaves them at their zero value. This is the primary config
+// mechanism for container platforms (Railway, Render, Heroku, …) that inject
+// a full Postgres connection string as a single env var.
+//
+// The URL is parsed with net/url (not regex), so special characters in
+// passwords are handled correctly. Only postgresql:// and postgres:// schemes
+// are accepted; other schemes are silently ignored (the operator may have set
+// DATABASE_URL for a different purpose).
+//
+// Priority: explicit YAML values always win — env only fills zero-value fields.
+func applyDatabaseURLEnv(cfg *Config) {
+	raw := os.Getenv("DATABASE_URL")
+	if raw == "" {
+		return
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return // malformed URL — don't silently override, let the operator fix it
+	}
+	switch u.Scheme {
+	case "postgresql", "postgres":
+		// valid
+	default:
+		return // not a Postgres URL
+	}
+
+	cfg.Database.Driver = "postgres"
+
+	if u.User != nil {
+		if cfg.Database.User == "" {
+			cfg.Database.User = u.User.Username()
+		}
+		if cfg.Database.Password == "" {
+			if pass, ok := u.User.Password(); ok {
+				cfg.Database.Password = pass
+			}
+		}
+	}
+	if cfg.Database.Host == "" {
+		cfg.Database.Host = u.Hostname()
+	}
+	if cfg.Database.Port == 0 {
+		if portStr := u.Port(); portStr != "" {
+			if port, err := strconv.Atoi(portStr); err == nil {
+				cfg.Database.Port = port
+			}
+		} else {
+			cfg.Database.Port = 5432 // default Postgres port
+		}
+	}
+	if cfg.Database.DBName == "" {
+		// Strip leading "/" from the path component.
+		cfg.Database.DBName = strings.TrimPrefix(u.Path, "/")
+	}
+	if cfg.Database.SSLMode == "" || cfg.Database.SSLMode == "disable" {
+		if ssl := u.Query().Get("sslmode"); ssl != "" {
+			cfg.Database.SSLMode = ssl
+		}
+	}
+}
+
+// applyProviderMasterKeyEnv fills security.provider_master_key from
+// PROVIDER_MASTER_KEY when the config leaves it empty. This lets container
+// platforms inject the key as an env var instead of requiring a pre-existing
+// config file or a shell wrapper that generates one.
+func applyProviderMasterKeyEnv(cfg *Config) {
+	if cfg.Security.ProviderMasterKey == "" {
+		if key := os.Getenv("PROVIDER_MASTER_KEY"); key != "" {
+			cfg.Security.ProviderMasterKey = key
+		}
+	}
+}
+
+// applyServerPortEnv fills server.port from SERVER_PORT when the config leaves
+// it at zero (the YAML default). Useful for platforms that expose port
+// configuration via env vars.
+func applyServerPortEnv(cfg *Config) {
+	if cfg.Server.Port == 0 {
+		if portStr := os.Getenv("SERVER_PORT"); portStr != "" {
+			if port, err := strconv.Atoi(portStr); err == nil && port > 0 {
+				cfg.Server.Port = port
+			}
+		}
+	}
+}
+
+// applyLogLevelEnv fills log.level from LOG_LEVEL when the config leaves it
+// empty. Lets operators set log verbosity without touching the config file.
+func applyLogLevelEnv(cfg *Config) {
+	if cfg.Log.Level == "" {
+		if level := os.Getenv("LOG_LEVEL"); level != "" {
+			cfg.Log.Level = level
+		}
+	}
+}
+
+// applyAllEnvOverrides applies all environment variable overrides to cfg.
+// Called after loading or generating a config so that env vars can fill any
+// field the YAML left at its zero value. The order does not matter — each
+// override is independent and idempotent.
+func applyAllEnvOverrides(cfg *Config) {
+	applyDatabaseURLEnv(cfg)
+	applyProviderMasterKeyEnv(cfg)
+	applyServerPortEnv(cfg)
+	applyLogLevelEnv(cfg)
+	applyUpdateProxyEnv(cfg)
+}
+
 func generateDefaultConfig(path string) (*Config, error) {
 	cfg := defaults()
-	key, err := randomMasterKey()
-	if err != nil {
-		return nil, fmt.Errorf("generate provider_master_key: %w", err)
-	}
-	cfg.Security.ProviderMasterKey = key
 
-	// A mirror install (install.sh with YOLO_MIRROR) exports this, so record the
-	// proxy in the generated file — self-update then routes through the same
-	// mirror with no manual edit. Persisted here (before the write) so the CLI
-	// `update`, run from a shell without the env, also reads it from config.
-	applyUpdateProxyEnv(cfg)
+	// Apply env var overrides first — this lets container platforms (Railway,
+	// Render, …) inject DATABASE_URL, PROVIDER_MASTER_KEY, etc. and have
+	// them persisted into the generated config file on first run.
+	applyAllEnvOverrides(cfg)
+
+	// Generate a random master key only if the env var didn't provide one.
+	if cfg.Security.ProviderMasterKey == "" {
+		key, err := randomMasterKey()
+		if err != nil {
+			return nil, fmt.Errorf("generate provider_master_key: %w", err)
+		}
+		cfg.Security.ProviderMasterKey = key
+	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create config directory: %w", err)

@@ -1144,3 +1144,223 @@ func TestInstallHintQuotesThePathForPasting(t *testing.T) {
 		t.Fatalf("path is not a single shell word in %q", hint)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Environment variable overrides
+// ---------------------------------------------------------------------------
+
+func TestApplyDatabaseURLEnv_BasicParse(t *testing.T) {
+	cfg := defaults()
+	t.Setenv("DATABASE_URL", "postgresql://myuser:mypass@db.example.com:5433/mydb?sslmode=require")
+
+	applyDatabaseURLEnv(cfg)
+
+	if cfg.Database.Driver != "postgres" {
+		t.Fatalf("driver = %q, want postgres", cfg.Database.Driver)
+	}
+	if cfg.Database.User != "myuser" {
+		t.Fatalf("user = %q, want myuser", cfg.Database.User)
+	}
+	if cfg.Database.Password != "mypass" {
+		t.Fatalf("password = %q, want mypass", cfg.Database.Password)
+	}
+	if cfg.Database.Host != "db.example.com" {
+		t.Fatalf("host = %q, want db.example.com", cfg.Database.Host)
+	}
+	if cfg.Database.Port != 5433 {
+		t.Fatalf("port = %d, want 5433", cfg.Database.Port)
+	}
+	if cfg.Database.DBName != "mydb" {
+		t.Fatalf("dbname = %q, want mydb", cfg.Database.DBName)
+	}
+	if cfg.Database.SSLMode != "require" {
+		t.Fatalf("sslmode = %q, want require", cfg.Database.SSLMode)
+	}
+}
+
+func TestApplyDatabaseURLEnv_SpecialCharsInPassword(t *testing.T) {
+	cfg := defaults()
+	t.Setenv("DATABASE_URL", "postgresql://user:p%40ss%2Fw%3Ard@host:5432/db")
+
+	applyDatabaseURLEnv(cfg)
+
+	if cfg.Database.Password != "p@ss/w:rd" {
+		t.Fatalf("password = %q, want p@ss/w:rd (URL-decoded)", cfg.Database.Password)
+	}
+}
+
+func TestApplyDatabaseURLEnv_DefaultPort(t *testing.T) {
+	cfg := defaults()
+	t.Setenv("DATABASE_URL", "postgresql://user:pass@host/db")
+
+	applyDatabaseURLEnv(cfg)
+
+	if cfg.Database.Port != 5432 {
+		t.Fatalf("port = %d, want 5432 (default)", cfg.Database.Port)
+	}
+}
+
+func TestApplyDatabaseURLEnv_PostgresScheme(t *testing.T) {
+	cfg := defaults()
+	t.Setenv("DATABASE_URL", "postgres://user:pass@host:5432/db")
+
+	applyDatabaseURLEnv(cfg)
+
+	if cfg.Database.Driver != "postgres" {
+		t.Fatalf("driver = %q, want postgres", cfg.Database.Driver)
+	}
+}
+
+func TestApplyDatabaseURLEnv_IgnoresNonPostgresScheme(t *testing.T) {
+	cfg := defaults()
+	origDriver := cfg.Database.Driver
+	t.Setenv("DATABASE_URL", "mysql://user:pass@host:3306/db")
+
+	applyDatabaseURLEnv(cfg)
+
+	if cfg.Database.Driver != origDriver {
+		t.Fatalf("driver changed to %q for non-postgres scheme", cfg.Database.Driver)
+	}
+}
+
+func TestApplyDatabaseURLEnv_YAMLWinsOverEnv(t *testing.T) {
+	cfg := defaults()
+	cfg.Database.Host = "yaml-host"
+	cfg.Database.Port = 9999
+	cfg.Database.User = "yaml-user"
+	t.Setenv("DATABASE_URL", "postgresql://env-user:pass@env-host:5432/db")
+
+	applyDatabaseURLEnv(cfg)
+
+	if cfg.Database.Host != "yaml-host" {
+		t.Fatalf("host = %q, want yaml-host (YAML should win)", cfg.Database.Host)
+	}
+	if cfg.Database.Port != 9999 {
+		t.Fatalf("port = %d, want 9999 (YAML should win)", cfg.Database.Port)
+	}
+	if cfg.Database.User != "yaml-user" {
+		t.Fatalf("user = %q, want yaml-user (YAML should win)", cfg.Database.User)
+	}
+}
+
+func TestApplyDatabaseURLEnv_EmptyEnvIsNoop(t *testing.T) {
+	cfg := defaults()
+	orig := *cfg
+
+	applyDatabaseURLEnv(cfg)
+
+	if cfg.Database.Driver != orig.Database.Driver {
+		t.Fatalf("driver changed with empty DATABASE_URL")
+	}
+}
+
+func TestApplyProviderMasterKeyEnv(t *testing.T) {
+	cfg := defaults()
+	t.Setenv("PROVIDER_MASTER_KEY", "test-key-123")
+
+	applyProviderMasterKeyEnv(cfg)
+
+	if cfg.Security.ProviderMasterKey != "test-key-123" {
+		t.Fatalf("key = %q, want test-key-123", cfg.Security.ProviderMasterKey)
+	}
+}
+
+func TestApplyProviderMasterKeyEnv_YAMLWins(t *testing.T) {
+	cfg := defaults()
+	cfg.Security.ProviderMasterKey = "yaml-key"
+	t.Setenv("PROVIDER_MASTER_KEY", "env-key")
+
+	applyProviderMasterKeyEnv(cfg)
+
+	if cfg.Security.ProviderMasterKey != "yaml-key" {
+		t.Fatalf("key = %q, want yaml-key (YAML should win)", cfg.Security.ProviderMasterKey)
+	}
+}
+
+func TestApplyServerPortEnv(t *testing.T) {
+	cfg := defaults()
+	cfg.Server.Port = 0 // simulate unset
+	t.Setenv("SERVER_PORT", "9090")
+
+	applyServerPortEnv(cfg)
+
+	if cfg.Server.Port != 9090 {
+		t.Fatalf("port = %d, want 9090", cfg.Server.Port)
+	}
+}
+
+func TestApplyLogLevelEnv(t *testing.T) {
+	cfg := defaults()
+	cfg.Log.Level = "" // simulate unset
+	t.Setenv("LOG_LEVEL", "debug")
+
+	applyLogLevelEnv(cfg)
+
+	if cfg.Log.Level != "debug" {
+		t.Fatalf("level = %q, want debug", cfg.Log.Level)
+	}
+}
+
+// TestLoadWithDatabaseURLAndMasterKey is the integration test for the Railway
+// use case: both DATABASE_URL and PROVIDER_MASTER_KEY are set as env vars,
+// and Load() must produce a valid config without any pre-existing config file.
+func TestLoadWithDatabaseURLAndMasterKey(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	}()
+
+	t.Setenv("DATABASE_URL", "postgresql://railuser:railpass@railway-host:5432/raildb?sslmode=require")
+	t.Setenv("PROVIDER_MASTER_KEY", "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load with DATABASE_URL + PROVIDER_MASTER_KEY should succeed: %v", err)
+	}
+
+	if cfg.Database.Driver != "postgres" {
+		t.Fatalf("driver = %q, want postgres", cfg.Database.Driver)
+	}
+	if cfg.Database.User != "railuser" {
+		t.Fatalf("user = %q, want railuser", cfg.Database.User)
+	}
+	if cfg.Database.Password != "railpass" {
+		t.Fatalf("password = %q, want railpass", cfg.Database.Password)
+	}
+	if cfg.Database.Host != "railway-host" {
+		t.Fatalf("host = %q, want railway-host", cfg.Database.Host)
+	}
+	if cfg.Database.Port != 5432 {
+		t.Fatalf("port = %d, want 5432", cfg.Database.Port)
+	}
+	if cfg.Database.DBName != "raildb" {
+		t.Fatalf("dbname = %q, want raildb", cfg.Database.DBName)
+	}
+	if cfg.Database.SSLMode != "require" {
+		t.Fatalf("sslmode = %q, want require", cfg.Database.SSLMode)
+	}
+	if cfg.Security.ProviderMasterKey != "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=" {
+		t.Fatalf("master key = %q, want QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=", cfg.Security.ProviderMasterKey)
+	}
+
+	// Verify the generated config file persists the values.
+	cfg2, err := Load("")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if cfg2.Database.User != "railuser" {
+		t.Fatalf("user not persisted: %q", cfg2.Database.User)
+	}
+	if cfg2.Security.ProviderMasterKey != "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=" {
+		t.Fatalf("master key not persisted: %q", cfg2.Security.ProviderMasterKey)
+	}
+}
