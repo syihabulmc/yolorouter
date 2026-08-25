@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The setup administrator can edit any other account's display name and
+  email from the Users page (both were write-once: set at creation or
+  snapshotted from the identity provider's first login) — directory
+  information only, so the target's sessions are untouched.
+
 ## [0.1.8] - 2026-08-25
 
 ### Added

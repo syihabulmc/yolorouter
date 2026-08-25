@@ -322,6 +322,7 @@ func newWithDistFS(distFS fs.FS, deps Deps) (*gin.Engine, error) {
 	protected.GET("/users", handler.GetUsers(db))
 	protected.POST("/users", handler.PostUser(db))
 	protected.POST("/users/:id/password", handler.PostUserPasswordReset(db))
+	protected.PATCH("/users/:id/profile", handler.PatchUserProfile(db))
 	protected.PATCH("/users/:id/status", handler.PatchUserStatus(db))
 	protected.PATCH("/users/:id/role", handler.PatchUserRole(db))
 
