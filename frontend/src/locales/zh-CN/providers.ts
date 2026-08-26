@@ -74,7 +74,7 @@ export default {
   tabModels: '模型映射',
   modelsEmpty: '暂无关联模型',
   candidatePrice: '价格',
-  candidatePrice_tip: '输入 / 输出价格，元/百万 Token，0 表示免费或未定价；设置了缓存价的映射会在第二行显示 缓存写 / 缓存读 价格',
+  candidatePrice_tip: '输入 / 输出价格，美元/百万 Token，0 表示免费或未定价；设置了缓存价的映射会在第二行显示 缓存写 / 缓存读 价格',
   candidateCachePrice: '缓存 {write} / {read}',
   candidateProbeStatus: '探测状态',
   candidateProbeStatus_tip: '该映射的验证结果：通过的自动启用参与路由；失败或未验证的保持禁用，不会被路由到',

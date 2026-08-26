@@ -5,7 +5,7 @@
 //
 // Prices follow the provider, not the vendor: the key is the provider's
 // base_url host, so an aggregator (e.g. SiliconFlow) carries its own resale
-// prices for models it fronts. All values are CNY per million tokens, matching
+// prices for models it fronts. All values are USD per million tokens, matching
 // internal/gateway/log.go's computeCost.
 package pricecatalog
 
@@ -27,9 +27,9 @@ var catalogBytes []byte
 // often as the pair used here, so the file states which one it holds and the
 // loader refuses anything else. Without this a refresh in the wrong unit would
 // flow through Lookup into a candidate's price columns and be billed as if it
-// were CNY per million — silently off by orders of magnitude.
+// were USD per million — silently off by orders of magnitude.
 const (
-	expectedCurrency = "CNY"
+	expectedCurrency = "USD"
 	expectedUnit     = "per_million_tokens"
 )
 

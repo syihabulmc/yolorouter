@@ -65,7 +65,7 @@ function formatAxisDate(s: string): string {
 const option = computed(() => {
   const dates = props.points.map((p) => formatAxisDate(p.date))
   const calls = props.points.map((p) => p.calls)
-  // Cost is shown in yuan (major unit); cost_micros / 1e6 — same formatter as
+  // Cost is shown in usd (major unit); cost_micros / 1e6 — same formatter as
   // the table column, so axis ticks and tooltip stay consistent with it.
   const costs = props.points.map((p) => Number(formatMicros(p.cost_micros)))
 
@@ -88,7 +88,7 @@ const option = computed(() => {
           // Format cost via money.ts's formatMicros (the single precision
           // source) from this bucket's original micros, rather than
           // re-hardcoding the decimal count here.
-          const val = isCost ? `¥${formatMicros(props.points[p.dataIndex]?.cost_micros ?? 0)}` : String(p.value)
+          const val = isCost ? `$${formatMicros(props.points[p.dataIndex]?.cost_micros ?? 0)}` : String(p.value)
           return `${p.marker} ${p.seriesName}: ${val}`
         })
         return [header, ...lines].join('<br/>')
@@ -111,7 +111,7 @@ const option = computed(() => {
       axisLine: { lineStyle: { color: AXIS_LINE } },
       axisLabel: { fontSize: 11, color: TEXT_MUTED, hideOverlap: true },
     },
-    // Two Y axes — index 0 (calls) on the left, index 1 (cost, yuan) on
+    // Two Y axes — index 0 (calls) on the left, index 1 (cost, usd) on
     // the right. Each series binds itself to an axis via `yAxisIndex`.
     yAxis: [
       {
@@ -127,14 +127,14 @@ const option = computed(() => {
         name: t('analytics.costColumn'),
         min: 0,
         // Without this the two axes pick their own tick counts (e.g. 0..180 in
-        // 6 steps vs 0..0.25 in 5), so the right-hand ¥ labels land between
+        // 6 steps vs 0..0.25 in 5), so the right-hand $ labels land between
         // grid lines and the cost line can't be read against any reference.
         alignTicks: true,
         nameTextStyle: { color: TEXT_MUTED, fontSize: 11 },
         axisLabel: {
           fontSize: 11,
           color: TEXT_MUTED,
-          formatter: (v: number) => `¥${v}`,
+          formatter: (v: number) => `$${v}`,
         },
         splitLine: { show: false },
       },

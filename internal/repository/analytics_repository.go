@@ -1113,7 +1113,7 @@ type PricedOutputVolume struct {
 	// the basis of the projected saved-token figure.
 	PricedOutputTokens int64
 	// OutputSpendMicros is SUM(output_tokens x output_price) over the
-	// priced rows, in int64 micros (1 CNY = 1e6). Per-million-token pricing
+	// priced rows, in int64 micros (1 USD = 1e6). Per-million-token pricing
 	// and the micros scale cancel, so the tokens x price product is already
 	// micros; summed as float and rounded once at the end so group-level
 	// products don't each truncate before the total.

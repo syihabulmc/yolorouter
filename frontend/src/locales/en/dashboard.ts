@@ -18,7 +18,7 @@ export default {
   callsCard_tip: 'Total requests in the selected period. Includes success, failure, and cancelled',
   callsCard_sub: 'Selected period',
   costCard: 'Cost',
-  costCard_tip: 'Known cost accumulated in the selected period (CNY). Requests with unknown cost are excluded from this total',
+  costCard_tip: 'Known cost accumulated in the selected period (USD). Requests with unknown cost are excluded from this total',
   costCard_sub: 'Known cost total',
   successRateCard: 'Success Rate',
   successRateCard_tip: '2xx requests / (2xx + 4xx + 5xx, excluding 499 caller-cancelled)',

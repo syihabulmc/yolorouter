@@ -2,7 +2,7 @@
 #
 # Runs the Node fetchers in scripts/price-catalog/ against each provider's
 # server-side data endpoint, normalizes the results, validates against the
-# catalog contract (CNY / per_million_tokens), runs the Go pricecatalog tests
+# catalog contract (USD / per_million_tokens), runs the Go pricecatalog tests
 # to prove the refreshed JSON loads, then commits catalog.json back to this
 # branch and writes a copy to the Cloudflare KV namespace that the distribution
 # Worker serves from.

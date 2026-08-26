@@ -78,7 +78,7 @@
             <div class="metric__label">
               <HelpLabel :tip="t('costOptimization.metricCostSaved_tip')">{{ t('costOptimization.metricCostSaved') }}</HelpLabel>
             </div>
-            <div class="metric__value">¥{{ formatMicros(totals.cost_saved_micros, 2) }}</div>
+            <div class="metric__value">${{ formatMicros(totals.cost_saved_micros, 2) }}</div>
           </div>
           <div class="metric-cell">
             <div class="metric__label">
@@ -408,12 +408,12 @@ const compressRate = computed(() => {
 // output spend and priced output tokens, each scaled by the coefficient —
 // so they visibly move with the selected time range and account. No
 // traffic / all-unpriced windows render an em-dash plus an explanatory
-// note rather than a ¥0.00 figure.
+// note rather than a $0.00 figure.
 const projectionState = computed(() => projectionDisplay(projection.value))
 
 const projectionCost = computed(() => {
   const d = projectionState.value
-  return d.kind === 'amount' ? `¥${formatMicros(d.costMicros, 2)}` : '—'
+  return d.kind === 'amount' ? `$${formatMicros(d.costMicros, 2)}` : '—'
 })
 
 const projectionTokens = computed(() => {

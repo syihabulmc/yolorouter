@@ -14,7 +14,7 @@ export default {
   detailTitle: 'Request Detail',
   notFound: 'Request log not found or has been cleaned up',
   costUnknown: 'Unknown',
-  currencyUnit: 'CNY',
+  currencyUnit: 'USD',
 
   // Filters
   filterRequestId: 'Find by request ID',
@@ -100,7 +100,7 @@ export default {
   allFilterEndpoint: 'All Endpoints',
   filterEndpointGemini: 'Gemini (/v1beta/…)',
   col_cost: 'Cost',
-  col_cost_tip: 'Final cost of this request (CNY); shows "Unknown" rather than zero when pricing is unavailable',
+  col_cost_tip: 'Final cost of this request (USD); shows "Unknown" rather than zero when pricing is unavailable',
   col_duration: 'Duration',
   col_duration_tip: 'End-to-end duration from request received to response completed',
 

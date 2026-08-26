@@ -7,7 +7,7 @@
 // formatting policy here keeps CreateKeyModal / EditKeyModal / ApiKeyListPage
 // and every cost display consistent, and gives one place to change if the
 // precision rule ever needs to. Naming is currency-agnostic on purpose: the
-// project hard-codes CNY today, but the conversion itself is just
+// project hard-codes USD today, but the conversion itself is just
 // "major unit <-> micros".
 
 import type { OverviewRow } from '../api/analytics'

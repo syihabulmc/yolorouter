@@ -92,7 +92,7 @@ func TestConciseOutputProjectionPeriodTotals(t *testing.T) {
 		t.Fatalf("volume: got spend=%d rows=%d priced=%d tokens=%d, want 700000/1/1/700000",
 			p.OutputSpendMicros, p.OutputRows, p.PricedRows, p.PricedOutputTokens)
 	}
-	// 700K tokens at 1 CNY/M = 700000 micros spend for the whole window.
+	// 700K tokens at 1 USD/M = 700000 micros spend for the whole window.
 	wantCost := int64(math.Round(700_000 * ConciseOutputCoefficient))
 	if p.ProjectedSavedCostMicros != wantCost {
 		t.Errorf("saved cost = %d, want %d (window spend x coefficient)",
@@ -153,7 +153,7 @@ func TestConciseOutputProjectionCarriesCoverageDenominator(t *testing.T) {
 		t.Errorf("PricedOutputTokens = %d, want 250000", p.PricedOutputTokens)
 	}
 	if p.OutputSpendMicros != 1_000_000 {
-		t.Errorf("OutputSpendMicros = %d, want 1000000 (250K x 4 CNY/M)", p.OutputSpendMicros)
+		t.Errorf("OutputSpendMicros = %d, want 1000000 (250K x 4 USD/M)", p.OutputSpendMicros)
 	}
 	wantCost := int64(math.Round(1_000_000 * ConciseOutputCoefficient))
 	if p.ProjectedSavedCostMicros != wantCost {
@@ -202,7 +202,7 @@ func TestConciseOutputProjectionShortWindowFloor(t *testing.T) {
 // TestConciseOutputProjectionScalesUnroundedSpend pins the unrounded basis:
 // the saved cost scales the exact spend, not the spend rounded to whole
 // micros. The fixture is chosen so the two roundings land on different
-// integers — one token at 3.9 CNY/M is an exact spend of 3.9 micros
+// integers — one token at 3.9 USD/M is an exact spend of 3.9 micros
 // (reported rounded as 4), and 3.9 x coefficient rounds to a different
 // figure than 4 x coefficient. Scaling the rounded spend turns this red.
 func TestConciseOutputProjectionScalesUnroundedSpend(t *testing.T) {

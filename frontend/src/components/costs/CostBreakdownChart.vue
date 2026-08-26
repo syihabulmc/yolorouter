@@ -63,7 +63,7 @@ const OTHER_COLOR = '#c0c4cc'
 
 interface Slice {
   name: string
-  value: number // yuan (major unit), for the chart
+  value: number // usd (major unit), for the chart
   micros: number // original, for the tooltip via the shared formatter
   // Provider-tab identity (null = unrouted bucket); undefined on model tab.
   providerId?: number | null
@@ -121,7 +121,7 @@ const option = computed(() => {
       trigger: 'item',
       formatter: (p: { dataIndex: number; percent: number; marker: string; name: string }) => {
         const micros = data[p.dataIndex]?.micros ?? 0
-        return `${p.marker} ${p.name}<br/>¥${formatMicros(micros)} (${p.percent}%)`
+        return `${p.marker} ${p.name}<br/>$${formatMicros(micros)} (${p.percent}%)`
       },
     },
     legend: {

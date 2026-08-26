@@ -109,7 +109,7 @@ func TestAggregatePricedOutputVolumeCoverageAndSpend(t *testing.T) {
 	if v.PricedOutputTokens != 1_500_000 {
 		t.Errorf("PricedOutputTokens = %d, want 1500000", v.PricedOutputTokens)
 	}
-	// 1.5M tokens x 2.5 CNY/M: per-M pricing and the micros scale cancel,
+	// 1.5M tokens x 2.5 USD/M: per-M pricing and the micros scale cancel,
 	// so the product is already micros — 3,750,000.
 	if v.OutputSpendMicros != 3_750_000 {
 		t.Errorf("OutputSpendMicros = %d, want 3750000", v.OutputSpendMicros)
@@ -152,7 +152,7 @@ func TestAggregatePricedOutputVolumeKeepsExactSpend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AggregatePricedOutputVolume: %v", err)
 	}
-	// 1 token x 0.4 CNY/M = 0.4 micros: rounds to zero, exact keeps the 0.4.
+	// 1 token x 0.4 USD/M = 0.4 micros: rounds to zero, exact keeps the 0.4.
 	if v.OutputSpendMicros != 0 {
 		t.Errorf("OutputSpendMicros = %d, want 0 (0.4 rounds down)", v.OutputSpendMicros)
 	}

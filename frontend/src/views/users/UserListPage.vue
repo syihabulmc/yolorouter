@@ -323,7 +323,7 @@ const columns = computed<DataTableColumns<UserSummary>>(() => [
     title: columnTitle(t('users.spendColumn'), t('users.spendColumn_tip')),
     key: 'spend_micros',
     width: 120,
-    render: (row) => `¥${formatMicros(row.spend_micros, 2)}`,
+    render: (row) => `$${formatMicros(row.spend_micros, 2)}`,
   },
   {
     title: columnTitle(t('users.lastLoginColumn'), t('users.lastLoginColumn_tip')),

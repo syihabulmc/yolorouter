@@ -62,7 +62,7 @@ export function costColumn<T extends MetricRow>(t: Translator, sort?: SortOption
     align: 'right',
     sorter: sort?.sortable ? (a: T, b: T) => a.cost_micros - b.cost_micros : undefined,
     defaultSortOrder: sort?.sortable && sort?.defaultDescend ? 'descend' : undefined,
-    render: (r: T) => `¥${formatMicros(r.cost_micros)}`,
+    render: (r: T) => `$${formatMicros(r.cost_micros)}`,
   }
 }
 

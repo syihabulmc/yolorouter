@@ -1,6 +1,6 @@
 {
   "updated_at": "2026-08-25",
-  "currency": "CNY",
+  "currency": "USD",
   "unit": "per_million_tokens",
   "prices": {
     "api.deepseek.com": {

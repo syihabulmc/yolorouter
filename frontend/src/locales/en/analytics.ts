@@ -65,7 +65,7 @@ export default {
   cacheReadTokensColumn: 'Cache Read Tokens',
   cacheReadTokensColumn_tip: 'Cumulative cache-read (cache hit) tokens for this group',
   costColumn: 'Cost',
-  costColumn_tip: 'Known cost total for this group (CNY); unknown-cost requests are excluded',
+  costColumn_tip: 'Known cost total for this group (USD); unknown-cost requests are excluded',
   failoversColumn: 'Failovers Caused',
   failoversColumn_tip: 'How many times this provider failed a request that another provider then picked up. Charged to the provider that failed, not the one that rescued; key rotation within one provider does not count',
   mobileSortBy: 'Sort by',

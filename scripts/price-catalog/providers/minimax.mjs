@@ -2,7 +2,7 @@
 //
 // MiniMax's docs are a Mintlify site: appending `.md` to a doc URL returns the
 // raw markdown table instead of the rendered page. The pay-as-you-go pricing
-// page is one such table — input/output/cache-read per million tokens, in CNY.
+// page is one such table — input/output/cache-read per million tokens, in USD.
 // We parse the markdown table rows directly.
 
 import { fetchWithTimeout } from "./_fetch.mjs";

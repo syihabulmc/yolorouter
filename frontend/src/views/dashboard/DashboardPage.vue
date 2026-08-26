@@ -63,7 +63,7 @@
           <div class="kpi__label">
             <HelpLabel :tip="t('dashboard.costCard_tip')">{{ t('dashboard.costCard') }}</HelpLabel>
           </div>
-          <div class="kpi__value">¥{{ formatMicros(data?.today.total_cost_micros ?? 0,2) }}</div>
+          <div class="kpi__value">${{ formatMicros(data?.today.total_cost_micros ?? 0,2) }}</div>
           <div class="kpi__sub">{{ t('dashboard.costCard_sub') }}</div>
         </div>
       </div>
@@ -179,7 +179,7 @@
             <span class="caller-rank">{{ i + 1 }}</span>
             <span class="caller-label">{{ callerDisplay(c.username, c.key_prefix) || t('dashboard.unknownCaller') }}</span>
             <span class="caller-meta">{{ formatNumber(c.calls) }} {{ t('dashboard.callsUnit') }}</span>
-            <span class="caller-cost">¥{{ formatMicros(c.cost_micros, 2) }}</span>
+            <span class="caller-cost">${{ formatMicros(c.cost_micros, 2) }}</span>
           </li>
         </ul>
       </section>

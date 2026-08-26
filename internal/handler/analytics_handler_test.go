@@ -2129,7 +2129,7 @@ func TestGetConciseOutputProjectionReturnsPricedVolumeAndTotals(t *testing.T) {
 	if err := db.Create(&cand).Error; err != nil {
 		t.Fatalf("seed candidate: %v", err)
 	}
-	// 250K priced output tokens at 4 CNY/M = 1,000,000 micros of spend.
+	// 250K priced output tokens at 4 USD/M = 1,000,000 micros of spend.
 	seedRequestLog(t, db, "cp1", now, func(l *model.RequestLog) {
 		l.ModelName = "concise-model"
 		l.ProviderID = &providerID
@@ -2181,7 +2181,7 @@ func TestGetConciseOutputProjectionReturnsPricedVolumeAndTotals(t *testing.T) {
 		t.Errorf("priced_output_tokens = %d, want 250000", d.PricedOutputTokens)
 	}
 	if d.OutputSpendMicros != 1_000_000 {
-		t.Errorf("output_spend_micros = %d, want 1000000 (250K x 4 CNY/M)", d.OutputSpendMicros)
+		t.Errorf("output_spend_micros = %d, want 1000000 (250K x 4 USD/M)", d.OutputSpendMicros)
 	}
 	// Window spend (1,000,000 micros) and priced tokens (250K), each scaled
 	// by the coefficient.
@@ -2194,7 +2194,7 @@ func TestGetConciseOutputProjectionReturnsPricedVolumeAndTotals(t *testing.T) {
 		t.Errorf("projected_saved_output_tokens = %d, want %d", d.SavedOutputTokens, wantTokens)
 	}
 	// The deprecated per-million rate must still reach pre-upgrade tabs:
-	// 4 CNY per million output tokens x the coefficient.
+	// 4 USD per million output tokens x the coefficient.
 	wantLegacy := int64(math.Round(4 * analytics.ConciseOutputCoefficient * 1e6))
 	if d.LegacyPerMillion == nil {
 		t.Fatalf("projected_savings_per_million_tokens_micros absent, want %d", wantLegacy)

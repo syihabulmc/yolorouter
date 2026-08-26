@@ -4,7 +4,7 @@
      provider). Mirrors CostTrendChart's structure: smooth line + areaStyle,
      optional dashed average markLine, empty state when no data, and a tooltip
      whose axis label and y-axis ticks share the caller-supplied formatValue
-     so the units stay consistent (tokens, yuan, etc.) between chart and
+     so the units stay consistent (tokens, usd, etc.) between chart and
      metric tiles. The x axis renders arbitrary category labels (date strings,
      key/model/provider names) with rotate+hideOverlap so long labels can't
      collide. -->

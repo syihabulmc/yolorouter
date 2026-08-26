@@ -18,7 +18,7 @@ export default {
   callsCard_tip: '所选时间范围内的请求总数，含成功、失败、取消',
   callsCard_sub: '所选时间范围',
   costCard: '总成本',
-  costCard_tip: '所选时间范围内已知成本累计（人民币元），未知成本的请求不纳入该合计',
+  costCard_tip: '所选时间范围内已知成本累计（美元），未知成本的请求不纳入该合计',
   costCard_sub: '已知成本累计',
   successRateCard: '成功率',
   successRateCard_tip: '所选时间范围内 2xx 请求数 / (2xx+4xx+5xx，不含 499 调用方取消)',

@@ -100,7 +100,7 @@ export default {
   allFilterEndpoint: '全部 Endpoint',
   filterEndpointGemini: 'Gemini（/v1beta/…）',
   col_cost: '成本',
-  col_cost_tip: '该请求的最终成本（人民币元），未知时显示"未知"而非零',
+  col_cost_tip: '该请求的最终成本（美元），未知时显示"未知"而非零',
   col_duration: '耗时',
   col_duration_tip: '该请求从接收到响应完成的端到端耗时',
 

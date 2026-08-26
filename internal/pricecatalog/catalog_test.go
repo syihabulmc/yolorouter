@@ -132,7 +132,7 @@ func TestBuildIndexRejectsWrongUnitContract(t *testing.T) {
 		mutate  func(*Catalog)
 		wantErr string
 	}{
-		{"foreign currency", func(c *Catalog) { c.Currency = "USD" }, "currency"},
+		{"foreign currency", func(c *Catalog) { c.Currency = "CNY" }, "currency"},
 		{"per-1K unit", func(c *Catalog) { c.Unit = "per_thousand_tokens" }, "unit"},
 		{"missing currency", func(c *Catalog) { c.Currency = "" }, "currency"},
 		{"unparseable updated_at", func(c *Catalog) { c.UpdatedAt = "soon" }, "updated_at"},

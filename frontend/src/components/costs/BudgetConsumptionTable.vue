@@ -129,7 +129,7 @@ const columns = computed<DataTableColumns<BudgetRow>>(() => [
     key: 'budget_spent_micros',
     width: 150,
     align: 'right',
-    render: (r) => `¥${formatMicros(r.budget_spent_micros)}`,
+    render: (r) => `$${formatMicros(r.budget_spent_micros)}`,
   },
   {
     title: columnTitle(t('costs.budget.limitColumn'), t('costs.budget.limitColumn_tip')),
@@ -139,7 +139,7 @@ const columns = computed<DataTableColumns<BudgetRow>>(() => [
     render: (r) =>
       r.budget_limit_micros == null || r.budget_limit_micros <= 0
         ? h('span', { class: 'budget-uncapped' }, t('costs.budget.uncapped'))
-        : `¥${formatMicros(r.budget_limit_micros)}`,
+        : `$${formatMicros(r.budget_limit_micros)}`,
   },
   {
     title: columnTitle(t('costs.budget.consumptionColumn'), t('costs.budget.consumptionColumn_tip')),

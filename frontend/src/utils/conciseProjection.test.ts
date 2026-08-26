@@ -30,7 +30,7 @@ function projection(over: Partial<ConciseOutputProjection>): ConciseOutputProjec
 }
 
 describe('projectionDisplay', () => {
-  it('null (not loaded / failed) is missing — em-dashes, never a ¥0 figure', () => {
+  it('null (not loaded / failed) is missing — em-dashes, never a $0 figure', () => {
     expect(projectionDisplay(null)).toEqual({ kind: 'missing' })
   })
 
@@ -39,7 +39,7 @@ describe('projectionDisplay', () => {
       .toEqual({ kind: 'empty' })
   })
 
-  it('traffic that is entirely unpriced gets its own state — no ¥0.00 over real traffic', () => {
+  it('traffic that is entirely unpriced gets its own state — no $0.00 over real traffic', () => {
     expect(projectionDisplay(projection({ output_rows: 5, priced_rows: 0 }))).toEqual({ kind: 'unpriced-all' })
   })
 

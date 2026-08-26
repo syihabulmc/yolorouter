@@ -33,7 +33,7 @@ func generateRequestID() string {
 	return hex.EncodeToString(b)
 }
 
-// microsPerUnit is the fixed-point scale for stored money: one CNY = 1e6
+// microsPerUnit is the fixed-point scale for stored money: one USD = 1e6
 // integer micros, i.e. 6 decimal places. Mirrors the frontend's MICROS_PER_UNIT
 // (utils/money.ts) — the two must agree.
 const microsPerUnit = 1_000_000
@@ -164,14 +164,14 @@ func compressTokensSaved(t fact.Timeline) int {
 }
 
 // computeCost returns the cost breakdown in integer micros (major-unit × 1e6,
-// i.e. CNY to 6 decimal places) and whether the cost is "known".
+// i.e. USD to 6 decimal places) and whether the cost is "known".
 // Unknown = usage missing — the row records cost_micros=0 with
 // cost_known=false so the dashboard never shows it as a free request.
 // compressTokensSaved is the input-compression estimate (chars-saved/4); the
 // matching CompressCostSavedMicros line prices it at the candidate's input
 // rate so the saving is reported on the same basis as the billed cost. It is
 // forced to 0 whenever usage/pricing is unknown, matching CostKnown=false.
-// Candidate prices are CNY per million tokens.
+// Candidate prices are USD per million tokens.
 func computeCost(cand *model.ModelCandidate, usage *protocols.IRUsage, compressTokensSaved int) costBreakdown {
 	if cand == nil || !usageIsCoherent(usage) {
 		return costBreakdown{} // Known=false: no cost recorded, no budget consumed
@@ -182,7 +182,7 @@ func computeCost(cand *model.ModelCandidate, usage *protocols.IRUsage, compressT
 	//      + completion × output_price
 	// net_input is the non-cached input (netPromptTokens): cache tokens are
 	// billed on their own lines below, so they must not also be charged at the
-	// input price. Candidate prices are CNY per million tokens.
+	// input price. Candidate prices are USD per million tokens.
 	cacheRead := usage.CacheReadTokens
 	cacheWrite := usage.CacheWriteTokens
 	nonCacheInput := netPromptTokens(usage)
@@ -206,7 +206,7 @@ func computeCost(cand *model.ModelCandidate, usage *protocols.IRUsage, compressT
 	// the wrong side of input never turns into a negative on the other line.
 	cacheReadSaved := max(0, float64(cacheRead)/1_000_000*(cand.InputPrice-cacheReadPrice))
 	cacheWriteExtra := max(0, float64(cacheWrite)/1_000_000*(cacheWritePrice-cand.InputPrice))
-	// Scale CNY to integer micros so cumulative budget accounting stays
+	// Scale USD to integer micros so cumulative budget accounting stays
 	// exact-integer (no float drift) while keeping 6-decimal cost precision.
 	// (microsPerUnit is a distinct constant from the /1_000_000 above, which is
 	// the "price per million tokens" divisor — same literal, different meaning.)

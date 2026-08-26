@@ -74,7 +74,7 @@ export default {
   tabModels: 'Model Mapping',
   modelsEmpty: 'No models mapped yet',
   candidatePrice: 'Price',
-  candidatePrice_tip: 'Input / output price in CNY per million tokens; 0 means free or unpriced. Mappings with cache pricing show cache write / read on a second line',
+  candidatePrice_tip: 'Input / output price in USD per million tokens; 0 means free or unpriced. Mappings with cache pricing show cache write / read on a second line',
   candidateCachePrice: 'Cache {write} / {read}',
   candidateProbeStatus: 'Probe Status',
   candidateProbeStatus_tip: 'Verification result of this mapping: passing enables it for routing; failed or unverified mappings stay disabled and are never routed to',

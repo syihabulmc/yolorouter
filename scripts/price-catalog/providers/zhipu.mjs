@@ -8,7 +8,7 @@
 //
 //   {name:"GLM-5.2", inPrice:["8元"], outPrice:["28元"], hit:["2元"], ...}
 //
-// inPrice/outPrice are CNY per million tokens (verified against the existing
+// inPrice/outPrice are USD per million tokens (verified against the existing
 // catalog: GLM-5.2 = 8/28 matches); `hit` is the cache-read price. The bundle
 // filename is hashed (app.<hash>.js), so we first fetch the pricing page HTML
 // to discover the current bundle URL, then fetch and parse that.

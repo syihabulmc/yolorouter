@@ -47,7 +47,7 @@ const ROW_PX = 34
 
 interface Bar {
   label: string
-  value: number // yuan
+  value: number // usd
   micros: number
   // Preserved so a chart click can route to the per-key cost detail page.
   // Null when the source row had no api_key_id (unknown caller) — such bars
@@ -91,13 +91,13 @@ const option = computed(() => ({
       if (!Array.isArray(params) || !params.length) return ''
       const p = params[0] as { dataIndex: number; name: string; marker: string }
       const micros = bars.value[p.dataIndex]?.micros ?? 0
-      return `${p.marker} ${p.name}<br/>¥${formatMicros(micros)}`
+      return `${p.marker} ${p.name}<br/>$${formatMicros(micros)}`
     },
   },
   grid: { left: 8, right: 16, top: 8, bottom: 8, containLabel: true },
   xAxis: {
     type: 'value',
-    axisLabel: { fontSize: 11, color: TEXT_MUTED, formatter: (v: number) => `¥${v}` },
+    axisLabel: { fontSize: 11, color: TEXT_MUTED, formatter: (v: number) => `$${v}` },
     splitLine: { lineStyle: { color: GRID_LINE } },
   },
   yAxis: {

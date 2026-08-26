@@ -2,10 +2,10 @@
 //
 // Mintlify multi-page: each model has its own pricing page listed in
 // /docs/llms.txt. We fetch llms.txt, filter to the /docs/pricing/chat-*.md pages,
-// then fetch each and parse its pricing row. All in CNY per million tokens.
+// then fetch each and parse its pricing row. All in USD per million tokens.
 //
 // A Kimi per-model page carries a row like:
-//   ["kimi-k3", "1M tokens", "¥2.00", "¥20.00", "¥100.00", "1,048,576 tokens"]
+//   ["kimi-k3", "1M tokens", "$2.00", "$20.00", "$100.00", "1,048,576 tokens"]
 // columns: model | unit | input(cache hit) | input(cache miss) | output | context.
 // catalog: input = cache-miss column, output = output column, cache_read = hit column.
 
@@ -35,7 +35,7 @@ export async function fetchKimi() {
       if (!r.ok) continue;
       const md = await r.text();
       // The pricing row is a JSON array literal in the markdown.
-      const row = md.match(/\[\s*"([a-z0-9][\w.-]*)"\s*,\s*"\d+\s*[Mm]\s*tokens"\s*,\s*"¥\s*([\d.]+)"\s*,\s*"¥\s*([\d.]+)"\s*,\s*"¥\s*([\d.]+)"/);
+      const row = md.match(/\[\s*"([a-z0-9][\w.-]*)"\s*,\s*"\d+\s*[Mm]\s*tokens"\s*,\s*"\$\s*([\d.]+)"\s*,\s*"\$\s*([\d.]+)"\s*,\s*"\$\s*([\d.]+)"/);
       if (row) {
         entries.set(row[1], {
           input: Number(row[3]),   // cache-miss input

@@ -84,7 +84,7 @@ func TestApplyLiveRejectsBadPayloadKeepsPriorLive(t *testing.T) {
 	prior, _ := Lookup("https://api.live.example", "live-model")
 
 	bad := liveCatalog()
-	bad.Unit = "per_thousand_tokens" // violates the CNY/per_million_tokens contract
+	bad.Unit = "per_thousand_tokens" // violates the USD/per_million_tokens contract
 	if err := ApplyLive(liveJSON(t, bad)); err == nil {
 		t.Fatal("ApplyLive accepted a catalog with the wrong unit")
 	}

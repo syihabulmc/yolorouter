@@ -128,7 +128,7 @@
         <div class="metric__label">
           <HelpLabel :tip="t('analytics.costColumn_tip')">{{ t('analytics.totalCost') }}</HelpLabel>
         </div>
-        <div class="metric__value">¥{{ formatMicros(overview?.cost_micros ?? 0, 2) }}</div>
+        <div class="metric__value">${{ formatMicros(overview?.cost_micros ?? 0, 2) }}</div>
         <div v-if="(overview?.unknown_cost_calls ?? 0) > 0" class="metric__sub">
           {{ t('analytics.unknownCostSub', { n: overview?.unknown_cost_calls ?? 0 }) }}
         </div>

@@ -15,9 +15,9 @@ import (
 )
 
 func TestComputeCost(t *testing.T) {
-	// Candidate prices are CNY per million tokens. Cost is
-	// stored as integer micros (CNY × 1e6, i.e. 6-decimal precision).
-	// 1M input @ 1.0 + 0.5M output @ 2.0 = 1.0 + 1.0 = 2.0 CNY = 2_000_000 micros.
+	// Candidate prices are USD per million tokens. Cost is
+	// stored as integer micros (USD × 1e6, i.e. 6-decimal precision).
+	// 1M input @ 1.0 + 0.5M output @ 2.0 = 1.0 + 1.0 = 2.0 USD = 2_000_000 micros.
 	cand := &model.ModelCandidate{InputPrice: 1.0, OutputPrice: 2.0}
 	usage := &protocols.IRUsage{PromptTokens: 1_000_000, CompletionTokens: 500_000}
 	cost := computeCost(cand, usage, 0)
@@ -31,8 +31,8 @@ func TestComputeCost(t *testing.T) {
 
 func TestComputeCostCacheEconomics(t *testing.T) {
 	// input @ 3.0/M, cache read @ 0.3/M (cheaper), cache write @ 3.75/M (a
-	// premium over input). 1M cache-read tokens save (3.0−0.3)=2.7 CNY;
-	// 1M cache-write tokens cost an extra (3.75−3.0)=0.75 CNY.
+	// premium over input). 1M cache-read tokens save (3.0−0.3)=2.7 USD;
+	// 1M cache-write tokens cost an extra (3.75−3.0)=0.75 USD.
 	readPrice, writePrice := 0.3, 3.75
 	cand := &model.ModelCandidate{
 		InputPrice:      3.0,
@@ -63,8 +63,8 @@ func TestComputeCostNoCachePriceHasNoSavings(t *testing.T) {
 }
 
 func TestComputeCostRoundsToMicro(t *testing.T) {
-	// Micros are the smallest stored unit (CNY × 1e6). 1 token @ 1.5/M =
-	// 0.0000015 CNY = 1.5 micros -> rounds to 2 micros.
+	// Micros are the smallest stored unit (USD × 1e6). 1 token @ 1.5/M =
+	// 0.0000015 USD = 1.5 micros -> rounds to 2 micros.
 	cand := &model.ModelCandidate{InputPrice: 1.5, OutputPrice: 0}
 	usage := &protocols.IRUsage{PromptTokens: 1, CompletionTokens: 0}
 	cost := computeCost(cand, usage, 0)
@@ -192,7 +192,7 @@ func TestGenerateRequestIDUnique(t *testing.T) {
 }
 
 // TestComputeCostCompressSavings verifies the ESTIMATED compress saving is
-// priced at the candidate's input rate. 1500 tokens saved @ 2.5 CNY/M =
+// priced at the candidate's input rate. 1500 tokens saved @ 2.5 USD/M =
 // 1500 * 2.5 = 3750 micros (the /1e6 from per-M pricing cancels the ×1e6
 // to micros). Reported only — CostMicros itself is unaffected.
 func TestComputeCostCompressSavings(t *testing.T) {

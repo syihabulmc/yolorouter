@@ -1,8 +1,8 @@
 <!-- frontend/src/components/costs/CostTrendChart.vue
-     Daily spend trend (module: spend trend). One line of yuan-per-day plus a
+     Daily spend trend (module: spend trend). One line of usd-per-day plus a
      dashed average marker. A lifetime budget cap has no daily equivalent, so
      the reference line is the window's own mean daily spend ("you spend about
-     ¥X/day") rather than a budget overlay that wouldn't map onto a daily axis. -->
+     $X/day") rather than a budget overlay that wouldn't map onto a daily axis. -->
 <template>
   <div class="cost-trend">
     <div v-if="!rows.length" class="cost-trend__empty">
@@ -63,7 +63,7 @@ const option = computed(() => {
         const first = params[0] as { axisValueLabel?: string; name?: string; dataIndex: number }
         const header = first.axisValueLabel || first.name || ''
         const micros = rows[first.dataIndex]?.cost_micros ?? 0
-        return `${header}<br/>${t('costs.trend.seriesName')}: ¥${formatMicros(micros)}`
+        return `${header}<br/>${t('costs.trend.seriesName')}: $${formatMicros(micros)}`
       },
     },
     grid: { left: 8, right: 8, top: 16, bottom: 24, containLabel: true },
@@ -76,7 +76,7 @@ const option = computed(() => {
     },
     yAxis: {
       type: 'value',
-      axisLabel: { fontSize: 11, color: TEXT_MUTED, formatter: (v: number) => `¥${v}` },
+      axisLabel: { fontSize: 11, color: TEXT_MUTED, formatter: (v: number) => `$${v}` },
       splitLine: { lineStyle: { color: GRID_LINE } },
     },
     series: [
@@ -90,13 +90,13 @@ const option = computed(() => {
         lineStyle: { color: ACCENT, width: 2 },
         itemStyle: { color: ACCENT },
         areaStyle: { color: 'rgba(100, 103, 242, 0.08)' },
-        // Dashed mean-daily-spend line, labelled with its own yuan value.
+        // Dashed mean-daily-spend line, labelled with its own usd value.
         markLine: {
           symbol: 'none',
           silent: true,
           lineStyle: { color: TEXT_MUTED, type: 'dashed' },
           label: {
-            formatter: (p: { value: number }) => `${t('costs.trend.avgLabel')} ¥${p.value}`,
+            formatter: (p: { value: number }) => `${t('costs.trend.avgLabel')} $${p.value}`,
             fontSize: 11,
             color: TEXT_MUTED,
           },

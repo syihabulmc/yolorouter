@@ -43,9 +43,9 @@
           <span>
             {{ t('costs.budget.limitColumn') }}:
             <template v-if="budget?.budget_limit_micros == null">{{ t('costs.detail.noLimit') }}</template>
-            <template v-else>¥{{ formatMicros(budget.budget_limit_micros) }}</template>
+            <template v-else>${{ formatMicros(budget.budget_limit_micros) }}</template>
           </span>
-          <span>{{ t('costs.budget.spentColumn') }}: ¥{{ formatMicros(budget?.budget_spent_micros ?? 0) }}</span>
+          <span>{{ t('costs.budget.spentColumn') }}: ${{ formatMicros(budget?.budget_spent_micros ?? 0) }}</span>
           <span>{{ t('costs.detail.exhaust') }}: {{ exhaustLabel }}</span>
         </div>
       </div>

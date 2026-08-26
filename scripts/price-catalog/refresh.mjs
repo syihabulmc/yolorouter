@@ -1,7 +1,7 @@
 // Price catalog refresh — main entry.
 //
 // Fetches each provider's current prices, normalizes them against the catalog's
-// contract (CNY / per_million_tokens, chat models only), merges into the shape
+// contract (USD / per_million_tokens, chat models only), merges into the shape
 // catalog.json expects, and writes the file. Designed to run in a GitHub Action
 // cron daily (see .github/workflows/refresh-price-catalog.yml).
 //
@@ -146,7 +146,7 @@ async function main() {
 
   const catalog = {
     updated_at: todayUTC(),
-    currency: "CNY",
+    currency: "USD",
     unit: "per_million_tokens",
     prices,
   };
@@ -154,7 +154,7 @@ async function main() {
   // Contract self-check before writing: matches pricecatalog.buildIndex's
   // validation (currency/unit/date), so a bug here surfaces as a CI failure
   // rather than a runtime load error in every instance.
-  if (catalog.currency !== "CNY") throw new Error("currency contract violation");
+  if (catalog.currency !== "USD") throw new Error("currency contract violation");
   if (catalog.unit !== "per_million_tokens") throw new Error("unit contract violation");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(catalog.updated_at)) throw new Error("updated_at format violation");
 
