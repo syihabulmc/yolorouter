@@ -192,7 +192,7 @@ func defaults() *Config {
 		// directory as a top-level sibling of configs/, not nested inside
 		// it.
 		Database: DatabaseConfig{Driver: "sqlite", SQLitePath: "../data/yolorouter.db", SSLMode: "disable"},
-		Log:      LogConfig{Level: "info"},
+		Log:      LogConfig{Level: "warn"},
 		// Enabled defaults true so a config that omits the `update` section
 		// entirely (auto-generated, legacy) keeps updates ON — only an
 		// explicit `enabled: false` disables them.
@@ -518,15 +518,25 @@ func applyProviderMasterKeyEnv(cfg *Config) {
 	}
 }
 
-// applyServerPortEnv fills server.port from SERVER_PORT when the config leaves
-// it at zero (the YAML default). Useful for platforms that expose port
-// configuration via env vars.
+// applyServerPortEnv fills server.port from PORT (the bare PORT convention
+// used by Railway, Heroku, Render, Fly, …) or the legacy SERVER_PORT when
+// the config leaves it at zero (the YAML default). Useful for platforms
+// that expose port configuration via env vars. PORT wins over SERVER_PORT
+// only because it is the de-facto platform convention; both fill a
+// zero-value field and never override an explicit YAML setting.
 func applyServerPortEnv(cfg *Config) {
-	if cfg.Server.Port == 0 {
-		if portStr := os.Getenv("SERVER_PORT"); portStr != "" {
-			if port, err := strconv.Atoi(portStr); err == nil && port > 0 {
-				cfg.Server.Port = port
-			}
+	if cfg.Server.Port != 0 {
+		return
+	}
+	if portStr := os.Getenv("PORT"); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil && port > 0 {
+			cfg.Server.Port = port
+			return
+		}
+	}
+	if portStr := os.Getenv("SERVER_PORT"); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil && port > 0 {
+			cfg.Server.Port = port
 		}
 	}
 }
