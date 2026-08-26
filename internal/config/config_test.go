@@ -1301,6 +1301,133 @@ func TestApplyLogLevelEnv(t *testing.T) {
 	}
 }
 
+// TestApplyRetentionDaysEnvZeroIsExplicitDisable guards the unique
+// "env always wins" contract for retention.days: unlike LOG_LEVEL
+// (which only fills a zero field) and PROVIDER_MASTER_KEY (same), a
+// RETENTION_DAYS=0 from the platform is the operator's explicit "off"
+// signal and must be honoured even when defaults() seeded Days=30. A
+// regression to the usual "only-fill-zero" rule would silently keep
+// the background ticker running against a config the operator thought
+// was disabled.
+func TestApplyRetentionDaysEnvZeroIsExplicitDisable(t *testing.T) {
+	cfg := defaults() // Days=30
+	t.Setenv("RETENTION_DAYS", "0")
+
+	applyRetentionDaysEnv(cfg)
+
+	if cfg.Retention.Days != 0 {
+		t.Fatalf("days = %d, want 0 (env must override default)", cfg.Retention.Days)
+	}
+}
+
+func TestApplyRetentionDaysEnvOverridesYAML(t *testing.T) {
+	cfg := defaults()
+	cfg.Retention.Days = 7 // operator set this in YAML
+	t.Setenv("RETENTION_DAYS", "14")
+
+	applyRetentionDaysEnv(cfg)
+
+	if cfg.Retention.Days != 14 {
+		t.Fatalf("days = %d, want 14 (env must override YAML)", cfg.Retention.Days)
+	}
+}
+
+func TestApplyRetentionDaysEnvUnsetLeavesConfigAlone(t *testing.T) {
+	cfg := defaults()
+	t.Setenv("RETENTION_DAYS", "")
+
+	applyRetentionDaysEnv(cfg)
+
+	if cfg.Retention.Days != 30 {
+		t.Fatalf("days = %d, want 30 (unset env must not touch config)", cfg.Retention.Days)
+	}
+}
+
+func TestApplyRetentionDaysEnvMalformedIsIgnored(t *testing.T) {
+	cfg := defaults()
+	t.Setenv("RETENTION_DAYS", "not-a-number")
+
+	applyRetentionDaysEnv(cfg)
+
+	if cfg.Retention.Days != 30 {
+		t.Fatalf("days = %d, want 30 (malformed env must not change config; validate() reports the error)", cfg.Retention.Days)
+	}
+}
+
+func TestApplyRetentionIntervalEnvParsesDurationString(t *testing.T) {
+	cfg := defaults()
+	t.Setenv("RETENTION_INTERVAL", "12h")
+
+	applyRetentionIntervalEnv(cfg)
+
+	if cfg.Retention.Interval != 12*time.Hour {
+		t.Fatalf("interval = %v, want 12h", cfg.Retention.Interval)
+	}
+}
+
+func TestApplyRetentionIntervalEnvZeroIsExplicitDisable(t *testing.T) {
+	cfg := defaults()
+	t.Setenv("RETENTION_INTERVAL", "0s")
+
+	applyRetentionIntervalEnv(cfg)
+
+	if cfg.Retention.Interval != 0 {
+		t.Fatalf("interval = %v, want 0 (env must override default)", cfg.Retention.Interval)
+	}
+}
+
+func TestApplyRetentionIntervalEnvMalformedIsIgnored(t *testing.T) {
+	cfg := defaults()
+	t.Setenv("RETENTION_INTERVAL", "two-hours")
+
+	applyRetentionIntervalEnv(cfg)
+
+	if cfg.Retention.Interval != 24*time.Hour {
+		t.Fatalf("interval = %v, want 24h (malformed env must not change config; validate() reports the error)", cfg.Retention.Interval)
+	}
+}
+
+// TestValidateRejectsNegativeDays catches the only "Days < 0" branch: a
+// negative number would invert the cutoff (a request created one second
+// in the future is "older" than the cutoff), which has no sensible
+// meaning and would either no-op forever or delete everything. A typo
+// in YAML must surface as a load error rather than a silently
+// never-purging deployment.
+func TestValidateRejectsNegativeDays(t *testing.T) {
+	r := RetentionConfig{Days: -1, Interval: 24 * time.Hour}
+	if err := validateRetention(&r); err == nil {
+		t.Fatalf("expected validateRetention to reject negative days")
+	}
+}
+
+// TestValidateRejectsDaysWithoutInterval catches the contradictory
+// "do something every 0s" config: Days>0 implies a schedule, but
+// Interval<=0 is "no schedule" and the two together would either fire
+// constantly (Interval<0 panics) or never (Interval=0 is no-op). A
+// typo in either field should fail validation.
+func TestValidateRejectsDaysWithoutInterval(t *testing.T) {
+	cfg := defaults()
+	cfg.Retention.Days = 7
+	cfg.Retention.Interval = 0
+	if err := validate(cfg); err == nil {
+		t.Fatalf("expected validate() to reject days>0 with interval=0")
+	}
+}
+
+// TestValidateAcceptsDisabledRetention confirms the zero/zero config
+// is valid: defaults() seeds 30/24h, but an operator who sets both
+// to 0 (or sets `retention:` with no sub-fields, or overrides via
+// env to 0/0s) is opting out entirely. The background goroutine is
+// never spawned in that case — see TestStartRetentionDisabledReturnsNil.
+func TestValidateAcceptsDisabledRetention(t *testing.T) {
+	cfg := defaults()
+	cfg.Retention.Days = 0
+	cfg.Retention.Interval = 0
+	if err := validateRetention(&cfg.Retention); err != nil {
+		t.Fatalf("days=0/interval=0 should be valid (disabled): %v", err)
+	}
+}
+
 // TestLoadWithDatabaseURLAndMasterKey is the integration test for the Railway
 // use case: both DATABASE_URL and PROVIDER_MASTER_KEY are set as env vars,
 // and Load() must produce a valid config without any pre-existing config file.

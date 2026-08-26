@@ -21,6 +21,51 @@ func CreateRequestLog(db *gorm.DB, log *model.RequestLog) error {
 	return db.Create(log).Error
 }
 
+// PurgeRequestLogsOlderThan deletes every request_logs row whose created_at
+// is strictly before cutoff, and the matching request_log_bodies rows in
+// the same transaction-shaped sequence. Returns the number of summary rows
+// removed (bodies are deleted but not counted — they are a child of the
+// summary, and the count operators care about is the row that owns the
+// cost/usage figures).
+//
+// Bodies are deleted first via a subselect on the summary table so a crash
+// between the two statements leaves at most orphan body rows; those are
+// reaped by the next tick's same subselect, so the cleanup is eventually
+// consistent without any extra machinery. The summary's own WHERE matches
+// the same predicate the next tick will use, so an orphan left mid-cycle
+// cannot be missed.
+//
+// SQLite: VACUUM runs after a successful purge so the .db file actually
+// shrinks on disk (a plain DELETE leaves free pages that SQLite reuses but
+// does not release back to the filesystem). VACUUM is best-effort: a
+// failure is non-fatal because the next tick will re-try it once more
+// rows accumulate. Postgres is skipped here because autovacuum is the
+// platform's own reclaim path and a manual VACUUM would just contend
+// with it.
+//
+// This is the only function that ever deletes audit rows; the only callers
+// are the retention ticker (internal/service/requestlog/retention.go) and
+// the operator's tests.
+func PurgeRequestLogsOlderThan(db *gorm.DB, cutoff time.Time) (int64, error) {
+	// Bodies first: they are the child of the summary. The subselect reads
+	// the summary table directly (no JOIN) so the planner uses the
+	// request_logs.created_at index whether it exists or not.
+	if err := db.Where("request_id IN (SELECT request_id FROM request_logs WHERE created_at < ?)", cutoff).
+		Delete(&model.RequestLogBody{}).Error; err != nil {
+		return 0, err
+	}
+	res := db.Where("created_at < ?", cutoff).Delete(&model.RequestLog{})
+	if err := res.Error; err != nil {
+		return 0, err
+	}
+	// SQLite only: reclaim disk. gorm.Exec on a raw "VACUUM" statement
+	// works; VACUUM has no parameters, so ?-binding is unnecessary.
+	if db.Dialector.Name() != "postgres" {
+		_ = db.Exec("VACUUM").Error //nolint:staticcheck // see QF1008 note elsewhere
+	}
+	return res.RowsAffected, nil
+}
+
 // IncrementAPIKeyBudgetSpent atomically adds micros to one key's cumulative
 // spend. The gateway is the only writer. Used after a successful upstream
 // response so budget exhaustion is visible to the next request's pre-check.

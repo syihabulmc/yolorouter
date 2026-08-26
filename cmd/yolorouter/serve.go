@@ -20,6 +20,7 @@ import (
 	"github.com/yolorouter/yolorouter/internal/service/modeladmin"
 	"github.com/yolorouter/yolorouter/internal/service/provider"
 	"github.com/yolorouter/yolorouter/internal/service/providerclient"
+	"github.com/yolorouter/yolorouter/internal/service/requestlog"
 	"github.com/yolorouter/yolorouter/pkg/crypto"
 	"github.com/yolorouter/yolorouter/pkg/database"
 	"github.com/yolorouter/yolorouter/pkg/logger"
@@ -274,6 +275,29 @@ func runServe(ctx context.Context, args []string) error {
 		// nil func would panic, so guard it.
 		if stopPriceRefresh != nil {
 			stopPriceRefresh()
+		}
+	}()
+
+	// Background retention: periodic purge of request_logs /
+	// request_log_bodies rows older than the configured retention window,
+	// plus any orphaned stream-body capture files in bodiesDir. Shares the
+	// same shutdown contract as the price refresh above (cancel + wait),
+	// so a SIGTERM that stops the HTTP server also stops the cleanup
+	// loop. stopRetention is nil when retention is disabled (days<=0 or
+	// interval<=0), so the default 30d/24h config is opt-in via env
+	// (RETENTION_DAYS / RETENTION_INTERVAL) without requiring a code change.
+	retentionCtx, retentionCancel := context.WithCancel(ctx)
+	stopRetention := requestlog.StartRetention(
+		retentionCtx,
+		app.DB,
+		bodiesDir,
+		app.Config.Retention.Days,
+		app.Config.Retention.Interval,
+	)
+	defer func() {
+		retentionCancel()
+		if stopRetention != nil {
+			stopRetention()
 		}
 	}()
 

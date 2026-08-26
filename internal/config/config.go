@@ -27,6 +27,7 @@ type Config struct {
 	Update       UpdateConfig       `yaml:"update"`
 	Gateway      GatewayConfig      `yaml:"gateway"`
 	PriceCatalog PriceCatalogConfig `yaml:"price_catalog"`
+	Retention    RetentionConfig    `yaml:"retention"`
 }
 
 type ServerConfig struct {
@@ -183,6 +184,24 @@ type PriceCatalogConfig struct {
 	RefreshInterval time.Duration `yaml:"refresh_interval"`
 }
 
+// RetentionConfig controls the background purge of request_logs /
+// request_log_bodies rows and orphaned stream body files. The background
+// ticker is spawned by serve.go only when Days > 0 AND Interval > 0 —
+// either being zero disables the feature with no goroutine and no
+// periodic query, so the default config is "no purge" until the operator
+// opts in. SQLite VACUUM is run after each successful purge on that
+// driver to actually reclaim disk; Postgres relies on autovacuum.
+type RetentionConfig struct {
+	// Days is the row age cutoff. Rows with created_at < now-Days are
+	// deleted on every tick. 0 disables the entire feature.
+	Days int `yaml:"days"`
+	// Interval is how often the purge runs. 0 also disables. Must be > 0
+	// when Days > 0; validate() rejects the contradictory combination
+	// (a "do something every 0s" loop is the configuration that cannot
+	// have a sensible deployment meaning).
+	Interval time.Duration `yaml:"interval"`
+}
+
 func defaults() *Config {
 	return &Config{
 		Server: ServerConfig{Port: 8080},
@@ -209,6 +228,15 @@ func defaults() *Config {
 		PriceCatalog: PriceCatalogConfig{
 			Endpoint:        "https://prices.yolorouter.com/catalog.json",
 			RefreshInterval: 24 * time.Hour,
+		},
+		// Retention is opt-in: an operator who wants periodic purge of
+		// request_logs / request_log_bodies / orphaned stream files sets
+		// retention.days > 0. The default 30 days / 24h is a starting
+		// point the operator can lower on a free-tier disk-bound
+		// deployment without changing the rest of the config.
+		Retention: RetentionConfig{
+			Days:     30,
+			Interval: 24 * time.Hour,
 		},
 	}
 }
@@ -551,6 +579,45 @@ func applyLogLevelEnv(cfg *Config) {
 	}
 }
 
+// applyRetentionDaysEnv fills retention.days from RETENTION_DAYS whenever the
+// env var is set. Unlike every other env override in this package, an explicit
+// "0" is meaningful: it disables the background purge goroutine entirely. So
+// the env-var-takes-precedence rule of "env fills a zero field" does not
+// apply — even a YAML `retention.days: 0` is overridden by RETENTION_DAYS=N
+// for any N >= 0, so a container platform can both turn the feature on
+// (RETENTION_DAYS=30) and turn it off (RETENTION_DAYS=0) without editing the
+// config file. validateRetention still rejects negative values.
+func applyRetentionDaysEnv(cfg *Config) {
+	v := os.Getenv("RETENTION_DAYS")
+	if v == "" {
+		return
+	}
+	d, err := strconv.Atoi(v)
+	if err != nil {
+		return // malformed value — let validate() surface it; env override
+		// is best-effort, not authoritative
+	}
+	cfg.Retention.Days = d
+}
+
+// applyRetentionIntervalEnv fills retention.interval from RETENTION_INTERVAL
+// whenever the env var is set, parsed as a Go duration string ("24h", "30m",
+// "1h30m", …). Same precedence rule as applyRetentionDaysEnv: env wins over
+// any YAML value, including 0 (the explicit-disable signal). A typo
+// (unparseable string) is ignored here so validate() reports it instead of
+// silently running with the wrong interval forever.
+func applyRetentionIntervalEnv(cfg *Config) {
+	v := os.Getenv("RETENTION_INTERVAL")
+	if v == "" {
+		return
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return // malformed — see applyRetentionDaysEnv
+	}
+	cfg.Retention.Interval = d
+}
+
 // applyAllEnvOverrides applies all environment variable overrides to cfg.
 // Called after loading or generating a config so that env vars can fill any
 // field the YAML left at its zero value. The order does not matter — each
@@ -561,6 +628,8 @@ func applyAllEnvOverrides(cfg *Config) {
 	applyServerPortEnv(cfg)
 	applyLogLevelEnv(cfg)
 	applyUpdateProxyEnv(cfg)
+	applyRetentionDaysEnv(cfg)
+	applyRetentionIntervalEnv(cfg)
 }
 
 func generateDefaultConfig(path string) (*Config, error) {
@@ -804,6 +873,23 @@ func validate(cfg *Config) error {
 	}
 	if err := validatePriceCatalog(&cfg.PriceCatalog); err != nil {
 		return err
+	}
+	if err := validateRetention(&cfg.Retention); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateRetention rejects only the two genuinely broken combinations:
+// negative days (would invert the cutoff) and "do something every 0s".
+// Either field being zero is valid — it means "disabled" and the background
+// goroutine is never spawned, so the values are inert rather than illegal.
+func validateRetention(r *RetentionConfig) error {
+	if r.Days < 0 {
+		return fmt.Errorf("retention.days must be >= 0, got %d", r.Days)
+	}
+	if r.Days > 0 && r.Interval <= 0 {
+		return fmt.Errorf("retention.interval must be > 0 when retention.days > 0, got %v", r.Interval)
 	}
 	return nil
 }
