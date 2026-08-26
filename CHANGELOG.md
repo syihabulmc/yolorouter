@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The setup administrator can edit any other account's display name and
+  email from the Users page (both were write-once: set at creation or
+  snapshotted from the identity provider's first login) — directory
+  information only, so the target's sessions are untouched.
+
+### Changed
+
+- The New Model dialog now defaults the scheduling mode to Balanced
+  (spread by caller key) each time it opens. Failover is still selectable,
+  and the API default for requests that omit the field stays `failover`.
+- The Zhipu GLM preset group in the New Model dialog now lists `glm-5.3`
+  and `glm-5-turbo` first; all previously listed models remain selectable.
+
 ## [0.1.8] - 2026-08-25
 
 ### Added

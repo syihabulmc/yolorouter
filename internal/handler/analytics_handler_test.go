@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -2104,7 +2105,7 @@ func TestGetAnalyticsReportByUserGroupsAcrossKeys(t *testing.T) {
 
 // === Concise-output projection handler ===================================
 
-// TestGetConciseOutputProjectionReturnsPricedVolumeAndRate drives the new
+// TestGetConciseOutputProjectionReturnsPricedVolumeAndTotals drives the
 // endpoint through the real route table and decodes the JSON envelope by
 // wire field name, so a rename or a mis-wired struct field fails here rather
 // than silently reaching the console as an em-dash.
@@ -2114,7 +2115,7 @@ func TestGetAnalyticsReportByUserGroupsAcrossKeys(t *testing.T) {
 // priced tokens and spend can never coincide. Swapping any two of them —
 // output_tokens for priced_output_tokens in particular, which is what the
 // coverage ratio divides — turns this red.
-func TestGetConciseOutputProjectionReturnsPricedVolumeAndRate(t *testing.T) {
+func TestGetConciseOutputProjectionReturnsPricedVolumeAndTotals(t *testing.T) {
 	r, db, ck := newAnalyticsFixture(t)
 	now := time.Now().UTC()
 	providerID := seedProvider(t, db, "concise-provider")
@@ -2158,9 +2159,11 @@ func TestGetConciseOutputProjectionReturnsPricedVolumeAndRate(t *testing.T) {
 			OutputTokens       int64 `json:"output_tokens"`
 			PricedRows         int64 `json:"priced_rows"`
 			PricedOutputTokens int64 `json:"priced_output_tokens"`
-			// Pointer, so a null on the wire is distinguishable from a
-			// zero saving — the contract the console relies on.
-			PerMillionMicros *int64  `json:"projected_savings_per_million_tokens_micros"`
+			SavedCostMicros    int64 `json:"projected_saved_cost_micros"`
+			SavedOutputTokens  int64 `json:"projected_saved_output_tokens"`
+			// Deprecated wire field pre-upgrade tabs still read; a pointer so
+			// its absent-vs-zero contract stays observable here.
+			LegacyPerMillion *int64  `json:"projected_savings_per_million_tokens_micros"`
 			Coefficient      float64 `json:"coefficient"`
 		} `json:"data"`
 	}
@@ -2180,13 +2183,24 @@ func TestGetConciseOutputProjectionReturnsPricedVolumeAndRate(t *testing.T) {
 	if d.OutputSpendMicros != 1_000_000 {
 		t.Errorf("output_spend_micros = %d, want 1000000 (250K x 4 CNY/M)", d.OutputSpendMicros)
 	}
-	// 4 CNY per million output tokens x the coefficient.
-	want := int64(4 * analytics.ConciseOutputCoefficient * 1e6)
-	if d.PerMillionMicros == nil {
-		t.Fatalf("projected_savings_per_million_tokens_micros is null, want %d", want)
+	// Window spend (1,000,000 micros) and priced tokens (250K), each scaled
+	// by the coefficient.
+	wantCost := int64(math.Round(1_000_000 * analytics.ConciseOutputCoefficient))
+	if d.SavedCostMicros != wantCost {
+		t.Errorf("projected_saved_cost_micros = %d, want %d", d.SavedCostMicros, wantCost)
 	}
-	if *d.PerMillionMicros != want {
-		t.Errorf("projected_savings_per_million_tokens_micros = %d, want %d", *d.PerMillionMicros, want)
+	wantTokens := int64(math.Round(250_000 * analytics.ConciseOutputCoefficient))
+	if d.SavedOutputTokens != wantTokens {
+		t.Errorf("projected_saved_output_tokens = %d, want %d", d.SavedOutputTokens, wantTokens)
+	}
+	// The deprecated per-million rate must still reach pre-upgrade tabs:
+	// 4 CNY per million output tokens x the coefficient.
+	wantLegacy := int64(math.Round(4 * analytics.ConciseOutputCoefficient * 1e6))
+	if d.LegacyPerMillion == nil {
+		t.Fatalf("projected_savings_per_million_tokens_micros absent, want %d", wantLegacy)
+	}
+	if *d.LegacyPerMillion != wantLegacy {
+		t.Errorf("projected_savings_per_million_tokens_micros = %d, want %d", *d.LegacyPerMillion, wantLegacy)
 	}
 	if d.Coefficient != analytics.ConciseOutputCoefficient {
 		t.Errorf("coefficient = %v, want %v", d.Coefficient, analytics.ConciseOutputCoefficient)
