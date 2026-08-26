@@ -2411,6 +2411,58 @@ func TestDeleteModelCandidateReturnsNotFoundForUnknownID(t *testing.T) {
 	}
 }
 
+// TestDeleteModelCascadesToCandidates is the service-layer smoke test:
+// a model with two candidates is deleted via the service, and the
+// follow-up detail read shows zero candidates. The detail read is
+// indirect evidence that the candidates-first transaction order ran —
+// a regression that deleted the model but left candidates behind would
+// surface as "model not found" (FK-less, so no error) and an empty
+// detail.
+func TestDeleteModelCascadesToCandidates(t *testing.T) {
+	providerService, db, client := newTestProviderService(t)
+	now := time.Now().UTC()
+	providerA := seedEnabledProviderForModelTest(t, providerService, "provider-a")
+	providerB := seedEnabledProviderForModelTest(t, providerService, "provider-b")
+
+	svc := modeladmin.NewModelService(db, testutil.ProviderSecrets(), client)
+	modelView, err := svc.CreateModel(modeladmin.CreateModelInput{Name: "smart-cascade"}, now)
+	if err != nil {
+		t.Fatalf("CreateModel failed: %v", err)
+	}
+	if _, err := svc.CreateModelCandidate(context.Background(), modelView.ID, modeladmin.CreateCandidateInput{
+		ProviderID: providerA.ID, ProviderModelName: "gpt-4o", InputPrice: 1, OutputPrice: 2,
+	}, now); err != nil {
+		t.Fatalf("CreateModelCandidate (a) failed: %v", err)
+	}
+	if _, err := svc.CreateModelCandidate(context.Background(), modelView.ID, modeladmin.CreateCandidateInput{
+		ProviderID: providerB.ID, ProviderModelName: "gpt-4o", InputPrice: 1, OutputPrice: 2,
+	}, now); err != nil {
+		t.Fatalf("CreateModelCandidate (b) failed: %v", err)
+	}
+
+	if err := svc.DeleteModel(modelView.ID); err != nil {
+		t.Fatalf("DeleteModel failed: %v", err)
+	}
+	// GetModelDetail returns ErrModelNotFound on a missing row, which is
+	// itself the assertion: if the cascade left the model alive, this
+	// would have surfaced a populated detail with zero candidates, not
+	// the not-found error.
+	if _, err := svc.GetModelDetail(modelView.ID); !errors.Is(err, errcode.ErrModelNotFound) {
+		t.Fatalf("expected ErrModelNotFound after cascade delete, got %v", err)
+	}
+}
+
+// TestDeleteModelReturnsNotFoundForUnknownID locks in the service's
+// sentinel mapping: a delete against a missing id must surface as
+// errcode.ErrModelNotFound so the serviceErrorTable's 404 mapping
+// triggers, rather than a generic 500.
+func TestDeleteModelReturnsNotFoundForUnknownID(t *testing.T) {
+	svc, _, _ := newTestModelService(t)
+	if err := svc.DeleteModel(999999); !errors.Is(err, errcode.ErrModelNotFound) {
+		t.Fatalf("expected ErrModelNotFound, got %v", err)
+	}
+}
+
 func TestUpdateModelRenamesModel(t *testing.T) {
 	svc, _, _ := newTestModelService(t)
 	now := time.Now().UTC()

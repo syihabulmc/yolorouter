@@ -388,6 +388,23 @@ func DeleteModelCandidate(svc *modeladmin.ModelService) gin.HandlerFunc {
 	}
 }
 
+// DeleteModel handles DELETE /api/admin/models/:id. The service cascades
+// the delete to model_candidates in one transaction; missing id maps to
+// 404 via the existing ErrModelNotFound sentinel in serviceErrorTable.
+func DeleteModel(svc *modeladmin.ModelService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, ok := parseUintParam(c, "id")
+		if !ok {
+			return
+		}
+		if err := svc.DeleteModel(id); err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		response.Success(c, nil)
+	}
+}
+
 // GetModelImpact returns what disabling or renaming the model touches, for
 // the confirm dialogs and the impact tab.
 func GetModelImpact(svc *modeladmin.ModelService) gin.HandlerFunc {

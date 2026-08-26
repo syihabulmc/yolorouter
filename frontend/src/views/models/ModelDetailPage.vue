@@ -11,6 +11,9 @@
           <n-button size="small" @click="onToggleModelStatus">
             {{ modelData.management_status === 1 ? t('models.statusDisabled') : t('models.statusEnabled') }}
           </n-button>
+          <n-button size="small" type="error" ghost @click="onDeleteModel">
+            {{ t('models.deleteModel') }}
+          </n-button>
         </template>
 
         <ResponsiveDropdown
@@ -146,6 +149,9 @@ const headerActionOptions = computed(() => [
     label: modelData.value?.management_status === 1 ? t('models.statusDisabled') : t('models.statusEnabled'),
     key: 'toggleStatus',
   },
+  // Delete is the destructive option — visually last, and only ever
+  // triggered from the confirm dialog wired in onDeleteModel.
+  { label: t('models.deleteModel'), key: 'delete' },
 ])
 
 function onHeaderAction(key: string) {
@@ -153,6 +159,33 @@ function onHeaderAction(key: string) {
   else if (key === 'viewCost') router.push(modelCostDetailLocation(modelData.value!.name))
   else if (key === 'addCandidate') showAddCandidate.value = true
   else if (key === 'toggleStatus') onToggleModelStatus()
+  else if (key === 'delete') onDeleteModel()
+}
+
+// onDeleteModel confirms the cascade before firing the API call: the
+// server deletes the model AND every model_candidate owned by it in one
+// transaction, so the confirm copy is the one place the operator learns
+// the cascade scope. On success the page navigates back to the models
+// list — there is no "deleted model" view to land on, and the URL would
+// 404 on reload otherwise.
+function onDeleteModel() {
+  if (!modelData.value) return
+  const candidateCount = modelData.value.candidates.length
+  dialog.warning({
+    title: t('models.confirmDeleteModelTitle'),
+    content: t('models.confirmDeleteModelContent', { count: candidateCount }),
+    positiveText: t('common.delete'),
+    negativeText: t('common.cancel'),
+    onPositiveClick: async () => {
+      try {
+        await store.deleteModel(modelId)
+        await store.fetchList()
+        router.push('/models')
+      } catch (err) {
+        message.error(displayMessage(err, t))
+      }
+    },
+  })
 }
 
 onMounted(() => {

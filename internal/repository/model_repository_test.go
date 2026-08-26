@@ -487,6 +487,69 @@ func TestDeleteModelCandidate(t *testing.T) {
 	}
 }
 
+// TestDeleteModelCascade_RemovesModelAndCandidates is the positive-path
+// guard: a model with two candidates (across two providers, since
+// model_candidates has UNIQUE(model_id, provider_id)) is deleted, and
+// after the call the model row and every candidate row are gone. The
+// "candidates first" order matters — a regression that reversed it (or
+// that skipped the candidates subquery) would either leave orphan
+// candidates or trip a future referential lookup. Both row counts are
+// asserted independently so a regression on either side surfaces with a
+// clear message.
+func TestDeleteModelCascade_RemovesModelAndCandidates(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	m, _, _ := seedModelWithCandidate(t, db, "smart-cascade", "provider-a")
+	// Second candidate on a second provider. seedProviderWithKey
+	// already lives in this file's helper set; using the same
+	// model name string across both candidates is the whole point —
+	// the cascade has to match by id, not name.
+	providerB, _ := seedProviderWithKey(t, db, "provider-b")
+	now := time.Now().UTC().Truncate(time.Second)
+	second := &model.ModelCandidate{
+		ModelID: m.ID, ProviderID: providerB.ID, ProviderModelName: "gpt-4o", SortOrder: 2,
+		ManagementStatus: model.ModelCandidateStatusDisabled, VerificationStatus: model.ModelVerificationStatusUntested,
+		CreatedAt: now, UpdatedAt: now, PriceUpdatedAt: now,
+	}
+	if err := CreateModelCandidate(db, second); err != nil {
+		t.Fatalf("CreateModelCandidate (second): %v", err)
+	}
+
+	deleted, err := DeleteModelCascade(db, m.ID)
+	if err != nil {
+		t.Fatalf("DeleteModelCascade failed: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected exactly 1 model row deleted, got %d", deleted)
+	}
+
+	if _, err := FindModelByID(db, m.ID); err == nil {
+		t.Fatalf("expected the model to be gone after cascade delete")
+	}
+	var candidateCount int64
+	if err := db.Model(&model.ModelCandidate{}).Where("model_id = ?", m.ID).Count(&candidateCount).Error; err != nil {
+		t.Fatalf("count candidates: %v", err)
+	}
+	if candidateCount != 0 {
+		t.Fatalf("expected all candidates gone, %d remain", candidateCount)
+	}
+}
+
+// TestDeleteModelCascade_NotFoundReturnsZero locks in the (0, nil)
+// contract for a missing id — the service layer maps that to
+// errcode.ErrModelNotFound (→ 404). A regression that returned
+// gorm.ErrRecordNotFound instead would either be ignored by the service
+// (silent success on a no-op) or mis-mapped to a 500, both wrong.
+func TestDeleteModelCascade_NotFoundReturnsZero(t *testing.T) {
+	db := testutil.NewSQLiteDB(t)
+	deleted, err := DeleteModelCascade(db, 99999)
+	if err != nil {
+		t.Fatalf("DeleteModelCascade on missing id should not error: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("expected 0 rows deleted for missing id, got %d", deleted)
+	}
+}
+
 // seedCandidatePrice attaches one more model to an existing provider, carrying
 // the given upstream name and prices. A second candidate on the same provider
 // needs its own model row because of UNIQUE(model_id, provider_id).

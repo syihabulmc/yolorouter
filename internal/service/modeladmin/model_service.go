@@ -1725,6 +1725,28 @@ func (s *ModelService) DeleteModelCandidate(id uint) error {
 	return repository.DeleteModelCandidate(s.db, id)
 }
 
+// DeleteModel removes the model and every model_candidate row owned by it.
+// 0 rows deleted (a missing id) maps to errcode.ErrModelNotFound so the
+// service error table's 404 mapping kicks in; without that mapping, a
+// second delete of the same id would surface as a generic 500 and read as
+// "the server is broken" rather than "this is already gone".
+//
+// Historical request_logs rows whose model_name happens to match the
+// deleted name are NOT touched (the column is a TEXT, not a FK) — the
+// audit trail is preserved. api_keys_allowlist rows referencing this
+// model id are also left alone, by design; see
+// repository.DeleteModelCascade's comment.
+func (s *ModelService) DeleteModel(id uint) error {
+	deleted, err := repository.DeleteModelCascade(s.db, id)
+	if err != nil {
+		return err
+	}
+	if deleted == 0 {
+		return errcode.ErrModelNotFound
+	}
+	return nil
+}
+
 // UpdateModelInput carries one PATCH's submitted fields. ImageInput pairs a
 // set-flag with a tri-state value (nil with ImageInputSet=true clears the
 // declaration). SchedulingMode's pointer alone carries set-ness: nil keeps

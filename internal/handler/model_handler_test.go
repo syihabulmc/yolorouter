@@ -65,6 +65,7 @@ func newModelTestRouterFull(t *testing.T, client providerclient.ProviderClient) 
 	admin.POST("/models/:id/candidates/:candidateId/test", PostModelCandidateTest(svc))
 	admin.GET("/models/candidates/suggest-price", GetCandidateSuggestPrice(svc))
 	admin.DELETE("/models/:id/candidates/:candidateId", DeleteModelCandidate(svc))
+	admin.DELETE("/models/:id", DeleteModel(svc))
 	// Unstarted on purpose: handler tests assert what got queued, not the
 	// asynchronous probing itself (that lives in the modeladmin suite).
 	queue := modeladmin.NewProbeQueue(svc, modeladmin.DefaultProbeWorkers)
@@ -306,6 +307,7 @@ func newModelTestRouterSharingProviderDB(t *testing.T, db *gorm.DB, client provi
 	admin.POST("/models/:id/candidates/:candidateId/test", PostModelCandidateTest(svc))
 	admin.GET("/models/candidates/suggest-price", GetCandidateSuggestPrice(svc))
 	admin.DELETE("/models/:id/candidates/:candidateId", DeleteModelCandidate(svc))
+	admin.DELETE("/models/:id", DeleteModel(svc))
 	return r
 }
 
@@ -769,6 +771,54 @@ func TestDeleteModelCandidateReturns400WhenNotFound(t *testing.T) {
 	}
 	if env.Code != errcode.ModelCandidateNotFound {
 		t.Fatalf("expected code %d, got %d", errcode.ModelCandidateNotFound, env.Code)
+	}
+}
+
+// TestDeleteModelSucceeds is the happy path for DELETE /api/admin/models/:id.
+// 200 from the unified success envelope, the model row is gone on a follow-up
+// GET (which would itself 400 with ModelNotFound).
+func TestDeleteModelSucceeds(t *testing.T) {
+	r, _ := newModelTestRouter(t)
+	id := createModelForTest(t, r, "smart-delete")
+	w, _ := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/api/admin/models/%d", id), nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+	// follow-up GET must report not-found, not a stale 200 with empty data
+	w, env := doJSON(t, r, http.MethodGet, fmt.Sprintf("/api/admin/models/%d", id), nil, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on follow-up GET, got %d, body: %s", w.Code, w.Body.String())
+	}
+	if env.Code != errcode.ModelNotFound {
+		t.Fatalf("expected code %d, got %d", errcode.ModelNotFound, env.Code)
+	}
+}
+
+// TestDeleteModelReturns400ForUnknownID covers the not-found path through
+// the handler: the service maps 0 rows to errcode.ErrModelNotFound, the
+// serviceErrorTable turns that into 400, and the env.Code carries
+// ModelNotFound so the frontend can distinguish "gone" from a generic 500.
+func TestDeleteModelReturns400ForUnknownID(t *testing.T) {
+	r, _ := newModelTestRouter(t)
+	w, env := doJSON(t, r, http.MethodDelete, "/api/admin/models/999999", nil, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
+	}
+	if env.Code != errcode.ModelNotFound {
+		t.Fatalf("expected code %d, got %d", errcode.ModelNotFound, env.Code)
+	}
+}
+
+// TestDeleteModelReturns400ForBadID catches a non-numeric :id segment
+// before the service is even called. parseUintParam writes the unified
+// bad-request envelope; this test exists so a future regression that
+// dropped the parse guard surfaces here rather than as a 500 from a
+// strconv error inside the repository.
+func TestDeleteModelReturns400ForBadID(t *testing.T) {
+	r, _ := newModelTestRouter(t)
+	w, _ := doJSON(t, r, http.MethodDelete, "/api/admin/models/not-a-number", nil, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", w.Code, w.Body.String())
 	}
 }
 

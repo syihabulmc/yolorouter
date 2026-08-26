@@ -24,3 +24,8 @@ services:
       - "8080:8080"
     volumes:
       - ./yolorouter:/yolorouter
+    environment:
+      RETENTION_DAYS: "7"           # hapus request_logs lebih tua dari 7 hari
+      RETENTION_INTERVAL: "12h"     # cek setiap 12 jam
+      LOG_LEVEL: "warn"             # dari optimasi sebelumnya
+      PORT: "8080"                  # dari optimasi sebelumnya

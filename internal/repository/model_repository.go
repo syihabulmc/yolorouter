@@ -755,6 +755,43 @@ func DeleteModelCandidate(db *gorm.DB, id uint) error {
 	return db.Where("id = ?", id).Delete(&model.ModelCandidate{}).Error
 }
 
+// DeleteModelCascade removes the model row and every model_candidate row
+// owned by it in a single transaction, returning the number of model rows
+// deleted. The order matters: candidates first, then the parent — a parent
+// without its children would be an orphan a future query could trip over,
+// and the FK-less schema (model_candidates.model_id is just an int column)
+// gives the database no help enforcing that order.
+//
+// request_logs.model_name is a TEXT column, not a foreign key to models, so
+// historical rows referencing the deleted name stay readable. The dashboard
+// history and cost reports keep working — a delete is a config-state change,
+// not a re-write of history.
+//
+// Returns (0, nil) when the model id does not exist. The caller surfaces
+// this as a 404 (via the service's sentinel mapping) rather than a 500, so a
+// double-click on Delete does not read as a server error.
+//
+// api_keys_allowlist rows pointing at this model id are intentionally left
+// alone: the allowlist is "which models this key may call", an authorization
+// statement that outlives the model itself. An operator who wants the
+// allowlist cleaned up after a delete does it through the key's edit page
+// — the delete flow does not silently mutate a sibling concern.
+func DeleteModelCascade(db *gorm.DB, id uint) (int64, error) {
+	var deleted int64
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("model_id = ?", id).Delete(&model.ModelCandidate{}).Error; err != nil {
+			return err
+		}
+		res := tx.Where("id = ?", id).Delete(&model.Model{})
+		if err := res.Error; err != nil {
+			return err
+		}
+		deleted = res.RowsAffected
+		return nil
+	})
+	return deleted, err
+}
+
 // ListModelCandidatesByProviderID returns every candidate on one provider,
 // across all models and management states — the reference list an impact
 // preview starts from when the provider is about to be disabled.

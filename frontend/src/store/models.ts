@@ -63,6 +63,9 @@ export const useModelsStore = defineStore('models', {
     async setStatus(id: number, enabled: boolean) {
       await modelsApi.setModelStatus(id, enabled)
     },
+    async deleteModel(id: number) {
+      await modelsApi.deleteModel(id)
+    },
     async createCandidate(modelId: number, input: CreateCandidateInput): Promise<ModelCandidate> {
       return modelsApi.createCandidate(modelId, input)
     },

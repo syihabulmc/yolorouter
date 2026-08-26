@@ -272,6 +272,13 @@ export function deleteCandidate(modelId: number, candidateId: number): Promise<v
   return apiFetch(`/api/admin/models/${modelId}/candidates/${candidateId}`, { method: 'DELETE' })
 }
 
+// deleteModel removes the model AND cascades to its model_candidates in
+// one server-side transaction. Historical request_logs rows are kept —
+// the model's name on those rows is a TEXT, not a foreign key.
+export function deleteModel(id: number): Promise<void> {
+  return apiFetch(`/api/admin/models/${id}`, { method: 'DELETE' })
+}
+
 // SuggestedPrice is a price to pre-fill when adding a candidate for a provider
 // + model. Source records where it came from ("history" = this provider's own
 // last-saved price, "seed" = the built-in official catalog, "" = nothing
