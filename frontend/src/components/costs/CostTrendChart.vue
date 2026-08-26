@@ -50,7 +50,7 @@ const option = computed(() => {
   // tooltip lookup from that same ordered array.
   const rows = [...props.rows].sort((a, b) => (a.bucket < b.bucket ? -1 : a.bucket > b.bucket ? 1 : 0))
   const labels = rows.map((r) => formatAxisBucket(r.bucket))
-  // Yuan (major unit); micros are integers so this is exact, and the tooltip
+  // USD (major unit); micros are integers so this is exact, and the tooltip
   // still formats via formatMicros so ticks and card stay consistent.
   const costs = rows.map((r) => fromMicros(r.cost_micros))
 

@@ -77,6 +77,35 @@ export interface UpdateKeyInput {
   management_status?: number
 }
 
+// Bulk add: one row per `label:key` line in the modal textarea (label may
+// be empty, the server fills a random one). The shape mirrors CreateKeyInput
+// because the backend shares the same validation pipeline.
+export interface BulkCreateKeyItem {
+  label: string
+  plaintext: string
+  test_model: string
+  management_status?: number
+}
+
+export interface BulkCreateKeyError {
+  code: number
+  message: string
+}
+
+export interface BulkCreateKeyResult {
+  index: number
+  // 1 = created, 2 = failed (matches the Go BulkResultStatus int values).
+  status: number
+  key?: ProviderKey
+  error?: BulkCreateKeyError
+}
+
+export interface BulkCreateKeysResponse {
+  results: BulkCreateKeyResult[]
+  created: number
+  failed: number
+}
+
 export interface TestKeyResult {
   outcome: number
   duration_ms: number
@@ -203,6 +232,22 @@ export function updateProviderKey(
     method: 'PATCH',
     body: JSON.stringify(input),
     timeoutMs: keyTestBudgetMs(destinationCount),
+  })
+}
+
+// Bulk-add wraps N independent creates into a single request. The server
+// runs the same verify-then-commit pipeline per row, so the timeout is the
+// per-row budget multiplied by the row count — same shape createProviderKey
+// uses for a single row × destination count.
+export function bulkCreateProviderKeys(
+  providerId: number,
+  items: BulkCreateKeyItem[],
+  destinationCount: number,
+): Promise<BulkCreateKeysResponse> {
+  return apiFetch(`/api/admin/providers/${providerId}/keys/bulk`, {
+    method: 'POST',
+    body: JSON.stringify({ items }),
+    timeoutMs: keyTestBudgetMs(destinationCount) * items.length,
   })
 }
 

@@ -74,6 +74,9 @@ export const useProvidersStore = defineStore('providers', {
     async createKey(providerId: number, input: CreateKeyInput, destinationCount: number) {
       return providersApi.createProviderKey(providerId, input, destinationCount)
     },
+    async bulkCreateKeys(providerId: number, items: providersApi.BulkCreateKeyItem[], destinationCount: number) {
+      return providersApi.bulkCreateProviderKeys(providerId, items, destinationCount)
+    },
     async updateKey(providerId: number, keyId: number, input: UpdateKeyInput, destinationCount: number) {
       return providersApi.updateProviderKey(providerId, keyId, input, destinationCount)
     },

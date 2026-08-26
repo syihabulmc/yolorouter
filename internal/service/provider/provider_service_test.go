@@ -3296,3 +3296,164 @@ func TestProviderImpactNamesKeysOnlyThroughStrandedModels(t *testing.T) {
 		t.Fatalf("provider-b strands nothing, yet keys reported: %+v allowAll=%d", impactB.AffectedKeys, impactB.AllowAllKeyCount)
 	}
 }
+
+// TestBulkCreateProviderKeysCreatesAllRowsWhenAllValid is the happy path:
+// every input row becomes a real provider_key with verification_status set
+// by the test client, and the call returns one created row per input.
+func TestBulkCreateProviderKeysCreatesAllRowsWhenAllValid(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	client.Result = providerclient.TestResult{Outcome: providerclient.TestSuccess, DurationMs: 5}
+	now := time.Now().UTC()
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k0",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+
+	results, err := svc.BulkCreateProviderKeys(context.Background(), provider.ID, []BulkCreateKeyInput{
+		{Label: "k1", Plaintext: "sk-zzzzzzzzzzzzzzzzzzzzzzzzzzz1", TestModel: "gpt-4o-mini", ManagementStatus: model.ProviderKeyStatusEnabled},
+		{Label: "", Plaintext: "sk-zzzzzzzzzzzzzzzzzzzzzzzzzzz2", TestModel: "gpt-4o-mini"},
+		{Label: "k3", Plaintext: "sk-zzzzzzzzzzzzzzzzzzzzzzzzzzz3", TestModel: "gpt-4o-mini"},
+	}, now)
+	if err != nil {
+		t.Fatalf("BulkCreateProviderKeys failed: %v", err)
+	}
+	if results.Created != 3 || results.Failed != 0 {
+		t.Fatalf("expected created=3 failed=0, got created=%d failed=%d", results.Created, results.Failed)
+	}
+	for i, r := range results.Results {
+		if r.Status != BulkResultCreated {
+			t.Fatalf("row %d: expected status=created, got %d (err=%v)", i, r.Status, r.Error)
+		}
+		if r.Key == nil {
+			t.Fatalf("row %d: expected a created key view, got nil", i)
+		}
+	}
+}
+
+// TestBulkCreateProviderKeysFillsEmptyLabelWithRandomSuffix covers the
+// "label is omitted" case: the row has no Label, the service must fill a
+// 6-char alphanumeric so the DB UNIQUE(label) never collides on a
+// genuinely-empty label, and the filled value must round-trip to the DB.
+func TestBulkCreateProviderKeysFillsEmptyLabelWithRandomSuffix(t *testing.T) {
+	svc, db, client := newTestProviderService(t)
+	client.Result = providerclient.TestResult{Outcome: providerclient.TestSuccess, DurationMs: 5}
+	now := time.Now().UTC()
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k0",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+
+	results, err := svc.BulkCreateProviderKeys(context.Background(), provider.ID, []BulkCreateKeyInput{
+		{Label: "", Plaintext: "sk-zzzzzzzzzzzzzzzzzzzzzzzzzzz1", TestModel: "gpt-4o-mini"},
+	}, now)
+	if err != nil {
+		t.Fatalf("BulkCreateProviderKeys failed: %v", err)
+	}
+	if results.Created != 1 {
+		t.Fatalf("expected created=1, got %d", results.Created)
+	}
+	if results.Results[0].Key.Label == "" {
+		t.Fatalf("expected the service to fill an empty label with a random suffix, got empty")
+	}
+	var persisted model.ProviderKey
+	if err := db.First(&persisted, results.Results[0].Key.ID).Error; err != nil {
+		t.Fatalf("reload persisted key failed: %v", err)
+	}
+	if persisted.Label != results.Results[0].Key.Label {
+		t.Fatalf("DB label %q does not match view label %q", persisted.Label, results.Results[0].Key.Label)
+	}
+}
+
+// TestBulkCreateProviderKeysReportsPerRowLabelCollision pins the contract
+// that a duplicate label is a per-row failure, not a whole-batch rollback:
+// the second row gets a labeled failure, the first row still gets created.
+func TestBulkCreateProviderKeysReportsPerRowLabelCollision(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	client.Result = providerclient.TestResult{Outcome: providerclient.TestSuccess, DurationMs: 5}
+	now := time.Now().UTC()
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k0",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+
+	results, err := svc.BulkCreateProviderKeys(context.Background(), provider.ID, []BulkCreateKeyInput{
+		{Label: "shared", Plaintext: "sk-zzzzzzzzzzzzzzzzzzzzzzzzzzz1", TestModel: "gpt-4o-mini"},
+		{Label: "shared", Plaintext: "sk-zzzzzzzzzzzzzzzzzzzzzzzzzzz2", TestModel: "gpt-4o-mini"},
+	}, now)
+	if err != nil {
+		t.Fatalf("BulkCreateProviderKeys should not itself error on a per-row label conflict: %v", err)
+	}
+	if results.Created != 1 || results.Failed != 1 {
+		t.Fatalf("expected created=1 failed=1, got created=%d failed=%d", results.Created, results.Failed)
+	}
+	if results.Results[0].Status != BulkResultCreated {
+		t.Fatalf("row 0: expected created, got %d", results.Results[0].Status)
+	}
+	if results.Results[1].Status != BulkResultFailed {
+		t.Fatalf("row 1: expected failed, got %d", results.Results[1].Status)
+	}
+	if results.Results[1].Error == nil || !errors.Is(results.Results[1].Error, errcode.ErrProviderKeyLabelTaken) {
+		t.Fatalf("row 1: expected ErrProviderKeyLabelTaken in error, got %v", results.Results[1].Error)
+	}
+}
+
+// TestBulkCreateProviderKeysRejectsTooShortPlaintextPerRow mirrors the
+// single-row rule for the bulk path: each row's plaintext is checked
+// individually, and the whole batch is not rejected when only one row is
+// too short.
+func TestBulkCreateProviderKeysRejectsTooShortPlaintextPerRow(t *testing.T) {
+	svc, _, client := newTestProviderService(t)
+	client.Result = providerclient.TestResult{Outcome: providerclient.TestSuccess, DurationMs: 5}
+	now := time.Now().UTC()
+	provider, err := svc.CreateProvider(context.Background(), CreateProviderInput{
+		Name: "p1", BaseURL: "https://a.example.com", KeyLabel: "k0",
+		KeyPlaintext: "sk-abcdefghijklmnopqrstuvwxyz1234", TestModel: "gpt-4o-mini",
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateProvider failed: %v", err)
+	}
+
+	results, err := svc.BulkCreateProviderKeys(context.Background(), provider.ID, []BulkCreateKeyInput{
+		{Label: "k1", Plaintext: "sk-zzzzzzzzzzzzzzzzzzzzzzzzzzz1", TestModel: "gpt-4o-mini"},
+		{Label: "k2", Plaintext: "short", TestModel: "gpt-4o-mini"},
+	}, now)
+	if err != nil {
+		t.Fatalf("BulkCreateProviderKeys should not itself error when only one row's plaintext is too short: %v", err)
+	}
+	if results.Created != 1 || results.Failed != 1 {
+		t.Fatalf("expected created=1 failed=1, got created=%d failed=%d", results.Created, results.Failed)
+	}
+	if results.Results[0].Status != BulkResultCreated {
+		t.Fatalf("row 0: expected created, got %d", results.Results[0].Status)
+	}
+	if results.Results[1].Status != BulkResultFailed {
+		t.Fatalf("row 1: expected failed, got %d", results.Results[1].Status)
+	}
+	if results.Results[1].Error == nil || !errors.Is(results.Results[1].Error, errcode.ErrProviderKeyTooShort) {
+		t.Fatalf("row 1: expected ErrProviderKeyTooShort, got %v", results.Results[1].Error)
+	}
+}
+
+// TestBulkCreateProviderKeysErrorsWhenProviderNotFound is the only
+// "whole batch" failure mode: a bad providerID must short-circuit before
+// any row is processed, and surface as the same ErrProviderNotFound the
+// single-row path returns.
+func TestBulkCreateProviderKeysErrorsWhenProviderNotFound(t *testing.T) {
+	svc, _, _ := newTestProviderService(t)
+	now := time.Now().UTC()
+	_, err := svc.BulkCreateProviderKeys(context.Background(), 999999, []BulkCreateKeyInput{
+		{Label: "k1", Plaintext: "sk-zzzzzzzzzzzzzzzzzzzzzzzzzzz1", TestModel: "gpt-4o-mini"},
+	}, now)
+	if !errors.Is(err, errcode.ErrProviderNotFound) {
+		t.Fatalf("expected ErrProviderNotFound, got %v", err)
+	}
+}

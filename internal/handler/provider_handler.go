@@ -85,6 +85,20 @@ type createKeyRequest struct {
 	ManagementStatus int    `json:"management_status" binding:"omitempty,oneof=1 2"`
 }
 
+// bulkCreateKeysRequest is the body for POST /providers/:id/keys/bulk.
+// Label is optional per row; the service fills a 6-char alphanumeric when
+// empty so a paste-only batch never collides on empty-string.
+type bulkCreateKeysRequest struct {
+	Items []bulkCreateKeyItem `json:"items" binding:"required,min=1,dive"`
+}
+
+type bulkCreateKeyItem struct {
+	Label            string `json:"label" binding:"omitempty,max=30"`
+	Plaintext        string `json:"plaintext" binding:"required,min=8"`
+	TestModel        string `json:"test_model" binding:"required,max=100"`
+	ManagementStatus int    `json:"management_status" binding:"omitempty,oneof=1 2"`
+}
+
 type updateKeyRequest struct {
 	Label            string  `json:"label" binding:"required,min=2,max=30"`
 	Plaintext        *string `json:"plaintext" binding:"omitempty,min=8"`
@@ -314,6 +328,80 @@ func PostProviderKey(svc *provider.ProviderService) gin.HandlerFunc {
 			return
 		}
 		response.Success(c, view)
+	}
+}
+
+// PostProviderKeysBulk creates N keys for one provider in a single request.
+// Per-row failures (label collision, plaintext too short) are reported on
+// the matching result row with the same errcode the single-row path would
+// have returned; only whole-batch failures (bad provider ID) short-circuit
+// the request with a top-level error envelope.
+func PostProviderKeysBulk(svc *provider.ProviderService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		providerID, ok := parseUintParam(c, "id")
+		if !ok {
+			return
+		}
+		var req bulkCreateKeysRequest
+		if !bindJSON(c, &req) {
+			return
+		}
+		items := make([]provider.BulkCreateKeyInput, 0, len(req.Items))
+		for _, it := range req.Items {
+			items = append(items, provider.BulkCreateKeyInput{
+				Label: it.Label, Plaintext: it.Plaintext, TestModel: it.TestModel, ManagementStatus: it.ManagementStatus,
+			})
+		}
+		resp, err := svc.BulkCreateProviderKeys(c.Request.Context(), providerID, items, timeNow())
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		// Per-row errcode sentinels are mapped through the same envelope
+		// shape serviceErrorTable uses (code + message), so the frontend
+		// can show "row 3: label taken" the same way a single-row failure
+		// would surface.
+		type resultView struct {
+			Index   int                          `json:"index"`
+			Status  provider.BulkResultStatus     `json:"status"`
+			Key     *provider.ProviderKeyView    `json:"key,omitempty"`
+			Error   *bulkKeyErrorView            `json:"error,omitempty"`
+		}
+		results := make([]resultView, 0, len(resp.Results))
+		for i, r := range resp.Results {
+			rv := resultView{Index: i, Status: r.Status, Key: r.Key}
+			if r.Error != nil {
+				code, msg := mapBulkRowError(r.Error)
+				rv.Error = &bulkKeyErrorView{Code: code, Message: msg}
+			}
+			results = append(results, rv)
+		}
+		response.Success(c, gin.H{
+			"results": results,
+			"created": resp.Created,
+			"failed":  resp.Failed,
+		})
+	}
+}
+
+type bulkKeyErrorView struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// mapBulkRowError extracts the errcode sentinel from a per-row failure and
+// returns the same (code, message) pair writeServiceError would have used
+// for it. Mirrors serviceErrorTable's verbatim/override behavior so the
+// bulk path never disagrees with the single-row path about how a failure
+// surfaces to the client.
+func mapBulkRowError(err error) (int, string) {
+	switch {
+	case errors.Is(err, errcode.ErrProviderKeyLabelTaken):
+		return errcode.ProviderKeyLabelTaken, errcode.GetMessage(errcode.ProviderKeyLabelTaken)
+	case errors.Is(err, errcode.ErrProviderKeyTooShort):
+		return errcode.ProviderKeyTooShort, errcode.GetMessage(errcode.ProviderKeyTooShort)
+	default:
+		return errcode.InternalError, errcode.GetMessage(errcode.InternalError)
 	}
 }
 

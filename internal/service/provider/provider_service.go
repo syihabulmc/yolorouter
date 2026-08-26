@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/yolorouter/yolorouter/internal/model"
+	"github.com/yolorouter/yolorouter/internal/protocols"
 	"github.com/yolorouter/yolorouter/internal/providerproto"
 	"github.com/yolorouter/yolorouter/internal/repository"
 	"github.com/yolorouter/yolorouter/internal/service/modeladmin"
@@ -531,6 +532,45 @@ type CreateKeyInput struct {
 	ManagementStatus int
 }
 
+// BulkCreateKeyInput is one row of a BulkCreateProviderKeys request. The
+// shape mirrors CreateKeyInput; Label may be empty, in which case the service
+// fills a 6-char alphanumeric suffix before insert.
+type BulkCreateKeyInput struct {
+	Label            string
+	Plaintext        string
+	TestModel        string
+	ManagementStatus int
+}
+
+// BulkResultStatus marks a single row of a BulkCreateProviderKeys response.
+type BulkResultStatus int
+
+const (
+	BulkResultCreated BulkResultStatus = 1
+	BulkResultFailed  BulkResultStatus = 2
+)
+
+// BulkCreateKeyResult is one row of the bulk response. On success, Key holds
+// the freshly created provider_key view; on failure, Error is the same
+// errcode.Err* sentinel the single-row path would have returned, so the
+// handler can map it via the existing serviceErrorTable.
+type BulkCreateKeyResult struct {
+	Status BulkResultStatus
+	Key    *ProviderKeyView
+	Error  error
+}
+
+// BulkCreateProviderKeysResponse is the aggregate shape of a bulk create.
+// Created and Failed are the row counters; Results is the per-row
+// detail in input order.
+type BulkCreateProviderKeysResponse struct {
+	Results []BulkCreateKeyResult
+	Created int
+	Failed  int
+}
+
+// UpdateKeyInput is a sparse PATCH used by UpdateProviderKey. Pointer fields
+// distinguish "omitted" (nil) from "set to empty/zero"; nil = no change.
 type UpdateKeyInput struct {
 	Label            string
 	Plaintext        *string // nil = no plaintext change ("retest"/label-only path)
@@ -621,6 +661,61 @@ func (s *ProviderService) CreateProviderKey(ctx context.Context, providerID uint
 	}
 	view := toKeyView(*reloaded, provider.DestinationVersion)
 	return &view, nil
+}
+
+// BulkCreateProviderKeys creates N keys for the same provider in a single
+// request. Per-row failures (label collision, plaintext too short) are
+// reported on the row, not the whole batch — only a missing provider
+// short-circuits everything. The label-fills-random step is the one
+// place this diverges from CreateProviderKey: an empty Label gets a
+// 6-char alphanumeric suffix before insert so a batch of paste-only
+// keys does not all collide on empty-string.
+func (s *ProviderService) BulkCreateProviderKeys(ctx context.Context, providerID uint, items []BulkCreateKeyInput, now time.Time) (*BulkCreateProviderKeysResponse, error) {
+	// Provider lookup is the only "whole batch" failure: a wrong ID is a
+	// caller error, not a per-row data issue, so fail fast before any work.
+	if _, err := repository.FindProviderByID(s.db, providerID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errcode.ErrProviderNotFound
+		}
+		return nil, err
+	}
+
+	resp := &BulkCreateProviderKeysResponse{
+		Results: make([]BulkCreateKeyResult, 0, len(items)),
+	}
+	for _, item := range items {
+		// Ponytail: copy the row, mutate the copy, call the single-row path.
+		// Reuses CreateProviderKey's full pipeline (label lookup, encrypt,
+		// pending insert, sort_order retry, server-side re-verify) without
+		// forking it.
+		single := CreateKeyInput{
+			Label:            item.Label,
+			Plaintext:        item.Plaintext,
+			TestModel:        item.TestModel,
+			ManagementStatus: item.ManagementStatus,
+		}
+		if single.Label == "" {
+			single.Label = "key-" + protocols.RandomString(6)
+		}
+		view, err := s.CreateProviderKey(ctx, providerID, single, now)
+		if err != nil {
+			// Per-row failure surfaces the same errcode sentinel the
+			// single-row path would have returned; handler maps it via
+			// serviceErrorTable. Anything that does NOT match the
+			// per-row allowlist (e.g. a wrapped encrypt error from a
+			// misconfigured master key) bubbles up as a whole-batch
+			// failure — a deploy is broken, not a row.
+			if !isPerRowBulkFailure(err) {
+				return nil, err
+			}
+			resp.Results = append(resp.Results, BulkCreateKeyResult{Status: BulkResultFailed, Error: err})
+			resp.Failed++
+			continue
+		}
+		resp.Results = append(resp.Results, BulkCreateKeyResult{Status: BulkResultCreated, Key: view})
+		resp.Created++
+	}
+	return resp, nil
 }
 
 // verificationSeverity ranks a per-destination result by how strongly it
@@ -1269,6 +1364,16 @@ func (s *ProviderService) TestAllProviderKeys(ctx context.Context, providerID ui
 func validateProviderType(t string) (string, error) {
 	id, err := providerproto.ValidateType(t)
 	return string(id), err
+}
+
+// isPerRowBulkFailure is the BulkCreateProviderKeys allowlist for
+// "this row's data was bad, the rest of the batch is fine". Anything
+// outside this list (e.g. a wrapped encrypt error from a misconfigured
+// master key) bubbles up as a whole-batch failure — a deploy is broken,
+// not a row.
+func isPerRowBulkFailure(err error) bool {
+	return errors.Is(err, errcode.ErrProviderKeyLabelTaken) ||
+		errors.Is(err, errcode.ErrProviderKeyTooShort)
 }
 
 // ProviderImpactModelView is one model that references the provider.

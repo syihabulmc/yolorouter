@@ -49,6 +49,75 @@ export function testModelRule(t: (key: string) => string): FormItemRule[] {
   ]
 }
 
+// Bulk-add parser for the "Add bulk key" flow. Each non-blank line is either
+// `label:key` (label may be empty so the server fills a random one) or just
+// `key` (no colon, no label). The same shape the backend accepts, surfaced
+// client-side so the operator sees line-numbered errors before submit instead
+// of after a 400 round trip.
+export interface ParsedBulkKey {
+  label: string
+  plaintext: string
+}
+
+export interface ParsedBulkError {
+  line: number
+  reason: 'empty_key' | 'key_too_short' | 'label_too_long'
+}
+
+export interface ParsedBulkDuplicate {
+  line: number
+  plaintext: string
+}
+
+export interface ParsedBulkResult {
+  valid: ParsedBulkKey[]
+  duplicates: ParsedBulkDuplicate[]
+  errors: ParsedBulkError[]
+}
+
+const BULK_KEY_MIN_LENGTH = 8
+const BULK_LABEL_MAX_LENGTH = 30
+
+export function parseBulkKeyLines(input: string): ParsedBulkResult {
+  const result: ParsedBulkResult = { valid: [], duplicates: [], errors: [] }
+  const seen = new Set<string>()
+  const lines = input.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const lineNumber = i + 1
+    const trimmed = lines[i].trim()
+    if (trimmed === '') continue
+    const colonIdx = trimmed.indexOf(':')
+    let label: string
+    let plaintext: string
+    if (colonIdx === -1) {
+      label = ''
+      plaintext = trimmed
+    } else {
+      label = trimmed.slice(0, colonIdx).trim()
+      plaintext = trimmed.slice(colonIdx + 1)
+    }
+    if (plaintext === '') {
+      result.errors.push({ line: lineNumber, reason: 'empty_key' })
+      continue
+    }
+    if (plaintext.length < BULK_KEY_MIN_LENGTH) {
+      result.errors.push({ line: lineNumber, reason: 'key_too_short' })
+      continue
+    }
+    if (label.length > BULK_LABEL_MAX_LENGTH) {
+      result.errors.push({ line: lineNumber, reason: 'label_too_long' })
+      continue
+    }
+    if (seen.has(plaintext)) {
+      result.duplicates.push({ line: lineNumber, plaintext })
+      continue
+    }
+    seen.add(plaintext)
+    result.valid.push({ label, plaintext })
+  }
+  return result
+}
+
 // Mirrors the backend's ValidateProtocolEndpoints (internal/service/provider_protocol.go):
 // an empty string is valid (means "reuse the provider's base_url"), otherwise the
 // value must parse as an absolute http(s) URL with a non-empty host.

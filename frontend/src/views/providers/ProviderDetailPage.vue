@@ -36,6 +36,10 @@
               <template #icon><Plus :size="16" /></template>
               {{ t('providers.addKey') }}
             </n-button>
+            <n-button @click="showAddBulkKey = true">
+              <template #icon><Plus :size="16" /></template>
+              {{ t('providers.addBulkKey') }}
+            </n-button>
             <n-button type="primary" :loading="testingAll" @click="onTestAll">
               <template #icon><PlayCircle :size="16" /></template>
               {{ t('providers.testAllButton') }}
@@ -87,6 +91,14 @@
       :destination-count="destinationCount"
       @saved="reload"
     />
+    <KeyBulkAddModal
+      v-model:show="showAddBulkKey"
+      :provider-id="provider.id"
+      :base-url="provider.base_url"
+      :provider-type="provider.provider_type"
+      :destination-count="destinationCount"
+      @saved="reload"
+    />
     <KeyEditModal
       v-model:show="showEditKey"
       :provider-id="provider.id"
@@ -118,6 +130,7 @@ import type { BatchTestResult, Provider, ProviderKey } from '../../api/providers
 import PageHeader from '../../components/PageHeader.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import KeyEditModal from '../../components/providers/KeyEditModal.vue'
+import KeyBulkAddModal from '../../components/providers/KeyBulkAddModal.vue'
 import ImportModelsModal from '../../components/models/ImportModelsModal.vue'
 import ProviderEditModal from '../../components/providers/ProviderEditModal.vue'
 import ResponsiveDataTable from '../../components/common/ResponsiveDataTable.vue'
@@ -157,6 +170,7 @@ const providerId = Number(route.params.id)
 const provider = ref<Provider | null>(null)
 const activeTab = ref('keys')
 const showAddKey = ref(false)
+const showAddBulkKey = ref(false)
 const showEditKey = ref(false)
 const editingKey = ref<ProviderKey | null>(null)
 const showEditProvider = ref(false)
@@ -207,6 +221,7 @@ const headerActionOptions = computed(() => [
   { label: t('providers.editProvider'), key: 'edit' },
   { label: t('costs.detail.viewCost'), key: 'viewCost' },
   { label: t('providers.addKey'), key: 'addKey' },
+  { label: t('providers.addBulkKey'), key: 'addBulkKey' },
   { label: t('models.importModelsButton'), key: 'importModels' },
   { label: t('providers.testAllButton'), key: 'testAll', disabled: testingAll.value },
   {
@@ -219,6 +234,7 @@ function onHeaderAction(key: string) {
   if (key === 'edit') showEditProvider.value = true
   else if (key === 'viewCost') router.push(`/costs/providers/${provider.value!.id}`)
   else if (key === 'addKey') showAddKey.value = true
+  else if (key === 'addBulkKey') showAddBulkKey.value = true
   else if (key === 'importModels') openImportModels()
   else if (key === 'testAll') void onTestAll()
   else if (key === 'toggleStatus') onToggleProviderStatus()

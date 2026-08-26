@@ -35,7 +35,9 @@ export async function fetchKimi() {
       if (!r.ok) continue;
       const md = await r.text();
       // The pricing row is a JSON array literal in the markdown.
-      const row = md.match(/\[\s*"([a-z0-9][\w.-]*)"\s*,\s*"\d+\s*[Mm]\s*tokens"\s*,\s*"\$\s*([\d.]+)"\s*,\s*"\$\s*([\d.]+)"\s*,\s*"\$\s*([\d.]+)"/);
+      // Kimi's pricing page emits the yuan sign (¥); some regional pages use $.
+      // Accept either so a future page revision does not silently parse 0 rows.
+      const row = md.match(/\[\s*"([a-z0-9][\w.-]*)"\s*,\s*"\d+\s*[Mm]\s*tokens"\s*,\s*"[$¥]\s*([\d.]+)"\s*,\s*"[$¥]\s*([\d.]+)"\s*,\s*"[$¥]\s*([\d.]+)"/);
       if (row) {
         entries.set(row[1], {
           input: Number(row[3]),   // cache-miss input
